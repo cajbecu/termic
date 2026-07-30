@@ -1456,7 +1456,18 @@ const captureArmedRef = useRef(false);
             ipc.ptyDebugAppend(file, line).catch(() => {});
           };
           console.log(`[ptyDebug] logging to OS_TEMP_DIR/${file}`);
-          dbg("spawn", `task=${task.name} cli=${tab.cli} ptyId=${ptyId} file=${file}`);
+          // Everything needed to join this log to an EXTERNAL ground truth,
+          // which is the only way to call a `done` false rather than argue
+          // about it. Every later line is `+Nms` off this `t0`, so the
+          // absolute epoch is what converts them to wall clock. `session` +
+          // `cwd` locate the agent's own transcript (claude appends
+          // ~/.claude/projects/<cwd-slug>/<session>.jsonl live, and termic
+          // minted that uuid, so the pairing is exact, not inferred): replay
+          // the two side by side and a done we fired while the transcript
+          // was still mid-turn is a fact with a timestamp.
+          dbg("spawn", `task=${task.name} cli=${tab.cli} ptyId=${ptyId} file=${file}`
+            + ` t0=${t0} t0iso=${new Date(t0).toISOString()}`
+            + ` session=${sessionUuid ?? "none"} resume=${decision.kind} cwd=${task.path}`);
         }
         // Sandbox truth lands synchronously with the spawn (no event
         // race possible). Render the warning chip immediately when the
