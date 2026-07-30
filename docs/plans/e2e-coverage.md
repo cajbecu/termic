@@ -26,6 +26,7 @@ until `make e2e` is green and this file reflects it.
 | ✅ Agent working | After a real submit, the agent enters the working state | `agent.e2e.ts` |
 | ✅ Agent attention | A backgrounded agent flags completion (unread/done) when it finishes | `agent.e2e.ts` |
 | ✅ Pending work defers done | An agent that backgrounds work and returns to its idle title holds the done badge back past byte-quiet (4s) and the settle timer (5s); done fires once its status line clears | `agent.e2e.ts` |
+| ✅ Split restore | A pane whose tabs are all gone collapses instead of restoring a blank leg; a task whose main tabs were all non-durable still restores with a main tab and a real activeTab | `tabs-layout.e2e.ts` |
 | ✅ Agent notifications | OSC 9 raises attention carrying the agent's verbatim body; the "waiting for your input" idle nag raises nothing | `agent.e2e.ts` |
 | ✅ Run tabs | A custom run command opens a run tab whose PTY executes it | `run.e2e.ts` |
 | ✅ Task archive | Archived task leaves the active board | `task.e2e.ts` |

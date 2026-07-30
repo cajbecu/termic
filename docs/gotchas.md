@@ -24,6 +24,16 @@
 - Effect deps: stable IDs (`ws.id`, `tab.id`), never ws/tab objects (identity changes every patch).
 - StrictMode is off. Audit before re-enabling.
 
+## Split restore invariants
+
+Two things must hold after `ensureDefaultTab` restores a task, and neither is guaranteed by the persistence rules on their own:
+
+**A task always owns at least one MAIN tab.** `moveTabToPane` already refuses to empty main ("main must keep at least one tab"), but that guard counts LIVE main tabs and a plain shell satisfies it. Main-panel shells are deliberately not durable (no session to resume) while split-pane shells ARE, so moving the only agent into a pane and leaving a shell in main persists nothing for main: the guard holds all session and breaks on reopen. The restore path `return`s before the seed path at the end of the function, so it seeds the default tab itself when `restoredMain` comes back empty. Seed BEFORE `active` is derived, or main gets a tab while `activeTab` stays `""` and the pane still renders blank.
+
+**A restored split never has an empty leg.** `pruneLeafTabs` drops ids that no longer exist but leaves the leaf standing, so a pane whose tabs did not come back would restore as a blank half of a split that no user action created and only closing the pane by hand clears. `dropEmptyLeaves` collapses those (the main leaf is exempt: it holds no `tabIds` by design, its content mirrors `activeTab[taskId]`). If that leaves a single pane, restore unsplit rather than as a one-legged tree.
+
+Related sharp edge, not currently handled: `restoredPaneTabs` is only built inside `if (task?.split_layout)`, so a durable pane tab whose layout failed to save is discarded even though its data is sitting in `persisted_tabs`.
+
 ## Custom agent work-done detection (#68)
 
 An agent's working / done / needs-you state is classified from the fastest reliable signal available. For a CUSTOM CLI, use the highest tier it can emit:

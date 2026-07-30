@@ -121,6 +121,32 @@ export function pruneLeafTabs(tree: SplitTree, validIds: Set<string>): SplitTree
   return { ...tree, a: pruneLeafTabs(tree.a, validIds), b: pruneLeafTabs(tree.b, validIds) };
 }
 
+/** Drop split panes that hold no tabs, collapsing each parent split so the
+ *  sibling takes the freed space (the same shape `removeLeaf` produces when a
+ *  pane is closed by hand). Returns null only if nothing survives.
+ *
+ *  The main leaf is always kept: it holds no `tabIds` of its own by design
+ *  (its content mirrors `activeTab[taskId]`), so "empty" means nothing there.
+ *
+ *  Restore needs this because `pruneLeafTabs` empties a leaf's `tabIds` without
+ *  removing the leaf. A pane whose tabs did not come back then survives as a
+ *  permanently blank half of a split that no user action created and only
+ *  closing the pane by hand clears. */
+export function dropEmptyLeaves(tree: SplitTree): SplitTree | null {
+  if (tree.type === 'pane') {
+    if (tree.isMain) return tree;
+    return (tree.tabIds?.length ?? 0) > 0 ? tree : null;
+  }
+  const a = dropEmptyLeaves(tree.a);
+  const b = dropEmptyLeaves(tree.b);
+  // Collapse rather than keep a split with a hole in it. Surviving splits keep
+  // their own ratios: the removed leaf's parent disappears whole, so there is
+  // no ratio left to rebalance and the user's sizing elsewhere is preserved.
+  if (!a) return b;
+  if (!b) return a;
+  return { ...tree, a, b };
+}
+
 /** Set the active tab within a pane leaf (does not change tabIds). */
 export function setLeafActiveTabId(tree: SplitTree, leafId: string, tabId: string): SplitTree {
   if (tree.type === 'pane') {

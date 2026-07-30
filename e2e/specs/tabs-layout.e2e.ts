@@ -500,3 +500,139 @@ describe("layout", () => {
     });
   });
 });
+
+// P0: a split whose pane tabs don't come back must not restore as a blank
+// half, and a task must never restore owning zero main tabs. Both were hit by
+// the same real layout: main-panel shells are deliberately not durable (no
+// session to resume), so moving the only agent into a pane and leaving a shell
+// in main persists nothing for main. Found on disk as a saved split_layout
+// referencing two tab ids beside an empty persisted tab list.
+describe("split restore", () => {
+  let taskId: string | undefined;
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+  });
+
+  /** Re-run the real restore path as a COLD start. `ensureDefaultTab` is what
+   *  runs on load and bails when main already has tabs, so the in-memory tabs
+   *  AND the live split tree both have to go: a relaunch has neither, and
+   *  leaving the tree behind would let the assertions pass against state that
+   *  never came from disk. */
+  const restore = (id: string) =>
+    browser.execute((wid) => {
+      const s = window.__termic!.useApp;
+      const cli = s.getState().tasks.find((t: any) => t.id === wid)?.cli ?? "fakeagent";
+      const st = s.getState();
+      const { [wid]: _tabs, ...tabsRest } = st.tabs;
+      const { [wid]: _tree, ...treeRest } = st.splitTree;
+      const { [wid]: _pane, ...paneRest } = st.activePaneId;
+      s.setState({
+        tabs: { ...tabsRest, [wid]: [] },
+        splitTree: treeRest,
+        activePaneId: paneRest,
+        activeTab: { ...st.activeTab, [wid]: "" },
+      });
+      s.getState().ensureDefaultTab(wid, cli);
+    }, id);
+
+  const leaves = (id: string) =>
+    browser.execute((wid) => {
+      const tree = window.__termic!.useApp.getState().splitTree[wid];
+      if (!tree) return [];
+      const walk = (n: any): any[] => n.type === "pane" ? [n] : [...walk(n.a), ...walk(n.b)];
+      return walk(tree).map((l: any) => ({ isMain: !!l.isMain, count: (l.tabIds ?? []).length }));
+    }, id);
+
+  it("keeps a main tab when every main tab was non-durable", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask("e2e-split-restore");
+
+    // Reproduce the reported sequence exactly. A plain shell has to go into
+    // main FIRST: moveTabToPane refuses to empty main ("main must keep at
+    // least one tab"), and that guard counts LIVE main tabs. A shell satisfies
+    // it while being non-durable, so main survives the session and restores
+    // with nothing. That mismatch is the whole bug.
+    await browser.execute((wid) => {
+      const s = window.__termic!.useApp.getState();
+      const agent = s.tabs[wid][0];
+      s.addTab(wid, {
+        id: crypto.randomUUID(), type: "terminal", title: "shell", cli: "shell",
+      } as any, { focus: false });
+      const paneId = s.splitPane(wid, "v");
+      window.__termic!.useApp.getState().moveTabToPane(wid, agent.id, paneId);
+      const st = window.__termic!.useApp.getState();
+      st.syncDurableTabs(wid);
+      st.saveSplitLayout(wid);
+    }, taskId);
+
+    // Assert the SETUP before the restore, so a failure below can only mean
+    // the restore is at fault. Both halves are needed: pane tabs are only
+    // rebuilt inside the `if (task.split_layout)` branch, so a durable pane
+    // tab with no saved layout is silently dropped.
+    const persistedBefore = await browser.execute((wid) => {
+      const t = window.__termic!.useApp.getState().tasks.find((x: any) => x.id === wid);
+      return {
+        layout: t?.split_layout ?? null,
+        paneEntries: (t?.persisted_tabs ?? []).filter((p: any) => !!p.pane_leaf_id).length,
+        mainEntries: (t?.persisted_tabs ?? []).filter((p: any) => !p.pane_leaf_id).length,
+      };
+    }, taskId);
+    expect(persistedBefore.layout).not.toBeNull();
+    expect(persistedBefore.paneEntries).toBeGreaterThan(0);
+    expect(persistedBefore.mainEntries).toBe(0);
+
+    await restore(taskId!);
+
+    const after = await browser.execute((wid) => {
+      const s = window.__termic!.useApp.getState();
+      const tabs = s.tabs[wid] ?? [];
+      return {
+        mainCount: tabs.filter((t: any) => !t.paneId).length,
+        paneCount: tabs.filter((t: any) => !!t.paneId).length,
+        activeTab: s.activeTab[wid] ?? "",
+      };
+    }, taskId);
+
+    // The violated invariant: a task always owns a main tab pointed at by a
+    // real activeTab. Previously both were empty and the pane rendered blank.
+    expect(after.mainCount).toBeGreaterThan(0);
+    expect(after.activeTab).not.toBe("");
+    // The durable pane agent still comes back, so the split is still earned.
+    expect(after.paneCount).toBeGreaterThan(0);
+    await snap("split-restore-main-tab.png");
+  });
+
+  it("collapses a pane whose tabs are all gone", async () => {
+    // Inject the shape found on disk: a saved layout whose pane references tab
+    // ids nothing will restore (session-only editor tabs do exactly this).
+    await browser.execute(async (wid) => {
+      const t = window.__termic!;
+      const tree = {
+        type: "split", id: crypto.randomUUID(), dir: "v", ratio: 0.5,
+        a: { type: "pane", id: crypto.randomUUID(), isMain: true, tabIds: [], activeTabId: null },
+        b: {
+          type: "pane", id: crypto.randomUUID(),
+          tabIds: ["ghost-a", "ghost-b"], activeTabId: "ghost-b",
+        },
+      };
+      await t.invoke("task_set_split_layout", { id: wid, layout: JSON.stringify(tree) });
+      await t.useApp.getState().loadAll();
+    }, taskId);
+
+    await restore(taskId!);
+
+    // Every ghost pruned away, so the pane has nothing left and the whole
+    // split goes with it rather than restoring as a blank leg.
+    for (const l of await leaves(taskId!)) {
+      if (!l.isMain) expect(l.count).toBeGreaterThan(0);
+    }
+    const mainCount = await browser.execute(
+      (wid) => (window.__termic!.useApp.getState().tabs[wid] ?? [])
+        .filter((t: any) => !t.paneId).length,
+      taskId,
+    );
+    expect(mainCount).toBeGreaterThan(0);
+    await snap("split-restore-collapsed.png");
+  });
+});

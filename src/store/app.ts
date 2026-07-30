@@ -5,7 +5,7 @@ import { create } from "zustand";
 import type { Project, Task, Tab, TerminalTab, PersistedTab, SplitTree, PaneLeaf, SplitDir } from "@/lib/types";
 import {
   findLeaf, getAllLeaves, countLeaves, replaceNode, removeLeaf,
-  addLeafTab, removeLeafTab, setLeafActiveTabId, pruneLeafTabs,
+  addLeafTab, removeLeafTab, setLeafActiveTabId, pruneLeafTabs, dropEmptyLeaves,
   updateSplitRatio, findAdjacentPane, equalizeSplitsOnAxis,
 } from "@/lib/splitTree";
 import * as ipc from "@/lib/ipc";
@@ -1413,6 +1413,24 @@ export const useApp = create<AppState>((set, get) => ({
         // script — the user presses play (RunPane placeholder / pill).
         ...(pt.run_member != null ? { runTab: { member: pt.run_member, previewUrl: null, idle: true } } : {}),
       }));
+      // A task must always own at least one MAIN tab, and this path can
+      // legitimately restore with none: main-panel shells are not durable (no
+      // session to resume), so moving the only agent into a split pane and
+      // leaving a shell behind persists nothing for main. moveTabToPane's
+      // "main must keep at least one tab" guard does not catch it, because it
+      // counts LIVE main tabs and a shell satisfies it while not surviving the
+      // restart. Seed BEFORE `active` is picked below: this returns before the
+      // seed path at the end of the function, so otherwise the task comes back
+      // with an empty main pane and activeTab "".
+      if (!restoredMain.length) {
+        restoredMain.push({
+          id: crypto.randomUUID(), type: "terminal", cli,
+          title: cli === "custom" ? (task?.name || "Command") : agentDisplayName(cli, s.agents),
+          is_default: true,
+          ...(cli === "custom" && task?.custom_command ? { command: task.custom_command } : {}),
+        } as TerminalTab);
+      }
+
       const active = restoredMain.find(t => t.is_default) ?? restoredMain[0];
 
       // Restore the split tree and pane tabs if a layout was saved.
@@ -1444,6 +1462,16 @@ export const useApp = create<AppState>((set, get) => ({
           // ids so a leaf's activeTabId always points at a real tab — a ghost
           // would render the pane blank (all wrappers hidden, no launcher).
           restoredTree = pruneLeafTabs(restoredTree, new Set(restoredPaneTabs.map(t => t.id)));
+          // Pruning empties a leaf's tabIds but leaves the leaf standing, so a
+          // pane whose tabs didn't come back would restore as a blank half of a
+          // split the user never asked for, clearable only by closing it by
+          // hand. Collapse those away; if that leaves no split at all, restore
+          // as an unsplit task rather than a one-legged tree.
+          const collapsed = dropEmptyLeaves(restoredTree);
+          restoredTree = collapsed && collapsed.type === "split" ? collapsed : undefined;
+          restoredMainLeafId = restoredTree
+            ? getAllLeaves(restoredTree).find(l => (l as PaneLeaf).isMain)?.id
+            : undefined;
         } catch {
           restoredTree = undefined;
         }
