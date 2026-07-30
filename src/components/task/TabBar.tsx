@@ -8,7 +8,8 @@ import { useTabStripDrag } from "./useTabStripDrag";
 import { Button } from "@/components/ui/Button";
 import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownLabel, DropdownSeparator } from "@/components/ui/Dropdown";
 import { CliIcon, CLI_BRAND_COLOR, CLI_LABEL, resolveIconId } from "@/icons/cli";
-import { Plus, X, GitCompare, FileText, SquareSplitVertical, SquareSplitHorizontal, TerminalSquare, Bell, Megaphone, Repeat, Loader2, RotateCw, Square, Play, AlertTriangle } from "lucide-react";
+import { Plus, X, GitCompare, FileText, SquareSplitVertical, SquareSplitHorizontal, TerminalSquare, Bell, Megaphone, Repeat, RotateCw, Square, Play, AlertTriangle } from "lucide-react";
+import { Spinner } from "@/components/ui/Spinner";
 import { ptyKill } from "@/lib/ipc";
 import { usePrefs } from "@/store/prefs";
 import { Tip } from "@/components/ui/Tooltip";
@@ -561,7 +562,7 @@ export function TabPill({ task, tab, active, paneFocused, compact, onSelect, onC
               )}
               {showWorking && (
                 <span className="text-[var(--color-fg-faint)]" title="Agent working" aria-label="Working">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <Spinner size={14} />
                 </span>
               )}
             </span>

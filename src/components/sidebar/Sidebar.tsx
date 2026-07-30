@@ -6,7 +6,8 @@ import { useApp, useTaskTabs, useActiveTabId } from "@/store/app";
 import { usePrefs } from "@/store/prefs";
 import { Button } from "@/components/ui/Button";
 import { Tip } from "@/components/ui/Tooltip";
-import { LayoutGrid, History, FolderPlus, Settings, Plus, Archive, Layers, Moon, Cog, MoreVertical, GitBranch, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Bell, Bug, Mail, Zap, X, Pencil, Copy, ChevronsDownUp, ChevronsUpDown, Check, AudioWaveform, Radio, SquareChevronRight, CircleStop, Loader2, Trash2, Folder, FolderMinus, FolderOpen, Megaphone, Keyboard } from "lucide-react";
+import { Spinner } from "@/components/ui/Spinner";
+import { LayoutGrid, History, FolderPlus, Settings, Plus, Archive, Layers, Moon, Cog, MoreVertical, GitBranch, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Bell, Bug, Mail, Zap, X, Pencil, Copy, ChevronsDownUp, ChevronsUpDown, Check, AudioWaveform, Radio, SquareChevronRight, CircleStop, Trash2, Folder, FolderMinus, FolderOpen, Megaphone, Keyboard } from "lucide-react";
 import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownSeparator, DropdownLabel } from "@/components/ui/Dropdown";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuLabel, ContextMenuSub, ContextMenuSubTrigger, ContextMenuSubContent } from "@/components/ui/ContextMenu";
 import { ProjectActionsMenuItems } from "./ProjectActionsMenuItems";
@@ -1745,7 +1746,7 @@ function TabBadge({ reason }: { reason: "attention" | "done" | "working" }) {
   if (reason === "working") {
     return (
       <span className="shrink-0 text-[var(--color-fg-faint)]" title="Agent working" aria-label="Working">
-        <Loader2 className="h-3 w-3 animate-spin" />
+        <Spinner size={12} />
       </span>
     );
   }

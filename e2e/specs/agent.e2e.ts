@@ -217,14 +217,22 @@ describe("agent extras", () => {
       before,
     );
 
-    // Each toggle asks the live agent's pane whether to restart. The window has
-    // ONE confirm slot, so leaving it up blocks every later dialog in this file
-    // (it used to sit over the rest of the suite). Answer it: "Later".
-    await browser.waitUntil(
-      () => browser.execute(() => !!window.__termic!.useUI.getState().confirm),
-      { timeout: 8_000, interval: 200, timeoutMsg: "the YOLO restart prompt never appeared" },
-    );
-    await browser.execute(() => window.__termic!.useUI.getState().resolveConfirm(false));
+    // Each toggle asks the live agent's pane whether to restart, and the window
+    // has ONE confirm slot, so leaving it up blocks every later dialog in this
+    // file (it used to sit over the whole suite). Answer it: "Later".
+    //
+    // Waited for, not required: toggling and restoring back-to-back can land in
+    // a single React commit, and then `effYolo` never changes as far as the
+    // pane is concerned, so nothing is asked. The invariant worth asserting is
+    // that nothing is left standing, not that something appeared.
+    await browser
+      .waitUntil(() => browser.execute(() => !!window.__termic!.useUI.getState().confirm),
+        { timeout: 5_000, interval: 200 })
+      .catch(() => {});
+    await browser.execute(() => {
+      const ui = window.__termic!.useUI.getState();
+      if (ui.confirm) ui.resolveConfirm(false);
+    });
     expect(await browser.execute(() => !!window.__termic!.useUI.getState().confirm)).toBe(false);
   });
 

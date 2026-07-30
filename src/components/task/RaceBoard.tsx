@@ -10,7 +10,8 @@ import { useRace, raceOf } from "@/store/race";
 import { useUI } from "@/store/ui";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { cn } from "@/lib/utils";
-import { Flag, X, Columns2, Loader2 } from "lucide-react";
+import { Flag, X, Columns2 } from "lucide-react";
+import { Spinner } from "@/components/ui/Spinner";
 import type { TerminalTab } from "@/lib/types";
 
 export type WorkDot = "idle" | "working" | "done";
@@ -114,7 +115,7 @@ export function RaceBoard() {
 }
 
 // Per-racer status, in the sidebar TabBadge's visual vocabulary so the same
-// state reads the same everywhere: Loader2 spinner while the agent works,
+// state reads the same everywhere: the shared Spinner while the agent works,
 // solid --color-info bullet when done, faint dot when idle. Unlike the
 // sidebar's opt-in working indicator (off by default, noisy-TUI misfires),
 // the spinner here is always on: watching progress is the strip's job, and
@@ -124,7 +125,7 @@ export function StateDot({ state }: { state: WorkDot }) {
   if (state === "working") {
     return (
       <span className="shrink-0 text-[var(--color-fg-faint)]" title="Agent working" aria-label="Working">
-        <Loader2 className="h-3 w-3 animate-spin" />
+        <Spinner size={12} />
       </span>
     );
   }
