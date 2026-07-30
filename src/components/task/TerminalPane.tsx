@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, TerminalSquare, Copy, Check, ChevronUp, ChevronDown, ChevronRight, X, Loader2 } from "lucide-react";
 import { PopoverRoot, PopoverTrigger, PopoverContent } from "@/components/ui/Popover";
 import { useUI } from "@/store/ui";
-import { useApp } from "@/store/app";
+import { isUserWatching, useApp } from "@/store/app";
 import { cn } from "@/lib/utils";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -359,7 +359,11 @@ const captureArmedRef = useRef(false);
     // focus-gating below so a loop the user is watching keeps advancing.
     if (sendNextQueuedRef.current?.()) return true;
     const app = useApp.getState();
-    const isActive = app.activeTaskId === task.id && app.activeTab[task.id] === tab.id;
+    // Shared predicate: also false while windowless, where there is no window
+    // to have seen anything. Without that this returns early, sets "idle", and
+    // never reaches markAttention - so a task left active when the window
+    // closed would finish with no badge and no notification.
+    const isActive = isUserWatching(task.id, tab.id);
     if (seen || isActive) {
       // Acknowledged: clear to idle, no badge, no bell.
       debugLogRef.current?.("done-seen", reason);
@@ -948,8 +952,7 @@ const captureArmedRef = useRef(false);
       // Snapshot focus at the moment the agent went idle (work finished).
       // If the user was looking then, they saw the result even if they
       // navigate away before this 5s timer fires → no badge.
-      const a = useApp.getState();
-      const seenAtIdle = a.activeTaskId === task.id && a.activeTab[task.id] === tab.id;
+      const seenAtIdle = isUserWatching(task.id, tab.id);
       settleTimer = setTimeout(() => {
         wdlog(`settle fired → workState=done`);
         fireDone(`settle timer (${reason})`, "done", seenAtIdle);

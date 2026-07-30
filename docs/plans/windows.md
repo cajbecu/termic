@@ -220,6 +220,41 @@ on top of our own 44px bar. Two title bars.
 Rounded corners (`lib.rs:9500-9540`, raw objc2) are compiled out and Windows 11
 rounds via DWM, so that part is a non-issue.
 
+## Windowless mode is macOS-only on purpose (CLI Phase 3)
+
+Windowless mode (Close -> menu bar, Quit -> teardown) landed macOS-gated, so
+the Windows port inherits a decision rather than a bug.
+
+What is already gated to `target_os = "macos"` in `lib.rs`:
+
+- The `CloseRequested` -> `enter_windowless` handler. **This is a semantic
+  choice, not a compile constraint.** Close-keeps-running is a mac convention
+  (Mail, Messages). On Windows and most Linux desktops closing the window is
+  expected to QUIT, and silently turning that into minimize-to-tray is a
+  default users resent. Windows keeps Tauri's native close until someone
+  deliberately decides otherwise.
+- `ActivationPolicy::Accessory` / `Regular` (dock-icon suppression). No
+  Windows equivalent; the taskbar follows window visibility. Windows would
+  instead want `skip_taskbar`.
+- `RunEvent::Reopen` (dock-icon click). The variant does not exist off macOS
+  in Tauri, so naming it unconditionally is a hard compile error - including
+  on the Linux CI runner that already builds `cargo test --workspace --lib`.
+
+What is NOT gated, and is expected to work everywhere:
+
+- `--headless` boots straight into background. Coherent on every platform:
+  the user explicitly asked for no window.
+- The menu-bar/tray item (`tray-icon` feature). Builds on Linux via
+  `libayatana-appindicator3-dev`, already in the CI apt list. `icon_as_template`
+  is a macOS no-op elsewhere and `show_menu_on_left_click` is documented
+  unsupported on Linux, so a Linux tray needs its menu checked by hand.
+- The webview half (`termic://windowless` -> `MainArea` collapses panes). Pure
+  DOM, no platform surface.
+
+Decision left for the port: what Close should do on Windows. Options are keep
+native close (current behavior), or minimize-to-tray behind an explicit
+opt-in setting. Do not copy the mac default without deciding.
+
 ## Two silent bugs to fix before shipping anything
 
 Neither produces an error, and no existing test covers either.

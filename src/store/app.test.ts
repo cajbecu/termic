@@ -29,10 +29,11 @@ vi.mock("@/lib/agents", () => ({
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn().mockResolvedValue(undefined) }));
 
 import { invoke } from "@tauri-apps/api/core";
-import { useApp } from "@/store/app";
+import { isUserWatching, useApp } from "@/store/app";
 import * as ipc from "@/lib/ipc";
 import { markUnattendedSpawn, takeUnattendedSpawn } from "@/lib/unattendedSpawns";
 import type { QueueItem, Tab, TerminalTab, Task, PersistedTab } from "@/lib/types";
+import { useUI } from "@/store/ui";
 
 // ── helpers ───────────────────────────────────────────────────────────
 
@@ -105,6 +106,55 @@ describe("setWorkState", () => {
 
     const result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
     expect(result.workState).toBe("done");
+  });
+
+  // The focused-tab rule downgrades "done" to "idle" because the user is
+  // looking right at it. Windowless there IS no window, so the downgrade would
+  // silently eat the badge for work that finished while they were away.
+  //
+  // NOTE this tests the GUARD, not the feature. The real "agent finished" path
+  // is fireDone in TerminalPane, which returns BEFORE setWorkState when it
+  // thinks the user is watching - an earlier version of this test passed while
+  // that path was still broken. Both now share isUserWatching, covered below.
+  it("does NOT swallow done for the active task while windowless", () => {
+    const taskId = "ws-bg";
+    const tab = makeTermTab({ workState: "working" });
+    addTab(taskId, tab);
+    useApp.setState({ activeTaskId: taskId, activeTab: { [taskId]: tab.id } } as never);
+
+    useUI.getState().setWindowless(false);
+    useApp.getState().setWorkState(taskId, tab.id, "done");
+    let result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
+    expect(result.workState).toBe("idle");
+
+    const tab2 = makeTermTab({ workState: "working" });
+    addTab(taskId, tab2);
+    useApp.setState({ activeTaskId: taskId, activeTab: { [taskId]: tab2.id } } as never);
+    useUI.getState().setWindowless(true);
+    useApp.getState().setWorkState(taskId, tab2.id, "done");
+    result = useApp.getState().tabs[taskId].find(t => t.id === tab2.id) as TerminalTab;
+    expect(result.workState).toBe("done");
+    useUI.getState().setWindowless(false);
+  });
+
+  // isUserWatching is the predicate fireDone, seenAtIdle, forwardNotification
+  // and useAttentionNotifier all gate on. If it wrongly reports "watching"
+  // while windowless, every completion signal is suppressed at once.
+  it("isUserWatching is false while windowless, whatever the store says", () => {
+    const taskId = "watch-1";
+    const tab = makeTermTab();
+    addTab(taskId, tab);
+    useApp.setState({ activeTaskId: taskId, activeTab: { [taskId]: tab.id } } as never);
+
+    useUI.getState().setWindowless(false);
+    expect(isUserWatching(taskId, tab.id)).toBe(true);
+    expect(isUserWatching(taskId)).toBe(true);            // task-level
+    expect(isUserWatching("other", tab.id)).toBe(false);  // different task
+
+    useUI.getState().setWindowless(true);
+    expect(isUserWatching(taskId, tab.id)).toBe(false);
+    expect(isUserWatching(taskId)).toBe(false);
+    useUI.getState().setWindowless(false);
   });
 
   it("sticky done: a busy signal right after the done is ignored", () => {

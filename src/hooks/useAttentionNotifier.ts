@@ -10,7 +10,7 @@
 // what they came back to look at).
 
 import { useEffect, useRef } from "react";
-import { useApp } from "@/store/app";
+import { isUserWatching, useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import { usePrefs } from "@/store/prefs";
 import { notify, onNotifyClick } from "@/lib/ipc";
@@ -49,7 +49,11 @@ export function useAttentionNotifier() {
           // Suppress notifications for ANY tab in the focused task —
           // even hidden tabs within it. The user explicitly asked for "never
           // watch and notify for work done" while focused on a task.
-          if (state.activeTaskId === taskId) continue;
+          // ...unless there is no window to be focused ON. A windowless
+          // Termic is exactly when the notification is the ONLY way to learn
+          // an agent finished, so suppressing it there is backwards. Shared
+          // predicate so this cannot drift from fireDone / setWorkState.
+          if (isUserWatching(taskId)) continue;
           const key = `${taskId}:${t.id}`;
           const now = Date.now();
           if ((lastFiredRef.current[key] || 0) + DEBOUNCE_MS > now) continue;

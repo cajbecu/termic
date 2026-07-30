@@ -15,7 +15,8 @@ import { mkdirSync, readdirSync, rmSync } from "node:fs";
 
 const repoRoot = path.dirname(fileURLToPath(import.meta.url));
 const appBinary = path.join(repoRoot, "src-tauri", "target", "debug", "termic");
-const dataDir = path.join(repoRoot, ".e2e", "profile");
+/** Exported so specs that need the control socket agree with the launcher. */
+export const dataDir = path.join(repoRoot, ".e2e", "profile");
 const artifactsDir = path.join(repoRoot, ".e2e", "artifacts");
 
 export const config: WebdriverIO.Config = {

@@ -20,6 +20,7 @@
 // their PTYs are freed.
 
 import { useApp, useActiveTask } from "@/store/app";
+import { useUI } from "@/store/ui";
 import { Dashboard } from "@/components/views/Dashboard";
 import { HistoryView } from "@/components/views/History";
 import { TaskView } from "@/components/task/TaskView";
@@ -29,6 +30,13 @@ export function MainArea() {
   const view = useApp(s => s.view.page);
   const tasks = useApp(s => s.tasks);
   const mounted = useApp(s => s.mountedTasks);
+  // Windowless mode (window closed to the menu bar / `--headless` CLI launch):
+  // the ACTIVE pane loses its display exemption too, so every mounted terminal
+  // sits at zero geometry and xterm's renderers pause. Hiding the window alone
+  // does not do this — a hidden window still reports full layout, so the WebGL
+  // draws would keep running for a window nobody can see. See
+  // src/lib/windowlessMode.ts.
+  const windowless = useUI(s => s.windowless);
 
   // Settings is rendered as an overlay at the App level (see App.tsx) — we
   // don't render it from here, so MainArea + all its TaskViews stay
@@ -61,8 +69,9 @@ export function MainArea() {
           className="absolute inset-0 flex min-h-0 flex-col"
           style={{
             // undefined → the className's `flex` applies; only hidden tasks
-            // get an inline display override.
-            display: w.id === activeId ? undefined : "none",
+            // get an inline display override. In windowless mode nothing is
+            // displayed, including the active task.
+            display: w.id === activeId && !windowless ? undefined : "none",
             zIndex:  w.id === activeId ? 1 : 0,
           }}
         >

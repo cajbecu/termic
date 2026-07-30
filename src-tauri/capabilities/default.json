@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Capability for the main window. NOTE core:window:allow-close: it lets the webview close its own window, which now routes through the close prompt instead of quitting. Its only in-tree caller is the e2e suite, which has to exercise the REAL CloseRequested path because WebDriver cannot click the native traffic light. Deliberate, not accidental: the user can already close the window, and Rust intercepts the request either way.",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -9,6 +9,7 @@
     "core:window:allow-start-dragging",
     "core:window:allow-toggle-maximize",
     "core:window:allow-minimize",
+    "core:window:allow-close",
     "clipboard-manager:allow-write-text",
     "opener:default",
     "notification:default",

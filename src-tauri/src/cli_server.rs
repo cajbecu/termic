@@ -2280,11 +2280,10 @@ impl CliHost for TauriHost {
         .map(|_| ())
     }
     fn raise_window(&self) {
-        if let Some(win) = self.app.get_webview_window("main") {
-            let _ = win.unminimize();
-            let _ = win.show();
-            let _ = win.set_focus();
-        }
+        // Routes through leave_windowless (which unminimizes) so a `--headless` instance also
+        // regains its dock icon and drops the menu-bar item, instead of
+        // showing a window while still pretending to be an accessory.
+        crate::leave_windowless(&self.app);
     }
     fn diff_stat(&self, task: &Task) -> Option<proto::DiffStat> {
         diff_stat(task)

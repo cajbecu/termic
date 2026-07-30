@@ -80,6 +80,25 @@ interface UIState {
   taskCreateProgress: { phase: "creating" | "error"; err: string | null } | null;
   /** Read-only "Keyboard shortcuts" cheat-sheet modal (opened from the
    *  sidebar footer). Distinct from Settings → Shortcuts (which edits them). */
+  /** True while Termic is in windowless mode (window closed to the menu bar,
+   *  or launched `--headless` by the CLI). Agents keep running; MainArea
+   *  collapses every task pane to ZERO GEOMETRY, which is the only thing that
+   *  actually pauses xterm's renderers - hiding the NSWindow does not (a
+   *  hidden window still reports full layout). See docs/performance.md bear
+   *  trap 2 and the windowless block in src-tauri/src/lib.rs. */
+  windowless: boolean;
+  setWindowless: (v: boolean) => void;
+  /** The window close prompt ("Keep in Menu Bar" / "Quit Termic" / dismiss).
+   *  Opened by Rust's `termic://close-requested`, which only fires when the
+   *  `close_action` setting is unset or "ask". */
+  closePromptOpen: boolean;
+  setClosePromptOpen: (v: boolean) => void;
+  /** Bumped on every close REQUEST. Opening alone is not enough to reset the
+   *  dialog's "Don't ask again" tick: a second request while the prompt is
+   *  already open leaves `closePromptOpen` true->true, which React sees as no
+   *  change. Same nonce trick as the sidebar rename signal. */
+  closePromptNonce: number;
+  requestClosePrompt: () => void;
   shortcutsHelpOpen: boolean;
   welcomeOpen: boolean;
   /** Changelog dialog — full per-version release notes. */
@@ -272,6 +291,9 @@ export const useUI = create<UIState>(set => ({
   runCommandsDialog: null,
   resumeOverrideTaskId: null,
   taskCreateProgress: null,
+  windowless: false,
+  closePromptOpen: false,
+  closePromptNonce: 0,
   shortcutsHelpOpen: false,
   welcomeOpen: false,
   changelogOpen: false,
@@ -308,6 +330,10 @@ export const useUI = create<UIState>(set => ({
   openResumeOverride: (taskId) => set({ resumeOverrideTaskId: taskId }),
   closeResumeOverride:() => set({ resumeOverrideTaskId: null }),
   setTaskCreateProgress: (p) => set({ taskCreateProgress: p }),
+  setWindowless: (v) => set({ windowless: v }),
+  setClosePromptOpen: (v) => set({ closePromptOpen: v }),
+  requestClosePrompt: () =>
+    set(s => ({ closePromptOpen: true, closePromptNonce: s.closePromptNonce + 1 })),
   openShortcutsHelp:  () => set({ shortcutsHelpOpen: true }),
   closeShortcutsHelp: () => set({ shortcutsHelpOpen: false }),
   openWelcome:       () => set({ welcomeOpen: true }),
