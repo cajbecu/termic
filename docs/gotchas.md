@@ -34,4 +34,14 @@ An agent's working / done / needs-you state is classified from the fastest relia
 
 `work_done: false` still disables the whole machine (badge, bell, notification) for an agent. The classifier lives in `lib/agents.ts` (`classifyAgentTitle`, unit-tested); Tier 3 scanning is in `TerminalPane`'s data sink.
 
+### Recording what an agent actually emits
+
+Before writing a pattern (or concluding an agent signals nothing), record it. Three localStorage flags, all read at spawn, so set them in the webview console and then restart the terminal:
+
+- `debugWorkDone = "1"` — state-machine narration to the console: every transition with its reason, plus unrecognised OSC ids.
+- `ptyDebug = "1"` — per-PTY log to `OS_TEMP_DIR/termic-pty-<task>-<cli>-<ptyId>.log` (find the dir with `python3 -c 'import tempfile; print(tempfile.gettempdir())'`). Timestamped, with `data` chunks truncated at 500 B.
+- `ptyDebugRaw = "1"` — implies `ptyDebug`, and makes the log lossless: chunks logged whole, plus a `raw-OSC` / `raw-DCS` / `raw-APC` / `raw-PM` / `raw-BEL` line for **every** control sequence (`lib/ctrlSniffer.ts`). Use this one for signal archaeology. The other two both lie by omission in the same direction: the 500 B cap slices the trailing escape off a full TUI repaint, and the `debugWorkDone` sniffer skips the ids we already consume (0/1/2/9/1337) and only matches sequences that land whole inside one chunk, so "the agent emitted nothing" and "one of our handlers ate it" look identical.
+
+The log holds verbatim terminal output. It is local and opt-in, but delete it when you are done.
+
 **Any tier that classifies a state must write `senderStateRef`.** The interval demoters (byte-quiet, settled-hash, scrollback) read it for two decisions: a `busy` value suppresses them entirely, and a `null` value means "this agent has never signalled anything", which downgrades their verdict from `done` to `attention`. A classifying path that skips the ref leaves a title-less agent looking mute, so byte-quiet fires at `QUIET_MS` (4s, under `SETTLE_MS`) through any silent think and rings the attention bell mid-turn, which is the bug #68 opened about.

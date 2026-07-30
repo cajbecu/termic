@@ -17,6 +17,7 @@ import { TerminalPathMenu } from "@/components/task/TerminalPathMenu";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { Osc52Base64 } from "@/lib/osc52";
+import { makeCtrlSniffer } from "@/lib/ctrlSniffer";
 import { attachCopyOnSelect } from "@/lib/terminalSelection";
 import { ImageAddon } from "@xterm/addon-image";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
@@ -81,11 +82,13 @@ function hashVisibleBuffer(t: Terminal): number {
 
 /** Decode a raw PTY chunk into a readable string for debug logs.
  *  Control characters get named tokens (<ESC>, <BEL>, etc.); printable
- *  text (including UTF-8) passes through verbatim. Truncates at 500 B. */
-function decodeForDebug(u8: Uint8Array): string {
-  const MAX = 500;
-  const excess = u8.length > MAX;
-  const buf = excess ? u8.slice(0, MAX) : u8;
+ *  text (including UTF-8) passes through verbatim. Truncates at `max`
+ *  bytes (500 by default; the raw recorder below passes a much larger
+ *  bound because a full TUI repaint sliced at 500 B loses exactly the
+ *  trailing escape sequence you were trying to find). */
+function decodeForDebug(u8: Uint8Array, max = 500): string {
+  const excess = u8.length > max;
+  const buf = excess ? u8.slice(0, max) : u8;
   const str = new TextDecoder("utf-8", { fatal: false }).decode(buf);
   let out = "";
   for (const ch of str) {
@@ -100,7 +103,7 @@ function decodeForDebug(u8: Uint8Array): string {
     else if (c < 0x20)   out += `<x${c.toString(16).padStart(2, "0")}>`;
     else                 out += ch;
   }
-  if (excess) out += `...(+${u8.length - MAX}B)`;
+  if (excess) out += `...(+${u8.length - max}B)`;
   return out;
 }
 
@@ -790,7 +793,15 @@ const captureArmedRef = useRef(false);
     // Short-hand that writes to the per-PTY debug file (and console) when
     // localStorage.ptyDebug === "1". Safe before ptyId is known — the ref
     // is null until the spawn IIFE initializes it, so calls are no-ops.
-    const ptyDebugOn = (() => { try { return localStorage.getItem("ptyDebug") === "1"; } catch { return false; } })();
+    // Signal archaeology: `localStorage.ptyDebugRaw = "1"` turns the per-PTY
+    // log into a lossless recording — chunks are logged whole instead of
+    // sliced at 500 B, and EVERY control sequence is reported (see
+    // makeCtrlSniffer), including the ones our own handlers consume. This is
+    // how you answer "what does this agent emit when it puts a question on
+    // screen, if anything". Implies ptyDebug. Off by default; the log holds
+    // verbatim terminal output, so delete it when you're done with it.
+    const ptyRawOn = (() => { try { return localStorage.getItem("ptyDebugRaw") === "1"; } catch { return false; } })();
+    const ptyDebugOn = ptyRawOn || (() => { try { return localStorage.getItem("ptyDebug") === "1"; } catch { return false; } })();
     const dbg = (tag: string, content: string) => debugLogRef.current?.(tag, content);
 
     const isRunTab = !!(tab as TerminalTab).runTab;
@@ -1507,9 +1518,16 @@ const captureArmedRef = useRef(false);
               };
             })()
           : null;
+        // Lossless recorder (localStorage.ptyDebugRaw). Unlike oscSniffer
+        // above it is stateful, so a sequence split across chunks is still
+        // reported, and it filters nothing.
+        const ctrlSniffer = ptyRawOn
+          ? makeCtrlSniffer((kind, payload) => dbg(`raw-${kind}`, payload))
+          : null;
         const unlistenData = await ipc.onPtyData(ptyId, (u8) => {
           term.write(u8);
           oscSniffer?.(u8);
+          ctrlSniffer?.(u8);
           const now = Date.now();
           lastDataAtRef.current = now;
           if (now - lastOutputPatchRef.current >= 500) {
@@ -1527,7 +1545,7 @@ const captureArmedRef = useRef(false);
             }, 500 - (now - lastOutputPatchRef.current));
           }
           if (outputSignals) scanOutputLines(u8);
-          if (ptyDebugOn) dbg("data", decodeForDebug(u8));
+          if (ptyDebugOn) dbg("data", decodeForDebug(u8, ptyRawOn ? 65_536 : 500));
           // Output activity extends the OSC 9;4 done timer — even if
           // the agent went OSC-idle, fresh bytes mean it's still
           // streaming output (thought summary, tool result text, etc.)
