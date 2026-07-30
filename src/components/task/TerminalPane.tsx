@@ -107,11 +107,11 @@ function visibleTailRows(t: Terminal, n: number): string[] {
   return out;
 }
 
-/** Debug override for the absolute working-state ceiling, in ms. Read fresh on
- *  every interval tick so it can be set from the console (or by an e2e spec)
- *  against already-mounted terminals. Returns null when unset or unparseable,
- *  and clamps to >= 1000 ms so a typo can't turn every turn into an instant
- *  forced done. */
+/** Debug override for the absolute working-state ceiling, in ms. Read ONCE when
+ *  the sampler starts, like the other debug flags (ptyDebug, debugWorkDone),
+ *  so set it before the terminal mounts. Returns null when unset or
+ *  unparseable, and clamps to >= 1000 ms so a typo can't turn every turn into
+ *  an instant forced done. */
 function ceilingOverrideMs(): number | null {
   try {
     const raw = localStorage.getItem("workDoneCeilingMs");
@@ -2103,6 +2103,10 @@ const captureArmedRef = useRef(false);
     // done from scrollback-stability. Tolerant of slow tool output;
     // strict enough to fire even when a status counter keeps ticking.
     const SCROLLBACK_STABLE_SAMPLES = 3;
+    // ABSOLUTE ceiling — see the check below. Resolved here rather than per
+    // tick: the tick is already the hot path (it hashes the viewport), and a
+    // debug knob has no business adding a storage read to it.
+    const absoluteCeilingMs = ceilingOverrideMs() ?? 600_000;
     const id = window.setInterval(() => {
       // Same gate as the rest of the state machine — workDoneCapable reads
       // the LIVE registry, so a Settings toggle (or a kind change) takes
@@ -2195,16 +2199,15 @@ const captureArmedRef = useRef(false);
       // never get permanently stuck. Set high enough (10 min) that a real
       // long-running task is extremely unlikely to trip it.
       //
-      // `localStorage.workDoneCeilingMs` shortens it. Ten minutes is not
-      // something a test can wait out, and this is the ONLY path that clears a
-      // done the agent's own status line is holding down, so without a knob the
-      // backstop is untestable and stays broken silently (it did). Debug knob,
-      // same family as ptyDebug / debugWorkDone; ignored unless it parses.
-      const WORKING_ABSOLUTE_CEILING_MS = ceilingOverrideMs() ?? 600_000;
+      // `localStorage.workDoneCeilingMs` shortens it (resolved at sampler
+      // start, above). Ten minutes is not something a test can wait out, and
+      // this is the ONLY path that clears a done the agent's own status line is
+      // holding down, so without a knob the backstop is untestable and stays
+      // broken silently (it did).
       if (cur && cur.type === "terminal" && cur.workState === "working"
           && workingStartedAtRef.current > 0
-          && Date.now() - workingStartedAtRef.current >= WORKING_ABSOLUTE_CEILING_MS) {
-        fireDone(`10min absolute ceiling`, fallbackReason, false, true);
+          && Date.now() - workingStartedAtRef.current >= absoluteCeilingMs) {
+        fireDone(`absolute ceiling (${absoluteCeilingMs}ms)`, fallbackReason, false, true);
         return;
       }
       // Content-hash check (kept as a third path). Also gated on
