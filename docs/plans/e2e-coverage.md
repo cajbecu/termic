@@ -25,6 +25,8 @@ until `make e2e` is green and this file reflects it.
 | ✅ Task spawn | Task created; agent PTY comes alive; PTY write round-trips; agent OSC title reaches the app | `task.e2e.ts` |
 | ✅ Agent working | After a real submit, the agent enters the working state | `agent.e2e.ts` |
 | ✅ Agent attention | A backgrounded agent flags completion (unread/done) when it finishes | `agent.e2e.ts` |
+| ✅ Pending work defers done | An agent that backgrounds work and returns to its idle title holds the done badge back past byte-quiet (4s) and the settle timer (5s); done fires once its status line clears | `agent.e2e.ts` |
+| ✅ Agent notifications | OSC 9 raises attention carrying the agent's verbatim body; the "waiting for your input" idle nag raises nothing | `agent.e2e.ts` |
 | ✅ Run tabs | A custom run command opens a run tab whose PTY executes it | `run.e2e.ts` |
 | ✅ Task archive | Archived task leaves the active board | `task.e2e.ts` |
 | ✅ Task restore | Archived task shows in History; restore returns it to active | `task.e2e.ts` |

@@ -43,14 +43,51 @@ echo "FAKE-AGENT ready (args: $*)"
 echo "  claude-like fixture: ✳ = idle, spinner = working. Type a prompt."
 set_title "✳ ${name}"
 
+# Signal drills for the work-done specs. Real claude reaches states that a
+# plain echo loop never does, so a line starting with `#` is a directive rather
+# than a prompt:
+#
+#   #pending N  reproduce the backgrounded-subagent trap: print claude's
+#               "Waiting for N background agents to finish" status line and go
+#               to the IDLE glyph while the work is still outstanding. Every
+#               byte-stream signal then says "finished" and only that line says
+#               otherwise, which is the whole point.
+#   #settle     clear the pending line (the work landed) and go idle for real.
+#   #osc9 TEXT  emit an OSC 9 notification with a verbatim body, the way claude
+#               asks for the user. BEL-terminated, as claude sends it.
+#   #bel        emit a REAL bell, distinct from the BEL that terminates an OSC.
+osc9()   { printf '\033]9;%s\007' "$1"; }
+spin()   { for f in 0 1 2; do set_title "${SPINNER[$f]} ${name}"; sleep 0.15; done; }
+
 # One "prompt" per stdin line: go busy (spinner title + streamed output), then
 # return to the idle glyph — the busy -> idle transition claude drives, which
 # termic turns into working -> done.
 while IFS= read -r line; do
-  for f in 0 1 2; do
-    set_title "${SPINNER[$f]} ${name}"   # working: spinner glyph title
-    sleep 0.15
-  done
+  case "$line" in
+    "#pending "*)
+      spin
+      # Order matters: the status line must be the LAST thing painted, so it
+      # sits at the bottom of the screen where the pending check looks.
+      echo "FAKE-AGENT backgrounded ${line#\#pending } agent(s)"
+      echo "✻ Waiting for ${line#\#pending } background agents to finish"
+      set_title "✳ ${name}"              # idle glyph WHILE work is outstanding
+      continue ;;
+    "#settle")
+      # Enough lines to push the pending status line out of the bottom-of-screen
+      # window the check looks at. That IS the real behaviour: claude's words
+      # stay in the scrollback, they just stop being the live status.
+      echo "FAKE-AGENT all background work landed"
+      for i in 1 2 3 4 5 6 7 8 9 10; do echo "FAKE-AGENT result line ${i}"; done
+      set_title "✳ ${name}"
+      continue ;;
+    "#osc9 "*)
+      osc9 "${line#\#osc9 }"
+      continue ;;
+    "#bel")
+      printf '\007'
+      continue ;;
+  esac
+  spin
   echo "FAKE-AGENT echo: ${line}"        # streamed "response"
   set_title "✳ ${name}"                  # done: idle glyph
 done

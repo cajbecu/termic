@@ -67,9 +67,13 @@ export function useAttentionNotifier() {
           const title = proj?.name
             ? `${proj.name} · ${w?.name || "task"}`
             : (w?.name || "task");
+          // The agent's own wording when it gave us one ("Claude needs your
+          // permission" beats "agent needs your input"). Single path: the
+          // terminal used to forward OSC 9 bodies itself AND mark unread,
+          // which meant two banners for one event.
           notify(
             title,
-            `agent ${reason}`,
+            t.unread.message?.trim() || `agent ${reason}`,
             { taskId, tabId: t.id },
             { sound: t.unread.reason === "done" },
           ).catch(() => {});

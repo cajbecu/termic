@@ -258,7 +258,12 @@ export function compileSignals(sources: string[] | undefined): RegExp[] {
 
 export type WorkState = "busy" | "idle" | "attention";
 
-export type SignalPatterns = { busy?: string[]; idle?: string[]; attention?: string[] };
+export type SignalPatterns = {
+  busy?: string[];
+  idle?: string[];
+  attention?: string[];
+  pending?: string[];
+};
 
 /** The built-in title heuristics for the two CLIs that have them, expressed as
  *  the same regex sources a user would type. Two jobs: they ARE the classifier
@@ -278,13 +283,94 @@ export const BUILTIN_TITLE_SIGNALS: Record<string, Required<SignalPatterns>> = {
     // seen Braille (U+2800..U+28FF) and combinations like "⠐ ⠂".
     busy: ["^\\s*[^A-Za-z0-9\\s✳]"],
     idle: ["^\\s*✳"],
+    // Claude paints the idle glyph the moment its own turn ends, including
+    // when it has backgrounded work that is still running. Measured: a title
+    // that sat on ✳ for 617s while three subagents worked, with the done badge
+    // showing the whole time. These are the words on screen while that is true.
+    // `agents?` and the shell/monitor form are both real (the count decrements
+    // as they land, and background shells count as pending work too).
+    pending: [
+      "Waiting for \\d+ background agents? to finish",
+      "\\d+ shells?(, \\d+ monitors?)? still running",
+    ],
   },
   codex: {
     attention: ["\\b(Waiting|Action Required)\\b"],
     busy: ["\\b(Working|Thinking)\\b", "^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"],
     idle: ["\\bReady\\b"],
+    pending: [],
   },
 };
+
+/** How many rows up from the bottom of the viewport `pending` patterns are
+ *  tested. Claude's live status line sits just above its input box, with the
+ *  mode footer under it; 8 rows covers that block on every layout we've
+ *  recorded without reaching into conversation history.
+ *
+ *  A whole-viewport search would be wrong, not merely slower: "Waiting for 1
+ *  background agent to finish" was still on screen 120s after that agent
+ *  finished in one recording. Matching it there would pin the tab to busy
+ *  until the 10-minute ceiling. */
+export const PENDING_TAIL_ROWS = 8;
+
+/** True when the agent's own UI says it has work outstanding, so a "done" now
+ *  would be a lie. `rows` is the visible buffer, top to bottom; only the last
+ *  PENDING_TAIL_ROWS are considered.
+ *
+ *  Pure and total (see compileSignals) — a user's bad pattern must never throw
+ *  on the path that decides whether to fire done. */
+export function hasPendingWork(
+  cli: string,
+  rows: string[],
+  agents: Agent[] = useApp.getState().agents,
+): boolean {
+  const user = agents.find(a => a.id === cli)?.capabilities?.signals?.pending;
+  const src = user?.length ? user : BUILTIN_TITLE_SIGNALS[cli]?.pending;
+  if (!src?.length) return false;
+  const res = compileSignals(src);
+  if (!res.length) return false;
+  const tail = rows.slice(-PENDING_TAIL_ROWS);
+  return tail.some(r => {
+    const line = r.trim();
+    return line ? res.some(re => re.test(line)) : false;
+  });
+}
+
+/** OSC 9 / OSC 777 bodies that are NOT worth a badge. Everything else an agent
+ *  puts in a notification is treated as "it wants you", which is what asking
+ *  the terminal to notify means.
+ *
+ *  Claude sends exactly two, distinguishable by body and by a fixed delay
+ *  after its title goes idle:
+ *    "Claude needs your permission"      6.0s   — really blocked on you
+ *    "Claude is waiting for your input"  60.0s  — you have just been idle a
+ *                                                 minute; its turn ended long
+ *                                                 ago and we already said so.
+ *  Badging the second would ring a bell a minute after every turn you did not
+ *  immediately reply to. */
+export const BUILTIN_NOTIFY_IGNORE: Record<string, string[]> = {
+  claude: ["is waiting for your input"],
+};
+
+/** Whether a notification body should raise attention. Defaults to `true` for
+ *  unknown agents and unknown bodies: an agent that explicitly asked the
+ *  terminal to notify has said what it means. */
+export function notificationWantsAttention(
+  cli: string,
+  body: string,
+  agents: Agent[] = useApp.getState().agents,
+): boolean {
+  const text = body.trim();
+  if (!text) return false;
+  // A non-empty `attention` list is an ALLOW-LIST: the agent has been told
+  // what needs-you looks like, so anything else it notifies about is chatter.
+  // This is the only tuning knob for notification bodies — the ignore list
+  // below is per-built-in and not user-editable, so without allow-list
+  // semantics an agent that spams notifications would have no way to opt out.
+  const attn = compileSignals(agents.find(a => a.id === cli)?.capabilities?.signals?.attention);
+  if (attn.length) return attn.some(re => re.test(text));
+  return !compileSignals(BUILTIN_NOTIFY_IGNORE[cli]).some(re => re.test(text));
+}
 
 /** Classify a terminal title into a work-done state for `cli`. The agent's
  *  user-configured `signals` drive it when set; otherwise the built-in

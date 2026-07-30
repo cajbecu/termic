@@ -571,7 +571,7 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
   // Does this agent have any title pattern at all? Gates the output-scan
   // switch, which has nothing to run without one (see the group below).
   const sig = agent.capabilities?.signals;
-  const hasSignals = !!(sig?.busy?.length || sig?.idle?.length || sig?.attention?.length);
+  const hasSignals = !!(sig?.busy?.length || sig?.idle?.length || sig?.attention?.length || sig?.pending?.length);
 
   return (
     // data-agent-card: every card renders the same control labels, so e2e (and
@@ -857,7 +857,14 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
               onChange={attention => onPatchCaps({ signals: { ...(agent.capabilities?.signals ?? {}), attention } })}
               placeholder={signalPlaceholder(agent.id, "attention", "Action Required\nWaiting for approval")}
             />
-            {/* The three fields above are useless without knowing what the
+            <RegexListField
+              label="Still working (screen → not done yet)"
+              hint="Matched against the BOTTOM of the screen, not the title. While one of these matches, the done badge is held back. For agents that background work and end their turn anyway, so the title says idle while the job runs."
+              value={agent.capabilities?.signals?.pending ?? []}
+              onChange={pending => onPatchCaps({ signals: { ...(agent.capabilities?.signals ?? {}), pending } })}
+              placeholder={signalPlaceholder(agent.id, "pending", "Waiting for \\d+ jobs? to finish\n\\d+ tasks? still running")}
+            />
+            {/* The fields above are useless without knowing what the
                 agent actually prints. This is where those strings come from. */}
             <SignalInspector
               agentId={agent.id}
@@ -1031,7 +1038,7 @@ function PathsTextarea({ value, onChange, placeholder }: {
  *  user who wants to adjust one has something to copy rather than a guess. The
  *  sources are written to behave identically when pasted in (see
  *  BUILTIN_TITLE_SIGNALS). Everyone else gets illustrative examples. */
-function signalPlaceholder(cli: string, key: "busy" | "idle" | "attention", fallback: string): string {
+function signalPlaceholder(cli: string, key: "busy" | "idle" | "attention" | "pending", fallback: string): string {
   const builtin = BUILTIN_TITLE_SIGNALS[cli]?.[key];
   return builtin?.length ? builtin.join("\n") : fallback;
 }

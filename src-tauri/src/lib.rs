@@ -8502,6 +8502,13 @@ pub struct AgentSignals {
     pub busy: Vec<String>,
     pub idle: Vec<String>,
     pub attention: Vec<String>,
+    /// "Still working" patterns, matched against the bottom rows of the SCREEN
+    /// rather than the title (an agent that backgrounds work ends its turn and
+    /// goes to its idle title while the work runs). Adding a field here is not
+    /// optional when adding one to the TS `signals` type: `#[serde(default)]`
+    /// drops unknown keys silently, so the pattern would vanish on the next
+    /// settings round-trip and the classifier would never see it.
+    pub pending: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]

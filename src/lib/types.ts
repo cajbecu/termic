@@ -372,6 +372,22 @@ export interface Agent {
       busy?: string[];
       idle?: string[];
       attention?: string[];
+      /** "Not actually finished" patterns, matched against the BOTTOM ROWS OF
+       *  THE SCREEN rather than the title. Not a fourth state — a match means
+       *  plain `busy`; it exists as its own list only because patterns are
+       *  input-specific (claude's busy title source `^\s*[^A-Za-z0-9\s✳]`
+       *  matches almost every line it draws, so the title lists cannot be
+       *  reused here).
+       *
+       *  The case it exists for: claude backgrounds a subagent, its own turn
+       *  genuinely ends, and the title goes to the idle glyph while the work
+       *  continues. Nothing in the byte stream distinguishes that from a
+       *  finished turn — measured over two recordings, the notification, the
+       *  title and even screen activity are identical — but the TUI says it in
+       *  words ("Waiting for 3 background agents to finish"). Matched against
+       *  the last rows only, because those words stay in the scrollback long
+       *  after they stop being true. */
+      pending?: string[];
     };
     /** Tier 3: also scan stdout LINES against `signals`, not just the title.
      *  Off by default (the title path is cheaper and safer). Turn on for CLIs
@@ -636,7 +652,16 @@ export interface BaseTab {
   /** Triggered when the tab requires user attention (BEL, idle, exit,
    *  agent-emitted "done" or explicit "attention" — agent is blocked
    *  waiting for the user to approve/answer). */
-  unread?: { reason: "bell" | "idle" | "exit" | "done" | "attention" } | null;
+  unread?: {
+    reason: "bell" | "idle" | "exit" | "done" | "attention";
+    /** Verbatim text from the agent when it asked for attention itself (an
+     *  OSC 9 / OSC 777 body, e.g. "Claude needs your permission"). Used as the
+     *  OS notification body in place of the generic "agent needs your input".
+     *  Carrying it here keeps ONE notification path: the alternative was
+     *  forwarding the body directly from the terminal AND marking unread,
+     *  which fires two banners for one event. */
+    message?: string;
+  } | null;
   /** Only meaningful for `edit` tabs: true when the editor buffer has
    *  unsaved changes. Drives the dirty-dot on the tab and the
    *  close-without-saving confirm. termic never auto-saves — this is

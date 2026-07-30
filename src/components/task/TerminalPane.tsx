@@ -36,7 +36,7 @@ import { TerminalExitedBanner } from "@/components/task/TerminalExitedBanner";
 import * as ipc from "@/lib/ipc";
 import { loginShell, loginShellArgs } from "@/lib/loginShell";
 import { usePrefs, currentTerminalStack, currentTerminalTheme, currentColorFgBg, currentMinimumContrastRatio } from "@/store/prefs";
-import { spawnArgsForCli, spawnCommandForCli, tryToggleYoloLive, envForCli, agentDisplayName, cliSupportsIdSession, cliSupportsCaptureResume, postLaunchCaptureForCli, decideResume, workDoneCapable, terminalLaunchCommand, isTerminalCli, classifyAgentTitle, compileSignals } from "@/lib/agents";
+import { spawnArgsForCli, spawnCommandForCli, tryToggleYoloLive, envForCli, agentDisplayName, cliSupportsIdSession, cliSupportsCaptureResume, postLaunchCaptureForCli, decideResume, workDoneCapable, terminalLaunchCommand, isTerminalCli, classifyAgentTitle, compileSignals, hasPendingWork, notificationWantsAttention, PENDING_TAIL_ROWS } from "@/lib/agents";
 import { recordTitle, noteSubmit, noteDone } from "@/lib/agentSignalLog";
 import { MessageQueueButton } from "./MessageQueueButton";
 import { ReviewCommentsBar } from "./ReviewCommentsBar";
@@ -78,6 +78,33 @@ function hashVisibleBuffer(t: Terminal): number {
     h = Math.imul(h, 0x01000193);
   }
   return h >>> 0;
+}
+
+/** The last `n` rows of the visible buffer, top to bottom, trailing whitespace
+ *  trimmed.
+ *
+ *  Called only when something is trying to fire a done, never per frame. That
+ *  is once per turn in the normal case, and once per 3s interval tick while a
+ *  done is being deferred — bounded by `n` rows either way, so a deferral that
+ *  lasts ten minutes costs ~200 row reads total. */
+function visibleTailRows(t: Terminal, n: number): string[] {
+  const buf = t.buffer.active;
+  const top = buf.viewportY;
+  // Anchor on the last row with CONTENT, not on the viewport's bottom edge.
+  // A full-screen TUI draws all the way down, but a line-oriented agent that
+  // hasn't scrolled yet leaves the bottom of the screen blank — anchoring on
+  // the edge would then return n empty rows and match nothing, silently. (Found
+  // by the e2e fixture, which is line-oriented; real claude fills the screen and
+  // would have hidden it.)
+  let last = top + t.rows - 1;
+  while (last >= top && !buf.getLine(last)?.translateToString(true).trim()) last--;
+  if (last < top) return [];
+  const out: string[] = [];
+  for (let i = Math.max(top, last - n + 1); i <= last; i++) {
+    const line = buf.getLine(i);
+    if (line) out.push(line.translateToString(true));
+  }
+  return out;
 }
 
 /** Decode a raw PTY chunk into a readable string for debug logs.
@@ -274,9 +301,25 @@ const captureArmedRef = useRef(false);
   // FINISHED (e.g. focused when the title went idle), even if they then
   // navigated away during the settle window. In that case they already
   // saw the result, so consume the done token but show no badge/bell.
-  const fireDone = useCallback((reason: string, attn: "done" | "attention" = "done", seen = false) => {
+  const fireDone = useCallback((reason: string, attn: "done" | "attention" = "done", seen = false, force = false) => {
     if (doneFiredSinceSubmitRef.current) {
       debugLogRef.current?.("done-suppressed", `already fired this turn (${reason})`);
+      return;
+    }
+    // The agent's UI still says it has work outstanding (backgrounded
+    // subagents, running shells). Bail WITHOUT spending the one-done-per-submit
+    // token and without touching workState: the tab stays "working", the 3s
+    // interval demoters keep re-testing, and the real done fires on the first
+    // tick after the agent's own status line clears. That self-retry is why
+    // this is a plain return rather than re-arming a timer — a deferral that
+    // had to schedule its own retry would be a second timer racing the first.
+    //
+    // `force` is the 10-minute absolute ceiling, which must outrank this: a
+    // status line that somehow never clears would otherwise pin the tab to
+    // "working" forever.
+    const term = termRef.current;
+    if (!force && term && hasPendingWork(tab.cli, visibleTailRows(term, PENDING_TAIL_ROWS))) {
+      debugLogRef.current?.("done-deferred", `agent reports pending work (${reason})`);
       return;
     }
     doneFiredSinceSubmitRef.current = true;
@@ -924,7 +967,7 @@ const captureArmedRef = useRef(false);
       // No prior busy → ignore: avoids "Ready" titles on cold spawn
       // marking the tab done out of nowhere.
     };
-    const goAttention = (reason: string) => {
+    const goAttention = (reason: string, message?: string) => {
       if (!workDoneEnabled) return;
       cancelSettle(reason);
       localBusy = false;
@@ -933,7 +976,7 @@ const captureArmedRef = useRef(false);
       // via the unread channel.
       dbg("state→attention", reason);
       setWorkState(task.id, tab.id, "done");
-      markAttention(task.id, tab.id, "attention");
+      markAttention(task.id, tab.id, "attention", message);
       // The turn reached a terminal state (waiting on the user). Spend the
       // one-done-per-submit token so a trailing settle/OSC 9 can't stack a
       // blue done dot on top of the attention until the user responds.
@@ -1006,45 +1049,46 @@ const captureArmedRef = useRef(false);
       if (scanLineBuf.length > MAX_SCAN_LINE * 4) scanLineBuf = scanLineBuf.slice(-MAX_SCAN_LINE);
     };
 
-    // ── OS notification forwarding (the iTerm2 "session is …" banner) ──
+    // ── Agent-authored notifications (OSC 9 plain, OSC 777) ──
     //
-    // OSC 9 plain + OSC 777 are agent-authored notification requests.
-    // We forward the body to the OS verbatim, skipping only when the
-    // user has the desktopNotifications pref off OR is currently
-    // looking at the task. iTerm2 does the same focus-gating.
-    // Format mirrors the screenshot the user provided:
-    //   Title: "Session ⁂ <task> (<cli>)"
-    //   Body:  <agent's verbatim message>
-    const forwardNotification = (msg: string) => {
-      if (isRunTab) return;
-      const trimmed = msg.trim();
-      if (!trimmed) return;
-      try {
-        const prefs = usePrefs.getState();
-        if (!prefs.desktopNotifications) {
-          wdlog(`OS notify suppressed (pref off): ${trimmed}`);
-          return;
-        }
-        const app = useApp.getState();
-        // Skip focused task — matches useAttentionNotifier's gating.
-        if (app.activeTaskId === task.id) {
-          wdlog(`OS notify suppressed (focused task): ${trimmed}`);
-          return;
-        }
-        // Title = "project · task" (terminal/cli name dropped — it
-        // was noise; the body carries the agent's message).
-        const proj = app.projects.find(p => p.id === task.project_id);
-        const title = proj?.name ? `${proj.name} · ${task.name}` : task.name;
-        ipc.notify(title, trimmed, { taskId: task.id, tabId: tab.id }).catch(() => {});
-        // Seed the focus-edge router so the user clicking the banner
-        // (or otherwise refocusing the window within ROUTE_WINDOW_MS)
-        // lands on the tab that emitted the notification. See
-        // useAttentionNotifier.ts for the consumer.
-        useUI.getState().setNotifyRoute({ taskId: task.id, tabId: tab.id });
-        wdlog(`OS notify fired: ${title} — ${trimmed}`);
-      } catch (e) {
-        wdlog(`OS notify error`, e);
+    // The agent is asking for the user. Route it through the attention
+    // channel and let useAttentionNotifier own the banner, carrying the
+    // verbatim body as `unread.message`. This used to forward the body to the
+    // OS here AND (elsewhere) mark unread, which is two banners for one event;
+    // that is why the old code deliberately kept OSC 9 away from
+    // markAttention, and why it therefore never produced a needs-you badge.
+    //
+    // Three things are checked before badging:
+    //   - the body: claude sends "is waiting for your input" 60s after EVERY
+    //     turn you don't immediately reply to, which is not news (see
+    //     BUILTIN_NOTIFY_IGNORE).
+    //   - back-to-work: you already answered and the agent moved on.
+    //   - pending work: the agent's own UI says subagents are still running,
+    //     so "needs you" would be as wrong as "done" (measured — a background
+    //     wait emits a byte-identical notification to a real permission
+    //     prompt, so the body alone cannot separate them).
+    const notifyAttention = (reason: string, body: string) => {
+      if (isRunTab || !workDoneEnabled) return;
+      const text = body.trim();
+      if (!text) return;
+      if (!notificationWantsAttention(tab.cli, text)) {
+        wdlog(`${reason} ignored (body not actionable): ${text}`);
+        dbg("notify-ignored", text.slice(0, 120));
+        return;
       }
+      const live = useApp.getState().tabs[task.id]?.find(t => t.id === tab.id) as TerminalTab | undefined;
+      if (localBusy || live?.workState === "working") {
+        wdlog(`${reason} ignored (agent already back at work): ${text}`);
+        dbg("notify-ignored", `back to work: ${text.slice(0, 100)}`);
+        return;
+      }
+      const term = termRef.current;
+      if (term && hasPendingWork(tab.cli, visibleTailRows(term, PENDING_TAIL_ROWS))) {
+        wdlog(`${reason} ignored (agent reports pending work): ${text}`);
+        dbg("notify-ignored", `pending work: ${text.slice(0, 100)}`);
+        return;
+      }
+      goAttention(reason, text);
     };
 
     // Title classification now lives in lib/agents (classifyAgentTitle):
@@ -1103,6 +1147,27 @@ const captureArmedRef = useRef(false);
       if (state) lastTitleState = state;
     });
 
+    // BEL — a real bell, as decided by the VT parser.
+    //
+    // This used to be `u8.indexOf(0x07) !== -1` on the raw chunk, which cannot
+    // tell a bell from the terminator of an OSC: `ESC ] 0 ; title BEL` ends in
+    // 0x07, and claude repaints its title about once a second. That is what the
+    // old "agents emit BEL every ~1s during their spinner" comment was actually
+    // describing — not a bell, a title. Worse, it was chunk-dependent: across
+    // three byte-identical OSC 9 sequences in one recording it fired on two and
+    // missed the third, so needs-you badges appeared at random. In 1300 lines
+    // of recorded claude output there was not one genuine bell.
+    //
+    // Still gated on having typed (a splash-screen bell on a tab you never used
+    // is not for you) and on not being mid-work.
+    term.onBell(() => {
+      if (!workDoneEnabled || isRunTab) return;
+      const cur = useApp.getState().tabs[task.id]?.find(t => t.id === tab.id) as TerminalTab | undefined;
+      if (!cur || !cur.lastInputAt || cur.workState === "working") return;
+      dbg("bel", `lastInputAt=${cur.lastInputAt} workState=${cur.workState}`);
+      markAttention(task.id, tab.id, "bell");
+    });
+
     // OSC 9 — Claude / VTE. Two sub-forms:
     //   "9;<text>"       → notification (forward to OS verbatim).
     //   "9;4;<state>..." → ConEmu progress.
@@ -1142,37 +1207,31 @@ const captureArmedRef = useRef(false);
       // OSC 9;<text> — Send notification. Body is `data` itself
       // (no leading "4;"). Empty payload = no-op.
       //
-      // iTerm2 treats this as: forward to OS AND render the tab's
-      // work-done indicator (blue bullet). It does NOT escalate to the
-      // attention/bell — the screenshot we mirror shows a blue bullet
-      // even when the body reads "Claude is waiting for input." So
-      // we settle to `done` here and forward the body verbatim. We
-      // intentionally do NOT route through markAttention(), which
-      // would cause useAttentionNotifier to fire a SECOND OS
-      // notification on top of our verbatim forward.
+      // This is the agent asking for the user, so it raises ATTENTION, not
+      // done. It used to settle to done, on the theory that OSC 9 is a
+      // straggler arriving after a turn we had already called. Two recordings
+      // say otherwise: it is the only signal claude emits when it is blocked,
+      // and it arrives a fixed 6.0s after the title goes idle — i.e. always
+      // just behind byte-quiet (4s) and the settle timer (5s). Racing it by
+      // slowing those down would make every genuine completion feel sluggish,
+      // so instead attention is allowed to land on top of a done we already
+      // fired (goAttention does not check the one-done-per-submit token).
       wdlog(`OSC 9 notify`, data);
       dbg("osc9-notify", data.slice(0, 200));
-      // Only forward the OS notification if we're still in working state.
-      // Claude sends OSC 9 tens of seconds after the settle timer already
-      // fired done and the user acknowledged it — forwarding then produces
-      // a spurious desktop banner for a turn they already saw.
-      const stillWorking = localBusy ||
-        ((useApp.getState().tabs[task.id]?.find(t => t.id === tab.id) as import("@/lib/types").TerminalTab | undefined)?.workState === "working");
-      if (stillWorking) forwardNotification(data);
-      goIdle(`OSC 9 notify`, 0);
+      notifyAttention(`OSC 9 notify`, data);
       return false;
     });
 
     // OSC 777;notify;<title>;<body> — VTE/urxvt notification dialect.
-    // Some custom agents emit this instead of OSC 9.
+    // Some custom agents emit this instead of OSC 9. Same meaning, same
+    // handling.
     term.parser.registerOscHandler(777, (data) => {
       const parts = data.split(";");
       if (parts[0] !== "notify") return false;
       const body = parts.slice(2).join(";") || parts[1] || "";
       wdlog(`OSC 777 notify`, body);
       dbg("osc777-notify", body.slice(0, 200));
-      forwardNotification(body);
-      goIdle(`OSC 777 notify`, 0);
+      notifyAttention(`OSC 777 notify`, body);
       return false;
     });
 
@@ -1564,15 +1623,6 @@ const captureArmedRef = useRef(false);
           pushOscDoneRef.current();
           const cur = (useApp.getState().tabs[task.id] || []).find(t => t.id === tab.id);
           if (cur && cur.type === "terminal") {
-            // BEL gating: only treat as attention when the user has typed
-            // AND the agent is not actively working. Agents like Claude
-            // emit BEL every ~1s during their spinner — we don't want to
-            // ring the sidebar bell 60 times while they're mid-task, only
-            // when they ring it from an idle/done state to get user input.
-            if (workDoneEnabled && u8.indexOf(0x07) !== -1 && cur.lastInputAt && cur.workState !== "working") {
-              dbg("bel", `lastInputAt=${cur.lastInputAt} workState=${cur.workState}`);
-              markAttention(task.id, tab.id, "bell");
-            }
             // Submit-anchored "working" promotion. Only fires for agents
             // that have emitted NO title/OSC signals (senderStateRef null)
             // — i.e. fully silent CLIs like agy. Claude/Gemini/Codex all
@@ -2076,7 +2126,7 @@ const captureArmedRef = useRef(false);
       if (cur && cur.type === "terminal" && cur.workState === "working"
           && workingStartedAtRef.current > 0
           && Date.now() - workingStartedAtRef.current >= WORKING_ABSOLUTE_CEILING_MS) {
-        fireDone(`10min absolute ceiling`, fallbackReason);
+        fireDone(`10min absolute ceiling`, fallbackReason, false, true);
         return;
       }
       // Content-hash check (kept as a third path). Also gated on

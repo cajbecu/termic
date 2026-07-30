@@ -21,7 +21,7 @@ vi.mock("@/lib/utils", () => ({
   slugify: (s: string) => s.toLowerCase().replace(/\s+/g, "-"),
 }));
 
-import { spawnArgsForCli, visibleCliIds, cliSupportsIdSession, agentDisplayName, decideResume, isTerminalCli, workDoneCapable, terminalLaunchCommand, classifyAgentTitle, compileSignals, BUILTIN_TITLE_SIGNALS } from "@/lib/agents";
+import { spawnArgsForCli, visibleCliIds, cliSupportsIdSession, agentDisplayName, decideResume, isTerminalCli, workDoneCapable, terminalLaunchCommand, classifyAgentTitle, compileSignals, BUILTIN_TITLE_SIGNALS, hasPendingWork, notificationWantsAttention, PENDING_TAIL_ROWS } from "@/lib/agents";
 import type { Agent, CliInfo } from "@/lib/types";
 
 // ── spawnArgsForCli ───────────────────────────────────────────────────
@@ -519,5 +519,131 @@ describe("compileSignals", () => {
     const [re] = compileSignals(["done"]);
     expect(re.test("done")).toBe(true);
     expect(re.test("done")).toBe(true);
+  });
+});
+
+// ── Pending-work detection ────────────────────────────────────────────
+//
+// Rows below are transcribed from real recordings of claude backgrounding
+// subagents (see docs/gotchas.md). The failure they encode: claude's turn
+// genuinely ends while the work continues, so the title goes to the idle glyph
+// and every byte-stream signal says "finished". One recording showed a done
+// badge held for 617s while three subagents ran.
+
+/** The live block at the bottom of claude's screen while subagents run. */
+const PENDING_TAIL = [
+  "✻ Churned for 56s · 3 shells, 1 monitor still running",
+  "",
+  "────────────────────────────────────  signal-subagents",
+  "❯ check on them",
+  "────────────────────────────────────",
+  "▶▶ auto mode on · 3 shells, 1 monitor · ← 1 agent · ↓ to manage",
+];
+
+/** Same block once everything has landed. Note `← 1 agent` survives here: it
+ *  is a persistent hint, not a pending-work count, and was measured present
+ *  while the agent was fully idle. A pattern keying on it would never clear. */
+const IDLE_TAIL = [
+  "✻ Brewed for 2s",
+  "",
+  "────────────────────────────────────  signal-subagents",
+  "❯ ",
+  "────────────────────────────────────",
+  "▶▶ auto mode on (shift+tab to cycle) · ← 1 agent",
+];
+
+describe("hasPendingWork", () => {
+  beforeEach(() => { mockAgents.length = 0; });
+
+  it("matches the live status line while subagents run", () => {
+    expect(hasPendingWork("claude", PENDING_TAIL)).toBe(true);
+  });
+
+  it("does not match once the work has landed", () => {
+    expect(hasPendingWork("claude", IDLE_TAIL)).toBe(false);
+  });
+
+  it("matches both singular and plural agent counts", () => {
+    for (const n of [1, 2, 3]) {
+      const line = `✻ Waiting for ${n} background agent${n === 1 ? "" : "s"} to finish`;
+      expect(hasPendingWork("claude", [line])).toBe(true);
+    }
+  });
+
+  it("ignores a stale copy sitting in scrollback", () => {
+    // The whole reason the check is positional: this exact line was still on
+    // screen 120s after that agent finished. Matching anywhere in the viewport
+    // would pin the tab to working until the 10-minute ceiling.
+    const rows = [
+      "✻ Waiting for 1 background agent to finish",
+      ...Array.from({ length: PENDING_TAIL_ROWS }, (_, i) => `⏺ later output ${i}`),
+    ];
+    expect(hasPendingWork("claude", rows)).toBe(false);
+  });
+
+  it("still matches when the line sits at the very edge of the window", () => {
+    const rows = [
+      "⏺ old output",
+      "✻ Waiting for 2 background agents to finish",
+      ...Array.from({ length: PENDING_TAIL_ROWS - 1 }, (_, i) => `⏺ newer ${i}`),
+    ];
+    expect(hasPendingWork("claude", rows)).toBe(true);
+  });
+
+  it("is off for agents with no pending patterns", () => {
+    expect(hasPendingWork("codex", PENDING_TAIL)).toBe(false);
+    expect(hasPendingWork("unknown-cli", PENDING_TAIL)).toBe(false);
+  });
+
+  it("lets an agent override the built-ins", () => {
+    mockAgents.push(sigAgent("claude", { pending: ["\\bstill crunching\\b"] }));
+    expect(hasPendingWork("claude", ["waiting: still crunching"])).toBe(true);
+    // Overridden, so the built-in phrasing no longer counts.
+    expect(hasPendingWork("claude", PENDING_TAIL)).toBe(false);
+  });
+
+  it("never throws on an invalid user pattern", () => {
+    mockAgents.push(sigAgent("claude", { pending: ["(unclosed"] }));
+    expect(() => hasPendingWork("claude", PENDING_TAIL)).not.toThrow();
+    expect(hasPendingWork("claude", PENDING_TAIL)).toBe(false);
+  });
+
+  it("ignores blank rows", () => {
+    expect(hasPendingWork("claude", ["", "   ", ""])).toBe(false);
+  });
+});
+
+describe("notificationWantsAttention", () => {
+  beforeEach(() => { mockAgents.length = 0; });
+
+  it("badges a real block on the user", () => {
+    // Measured 6.0s after the title went idle, on both question prompts and a
+    // real Bash approval.
+    expect(notificationWantsAttention("claude", "Claude needs your permission")).toBe(true);
+  });
+
+  it("ignores the 60s idle nag", () => {
+    // Fires after any turn you don't reply to within a minute. Badging it
+    // would ring a bell for work already reported done.
+    expect(notificationWantsAttention("claude", "Claude is waiting for your input")).toBe(false);
+  });
+
+  it("defaults to badging unknown agents and unknown bodies", () => {
+    expect(notificationWantsAttention("some-cli", "build broke")).toBe(true);
+    expect(notificationWantsAttention("claude", "something new claude says")).toBe(true);
+  });
+
+  it("ignores an empty body", () => {
+    expect(notificationWantsAttention("claude", "   ")).toBe(false);
+  });
+
+  it("treats a configured attention list as an allow-list", () => {
+    mockAgents.push(sigAgent("claude", { attention: ["waiting for your input"] }));
+    // Named → badged, even though the built-in ignore list drops it.
+    expect(notificationWantsAttention("claude", "Claude is waiting for your input")).toBe(true);
+    // Not named → dropped, even though an unconfigured agent would badge it.
+    // This is the only knob for notification bodies (the ignore list is
+    // built-in and not user-editable), so it has to be able to say "no".
+    expect(notificationWantsAttention("claude", "Claude needs your permission")).toBe(false);
   });
 });

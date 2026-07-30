@@ -314,7 +314,10 @@ export interface AppState {
   /** Update the tab's PTY-driven `OSC 0/2` title. No-op when the user
    *  has manually renamed the tab (`customTitle === true`). */
   setTabLiveTitle: (taskId: string, tabId: string, liveTitle: string) => void;
-  markAttention: (taskId: string, tabId: string, reason: "bell" | "idle" | "exit" | "done" | "attention") => void;
+  /** `message` is the agent's own words (an OSC 9/777 body). When present it
+   *  becomes the OS notification body instead of the generic phrasing, which
+   *  is what lets the terminal stop forwarding its own duplicate banner. */
+  markAttention: (taskId: string, tabId: string, reason: "bell" | "idle" | "exit" | "done" | "attention", message?: string) => void;
   clearAttention: (taskId: string, tabId: string) => void;
   /** Per-tab work-progress state. Idempotent — writing the same value is
    *  a no-op so we don't churn React for every OSC 9;4 the agent emits. */
@@ -2064,7 +2067,7 @@ export const useApp = create<AppState>((set, get) => ({
     return { tabs: { ...s.tabs, [taskId]: next } };
   }),
 
-  markAttention: (taskId, tabId, reason) => set(s => {
+  markAttention: (taskId, tabId, reason, message) => set(s => {
     // Always mark — iTerm2 shows the bullet/bell even on the focused
     // tab so users have a clear "yes, this turn really finished"
     // confirmation. OS notification suppression for the focused
@@ -2072,7 +2075,9 @@ export const useApp = create<AppState>((set, get) => ({
     // here. Indicator clears on user input (term.onData) — never on
     // tab view.
     const list = s.tabs[taskId] || [];
-    const next = list.map(t => t.id === tabId ? { ...t, unread: { reason } } as Tab : t);
+    const next = list.map(t => t.id === tabId
+      ? { ...t, unread: message ? { reason, message } : { reason } } as Tab
+      : t);
     return { tabs: { ...s.tabs, [taskId]: next } };
   }),
 
