@@ -313,6 +313,24 @@ export const BUILTIN_TITLE_SIGNALS: Record<string, Required<SignalPatterns>> = {
  *  until the 10-minute ceiling. */
 export const PENDING_TAIL_ROWS = 8;
 
+/** How long a fired `done` outranks a fresh busy signal from the agent.
+ *
+ *  Claude oscillates between its idle glyph and a spinner for a few frames
+ *  right after a response, so a "back to working" inside this window is that
+ *  flicker and gets ignored (otherwise every turn ends in a second done badge).
+ *  Past it, a busy signal is the agent genuinely working, and our done was
+ *  wrong: a long multi-stage turn that one of the heuristics cut short.
+ *
+ *  It must stay a WINDOW rather than the flat "agent signals can never undo a
+ *  done" rule it replaced. Under that rule a premature done was unrecoverable:
+ *  the spinner stayed off for the rest of the turn no matter how loudly the
+ *  agent kept working, the turn's one done token was already spent so the real
+ *  completion fired nothing, and the only way out was clicking the tab. 8s is
+ *  comfortably past the observed oscillation (1-3s) and well under a stage of
+ *  real work. Shared by the store's transition gate and the pane's
+ *  one-done-per-submit token so the two can't disagree about which it is. */
+export const STICKY_DONE_MS = 8_000;
+
 /** True when the agent's own UI says it has work outstanding, so a "done" now
  *  would be a lie. `rows` is the visible buffer, top to bottom; only the last
  *  PENDING_TAIL_ROWS are considered.

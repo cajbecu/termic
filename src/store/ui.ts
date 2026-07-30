@@ -20,6 +20,13 @@ export interface ConfirmRequest {
    *  delete / "ripping the cage" style actions. */
   destructive?: boolean;
   checkbox?: ConfirmCheckbox;
+  /** Identifies a prompt whose asker can go away before it is answered (a
+   *  terminal pane's "restart to apply YOLO?", say — the tab can be closed or
+   *  the task archived while it stands). The asker passes a key here and calls
+   *  `withdrawConfirm(key)` on teardown; without one, the modal outlives the
+   *  thing it was asking about and blocks the whole window. Only one confirm
+   *  is on screen at a time, so an un-withdrawn prompt is not a small mess. */
+  key?: string;
 }
 
 /** How the user chose to share a file dropped onto a sandboxed terminal. */
@@ -205,6 +212,12 @@ interface UIState {
     (req: ConfirmRequest): Promise<boolean | { confirmed: boolean; checked: boolean }>;
   };
   resolveConfirm: (ok: boolean, checked?: boolean) => void;
+  /** Take back a keyed confirm the asker no longer wants answered (its pane
+   *  unmounted, its task was archived, or it is about to ask again). Resolves
+   *  the pending promise as "cancelled" and closes the modal. Safe to call
+   *  before the prompt has appeared — askConfirm defers by a macrotask, so a
+   *  withdrawal that lands in that gap suppresses it when it fires. */
+  withdrawConfirm: (key: string) => void;
   /** Open the sandboxed-terminal drop prompt. Resolves with the chosen
    *  sharing strategy (or {kind:"cancel"} on dismiss). */
   askTerminalDrop: (req: TerminalDropRequest) => Promise<TerminalDropChoice>;
@@ -244,6 +257,10 @@ export interface Toast {
   /** Override the global TTL for this toast (e.g. longer for undo). */
   ttlMs?: number;
 }
+
+/** Keys withdrawn while their confirm was still inside askConfirm's macrotask
+ *  deferral. Consumed by that deferred open, so entries never accumulate. */
+const withdrawnConfirms = new Set<string>();
 
 export const useUI = create<UIState>(set => ({
   newProjectOpen: false,
@@ -336,7 +353,14 @@ export const useUI = create<UIState>(set => ({
     // invisible layer over everything). setTimeout(0) runs after React has
     // flushed the menu's unmount + its body cleanup, so the dialog mounts with
     // a clean `pointer-events: ""` baseline. (GH #43: discard via right-click.)
-    new Promise<any>(resolve => setTimeout(() => set({ confirm: { req, resolve } }), 0)),
+    new Promise<any>(resolve => setTimeout(() => {
+      // Withdrawn during the deferral gap → never show it.
+      if (req.key && withdrawnConfirms.delete(req.key)) {
+        resolve(req.checkbox ? { confirmed: false, checked: false } : false);
+        return;
+      }
+      set({ confirm: { req, resolve } });
+    }, 0)),
   resolveConfirm: (ok, checked) => {
     const c = useUI.getState().confirm;
     if (c) {
@@ -347,6 +371,17 @@ export const useUI = create<UIState>(set => ({
       }
     }
     set({ confirm: null });
+  },
+  withdrawConfirm: (key) => {
+    const c = useUI.getState().confirm;
+    if (c?.req.key === key) {
+      c.resolve(c.req.checkbox ? { confirmed: false, checked: false } : false);
+      set({ confirm: null });
+      return;
+    }
+    // Not on screen yet. Leave a note for the deferred open above; it is
+    // consumed there, so this set only ever holds in-flight keys.
+    withdrawnConfirms.add(key);
   },
   askTerminalDrop: (req) =>
     new Promise<TerminalDropChoice>(resolve => set({ terminalDrop: { req, resolve } })),

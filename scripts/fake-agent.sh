@@ -53,6 +53,15 @@ set_title "✳ ${name}"
 #               byte-stream signal then says "finished" and only that line says
 #               otherwise, which is the whole point.
 #   #settle     clear the pending line (the work landed) and go idle for real.
+#   #stage      a multi-stage turn whose FIRST stage looks finished: idle glyph,
+#               quiet PTY, still screen, so termic calls the turn done. Then the
+#               agent goes back to work long after that done and finishes for
+#               real. Both halves have to survive: the spinner has to come back
+#               (a done we got wrong must not outlive the evidence), and the
+#               real completion still has to fire (the turn's done token was
+#               spent on the wrong one). The sleep is long enough to clear
+#               STICKY_DONE_MS counted from when the done actually fires, not
+#               from when the stage ends.
 #   #osc9 TEXT  emit an OSC 9 notification with a verbatim body, the way claude
 #               asks for the user. BEL-terminated, as claude sends it.
 #   #bel        emit a REAL bell, distinct from the BEL that terminates an OSC.
@@ -79,6 +88,19 @@ while IFS= read -r line; do
       echo "FAKE-AGENT all background work landed"
       for i in 1 2 3 4 5 6 7 8 9 10; do echo "FAKE-AGENT result line ${i}"; done
       set_title "✳ ${name}"
+      continue ;;
+    "#stage")
+      # ~6s of visible work before the misleading idle glyph. The done that
+      # follows only badges on a tab nobody is watching, so the test needs this
+      # long to background the task first; a 0.5s spin made that a race.
+      for i in $(seq 1 20); do set_title "${SPINNER[$((i % 8))]} ${name}"; sleep 0.3; done
+      echo "FAKE-AGENT stage 1 landed"
+      set_title "✳ ${name}"              # looks finished, isn't
+      sleep 16
+      spin                               # stage 2: back to work
+      echo "FAKE-AGENT stage 2 landed"
+      sleep 2
+      set_title "✳ ${name}"              # finished for real this time
       continue ;;
     "#osc9 "*)
       osc9 "${line#\#osc9 }"

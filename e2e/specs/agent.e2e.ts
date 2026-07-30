@@ -216,6 +216,16 @@ describe("agent extras", () => {
       taskId,
       before,
     );
+
+    // Each toggle asks the live agent's pane whether to restart. The window has
+    // ONE confirm slot, so leaving it up blocks every later dialog in this file
+    // (it used to sit over the rest of the suite). Answer it: "Later".
+    await browser.waitUntil(
+      () => browser.execute(() => !!window.__termic!.useUI.getState().confirm),
+      { timeout: 8_000, interval: 200, timeoutMsg: "the YOLO restart prompt never appeared" },
+    );
+    await browser.execute(() => window.__termic!.useUI.getState().resolveConfirm(false));
+    expect(await browser.execute(() => !!window.__termic!.useUI.getState().confirm)).toBe(false);
   });
 
   it("opens an aux (bottom) terminal", async () => {
@@ -358,6 +368,135 @@ describe("pending work defers done", () => {
       { timeout: 25_000, interval: 300, timeoutMsg: "done never fired after the work landed" },
     );
     await snap("agent-pending-settled.png");
+  });
+});
+
+// P0: the hold above must not be able to pin a tab to "working" forever. A
+// status line that never clears (a background shell that outlives the turn, or
+// the words still sitting in the tail after the work landed) leaves the screen
+// byte-quiet and unchanging, so every demoter either fires into the hold or
+// latches itself off. The absolute ceiling is the only thing that outranks the
+// hold, and it was unreachable: byte-quiet gave up the tick on a held done, so
+// the ceiling below it never ran and the tab stayed "working" until the user
+// clicked it. Shortened here via the workDoneCeilingMs debug knob, since the
+// real one is ten minutes.
+describe("a hold that never clears still ends", () => {
+  let taskId: string | undefined;
+  const CEILING_MS = 8_000;
+
+  after(async () => {
+    await browser.execute(() => localStorage.removeItem("workDoneCeilingMs"));
+    if (taskId) await archiveTask(taskId);
+  });
+
+  it("force-clears the working state at the absolute ceiling", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    await browser.execute((ms) => localStorage.setItem("workDoneCeilingMs", String(ms)), CEILING_MS);
+    taskId = await openTask("e2e-pending-ceiling");
+
+    await browser.waitUntil(
+      () => browser.execute((id) => !!(window.__termic!.useApp.getState().tabs[id] ?? [])[0]?.ptyId, taskId),
+      { timeout: 20_000, interval: 250, timeoutMsg: "agent PTY never spawned" },
+    );
+
+    // Same drill as the hold spec, and #settle is never sent: the pending line
+    // stays on screen for the rest of the test.
+    await browser.execute((id) => {
+      const s = window.__termic!.useApp.getState();
+      const tab = s.tabs[id][0];
+      s.patchTab(id, tab.id, { lastInputAt: Date.now() });
+      window.__termic!.ipc.ptyWrite(
+        tab.ptyId,
+        Array.from(new TextEncoder().encode("#pending 2\r")),
+      );
+    }, taskId);
+
+    await browser.waitUntil(
+      () => browser.execute((id) => window.__termic!.useApp.getState().tabs[id][0].workState === "working", taskId),
+      { timeout: 10_000, timeoutMsg: "agent never started working" },
+    );
+
+    await browser.waitUntil(
+      () => browser.execute((id) => window.__termic!.useApp.getState().tabs[id][0].workState !== "working", taskId),
+      {
+        timeout: CEILING_MS + 20_000,
+        interval: 500,
+        timeoutMsg: "the held done never reached the ceiling — tab pinned to working",
+      },
+    );
+    await snap("agent-pending-ceiling.png");
+  });
+});
+
+// P0: a done we got wrong must not outlive the evidence. Every heuristic here
+// can misread a stage boundary in a long multi-stage turn as the end of it, and
+// the recovery used to be a click: agent signals could never undo a "done", so
+// the tab showed no spinner for the rest of the turn, and the turn's one done
+// token was already spent so the real completion badged nothing.
+describe("a premature done is taken back", () => {
+  let a: string | undefined;
+  let b: string | undefined;
+  after(async () => {
+    if (a) await archiveTask(a);
+    if (b) await archiveTask(b);
+  });
+
+  const state = (id: string) =>
+    browser.execute((wid) => {
+      const t = window.__termic!.useApp.getState().tabs[wid][0];
+      return { workState: t.workState, unread: t.unread ?? null };
+    }, id);
+
+  it("returns to working, then still fires the real done", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+
+    a = await openTask("e2e-stage-a");
+    await browser.waitUntil(
+      () => browser.execute((id) => !!(window.__termic!.useApp.getState().tabs[id] ?? [])[0]?.ptyId, a),
+      { timeout: 20_000, interval: 250, timeoutMsg: "agent PTY never spawned" },
+    );
+
+    await browser.execute((id) => {
+      const s = window.__termic!.useApp.getState();
+      const tab = s.tabs[id][0];
+      s.patchTab(id, tab.id, { lastInputAt: Date.now() });
+      window.__termic!.ipc.ptyWrite(
+        tab.ptyId,
+        Array.from(new TextEncoder().encode("#stage\r")),
+      );
+    }, a);
+    await browser.waitUntil(
+      async () => (await state(a!)).workState === "working",
+      { timeout: 10_000, timeoutMsg: "agent never started working" },
+    );
+
+    // Background it so a done actually badges (a focused tab's done is
+    // downgraded to idle on the spot — nothing to take back).
+    b = await openTask("e2e-stage-b");
+
+    await browser.waitUntil(
+      async () => (await state(a!)).workState === "done",
+      { timeout: 20_000, interval: 300, timeoutMsg: "the premature done never fired" },
+    );
+
+    // Stage 2 starts. The spinner has to come back on its own.
+    await browser.waitUntil(
+      async () => (await state(a!)).workState === "working",
+      { timeout: 25_000, interval: 300, timeoutMsg: "the tab never went back to working" },
+    );
+    expect((await state(a!)).unread).toBeNull(); // the wrong bullet went with it
+
+    // And the turn's real ending still has a done to spend.
+    await browser.waitUntil(
+      async () => {
+        const t = await state(a!);
+        return t.workState === "done" || !!t.unread;
+      },
+      { timeout: 25_000, interval: 300, timeoutMsg: "the real completion fired nothing" },
+    );
+    await snap("agent-stage-recovered.png");
   });
 });
 

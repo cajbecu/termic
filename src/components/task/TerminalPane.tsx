@@ -36,7 +36,7 @@ import { TerminalExitedBanner } from "@/components/task/TerminalExitedBanner";
 import * as ipc from "@/lib/ipc";
 import { loginShell, loginShellArgs } from "@/lib/loginShell";
 import { usePrefs, currentTerminalStack, currentTerminalTheme, currentColorFgBg, currentMinimumContrastRatio } from "@/store/prefs";
-import { spawnArgsForCli, spawnCommandForCli, tryToggleYoloLive, envForCli, agentDisplayName, cliSupportsIdSession, cliSupportsCaptureResume, postLaunchCaptureForCli, decideResume, workDoneCapable, terminalLaunchCommand, isTerminalCli, classifyAgentTitle, compileSignals, hasPendingWork, notificationWantsAttention, PENDING_TAIL_ROWS } from "@/lib/agents";
+import { spawnArgsForCli, spawnCommandForCli, tryToggleYoloLive, envForCli, agentDisplayName, cliSupportsIdSession, cliSupportsCaptureResume, postLaunchCaptureForCli, decideResume, workDoneCapable, terminalLaunchCommand, isTerminalCli, classifyAgentTitle, compileSignals, hasPendingWork, notificationWantsAttention, PENDING_TAIL_ROWS, STICKY_DONE_MS } from "@/lib/agents";
 import { recordTitle, noteSubmit, noteDone } from "@/lib/agentSignalLog";
 import { MessageQueueButton } from "./MessageQueueButton";
 import { ReviewCommentsBar } from "./ReviewCommentsBar";
@@ -105,6 +105,20 @@ function visibleTailRows(t: Terminal, n: number): string[] {
     if (line) out.push(line.translateToString(true));
   }
   return out;
+}
+
+/** Debug override for the absolute working-state ceiling, in ms. Read fresh on
+ *  every interval tick so it can be set from the console (or by an e2e spec)
+ *  against already-mounted terminals. Returns null when unset or unparseable,
+ *  and clamps to >= 1000 ms so a typo can't turn every turn into an instant
+ *  forced done. */
+function ceilingOverrideMs(): number | null {
+  try {
+    const raw = localStorage.getItem("workDoneCeilingMs");
+    if (!raw) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 1000 ? n : null;
+  } catch { return null; }
 }
 
 /** Decode a raw PTY chunk into a readable string for debug logs.
@@ -280,6 +294,11 @@ export function TerminalPane({ task, tab, active }: Props) {
   // late OSC 9 "waiting for input" arriving tens of seconds after the
   // user already saw the answer.
   const doneFiredSinceSubmitRef = useRef(false);
+  // When that token was spent. A busy signal arriving more than STICKY_DONE_MS
+  // later means the done was premature, so goWorking hands the token back —
+  // without that the turn's REAL completion is dropped as "already fired this
+  // turn" and a long multi-stage turn ends in silence.
+  const doneFiredAtRef = useRef(0);
   // Newest OSC title seen on this tab. fireDone hands it to a signal capture as
   // the "resting" title. A ref, not state, so the spinner's ~10/s repaint can
   // never re-render the terminal.
@@ -301,18 +320,28 @@ const captureArmedRef = useRef(false);
   // FINISHED (e.g. focused when the title went idle), even if they then
   // navigated away during the settle window. In that case they already
   // saw the result, so consume the done token but show no badge/bell.
-  const fireDone = useCallback((reason: string, attn: "done" | "attention" = "done", seen = false, force = false) => {
+  //
+  // Returns false ONLY when the done was HELD BACK by the agent's own "still
+  // working" status line. A caller that got `false` has not finished its job:
+  // it must keep its retry path alive rather than latching a one-shot flag or
+  // skipping the ceilings below it. Every other outcome (fired, acknowledged,
+  // drained into the message queue, or already spent this turn) returns true —
+  // the turn needs nothing further.
+  const fireDone = useCallback((reason: string, attn: "done" | "attention" = "done", seen = false, force = false): boolean => {
     if (doneFiredSinceSubmitRef.current) {
       debugLogRef.current?.("done-suppressed", `already fired this turn (${reason})`);
-      return;
+      return true;
     }
     // The agent's UI still says it has work outstanding (backgrounded
     // subagents, running shells). Bail WITHOUT spending the one-done-per-submit
-    // token and without touching workState: the tab stays "working", the 3s
-    // interval demoters keep re-testing, and the real done fires on the first
+    // token and without touching workState: the tab stays "working" and the 3s
+    // interval demoters keep re-testing, so the real done fires on the first
     // tick after the agent's own status line clears. That self-retry is why
     // this is a plain return rather than re-arming a timer — a deferral that
     // had to schedule its own retry would be a second timer racing the first.
+    // It only holds because the callers honor the `false` below; when they
+    // didn't, a held done starved both ceilings and pinned the tab to
+    // "working" until the user focused it by hand.
     //
     // `force` is the 10-minute absolute ceiling, which must outrank this: a
     // status line that somehow never clears would otherwise pin the tab to
@@ -320,21 +349,22 @@ const captureArmedRef = useRef(false);
     const term = termRef.current;
     if (!force && term && hasPendingWork(tab.cli, visibleTailRows(term, PENDING_TAIL_ROWS))) {
       debugLogRef.current?.("done-deferred", `agent reports pending work (${reason})`);
-      return;
+      return false;
     }
     doneFiredSinceSubmitRef.current = true;
+    doneFiredAtRef.current = Date.now();
     // If a message queue is draining, send the next message now and suppress
     // this turn's badge/bell — the user is running an automated loop and
     // doesn't want a notification between every iteration. Runs before the
     // focus-gating below so a loop the user is watching keeps advancing.
-    if (sendNextQueuedRef.current?.()) return;
+    if (sendNextQueuedRef.current?.()) return true;
     const app = useApp.getState();
     const isActive = app.activeTaskId === task.id && app.activeTab[task.id] === tab.id;
     if (seen || isActive) {
       // Acknowledged: clear to idle, no badge, no bell.
       debugLogRef.current?.("done-seen", reason);
       app.setWorkState(task.id, tab.id, "idle");
-      return;
+      return true;
     }
     debugLogRef.current?.("state→done", reason);
     app.setWorkState(task.id, tab.id, "done");
@@ -342,6 +372,7 @@ const captureArmedRef = useRef(false);
     // End of a turn: the title standing right now is the idle candidate for a
     // signal capture. No-op unless one is recording for this agent.
     noteDone(tab.cli, lastTitleRef.current);
+    return true;
   }, [task.id, tab.id, tab.cli]);
 
   // Throttle state for the message queue: the wall-clock of the last send and
@@ -929,6 +960,20 @@ const captureArmedRef = useRef(false);
     const goWorking = (reason: string) => {
       if (!workDoneEnabled) return;
       cancelSettle(reason);
+      // The agent is working again well after we called this turn done, so the
+      // done was premature (a stage boundary read as the end). Hand the turn's
+      // done token back — otherwise the completion that actually ends the turn
+      // is dropped as "already fired this turn" and nothing ever badges. The
+      // window matches the store's sticky-done gate, so the token and the
+      // spinner come back together instead of one without the other.
+      if (doneFiredSinceSubmitRef.current
+          && doneFiredAtRef.current > 0
+          && Date.now() - doneFiredAtRef.current >= STICKY_DONE_MS) {
+        wdlog(`done token reopened (${reason})`);
+        dbg("done-reopened", reason);
+        doneFiredSinceSubmitRef.current = false;
+        doneFiredAtRef.current = 0;
+      }
       if (!localBusy) {
         wdlog(`→ working (${reason})`);
         dbg("state→working", reason);
@@ -981,6 +1026,7 @@ const captureArmedRef = useRef(false);
       // one-done-per-submit token so a trailing settle/OSC 9 can't stack a
       // blue done dot on top of the attention until the user responds.
       doneFiredSinceSubmitRef.current = true;
+      doneFiredAtRef.current = Date.now();
     };
 
     // Tier 3 (issue #68): opt-in output-line matching. When the agent enables
@@ -2007,6 +2053,14 @@ const captureArmedRef = useRef(false);
     const ptyId = ptyRef.current;
     if (!ptyId) return;
     let cancelled = false;
+    // The prompt belongs to THIS pane and this toggle. Without a key to
+    // withdraw it by, it outlived both: toggling twice in a row replaced the
+    // first modal and orphaned its promise, and closing the tab (or archiving
+    // the task) left a modal on screen asking about an agent that no longer
+    // exists — one confirm slot for the whole window, so nothing else could
+    // ask anything until someone answered it.
+    const confirmKey = `yolo-restart:${task.id}:${tab.id}`;
+    let asked = false;
     (async () => {
       // Agents that support runtime mode-switching (gemini) flip live.
       const applied = await tryToggleYoloLive(tab.cli, ptyId, effYolo);
@@ -2015,16 +2069,22 @@ const captureArmedRef = useRef(false);
       // only prompt for a genuine per-task YOLO toggle on a running
       // agent that can't switch mid-session (claude / codex).
       if (enforced) return;
+      asked = true;
       const ok = await useUI.getState().askConfirm({
+        key: confirmKey,
         title: `Restart ${agentDisplayName(tab.cli)} to ${effYolo ? "enable" : "disable"} YOLO?`,
         message: `${agentDisplayName(tab.cli)} applies YOLO only on a fresh launch. Restart now (the session auto-resumes), or pick Later and it takes effect on the next restart.`,
         confirmLabel: "Restart now",
         cancelLabel: "Later",
       });
+      asked = false;
       if (ok && !cancelled) { setExited(false); setGen(g => g + 1); }
     })();
-    return () => { cancelled = true; };
-  }, [effYolo, enforced, tab.cli]);
+    return () => {
+      cancelled = true;
+      if (asked) useUI.getState().withdrawConfirm(confirmKey);
+    };
+  }, [effYolo, enforced, tab.cli, task.id, tab.id]);
 
   // Settled detection: hash the visible buffer every SAMPLE_MS. Once the hash
   // is identical across SETTLE_SAMPLES consecutive samples, the agent has
@@ -2069,12 +2129,17 @@ const captureArmedRef = useRef(false);
       // agent goes silent entirely. (Doesn't fire for Claude Code's
       // "Cooking for Ns" ticker — for that we need the scrollback
       // check below.)
+      //
+      // Only give up the tick when the done actually fired. A done HELD by the
+      // agent's pending-work line must fall through to the ceilings below —
+      // returning here on a held done starved both of them, and byte-quiet is
+      // true on every tick once an idle agent stops painting, so the tab sat on
+      // "working" past the 10-minute backstop until the user focused it.
       if (!senderBusy
           && cur && cur.type === "terminal" && cur.workState === "working"
           && lastDataAtRef.current > 0
           && Date.now() - lastDataAtRef.current >= QUIET_MS) {
-        fireDone(`byte-quiet (quietMs=${Date.now() - lastDataAtRef.current})`, fallbackReason);
-        return;
+        if (fireDone(`byte-quiet (quietMs=${Date.now() - lastDataAtRef.current})`, fallbackReason)) return;
       }
       // Scrollback-stability check — only meaningful for NORMAL
       // buffer mode (Claude Code, plain shells). Alt-screen TUIs
@@ -2089,10 +2154,16 @@ const captureArmedRef = useRef(false);
           sb.stableCount++;
           debugLogRef.current?.("settled-scrollback", `len=${len} stableCount=${sb.stableCount}/${SCROLLBACK_STABLE_SAMPLES} workState=${cur?.type === "terminal" ? cur.workState : "?"}`);
           if (sb.stableCount >= SCROLLBACK_STABLE_SAMPLES && !sb.marked) {
+            // Latch only when the done wasn't held. `marked` makes this a
+            // one-shot per stable stretch, and it resets on a length change —
+            // so latching a held done means this path never retries for a
+            // screen that stays exactly as it is, which is precisely the
+            // screen a pending-work hold leaves behind.
+            let held = false;
             if (cur && cur.type === "terminal" && cur.workState === "working") {
-              fireDone(`scrollback-stable (len=${len})`, fallbackReason);
+              held = !fireDone(`scrollback-stable (len=${len})`, fallbackReason);
             }
-            sb.marked = true;
+            if (!held) sb.marked = true;
           }
         } else {
           debugLogRef.current?.("settled-scrollback", `len changed ${sb.lastLen}→${len} (reset)`);
@@ -2110,8 +2181,9 @@ const captureArmedRef = useRef(false);
           && cur && cur.type === "terminal" && cur.workState === "working"
           && workingStartedAtRef.current > 0
           && Date.now() - workingStartedAtRef.current >= WORKING_HARD_CEILING_MS) {
-        fireDone(`90s hard ceiling`, fallbackReason);
-        return;
+        // Same rule as byte-quiet: a held done falls through to the absolute
+        // ceiling, which is the one that outranks the hold.
+        if (fireDone(`90s hard ceiling`, fallbackReason)) return;
       }
       // ABSOLUTE ceiling — fires even when senderBusy. The 90s ceiling and
       // byte-quiet fallback both defer to the sender's "busy" title, which
@@ -2122,7 +2194,13 @@ const captureArmedRef = useRef(false);
       // sender signals, so the experimental work-in-progress spinner can
       // never get permanently stuck. Set high enough (10 min) that a real
       // long-running task is extremely unlikely to trip it.
-      const WORKING_ABSOLUTE_CEILING_MS = 600_000;
+      //
+      // `localStorage.workDoneCeilingMs` shortens it. Ten minutes is not
+      // something a test can wait out, and this is the ONLY path that clears a
+      // done the agent's own status line is holding down, so without a knob the
+      // backstop is untestable and stays broken silently (it did). Debug knob,
+      // same family as ptyDebug / debugWorkDone; ignored unless it parses.
+      const WORKING_ABSOLUTE_CEILING_MS = ceilingOverrideMs() ?? 600_000;
       if (cur && cur.type === "terminal" && cur.workState === "working"
           && workingStartedAtRef.current > 0
           && Date.now() - workingStartedAtRef.current >= WORKING_ABSOLUTE_CEILING_MS) {
@@ -2145,10 +2223,12 @@ const captureArmedRef = useRef(false);
             // the agent never actually responded — it's an idle-prompt
             // false-positive (echo arrived just past ECHO_DEAD_MS).
             const contentChanged = preSubmitHashRef.current === 0 || h !== preSubmitHashRef.current;
+            // Held done → don't latch (same reasoning as scrollback-stable).
+            let held = false;
             if (cur && cur.type === "terminal" && cur.lastInputAt && cur.workState === "working" && contentChanged) {
-              fireDone(`hash-stable (0x${h.toString(16)})`, fallbackReason);
+              held = !fireDone(`hash-stable (0x${h.toString(16)})`, fallbackReason);
             }
-            s.marked = true;
+            if (!held) s.marked = true;
           }
         } else {
           debugLogRef.current?.("settled-hash", `hash changed 0x${s.lastHash.toString(16)}→0x${h.toString(16)} (reset)`);

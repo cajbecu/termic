@@ -753,6 +753,12 @@ export interface TerminalTab extends BaseTab {
    *  silenced so a stuck spinner the user just dismissed doesn't
    *  instantly re-arm. */
   workClearedAt?: number;
+  /** Wall-clock when `workState` last became "done". A busy signal arriving
+   *  within STICKY_DONE_MS of it is the agent's post-response glyph flicker
+   *  and is ignored; a later one means the done was premature and the tab
+   *  goes back to "working". Runtime-only, like `workState` itself (never
+   *  written to `persisted_tabs`). */
+  workDoneAt?: number;
   /** Per-agent message queue (the "ralph loop"). The head item is sent
    *  next; on every work-done the next message is auto-submitted. Only
    *  meaningful for work-done-capable agent tabs. Edited via the message

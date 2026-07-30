@@ -21,6 +21,7 @@ vi.mock("@/lib/tabFocus", () => ({
 
 vi.mock("@/lib/agents", () => ({
   agentDisplayName: vi.fn((cli: string) => cli),
+  STICKY_DONE_MS: 8_000,
 }));
 
 // cliPromptReports reaches tauri directly (kept dependency-free so this
@@ -106,7 +107,20 @@ describe("setWorkState", () => {
     expect(result.workState).toBe("done");
   });
 
-  it("sticky done: agent cannot flip done → working", () => {
+  it("sticky done: a busy signal right after the done is ignored", () => {
+    const taskId = "ws1";
+    // Claude flickers ✳ ↔ spinner for a few frames after answering; that is
+    // not the next turn starting.
+    const tab = makeTermTab({ workState: "done", workDoneAt: Date.now() - 1_000 });
+    addTab(taskId, tab);
+
+    useApp.getState().setWorkState(taskId, tab.id, "working");
+
+    const result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
+    expect(result.workState).toBe("done");
+  });
+
+  it("sticky done: an unstamped done stays sticky", () => {
     const taskId = "ws1";
     const tab = makeTermTab({ workState: "done" });
     addTab(taskId, tab);
@@ -114,8 +128,67 @@ describe("setWorkState", () => {
     useApp.getState().setWorkState(taskId, tab.id, "working");
 
     const result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
-    // done is sticky — agent "working" signal is ignored
     expect(result.workState).toBe("done");
+  });
+
+  it("a busy signal past the sticky window takes the tab back to working", () => {
+    const taskId = "ws1";
+    // The agent is still working 9s after we called the turn done: our done
+    // was premature, and before the window existed nothing but a click could
+    // undo it — the tab showed no spinner for the rest of a long turn.
+    const tab = makeTermTab({ workState: "done", workDoneAt: Date.now() - 9_000 });
+    addTab(taskId, tab);
+
+    useApp.getState().setWorkState(taskId, tab.id, "working");
+
+    const result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
+    expect(result.workState).toBe("working");
+    expect(result.workDoneAt).toBeUndefined();
+  });
+
+  it("drops the stale done badge when the agent goes back to work", () => {
+    const taskId = "ws1";
+    const tab = makeTermTab({
+      workState: "done",
+      workDoneAt: Date.now() - 9_000,
+      unread: { reason: "done" },
+    });
+    addTab(taskId, tab);
+
+    useApp.getState().setWorkState(taskId, tab.id, "working");
+
+    const result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
+    expect(result.unread).toBeNull();
+  });
+
+  it("keeps an attention badge when the agent goes back to work", () => {
+    const taskId = "ws1";
+    // The agent asked for the user in its own words. That request outlives our
+    // guess about whether the turn ended.
+    const tab = makeTermTab({
+      workState: "done",
+      workDoneAt: Date.now() - 9_000,
+      unread: { reason: "attention", message: "Claude needs your permission" },
+    });
+    addTab(taskId, tab);
+
+    useApp.getState().setWorkState(taskId, tab.id, "working");
+
+    const result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
+    expect(result.workState).toBe("working");
+    expect(result.unread?.reason).toBe("attention");
+  });
+
+  it("stamps workDoneAt on the transition to done", () => {
+    const taskId = "ws1";
+    const tab = makeTermTab({ workState: "working" });
+    addTab(taskId, tab);
+
+    const before = Date.now();
+    useApp.getState().setWorkState(taskId, tab.id, "done");
+
+    const result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
+    expect(result.workDoneAt).toBeGreaterThanOrEqual(before);
   });
 
   it("idempotent: same state write causes no update", () => {

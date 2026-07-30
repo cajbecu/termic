@@ -14,7 +14,7 @@ import { useRace } from "@/store/race";
 import { takeUnattendedSpawn } from "@/lib/unattendedSpawns";
 import { failCliQueuedPromptsInTabs } from "@/lib/cliPromptReports";
 import { focusTerminalTab, focusMainTab, focusPaneTab } from "@/lib/tabFocus";
-import { agentDisplayName } from "@/lib/agents";
+import { agentDisplayName, STICKY_DONE_MS } from "@/lib/agents";
 
 /** A secondary agent tab closed via the "X", snapshotted just before it's
  *  dropped from `persisted_tabs` (see `syncDurableTabs`'s forget rule).
@@ -2119,15 +2119,17 @@ export const useApp = create<AppState>((set, get) => ({
     const list = s.tabs[taskId] || [];
     const cur = list.find(t => t.id === tabId);
     if (!cur || cur.type !== "terminal") return s;
-    // Sticky `done`: once we've marked the agent as finished, an
-    // immediate "back to working" signal from the same turn is
-    // noise (Claude oscillates ✳ ↔ spinner for a few frames right
-    // after a response). The only paths out of "done" are:
-    //   - user input (term.onData clears it to "idle")
-    //   - tab/task focus (setActiveTabId clears it to "idle")
-    // i.e. the user explicitly acknowledges the bullet. Agent signals
-    // can't flip "done" → "working" by themselves.
-    if (cur.workState === "done" && state === "working") return s;
+    // Sticky `done`, but only for STICKY_DONE_MS: an immediate "back to
+    // working" from the same turn is noise (Claude oscillates ✳ ↔ spinner for
+    // a few frames right after a response). A busy signal still arriving
+    // seconds later is not noise, it is the agent working, and it takes the
+    // tab back to "working" — a done we got wrong mid-turn used to be
+    // unrecoverable, leaving no spinner for the rest of a long turn until the
+    // user clicked the tab. The user-driven exits (keypress in term.onData,
+    // focus in setActiveTask) are unchanged and still clear to "idle".
+    const doneAt = cur.workDoneAt ?? 0;
+    if (cur.workState === "done" && state === "working"
+        && (doneAt === 0 || Date.now() - doneAt < STICKY_DONE_MS)) return s;
     // A second "done" signal on an already-done tab is a no-op — skip
     // the focused-tab downgrade logic that would turn it into "idle" and
     // wipe the bullet. The only exits from "done" are user-driven
@@ -2175,7 +2177,18 @@ export const useApp = create<AppState>((set, get) => ({
       if (effective !== "working") {
         patch.workProgress = null;
         patch.workProgressKind = null;
+      } else {
+        patch.workDoneAt = undefined;
+        // The agent went back to work after we called it done, so the bullet
+        // this turn produced was wrong — drop it rather than leaving a "this
+        // finished" mark on a tab that is visibly working. An `attention`
+        // badge stays: the agent asked for the user in its own words, and
+        // that request outlives our guess about the turn.
+        if (cur.workState === "done" && t.type === "terminal" && t.unread?.reason === "done") {
+          patch.unread = null;
+        }
       }
+      if (effective === "done") patch.workDoneAt = Date.now();
       return { ...t, ...patch } as Tab;
     });
     return {
