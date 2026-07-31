@@ -27,6 +27,9 @@ export function GeneralSection() {
   // Three-way rather than a toggle because "ask me" has to remain reachable:
   // ticking "Don't ask again" in the close prompt is otherwise a one-way door.
   const [closeAction, setCloseAction] = useState<"ask" | "menubar" | "quit">("ask");
+  // Whether the menu-bar item (Show/Quit Termic, the attention dropdown) is
+  // shown at all. Also a backend field Rust re-reads live, on every save.
+  const [trayEnabled, setTrayEnabled] = useState(true);
   const [reposDir, setReposDir] = useState("");
   const [originalDir, setOriginalDir] = useState("");
   const [busy, setBusy] = useState(false);
@@ -39,6 +42,7 @@ export function GeneralSection() {
   useEffect(() => {
     if (!settings) return;
     setCloseAction(settings.close_action ?? "ask");
+    setTrayEnabled(settings.tray_enabled ?? true);
   }, [settings]);
 
   async function saveCloseAction(v: "ask" | "menubar" | "quit") {
@@ -47,6 +51,15 @@ export function GeneralSection() {
     setCloseAction(v);
     if (!(await patch({ close_action: v }))) {
       setCloseAction(prev);   // persist failed: don't show unsaved state
+    }
+  }
+
+  async function saveTrayEnabled(v: boolean) {
+    if (!settings) return;
+    const prev = trayEnabled;
+    setTrayEnabled(v);
+    if (!(await patch({ tray_enabled: v }))) {
+      setTrayEnabled(prev);
     }
   }
 
@@ -168,8 +181,7 @@ export function GeneralSection() {
           <p className="text-[12.5px] text-[var(--color-fg-dim)] leading-relaxed max-w-2xl">
             Closing used to quit Termic and stop every running agent. Keeping
             them in the menu bar leaves them working, and Quit (⌘Q, or the
-            menu-bar item) becomes the only thing that stops them. The
-            menu-bar item appears whenever Termic is running without a window.
+            menu-bar item) becomes the only thing that stops them.
           </p>
           <div className="mt-2 max-w-sm">
             <select
@@ -185,6 +197,20 @@ export function GeneralSection() {
           </div>
         </div>
       </Block>}
+
+      <Block id="setting-tray-enabled">
+        <Toggle
+          label="Show Termic in the menu bar"
+          hint={
+            "A small icon that's always there while Termic is running: a badge and dropdown for tasks that need your input or just finished, and Show/Quit."
+            + (IS_MAC
+              ? " Turning it off also means closing to the menu bar (above) falls back to the dock icon as your way back in."
+              : "")
+          }
+          value={trayEnabled}
+          onChange={saveTrayEnabled}
+        />
+      </Block>
 
       <Block
         id="setting-load-remote-images"

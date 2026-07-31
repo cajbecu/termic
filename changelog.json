@@ -1,7 +1,7 @@
 {
   "versions": [
     {
-      "version": "0.25.0",
+      "version": "0.25.1",
       "date": "2026-07-31",
       "summary": "A tray attention list, CLI send and attach, and several agent work-state fixes."
     },

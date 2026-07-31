@@ -8390,6 +8390,15 @@ pub struct Settings {
     /// must not silently start quitting on people with agents running.
     #[serde(default)]
     pub close_action: Option<String>,
+    /// Whether the menu-bar item (Show/Quit Termic, the attention dropdown)
+    /// is shown at all. `None`/absent means on, matching `fetch_before_create`'s
+    /// tri-state — only an explicit `Some(false)` turns it off, so upgraders
+    /// keep it. Re-read on every settings save so toggling it applies live
+    /// without a restart (`settings_save`), and on entering windowless mode
+    /// (`enter_windowless`'s `_tray_up` check): a user who disabled it still
+    /// gets the dock icon as their way back instead of losing both.
+    #[serde(default)]
+    pub tray_enabled: Option<bool>,
     /// Repo-root config dirs symlinked into each NEW worktree task (when the
     /// checkout didn't already provide them). `.claude/` and friends hold a
     /// project's subagents / skills / commands, which are commonly gitignored
@@ -8406,6 +8415,21 @@ pub struct Settings {
 /// explicit `Some(false)` in settings disables it.
 fn fetch_before_create_enabled() -> bool {
     load_settings_inner().fetch_before_create != Some(false)
+}
+
+/// Whether the menu-bar item should be shown, per `Settings.tray_enabled`.
+/// Default-on: only an explicit `Some(false)` disables it. Takes an already-
+/// loaded `Settings` so callers that just saved one (`settings_save`) don't
+/// re-read it from disk a beat later.
+fn tray_enabled_pref(s: &Settings) -> bool {
+    s.tray_enabled != Some(false)
+}
+
+/// Same as `tray_enabled_pref`, loading settings from disk. For call sites
+/// (`build_tray`, `enter_windowless`) that don't already have a `Settings`
+/// in hand.
+fn tray_enabled() -> bool {
+    tray_enabled_pref(&load_settings_inner())
 }
 
 /// Current on-disk schema version. Bump when adding a migration and gate it
@@ -9024,8 +9048,14 @@ fn run_capture_command(cmd: String, cwd: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn settings_save(s: Settings) -> Result<(), String> {
-    save_settings_inner(&s)
+fn settings_save(app: AppHandle, s: Settings) -> Result<(), String> {
+    let tray_on = tray_enabled_pref(&s);
+    save_settings_inner(&s)?;
+    // Applies live: flipping the toggle in Settings shouldn't need a restart
+    // to show/hide the menu-bar item, matching close_action/cli_enabled's
+    // "re-read per use" behavior.
+    let _ = set_tray_visible(&app, tray_on);
+    Ok(())
 }
 
 /// The single settings writer. Extracted so Rust-side toggles (the menu-bar
@@ -9057,7 +9087,7 @@ fn discovery_dismiss(path: String, dismissed: bool) -> Result<(), String> {
     } else {
         s.discovery_dismissed.retain(|p| p != &canon);
     }
-    settings_save(s)
+    save_settings_inner(&s)
 }
 
 /// Replace just the agents list, preserving the rest of settings (repos_dir,
@@ -9857,9 +9887,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             }
         })
         .build(app)?;
-    // Always visible: this is permanent chrome now, not a
-    // windowless-only affordance.
-    let _ = tray.set_visible(true);
+    // Permanent chrome by default, not a windowless-only affordance, unless
+    // the user turned it off in Settings > General.
+    let _ = tray.set_visible(tray_enabled());
     Ok(())
 }
 
@@ -9976,8 +10006,11 @@ pub(crate) fn enter_windowless(app: &AppHandle) {
     WINDOWLESS.store(true, Ordering::SeqCst);
     dlog("[windowless] entered (window hidden, agents keep running)");
     // Underscore-prefixed: only READ under the macOS gate below, and an
-    // unused-variable warning off macOS would be noise, not signal.
-    let _tray_up = set_tray_visible(app, true);
+    // unused-variable warning off macOS would be noise, not signal. Respects
+    // the user's tray_enabled setting rather than forcing it on: someone who
+    // turned the menu-bar item off should keep the dock icon as their way
+    // back, not have it silently reappear the moment they close to windowless.
+    let _tray_up = set_tray_visible(app, tray_enabled());
     // Collapse the panes so xterm's renderers actually pause (see the cost
     // note above). The webview stays alive and fully functional — it owns
     // PTY lifetime and every work-state signal the CLI's `--wait` rides.
