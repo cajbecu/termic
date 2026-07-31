@@ -4,6 +4,33 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
+## [0.25.0] - 2026-07-31
+
+A tray attention list, CLI send and attach, and several agent work-state fixes.
+
+### Features
+- A menu bar item that's always there, not just while windowless. It shows a numeral badge and a dropdown of tasks that need your input or just finished a turn, grouped by project; click one to bring Termic forward and jump straight to it.
+- The termic CLI can now interact with a running agent, not just create and watch one: `send` types a prompt into a task (optionally `--wait`ing for the reply), `attach` opens a live raw-terminal session to it, `logs`, `diff`, `result`, and `apply` read its output and land its changes, and `path` prints its worktree. (#134)
+- Settings shows what an agent's terminal actually emits and can propose done/attention patterns from a captured turn, instead of guessing at regexes against blank textareas. (#133)
+- Choose, and see, which branch a worktree is cut from per project: current branch, the project default, or any local/remote branch, remembered as a policy rather than a one-time pin. (#133)
+- Drag a file from the sidebar tree onto a terminal to type its path at the prompt, the same affordance a Finder drag already had. (#136)
+- Resume now lives behind one row in the project menu that opens a submenu of your last 5 archived sessions, instead of listing them at the top level.
+- History gets a bulk "empty the archive" action, behind a destructive confirmation naming the exact count.
+
+### Bug fixes
+- Claude's questions and permission prompts are detected as needing your input instead of being marked done, and a backgrounded subagent still running no longer shows as finished.
+- Work state no longer gets stuck on "working" past a ten-minute ceiling, and no longer loses its spinner mid-turn with the tab only recovering on focus.
+- Restoring a split task no longer leaves a blank pane where a terminal used to be.
+- The working spinner no longer visibly wobbles while it spins.
+- The signal inspector's Observed titles column no longer truncates to an ellipsis; the text wraps, is selectable, and has a copy button.
+- Worktree tasks and races now prefer the `origin` remote and read its default branch from the remote's own HEAD, instead of guessing against local branch names.
+- `make beta` no longer silently exits without opening a window when a previous Beta instance is still shutting down.
+- The termic CLI's Getting started commands in Settings can now be selected and copied.
+
+### Thanks
+- Michael Hohlios (@MHohlios) for CLI phases 2 and 3 (send, attach, logs, result, diff, apply) and the agent signal proposer.
+- ghelton-procense for the CLI Getting started selectable-text fix.
+
 ## [0.24.0] - 2026-07-24
 
 The termic CLI: create, watch, and archive tasks from any shell, plus per-repo run commands.

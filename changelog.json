@@ -1,6 +1,11 @@
 {
   "versions": [
     {
+      "version": "0.25.0",
+      "date": "2026-07-31",
+      "summary": "A tray attention list, CLI send and attach, and several agent work-state fixes."
+    },
+    {
       "version": "0.24.0",
       "date": "2026-07-24",
       "summary": "The termic CLI: create, watch, and archive tasks from any shell, plus per-repo run commands."
