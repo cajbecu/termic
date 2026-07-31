@@ -344,10 +344,13 @@ pub fn quit_question(p: &QuitData) -> String {
     // and naming it here would bury the number that matters.
     let agents = plural(p.live_agents, "agent", "agents");
     let tasks = plural(p.tasks_with_agents, "task", "tasks");
-    let working = if p.working_tasks > 0 {
-        format!(" {} still working.", plural(p.working_tasks, "task", "tasks"))
-    } else {
-        String::new()
+    // Three states, not two. `None` is UNKNOWN (the work-state cache went
+    // stale), and saying so beats rendering it the same as "nothing is
+    // working" on a question about killing agents.
+    let working = match p.working_tasks {
+        Some(0) => String::new(),
+        Some(n) => format!(" {} still working.", plural(n, "task", "tasks")),
+        None => " Work state unknown.".to_string(),
     };
     format!(
         "termic: quit Termic? This kills {agents} across {tasks}.{working}",
@@ -358,10 +361,10 @@ pub fn quit_text(q: &QuitData) -> String {
     if q.live_agents == 0 {
         return "Termic is quitting.".into();
     }
-    format!(
-        "Termic is quitting; {} killed.",
-        plural(q.live_agents, "agent", "agents"),
-    )
+    // Present tense on purpose: this reply is built and written BEFORE
+    // serve_conn fires the teardown, so "killed" would claim something that
+    // has not happened yet (guaranteed to follow, but not yet true).
+    format!("Termic is quitting; {}.", plural(q.live_agents, "agent", "agents"))
 }
 
 fn plural(n: u32, one: &str, many: &str) -> String {
@@ -372,7 +375,7 @@ fn plural(n: u32, one: &str, many: &str) -> String {
 mod tests {
     use super::*;
 
-    fn d(tasks: u32, agents: u32, working: u32) -> QuitData {
+    fn d(tasks: u32, agents: u32, working: Option<u32>) -> QuitData {
         QuitData { running: true, tasks_with_agents: tasks, live_agents: agents, working_tasks: working, quitting: false }
     }
 
@@ -380,7 +383,7 @@ mod tests {
     // thing standing between a teardown script and every running agent.
     #[test]
     fn question_names_what_dies() {
-        let q = quit_question(&d(2, 3, 1));
+        let q = quit_question(&d(2, 3, Some(1)));
         assert!(q.contains("3 agents"), "{q}");
         assert!(q.contains("2 tasks"), "{q}");
         assert!(q.contains("1 task still working"), "{q}");
@@ -388,7 +391,7 @@ mod tests {
 
     #[test]
     fn question_singularises() {
-        let q = quit_question(&d(1, 1, 0));
+        let q = quit_question(&d(1, 1, Some(0)));
         assert!(q.contains("1 agent across 1 task"), "{q}");
         assert!(!q.contains("still working"), "nothing working, so do not mention it: {q}");
     }
@@ -398,29 +401,40 @@ mod tests {
     // still working", not "2 agents".
     #[test]
     fn question_says_tasks_not_agents_for_the_working_count() {
-        let q = quit_question(&d(2, 5, 2));
+        let q = quit_question(&d(2, 5, Some(2)));
         assert!(q.contains("5 agents"), "{q}");
         assert!(q.contains("2 tasks still working"), "{q}");
+    }
+
+    // A stale work-state cache is UNKNOWN, not idle. Rendering it as silence
+    // would make "nothing is working" and "I cannot tell" identical on a
+    // prompt about killing agents, which understates what is about to die.
+    #[test]
+    fn question_says_unknown_rather_than_dropping_the_note() {
+        let q = quit_question(&d(2, 3, None));
+        assert!(q.contains("3 agents"), "{q}");
+        assert!(q.contains("Work state unknown"), "{q}");
+        assert!(!q.contains("still working"), "{q}");
     }
 
     // Nothing running: do not invent a scary question.
     #[test]
     fn question_is_plain_when_nothing_is_running() {
-        assert_eq!(quit_question(&d(0, 0, 0)), "termic: quit Termic?");
+        assert_eq!(quit_question(&d(0, 0, Some(0))), "termic: quit Termic?");
     }
 
     #[test]
     fn text_reports_the_kill_count() {
-        let mut q = d(1, 2, 0);
+        let mut q = d(1, 2, Some(0));
         q.quitting = true;
-        assert!(quit_text(&q).contains("2 agents killed"), "{}", quit_text(&q));
-        assert_eq!(quit_text(&d(0, 0, 0)), "Termic is quitting.");
+        assert!(quit_text(&q).contains("2 agents"), "{}", quit_text(&q));
+        assert_eq!(quit_text(&d(0, 0, Some(0))), "Termic is quitting.");
     }
 
     // Copy rule: no em dashes anywhere in CLI output.
     #[test]
     fn no_em_dashes() {
-        for s in [quit_question(&d(2, 3, 1)), quit_text(&d(1, 2, 0))] {
+        for s in [quit_question(&d(2, 3, Some(1))), quit_text(&d(1, 2, Some(0)))] {
             assert!(!s.contains('\u{2014}'), "em dash in CLI output: {s}");
         }
     }

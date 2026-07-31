@@ -346,7 +346,6 @@ mod tests {
         assert!(!err.message.contains("TERMIC_SOCKET"), "got: {}", err.message);
     }
 
-    
     use termic_proto::{ErrorCode, Reply, ReplyData};
 
     #[test]

@@ -621,12 +621,18 @@ pub(crate) fn handle_request(req: &Request, host: &dyn CliHost, sink: &mut dyn E
             // per task. Clamped, because a cache inside the staleness window
             // can still lag a PTY that just died, which would otherwise read
             // as "kills 1 agent across 1 task, 2 of them still working".
+            //
+            // None when the cache is stale: the webview stopped reporting, so
+            // this is UNKNOWN rather than zero. The prompt says so instead of
+            // quietly dropping the note, which would read the same as "nothing
+            // is working" on a question about killing agents.
             let working_tasks = snap
                 .age
                 .filter(|a| *a <= CACHE_STALE_AFTER)
-                .map(|_| snap.states.values().filter(|s| s.state == "working").count() as u32)
-                .unwrap_or(0)
-                .min(tasks_with_agents);
+                .map(|_| {
+                    (snap.states.values().filter(|s| s.state == "working").count() as u32)
+                        .min(tasks_with_agents)
+                });
             if *commit {
                 // Armed, not fired: serve_conn tears down after this reply is
                 // written. See the note there.
@@ -3428,7 +3434,7 @@ mod tests {
         let reply = handle(&req(Command::Quit { commit: false }, Some("tok")), &host);
         let Some(ReplyData::Quit(q)) = reply.data else { panic!("expected quit") };
         assert_eq!(q.tasks_with_agents, 1);
-        assert_eq!(q.working_tasks, 1, "working must never exceed the task count");
+        assert_eq!(q.working_tasks, Some(1), "working must never exceed the task count");
     }
 
     // `quit` is the most destructive verb on the socket, so the preview /
@@ -3445,7 +3451,7 @@ mod tests {
         assert!(reply.ok, "{reply:?}");
         let Some(ReplyData::Quit(q)) = reply.data else { panic!("expected quit, got {reply:?}") };
         assert_eq!((q.tasks_with_agents, q.live_agents), (2, 3));
-        assert_eq!(q.working_tasks, 1);
+        assert_eq!(q.working_tasks, Some(1));
         assert!(!q.quitting, "preview must not claim to be quitting");
         assert_eq!(*host.quit_calls.lock().unwrap(), 0, "preview tore the app down");
     }
@@ -3482,7 +3488,7 @@ mod tests {
     // the question would otherwise overstate what the user is about to lose.
     // The PTY counts are unaffected - they come from the PTY map, not here.
     #[test]
-    fn quit_reports_no_working_tasks_when_the_cache_is_stale() {
+    fn quit_reports_unknown_work_state_when_the_cache_is_stale() {
         let host = StubHost { live_agents: (1, 1), ..Default::default() };
         host.push_states(&[(
             "w1",
@@ -3493,7 +3499,7 @@ mod tests {
         std::thread::sleep(CACHE_STALE_AFTER + Duration::from_millis(100));
         let reply = handle(&req(Command::Quit { commit: false }, Some("tok")), &host);
         let Some(ReplyData::Quit(q)) = reply.data else { panic!("expected quit") };
-        assert_eq!(q.working_tasks, 0, "a stale cache must not be reported as fact");
+        assert_eq!(q.working_tasks, None, "a stale cache is UNKNOWN, not zero");
         assert_eq!(q.live_agents, 1, "PTY counts do not depend on the cache");
     }
 

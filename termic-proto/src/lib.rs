@@ -503,11 +503,17 @@ pub struct QuitData {
     /// TASKS the webview reports as working, not agents: the work-state
     /// cache aggregates per task, so two busy tabs in one task count once.
     /// Named for what it counts rather than what a caller might hope.
-    /// Best-effort - a stale cache reports 0 rather than guessing - and
-    /// clamped to `tasks_with_agents`, because a lagging cache can otherwise
+    /// Clamped to `tasks_with_agents`, because a lagging cache can otherwise
     /// name a task whose agent PTY is already gone.
+    ///
+    /// `None` means UNKNOWN, not zero: the cache went stale, so the webview
+    /// stopped reporting. The distinction is load-bearing for a confirmation
+    /// prompt - collapsing it into 0 would render "nothing is working" and
+    /// "I cannot tell" identically, and understating what is about to die is
+    /// the wrong direction for a safety question. `live_agents` is ground
+    /// truth either way; only this field can go dark.
     #[serde(default)]
-    pub working_tasks: u32,
+    pub working_tasks: Option<u32>,
     /// False for `preview`, true when the app is on its way out.
     pub quitting: bool,
 }
@@ -1262,7 +1268,7 @@ mod tests {
                 running: true,
                 tasks_with_agents: 2,
                 live_agents: 3,
-                working_tasks: 1,
+                working_tasks: Some(1),
                 quitting: true,
             }),
             ReplyData::Archive(ArchiveData {

@@ -548,7 +548,7 @@ still exits 4.
 Prints what happened on stdout. With --output-format json, one object, \
 always carrying `running` and `quitting`: \
 {\"running\", \"quitting\", \"tasks_with_agents\", \"live_agents\", \
-\"working_tasks\"} when Termic was running, or {\"running\": false, \
+\"working_tasks\" (null when the work-state cache is stale)} when Termic was running, or {\"running\": false, \
 \"quitting\": false} when it was not.
 
 Exit codes: 0 quit (or nothing was running), 1 error (declined, no TTY \
