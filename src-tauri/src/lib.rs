@@ -9570,50 +9570,262 @@ static CLOSE_PROMPT_ACKED: AtomicBool = AtomicBool::new(false);
 /// reaching for the mouse, and firing early would steal a dismissal.
 const CLOSE_PROMPT_ACK_GRACE: Duration = Duration::from_secs(5);
 
-/// 32×32 template image of the app mark (the pixelated "T" from
-/// icons/icon.svg, minus the squircle). Built in code rather than shipped as
-/// a PNG so it cannot drift from a rasterizer or need a build step; macOS
-/// recolors template images itself, so only alpha matters.
-fn tray_icon_image() -> tauri::image::Image<'static> {
-    const W: usize = 32;
-    // Master geometry: crossbar 6 cells × 2, stem 2 cells × 5, stem centered.
-    // Gaps are dropped deliberately — at menu-bar size they read as mud.
-    //
-    // CELL=4 puts the 6×7 grid at 24×28 inside 32×32 (4px side / 2px top-bottom
-    // padding, ~34% ink). That is deliberately heavier than icons/icon.svg's
-    // ~25% padding and heavier than the inset system items next to it, and it
-    // was CHECKED in a real menu bar and preferred. Don't "fix" it to 3 on
-    // theory alone: 3 renders the same mark at 18×21 and reads thinner than
-    // intended. Verify in an actual menu bar before changing it.
+/// Paints the pixelated "T" mark (from icons/icon.svg, minus the squircle)
+/// into a W×W RGBA buffer, in the given color. Shared geometry between the
+/// plain template icon and the colored badge variant below, so the two
+/// can't silently drift apart.
+///
+/// Master geometry: crossbar 6 cells × 2, stem 2 cells × 5, stem centered.
+/// Each cell leaves a 1px gap on its right/bottom edge so the mark reads as
+/// the same dotted/segmented grid as icons/icon.svg, not a solid block.
+///
+/// CELL=4 puts the 6×7 grid at 24×28 inside 32×32 (4px side / 2px top-bottom
+/// padding, ~34% ink). That is deliberately heavier than icons/icon.svg's
+/// ~25% padding and heavier than the inset system items next to it, and it
+/// was CHECKED in a real menu bar and preferred. Don't "fix" it to 3 on
+/// theory alone: 3 renders the same mark at 18×21 and reads thinner than
+/// intended. Verify in an actual menu bar before changing it.
+fn paint_t_mark(rgba: &mut [u8], w: usize, color: [u8; 4]) {
     const CELL: usize = 4;
-    const X0: usize = (W - 6 * CELL) / 2;
-    const Y0: usize = (W - 7 * CELL) / 2;
-    let mut rgba = vec![0u8; W * W * 4];
+    let x0 = (w - 6 * CELL) / 2;
+    let y0 = (w - 7 * CELL) / 2;
     let mut fill = |cx: usize, cy: usize| {
-        for y in Y0 + cy * CELL..Y0 + (cy + 1) * CELL {
-            for x in X0 + cx * CELL..X0 + (cx + 1) * CELL {
-                let i = (y * W + x) * 4;
-                rgba[i + 3] = 255; // black + opaque; macOS tints it
+        for y in y0 + cy * CELL..y0 + (cy + 1) * CELL - 1 {
+            for x in x0 + cx * CELL..x0 + (cx + 1) * CELL - 1 {
+                let i = (y * w + x) * 4;
+                rgba[i..i + 4].copy_from_slice(&color);
             }
         }
     };
     for cx in 0..6 { fill(cx, 0); fill(cx, 1); }        // crossbar
     for cy in 2..7 { fill(2, cy); fill(3, cy); }        // stem
+}
+
+/// 32×32 template image of the app mark. macOS recolors template images
+/// itself, so only alpha matters; color is black + opaque wherever the mark
+/// is painted.
+fn tray_icon_image() -> tauri::image::Image<'static> {
+    const W: usize = 32;
+    let mut rgba = vec![0u8; W * W * 4];
+    paint_t_mark(&mut rgba, W, [0, 0, 0, 255]);
     tauri::image::Image::new_owned(rgba, W as u32, W as u32)
 }
 
-/// Build the menu-bar item. Created once, hidden until we're windowless, so
-/// a normal windowed session shows nothing new in the menu bar.
-fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-    use tauri::tray::TrayIconBuilder;
+fn fill_circle(rgba: &mut [u8], w: usize, cx: i32, cy: i32, r: i32, color: [u8; 4]) {
+    for y in (cy - r).max(0)..=(cy + r).min(w as i32 - 1) {
+        for x in (cx - r).max(0)..=(cx + r).min(w as i32 - 1) {
+            let (dx, dy) = (x - cx, y - cy);
+            if dx * dx + dy * dy <= r * r {
+                let i = (y as usize * w + x as usize) * 4;
+                rgba[i..i + 4].copy_from_slice(&color);
+            }
+        }
+    }
+}
+
+/// Whether the system menu bar/status-item appearance is currently dark.
+/// Best-effort: off macOS, or if AppKit can't be reached, assume dark (this
+/// app's own default theme, and the common case). `tray_row_icon`'s colors
+/// aren't template-recolored by macOS the way the plain "T" mark is (they're
+/// full-color, not alpha-only), so they need to pick their own light/dark
+/// variant instead of getting it for free.
+fn menu_bar_is_dark() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::NSApplication;
+
+        let Some(mtm) = MainThreadMarker::new() else { return true };
+        let name = NSApplication::sharedApplication(mtm).effectiveAppearance().name();
+        return name.to_string().contains("Dark");
+    }
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
+/// Icon dropped into a task row's `IconMenuItem`: a solid dot, amber for
+/// "wants input" and blue for "done" (Sidebar.tsx's TabBadge colors).
+/// A hand-drawn bell (rectangles/circles at menu-icon scale) went through
+/// four rounds — blob, triangle, umbrella — without ever reading as a bell;
+/// a dot in a different color carries the same "these two differ" signal
+/// reliably, so use that instead of a fifth guess. macOS forces every
+/// `IconMenuItem` image into a fixed 18pt-tall frame (muda's icon.rs calls
+/// `to_nsimage(Some(18.))`) and always renders it leading — there is no
+/// public way to ask for a different size or the trailing side of the
+/// label.
+fn tray_row_icon(state: &str) -> tauri::image::Image<'static> {
+    // 128px source for an 18pt destination (~7x downsample) so the circle's
+    // edge gets smoothed away rather than surviving the resize as jaggies.
+    const W: usize = 128;
+    let dark = menu_bar_is_dark();
+    let mut rgba = vec![0u8; W * W * 4];
+    let color: [u8; 4] = if state == "waiting" {
+        // --color-warn (Sidebar.tsx's TabBadge), darkened ~25% on a light
+        // menu bar for legibility — these are full-color icons, not
+        // template-recolored, so unlike the plain "T" mark they need an
+        // explicit light-mode variant.
+        if dark { [240, 177, 58, 255] } else { [178, 133, 43, 255] }
+    } else {
+        // --color-info (Sidebar.tsx's TabBadge), darkened ~25% to match.
+        if dark { [74, 163, 255, 255] } else { [55, 122, 191, 255] }
+    };
+    fill_circle(&mut rgba, W, W as i32 / 2, W as i32 / 2, 28, color);
+    tauri::image::Image::new_owned(rgba, W as u32, W as u32)
+}
+
+/// 3×5 bitmap digits 0-9, one row per byte, bit 2/1/0 = leftmost/middle/
+/// rightmost column. Just enough to stamp a badge count onto an icon
+/// without pulling in a font rasterizer.
+const DIGIT_ROWS: [[u8; 5]; 10] = [
+    [0b111, 0b101, 0b101, 0b101, 0b111], // 0
+    [0b010, 0b110, 0b010, 0b010, 0b111], // 1
+    [0b111, 0b001, 0b111, 0b100, 0b111], // 2
+    [0b111, 0b001, 0b111, 0b001, 0b111], // 3
+    [0b101, 0b101, 0b111, 0b001, 0b001], // 4
+    [0b111, 0b100, 0b111, 0b001, 0b111], // 5
+    [0b111, 0b100, 0b111, 0b101, 0b111], // 6
+    [0b111, 0b001, 0b010, 0b010, 0b010], // 7
+    [0b111, 0b101, 0b111, 0b101, 0b111], // 8
+    [0b111, 0b101, 0b111, 0b001, 0b111], // 9
+];
+
+/// Draws one digit (0-9), scaled, centered at (cx, cy).
+fn draw_digit(rgba: &mut [u8], w: usize, cx: i32, cy: i32, digit: usize, scale: i32, color: [u8; 4]) {
+    let rows = DIGIT_ROWS[digit.min(9)];
+    let (gw, gh) = (3 * scale, 5 * scale);
+    let (x0, y0) = (cx - gw / 2, cy - gh / 2);
+    for (row, bits) in rows.iter().enumerate() {
+        for col in 0..3 {
+            if (bits >> (2 - col)) & 1 == 0 { continue; }
+            let (px0, py0) = (x0 + col as i32 * scale, y0 + row as i32 * scale);
+            for dy in 0..scale {
+                for dx in 0..scale {
+                    let (x, y) = (px0 + dx, py0 + dy);
+                    if x < 0 || y < 0 || x >= w as i32 || y >= w as i32 { continue; }
+                    let i = (y as usize * w + x as usize) * 4;
+                    rgba[i..i + 4].copy_from_slice(&color);
+                }
+            }
+        }
+    }
+}
+
+/// 32×32 colored app mark (accent "T", icons/icon.svg's #d97757, no
+/// squircle backing so it sits directly on the menu bar like the plain
+/// template icon does) with a small numeral badge in the bottom-right
+/// corner. Used instead of the plain template icon whenever something
+/// needs attention, so the count reads as a badge over the logo rather
+/// than menu-bar text next to it. Counts above 9 still show "9" — a
+/// two-digit badge doesn't fit legibly at this size.
+fn tray_icon_image_badge(count: usize) -> tauri::image::Image<'static> {
+    const W: usize = 32;
+    const ACCENT: [u8; 4] = [217, 119, 87, 255]; // #d97757
+    const BADGE: [u8; 4] = [255, 59, 48, 255]; // alert red
+    const WHITE: [u8; 4] = [255, 255, 255, 255];
+
+    let mut rgba = vec![0u8; W * W * 4];
+    paint_t_mark(&mut rgba, W, ACCENT);
+
+    let (bcx, bcy, br) = (W as i32 - 9, W as i32 - 9, 9);
+    fill_circle(&mut rgba, W, bcx, bcy, br, BADGE);
+    draw_digit(&mut rgba, W, bcx, bcy, count, 2, WHITE);
+
+    tauri::image::Image::new_owned(rgba, W as u32, W as u32)
+}
+
+
+/// One task worth surfacing in the tray dropdown: either blocked on the user
+/// or finished its last turn. Pushed from the webview (`trayAttention.ts`),
+/// pre-sorted by project name then attention-before-done then task name —
+/// `build_tray_menu` trusts that order rather than re-sorting.
+#[derive(serde::Deserialize)]
+struct TrayAttentionItem {
+    task_id: String,
+    task_name: String,
+    project_name: String,
+    /// "waiting" (blocked on the user) or "done" (finished a turn).
+    state: String,
+}
+
+/// Menu rows before Show/Quit are truncated past this count, so a runaway
+/// project fleet can't grow the native menu unbounded.
+const TRAY_ATTENTION_CAP: usize = 40;
+
+/// Build the tray dropdown: an optional attention section (grouped by
+/// project, one disabled header row per project) followed by the constant
+/// Show Termic / Quit Termic pair. Shared by the initial build and every
+/// later `tray_set_attention` push so both stay in lockstep.
+fn build_tray_menu(
+    app: &AppHandle,
+    items: &[TrayAttentionItem],
+) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{IconMenuItem, Menu, MenuItem, PredefinedMenuItem};
+
+    let mut entries: Vec<Box<dyn tauri::menu::IsMenuItem<tauri::Wry>>> = Vec::new();
+    if !items.is_empty() {
+        let shown = &items[..items.len().min(TRAY_ATTENTION_CAP)];
+        let mut last_project: Option<&str> = None;
+        for it in shown {
+            if last_project != Some(it.project_name.as_str()) {
+                let header = MenuItem::with_id(
+                    app,
+                    format!("tray_header_{}", it.project_name),
+                    &it.project_name,
+                    false,
+                    None::<&str>,
+                )?;
+                entries.push(Box::new(header));
+                last_project = Some(it.project_name.as_str());
+            }
+            // Icon carries the state (amber dot / blue dot, tray_row_icon)
+            // — no text prefix/suffix needed. (Emoji was tried in between:
+            // crisp, but rendered far larger than the menu text — Apple
+            // Color Emoji doesn't shrink to match a surrounding font the
+            // way a raster icon can be sized.)
+            let task = IconMenuItem::with_id(
+                app,
+                format!("tray_task_{}", it.task_id),
+                &it.task_name,
+                true,
+                Some(tray_row_icon(&it.state)),
+                None::<&str>,
+            )?;
+            entries.push(Box::new(task));
+        }
+        if items.len() > shown.len() {
+            let more = MenuItem::with_id(
+                app,
+                "tray_more",
+                format!("+{} more", items.len() - shown.len()),
+                false,
+                None::<&str>,
+            )?;
+            entries.push(Box::new(more));
+        }
+        entries.push(Box::new(PredefinedMenuItem::separator(app)?));
+    }
 
     let show = MenuItem::with_id(app, "tray_show", "Show Termic", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "tray_quit", "Quit Termic", true, None::<&str>)?;
+    entries.push(Box::new(show));
+    entries.push(Box::new(sep));
     // Separator so Quit is not one slip away from Show: this Quit kills every
     // running agent, and it is the item people reach for by muscle memory.
-    let menu = Menu::with_items(app, &[&show, &sep, &quit])?;
+    entries.push(Box::new(quit));
+
+    let refs: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> =
+        entries.iter().map(|e| e.as_ref()).collect();
+    Menu::with_items(app, &refs)
+}
+
+/// Build the menu-bar item. Created once, visible for the app's whole life:
+/// it is permanent chrome (Show Termic / Quit Termic, plus whatever tasks
+/// currently need attention), not something tied to windowless state.
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::tray::TrayIconBuilder;
+
+    let menu = build_tray_menu(app, &[])?;
 
     let tray = TrayIconBuilder::with_id("main")
         .icon(tray_icon_image())
@@ -9626,19 +9838,48 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         // right-click, which is undiscoverable for the one action that stops
         // your agents.
         .show_menu_on_left_click(true)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "tray_show" => leave_windowless(app),
-            // The user-facing quit besides ⌘Q. app.exit drives
-            // RunEvent::Exit → cleanup_children, so PTYs die with us.
-            "tray_quit" => app.exit(0),
-            _ => {}
+        .on_menu_event(|app, event| {
+            let id = event.id().as_ref();
+            if let Some(task_id) = id.strip_prefix("tray_task_") {
+                // Bring the window forward first (works even if it was
+                // already visible, just backgrounded), then route to the
+                // task the user clicked.
+                leave_windowless(app);
+                let _ = app.emit("termic://focus-task", task_id.to_string());
+                return;
+            }
+            match id {
+                "tray_show" => leave_windowless(app),
+                // The user-facing quit besides ⌘Q. app.exit drives
+                // RunEvent::Exit → cleanup_children, so PTYs die with us.
+                "tray_quit" => app.exit(0),
+                _ => {}
+            }
         })
         .build(app)?;
-    // Hidden until the window goes away. The item is a STATE, not a preference: its
-    // presence is exactly the signal "Termic is running without a window", so
-    // there is nothing for a setting to add. A windowed session shows no new
-    // chrome.
-    let _ = tray.set_visible(false);
+    // Always visible: this is permanent chrome now, not a
+    // windowless-only affordance.
+    let _ = tray.set_visible(true);
+    Ok(())
+}
+
+/// Rebuild the tray dropdown and icon from the webview's current attention
+/// list (`trayAttention.ts`). A no-op push (empty list) clears both back to
+/// the bare Show/Quit menu and the plain template mark.
+#[tauri::command]
+fn tray_set_attention(app: AppHandle, items: Vec<TrayAttentionItem>) -> Result<(), String> {
+    let menu = build_tray_menu(&app, &items).map_err(|e| e.to_string())?;
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_menu(Some(menu));
+        // Atomic icon+template swap: setting them separately visibly
+        // flickers on macOS (Tauri's own doc note on set_icon_with_as_template).
+        let (icon, is_template) = if items.is_empty() {
+            (tray_icon_image(), true)
+        } else {
+            (tray_icon_image_badge(items.len()), false)
+        };
+        let _ = tray.set_icon_with_as_template(Some(icon), is_template);
+    }
     Ok(())
 }
 
@@ -9782,8 +10023,6 @@ pub(crate) fn leave_windowless(app: &AppHandle) {
         let _ = win.show();
         let _ = win.set_focus();
     }
-    // Window is back, so the item has nothing left to say.
-    set_tray_visible(app, false);
 }
 
 pub fn run() {
@@ -10166,6 +10405,7 @@ pub fn run() {
             cli_server::cli_install_symlink,
             cli_server::cli_install_status,
             window_close_choice, window_is_windowless, close_prompt_ack,
+            tray_set_attention,
             list_monospace_fonts, list_font_families,
             themes_list, themes_dir,
         ])

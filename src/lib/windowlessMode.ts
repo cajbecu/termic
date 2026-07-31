@@ -21,6 +21,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { useUI } from "@/store/ui";
+import { useApp } from "@/store/app";
 
 export async function initWindowlessMode(): Promise<void> {
   // A real edge always wins over the boot query below: the invoke is a round
@@ -47,6 +48,19 @@ export async function initWindowlessMode(): Promise<void> {
     // respected (Rust only overrides when nobody answered at all).
     void invoke("close_prompt_ack").catch(() => {});
     useUI.getState().requestClosePrompt();
+  });
+  // Clicking a task in the tray's attention dropdown (lib/trayAttention.ts)
+  // brings the window forward on the Rust side, then tells us which task to
+  // switch to. setActiveTask already expands the right project/group.
+  //
+  // The dropdown is a snapshot: it can be up to the 150ms debounce window
+  // (or however long the user held the menu open) stale, so the task may
+  // have been archived or deleted between the click and this event. Guard
+  // rather than blindly setActiveTask-ing a dead id — the window still
+  // comes forward, just with nothing new selected.
+  await listen<string>("termic://focus-task", e => {
+    const live = useApp.getState().tasks.some(t => t.id === e.payload && !t.archived);
+    if (live) useApp.getState().setActiveTask(e.payload);
   });
   // Only NOW is it safe to learn the state: a `--headless` launch goes windowless
   // itself in Rust's setup(), well before this module ran, and that edge was
