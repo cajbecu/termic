@@ -4472,6 +4472,44 @@ fn task_set_sandbox(
     Ok(kill_task_ptys(&state, &id))
 }
 
+/// (tasks with a live agent, live AGENT PTYs). Ground truth for what
+/// `termic quit` is about to SIGKILL, counted off the PTY map rather than
+/// the webview's cache: the cache can be stale and this is the number the
+/// user is being asked to approve.
+///
+/// Only `kind == "agent"` counts. The map also holds the aux shell, plain
+/// shell tabs and setup/run script tabs; every one of those dies with the
+/// app too, but calling them "agents" in the confirmation would inflate
+/// the number the user is deciding on. Attribution comes from
+/// `role.task_id`, NOT `slot.task_id` - an agent tab carries the role
+/// while `slot.task_id` is the sandbox trigger and is unset on some tabs,
+/// which would otherwise report "1 agent across 0 tasks".
+pub(crate) fn live_agent_pty_counts(manager: &PtyManager) -> (u32, u32) {
+    let map = manager.inner.lock();
+    count_live_agents(map.values().map(|s| (s.child_pid.is_some(), s.role.as_ref())))
+}
+
+/// The rule behind `live_agent_pty_counts`, over plain data so it can be
+/// unit-tested: a real `PtySlot` owns a live `MasterPty` and cannot be
+/// constructed in a test.
+fn count_live_agents<'a>(
+    slots: impl Iterator<Item = (bool, Option<&'a PtyRole>)>,
+) -> (u32, u32) {
+    let mut tasks: HashSet<&str> = HashSet::new();
+    let mut total = 0u32;
+    for (alive, role) in slots {
+        if !alive {
+            continue; // already exited; nothing left to kill
+        }
+        let Some(role) = role.filter(|r| r.kind == "agent") else {
+            continue;
+        };
+        total += 1;
+        tasks.insert(role.task_id.as_str());
+    }
+    (tasks.len() as u32, total)
+}
+
 /// Find + SIGKILL every live PTY belonging to a task. Shared by
 /// `task_set_sandbox` (profile change requires a respawn) and the CLI's
 /// `archive` (removing a worktree under a live agent is undefined). The
@@ -10773,6 +10811,42 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    fn role(kind: &str, task: &str) -> PtyRole {
+        PtyRole { task_id: task.into(), kind: kind.into(), is_default: false }
+    }
+
+    // `termic quit`'s confirmation says "kills N agents across M tasks", and
+    // that number is the only thing between a teardown script and every
+    // running agent. The PTY map also holds the aux shell, plain shell tabs
+    // and setup/run script tabs; counting those as "agents" would inflate the
+    // number the user is deciding on.
+    #[test]
+    fn live_agent_count_counts_agents_only() {
+        let a1 = role("agent", "t1");
+        let a2 = role("agent", "t1"); // second agent tab, SAME task
+        let a3 = role("agent", "t2");
+        let aux = role("aux", "t1");
+        let slots = vec![
+            (true, Some(&a1)),
+            (true, Some(&a2)),
+            (true, Some(&a3)),
+            (true, Some(&aux)),  // aux shell: dies too, but is not an agent
+            (true, None),        // setup/run script or plain shell tab
+            (false, Some(&a3)),  // already exited: nothing left to kill
+        ];
+        // 3 live agent tabs across 2 distinct tasks.
+        assert_eq!(count_live_agents(slots.into_iter()), (2, 3));
+    }
+
+    #[test]
+    fn live_agent_count_is_zero_when_only_shells_are_open() {
+        let aux = role("aux", "t1");
+        let slots = vec![(true, Some(&aux)), (true, None)];
+        // Must not report "1 agent across 0 tasks" - the shape the old
+        // slot.task_id attribution produced.
+        assert_eq!(count_live_agents(slots.into_iter()), (0, 0));
+    }
 
     // The close button routes on a STRING from settings.json. Anything the
     // app does not recognise must fall back to ASKING: quitting kills every

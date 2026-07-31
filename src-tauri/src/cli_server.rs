@@ -61,6 +61,23 @@ const ARCHIVE_TIMEOUT: Duration = Duration::from_secs(300);
 /// or a respawn (PTY spawn deadline 15s + margin); the injection into a
 /// respawned agent continues app-side after the RPC returns.
 const SEND_TIMEOUT: Duration = Duration::from_secs(60);
+thread_local! {
+    /// Set by the `quit` handler, consumed by `serve_conn` once the reply has
+    /// been written: a flag rather than a direct call so teardown cannot race
+    /// the reply it is supposed to follow.
+    ///
+    /// THREAD-LOCAL, not a global. `serve_listener` spawns one thread per
+    /// connection and `handle_request` runs synchronously on it, so a global
+    /// would let ANY concurrent connection consume the flag - a sibling
+    /// `termic list` finishing its own write first would tear the app down
+    /// before the quitting client's reply was flushed, which is the exact
+    /// failure this mechanism exists to prevent, just moved from a timer race
+    /// to a thread race. Thread-local also means a future caller of
+    /// handle_request outside serve_conn cannot leave the flag armed for an
+    /// unrelated request to trip over.
+    static QUIT_AFTER_REPLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Keepalive cadence on streamed replies (10s in production). Must stay
 /// well under the CLI's 30s socket read timeout. Tests shrink every
 /// watch-loop constant so the timing paths run in milliseconds.
@@ -281,7 +298,22 @@ fn serve_conn(stream: UnixStream, host: Arc<dyn CliHost>) {
             let mut sink = SocketSink { writer: &mut writer };
             handle_request(&req, &*host, &mut sink)
         };
-        if proto::write_msg(&mut writer, &reply).is_err() {
+        let wrote = proto::write_msg(&mut writer, &reply).is_ok();
+        // `quit` defers teardown to HERE, once the reply is actually on the
+        // wire. Exiting from inside handle_request raced the write: on a busy
+        // machine (this app exists to run many agents) the serving thread can
+        // be descheduled past any fixed grace, the socket closes first, and a
+        // SUCCESSFUL quit is reported to the client as CONNECTION_LOST. Once
+        // write_msg returns the bytes are buffered in the kernel and survive
+        // our exit.
+        // Deliberately NOT gated on `wrote`: the commit was received and
+        // processed, so a client that died before reading its reply does not
+        // cancel a quit the user asked for. Only the ORDER is guaranteed here,
+        // not delivery.
+        if QUIT_AFTER_REPLY.with(|f| f.replace(false)) {
+            host.quit_app();
+        }
+        if !wrote {
             return;
         }
     }
@@ -454,6 +486,11 @@ pub(crate) trait CliHost: Send + Sync {
     fn work_states(&self, ids: &[String]) -> Option<HashMap<String, WorkStateInfo>>;
     fn open_task_in_ui(&self, task_id: &str) -> Result<(), String>;
     fn raise_window(&self);
+    /// (tasks with live agents, live agent PTYs). Ground truth from the
+    /// PTY map, not the webview cache.
+    fn live_agent_counts(&self) -> (u32, u32);
+    /// Tear the app down. Everything the app owns dies with it.
+    fn quit_app(&self);
     fn diff_stat(&self, task: &Task) -> Option<proto::DiffStat>;
     /// Registered agent CLIs (Settings registry).
     fn agents(&self) -> Vec<AgentMeta>;
@@ -571,6 +608,40 @@ pub(crate) fn handle_request(req: &Request, host: &dyn CliHost, sink: &mut dyn E
         Command::New { .. } => handle_new(req, host, sink),
         Command::Wait { task, project, timeout_ms, cwd } => {
             handle_wait(&req.id, host, task.as_deref(), project.as_deref(), cwd.as_deref(), *timeout_ms, sink)
+        }
+        Command::Quit { commit } => {
+            let (tasks_with_agents, live_agents) = host.live_agent_counts();
+            // Working count comes from the webview cache - only it knows
+            // work state. A stale cache reports 0 rather than guessing, so
+            // the number is a floor: it never overstates what the user is
+            // about to lose, and the PTY counts above still tell the truth
+            // about what dies.
+            let snap = host.agent_cache().snapshot();
+            // Per TASK, not per agent: the cache aggregates a single state
+            // per task. Clamped, because a cache inside the staleness window
+            // can still lag a PTY that just died, which would otherwise read
+            // as "kills 1 agent across 1 task, 2 of them still working".
+            let working_tasks = snap
+                .age
+                .filter(|a| *a <= CACHE_STALE_AFTER)
+                .map(|_| snap.states.values().filter(|s| s.state == "working").count() as u32)
+                .unwrap_or(0)
+                .min(tasks_with_agents);
+            if *commit {
+                // Armed, not fired: serve_conn tears down after this reply is
+                // written. See the note there.
+                QUIT_AFTER_REPLY.with(|f| f.set(true));
+            }
+            Reply::ok(
+                &req.id,
+                ReplyData::Quit(proto::QuitData {
+                    running: true,
+                    tasks_with_agents,
+                    live_agents,
+                    working_tasks,
+                    quitting: *commit,
+                }),
+            )
         }
         Command::Archive { task, project } => {
             handle_archive(&req.id, host, task, project.as_deref())
@@ -2317,6 +2388,17 @@ impl CliHost for TauriHost {
     ) -> Result<serde_json::Value, String> {
         webview_rpc_stream(&self.app, method, params, timeout, on_progress)
     }
+    fn live_agent_counts(&self) -> (u32, u32) {
+        let manager = self.app.state::<crate::PtyManager>();
+        crate::live_agent_pty_counts(&manager)
+    }
+    fn quit_app(&self) {
+        // Called by serve_conn AFTER the reply is written, so this can exit
+        // immediately. app.exit drives RunEvent::Exit -> cleanup_children,
+        // which reaps PTYs, script process groups, greps and spotlight
+        // sessions - the same teardown Cmd-Q performs.
+        self.app.exit(0);
+    }
     fn agent_cache(&self) -> &AgentCache {
         global_agent_cache()
     }
@@ -3029,6 +3111,11 @@ mod tests {
         /// `tasks` on the reload handle_new performs).
         extra_tasks: Mutex<Vec<Task>>,
         killed: Mutex<Vec<String>>,
+        /// (tasks with agents, live agents) the stub reports for `quit`.
+        live_agents: (u32, u32),
+        /// Bumped by quit_app, so a test can assert teardown happened
+        /// exactly once and NOT at all under `--preview`.
+        quit_calls: Mutex<u32>,
         /// Flat side-effect log ("kill:<id>", "rpc:<method>",
         /// "detach:<id>:<reason>") so tests can assert ORDER across
         /// kinds (archive must notify, then kill, then rpc).
@@ -3071,6 +3158,8 @@ mod tests {
                 states: None,
                 opened: Mutex::new(Vec::new()),
                 raised: Mutex::new(0),
+                live_agents: (0, 0),
+                quit_calls: Mutex::new(0),
                 agents: vec![
                     agent_meta("claude", true),
                     agent_meta("codex", true),
@@ -3109,6 +3198,13 @@ mod tests {
     }
 
     impl CliHost for StubHost {
+        fn live_agent_counts(&self) -> (u32, u32) {
+            self.live_agents
+        }
+        fn quit_app(&self) {
+            *self.quit_calls.lock().unwrap() += 1;
+            self.ops.lock().unwrap().push("quit".into());
+        }
         fn cli_enabled(&self) -> bool {
             self.enabled
         }
@@ -3299,6 +3395,106 @@ mod tests {
             Some(ReplyData::Hello(h)) => assert_eq!(h.protocol, proto::PROTOCOL_VERSION),
             other => panic!("expected hello, got {other:?}"),
         }
+    }
+
+    // The protocol tolerates unknown fields by design, so a misspelled or
+    // renamed flag silently takes serde's default. For this verb that default
+    // must be "preview", never "tear the app down".
+    #[test]
+    fn quit_without_the_commit_field_previews_rather_than_quitting() {
+        let host = StubHost { live_agents: (1, 1), ..Default::default() };
+        let raw = r#"{"id":"x","token":"tok","cmd":"quit","previw":true}"#;
+        let req: Request = serde_json::from_str(raw).expect("unknown fields are tolerated");
+        let reply = handle(&req, &host);
+        assert!(reply.ok, "{reply:?}");
+        let Some(ReplyData::Quit(q)) = reply.data else { panic!("expected quit") };
+        assert!(!q.quitting, "a missing commit field must not quit");
+        assert_eq!(*host.quit_calls.lock().unwrap(), 0, "typo'd field tore the app down");
+    }
+
+    // The cache can name more working tasks than there are tasks with live
+    // agents: it is a webview push, and a state inside the 120s staleness
+    // window can still lag a PTY that just died. Without the clamp the
+    // confirmation reads "kills 1 agent across 1 task. 2 tasks still
+    // working", which is nonsense the user is being asked to approve.
+    #[test]
+    fn quit_clamps_working_tasks_to_tasks_with_live_agents() {
+        let host = StubHost { live_agents: (1, 1), ..Default::default() };
+        host.push_states(&[
+            ("w1", TaskAgentState { state: "working".into(), tabs: 1, queued: 0, capable: true }),
+            // Still cached as working, but its agent PTY is already gone.
+            ("w3", TaskAgentState { state: "working".into(), tabs: 1, queued: 0, capable: true }),
+        ]);
+        let reply = handle(&req(Command::Quit { commit: false }, Some("tok")), &host);
+        let Some(ReplyData::Quit(q)) = reply.data else { panic!("expected quit") };
+        assert_eq!(q.tasks_with_agents, 1);
+        assert_eq!(q.working_tasks, 1, "working must never exceed the task count");
+    }
+
+    // `quit` is the most destructive verb on the socket, so the preview /
+    // commit split is load-bearing: the CLI asks what would die to build its
+    // confirmation question, and that ask must not itself kill anything.
+    #[test]
+    fn quit_preview_reports_without_tearing_down() {
+        let host = StubHost { live_agents: (2, 3), ..Default::default() };
+        host.push_states(&[
+            ("w1", TaskAgentState { state: "working".into(), tabs: 1, queued: 0, capable: true }),
+            ("w3", TaskAgentState { state: "idle".into(), tabs: 1, queued: 0, capable: true }),
+        ]);
+        let reply = handle(&req(Command::Quit { commit: false }, Some("tok")), &host);
+        assert!(reply.ok, "{reply:?}");
+        let Some(ReplyData::Quit(q)) = reply.data else { panic!("expected quit, got {reply:?}") };
+        assert_eq!((q.tasks_with_agents, q.live_agents), (2, 3));
+        assert_eq!(q.working_tasks, 1);
+        assert!(!q.quitting, "preview must not claim to be quitting");
+        assert_eq!(*host.quit_calls.lock().unwrap(), 0, "preview tore the app down");
+    }
+
+    #[test]
+    fn quit_commits_and_reports_what_died() {
+        let host = StubHost { live_agents: (2, 3), ..Default::default() };
+        let reply = handle(&req(Command::Quit { commit: true }, Some("tok")), &host);
+        assert!(reply.ok, "{reply:?}");
+        let Some(ReplyData::Quit(q)) = reply.data else { panic!("expected quit, got {reply:?}") };
+        assert!(q.quitting);
+        assert_eq!(q.live_agents, 3);
+        // handle_request only ARMS teardown; serve_conn fires it after the
+        // reply is written. See quit_replies_before_it_tears_the_app_down.
+        assert_eq!(*host.quit_calls.lock().unwrap(), 0);
+        assert!(
+            QUIT_AFTER_REPLY.with(|f| f.replace(false)),
+            "commit did not arm teardown on this thread",
+        );
+    }
+
+    // Quitting kills every agent, so it sits behind the same gate as the
+    // rest: NOT part of the unauthenticated hello/raise surface.
+    #[test]
+    fn quit_requires_a_token() {
+        let host = StubHost::default();
+        let reply = handle(&req(Command::Quit { commit: true }, None), &host);
+        assert!(!reply.ok);
+        assert_eq!(reply.error.as_ref().unwrap().code, ErrorCode::Auth);
+        assert_eq!(*host.quit_calls.lock().unwrap(), 0, "unauthenticated quit tore the app down");
+    }
+
+    // A stale work-state cache must report 0 working rather than guessing:
+    // the question would otherwise overstate what the user is about to lose.
+    // The PTY counts are unaffected - they come from the PTY map, not here.
+    #[test]
+    fn quit_reports_no_working_tasks_when_the_cache_is_stale() {
+        let host = StubHost { live_agents: (1, 1), ..Default::default() };
+        host.push_states(&[(
+            "w1",
+            TaskAgentState { state: "working".into(), tabs: 1, queued: 0, capable: true },
+        )]);
+        // CACHE_STALE_AFTER is 800ms under cfg(test); let it actually go stale
+        // rather than reaching into the cache's internals.
+        std::thread::sleep(CACHE_STALE_AFTER + Duration::from_millis(100));
+        let reply = handle(&req(Command::Quit { commit: false }, Some("tok")), &host);
+        let Some(ReplyData::Quit(q)) = reply.data else { panic!("expected quit") };
+        assert_eq!(q.working_tasks, 0, "a stale cache must not be reported as fact");
+        assert_eq!(q.live_agents, 1, "PTY counts do not depend on the cache");
     }
 
     #[test]
@@ -4489,6 +4685,34 @@ mod tests {
         let dynamic: Arc<dyn CliHost> = arc.clone();
         std::thread::spawn(move || serve_listener(listener, dynamic));
         (sock, dir, arc)
+    }
+
+    // The ordering `quit` depends on: the client must GET its reply, and only
+    // then may the app tear down. Get this backwards and a successful quit is
+    // reported as CONNECTION_LOST (exit 8). Exercised over a real socket
+    // because the bug lives in serve_conn, not in handle_request.
+    #[test]
+    fn quit_replies_before_it_tears_the_app_down() {
+        let (sock, _guard, host) = spawn_server_arc(StubHost {
+            live_agents: (1, 2),
+            ..Default::default()
+        });
+        let reply = roundtrip_on(&sock, &req(Command::Quit { commit: true }, Some("tok")));
+        // The reply arrived at all: that is the property under test.
+        assert!(reply.ok, "{reply:?}");
+        let Some(ReplyData::Quit(q)) = reply.data else { panic!("expected quit, got {reply:?}") };
+        assert!(q.quitting);
+        assert_eq!(q.live_agents, 2);
+        // ...and teardown followed it.
+        let mut fired = false;
+        for _ in 0..100 {
+            if *host.quit_calls.lock().unwrap() == 1 {
+                fired = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(fired, "reply was delivered but the app never tore down");
     }
 
     #[test]

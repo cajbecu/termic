@@ -527,6 +527,39 @@ Exit codes: 0 success, 1 unknown or ambiguous task, 4 app not running, \
         project: Option<String>,
     },
 
+    /// Quit Termic: every running agent dies with it. For the human at the keyboard, not for agents driving Termic.
+    ///
+    /// The only shell-side teardown for a windowless instance. Asks for
+    /// confirmation on a TTY unless --yes, naming how many agents it is
+    /// about to kill. Never launches Termic; if it is not running this
+    /// succeeds silently, so teardown scripts do not need `|| true`.
+    #[command(
+        after_help = "Every live agent PTY, script process group and in-flight grep dies \
+with the app, the same teardown Cmd-Q does. Any ACTIVE SPOTLIGHT SESSION is \
+also reverted, which force-checks-out the project's main checkout. The \
+confirmation names how many agents it is about to kill; non-interactive runs \
+REQUIRE --yes.
+
+Never launches Termic. On the default socket, a Termic that is not running \
+prints a note and exits 0, so teardown scripts do not need `|| true`. With \
+TERMIC_SOCKET set explicitly, a missing socket is a misconfiguration and \
+still exits 4.
+
+Prints what happened on stdout. With --output-format json, one object, \
+always carrying `running` and `quitting`: \
+{\"running\", \"quitting\", \"tasks_with_agents\", \"live_agents\", \
+\"working_tasks\"} when Termic was running, or {\"running\": false, \
+\"quitting\": false} when it was not.
+
+Exit codes: 0 quit (or nothing was running), 1 error (declined, no TTY \
+without --yes), 4 the app went away before the command committed, 5 CLI \
+disabled, 6 refused, 8 the app exited mid-command."
+    )]
+    Quit {
+        /// Skip the confirmation prompt (required non-interactively).
+        #[arg(short, long)]
+        yes: bool,
+    },
     /// Archive a task: SIGKILL its live agents, remove its worktree.
     #[command(
         after_help = "Kills the task's live agent PTYs FIRST, then archives: the worktree \
@@ -684,7 +717,25 @@ fn execute(cli: &Cli) -> Result<Output, CliError> {
     };
 
     let paths = client::socket_paths();
-    let mut conn = client::connect_or_launch(&paths, cli.no_launch)?;
+    // `quit` never launches: starting Termic in order to stop it is absurd,
+    // and a teardown script wants "already gone" to be SUCCESS, not an error
+    // it has to `|| true` away. Every other verb keeps auto-launch.
+    let quitting = matches!(cli.cmd, Cmd::Quit { .. });
+    let mut conn = match client::connect_or_launch(&paths, cli.no_launch || quitting) {
+        // "Nothing to quit" is success, so a teardown script does not need
+        // `|| true`. But ONLY on the default socket: if the user pointed
+        // TERMIC_SOCKET somewhere explicit, a socket that is not there is a
+        // misconfiguration, and reporting exit 0 would tell a script it had
+        // stopped agents that are in fact still running.
+        Err(e) if quitting && !paths.custom && e.code == exit_code::APP_NOT_RUNNING => {
+            return Ok(Output::ok(final_stdout(
+                format,
+                "Termic is not running.",
+                &serde_json::json!({ "running": false, "quitting": false }),
+            )));
+        }
+        other => other?,
+    };
     client::hello(&mut conn)?;
     let token = client::read_token(&paths)?;
 
@@ -791,6 +842,7 @@ fn execute(cli: &Cli) -> Result<Output, CliError> {
             let code = w.result.outcome.exit_code();
             Ok(Output { stdout: final_stdout(format, &output::wait_text(&w), &w), code })
         }
+        Cmd::Quit { yes } => execute_quit(&mut conn, &token, format, *yes, &paths),
         Cmd::Archive { task, project, yes } => {
             execute_archive(&mut conn, &token, format, task, project.as_deref(), *yes, &paths)
         }
@@ -1149,6 +1201,38 @@ fn execute_archive(
     Ok(Output::ok(final_stdout(format, &output::archive_text(&a), &a)))
 }
 
+/// `termic quit`. Preview first so the confirmation can name what dies,
+/// then commit. Never auto-launches: launching Termic in order to quit it
+/// is absurd, and a teardown script wants "already gone" to be success.
+fn execute_quit(
+    conn: &mut client::Conn,
+    token: &str,
+    format: OutputFormat,
+    yes: bool,
+    paths: &client::SocketPaths,
+) -> Result<Output, CliError> {
+    let data = client::request(conn, proto::Command::Quit { commit: false }, token)?;
+    let proto::ReplyData::Quit(p) = data else {
+        return Err(CliError::new(exit_code::ERROR, "unexpected reply to quit"));
+    };
+
+    let mut fresh = None;
+    if !yes {
+        if !confirm_tty(&output::quit_question(&p))? {
+            return Err(CliError::new(exit_code::ERROR, "quit declined"));
+        }
+        // A human can sit on the prompt longer than the server's 30s idle
+        // timeout, so reconnect before committing (same as archive).
+        fresh = Some(reconnect(paths)?);
+    }
+    let conn = fresh.as_mut().unwrap_or(conn);
+    let data = client::request(conn, proto::Command::Quit { commit: true }, token)?;
+    let proto::ReplyData::Quit(q) = data else {
+        return Err(CliError::new(exit_code::ERROR, "unexpected reply to quit"));
+    };
+    Ok(Output::ok(final_stdout(format, &output::quit_text(&q), &q)))
+}
+
 fn execute_project(
     conn: &mut client::Conn,
     token: &str,
@@ -1445,6 +1529,11 @@ fn verb_exit_codes(name: &str) -> Vec<i32> {
         // Fully local (no socket): only success, an unknown command
         // name, and the in-cage refusal that precedes it are reachable.
         "help" => vec![0, 1, 6],
+        // COMMON, and every code in it is genuinely reachable: 4 and 8 when
+        // the app exits underneath us (a second `quit`, or Cmd-Q while a
+        // human sits on the confirmation), which is why `after_help` lists
+        // them rather than pretending quit always succeeds.
+        "quit" => COMMON.to_vec(),
         _ => COMMON.to_vec(),
     }
 }
@@ -1756,7 +1845,7 @@ mod tests {
             v["commands"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
         for expected in [
             "list", "status", "open", "new", "send", "attach", "logs", "result", "diff",
-            "apply", "path", "wait", "archive", "project add", "project list",
+            "apply", "path", "wait", "archive", "quit", "project add", "project list",
             "project remove", "help",
         ] {
             assert!(names.contains(&expected), "missing {expected} in {names:?}");
