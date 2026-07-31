@@ -19,6 +19,7 @@ import { RaceDialog } from "./RaceDialog";
 import { RaceCompare } from "@/components/task/RaceCompare";
 import { TaskSandboxDialog } from "./TaskSandboxDialog";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { CloseDialog } from "./CloseDialog";
 import { TerminalDropDialog } from "./TerminalDropDialog";
 import { FileFinderDialog } from "./FileFinderDialog";
 import { FindInFilesDialog } from "./FindInFilesDialog";
@@ -54,6 +55,7 @@ export function Dialogs() {
       <RaceCompare />
       <TaskSandboxDialog />
       <ConfirmDialog />
+      <CloseDialog />
       <TerminalDropDialog />
       <FileFinderDialog />
       <FindInFilesDialog />

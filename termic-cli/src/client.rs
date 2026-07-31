@@ -150,8 +150,13 @@ pub fn connect_or_launch(paths: &SocketPaths, no_launch: bool) -> Result<Conn, C
         // Background launch without focus steal, then poll with a
         // deadline. Concurrent invocations racing `open -ga` are deduped
         // by LaunchServices (docs/plans/cli.md).
+        // `--headless` boots the app straight into background mode: no
+        // window, no dock icon. A shell command must not yank a window onto
+        // the user's screen. `open --args` only reaches an app it actually
+        // LAUNCHES, which is exactly the case we want it to apply to - an
+        // already-running Termic keeps whatever state it is in.
         let launched = std::process::Command::new("open")
-            .args(["-ga", "Termic"])
+            .args(["-ga", "Termic", "--args", "--headless"])
             .status()
             .map(|s| s.success())
             .unwrap_or(false);

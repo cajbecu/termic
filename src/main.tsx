@@ -10,6 +10,7 @@ import "@/lib/terminalFontReady";
 import { App } from "./App";
 import { logLine } from "@/lib/ipc";
 import { initTerminalDropHandler } from "@/lib/terminalDrop";
+import { initWindowlessMode } from "@/lib/windowlessMode";
 import { initModKeyClass } from "@/lib/modKeyClass";
 
 // StrictMode disabled: it double-mounts effects in dev, which races our async
@@ -103,3 +104,7 @@ createRoot(document.getElementById("root")!).render(<App />);
 // the whole app — see src/lib/terminalDrop.ts for why the browser DnD API
 // can't be used here. Fire-and-forget; failure just means no drop support.
 initTerminalDropHandler().catch(() => {});
+
+// Windowless mode: collapse task panes when Termic goes windowless so
+// xterm's renderers actually pause. See src/lib/windowlessMode.ts.
+initWindowlessMode().catch(() => {});

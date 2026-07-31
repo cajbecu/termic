@@ -8382,6 +8382,14 @@ pub struct Settings {
     /// Landing). Re-read per request, so flipping it applies live.
     #[serde(default)]
     pub cli_enabled: bool,
+    /// What the window's close button does: "ask" (default) | "menubar" |
+    /// "quit". "ask" shows the close prompt whose "Don't ask again" checkbox
+    /// writes the chosen one back here. Stored rather than inferred so the
+    /// answer survives restarts, and re-read per close so Settings applies
+    /// live. Unknown values are treated as "ask" - a corrupt settings file
+    /// must not silently start quitting on people with agents running.
+    #[serde(default)]
+    pub close_action: Option<String>,
     /// Repo-root config dirs symlinked into each NEW worktree task (when the
     /// checkout didn't already provide them). `.claude/` and friends hold a
     /// project's subagents / skills / commands, which are commonly gitignored
@@ -9017,8 +9025,15 @@ fn run_capture_command(cmd: String, cwd: String) -> Result<String, String> {
 
 #[tauri::command]
 fn settings_save(s: Settings) -> Result<(), String> {
+    save_settings_inner(&s)
+}
+
+/// The single settings writer. Extracted so Rust-side toggles (the menu-bar
+/// item, the close-button choice) persist through exactly the same path the
+/// Settings UI does, instead of growing a second encoder that could drift.
+pub(crate) fn save_settings_inner(s: &Settings) -> Result<(), String> {
     let f = settings_file().map_err(|e| e.to_string())?;
-    fs::write(f, serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?)
+    fs::write(f, serde_json::to_string_pretty(s).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())
 }
 
@@ -9513,6 +9528,264 @@ fn set_dev_dock_icon() {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+// ───────────────────────── windowless mode ─────────────────
+//
+// Standard macOS app semantics, which Termic did not have before:
+//
+//   Close (⌘W / red button) → BACKGROUND. The window goes away, agents keep
+//     working, and a menu-bar item is the way back.
+//   Quit  (⌘Q / menu-bar Quit) → the only thing that tears the app down
+//     (RunEvent::Exit → cleanup_children SIGKILLs every PTY).
+//
+// This CHANGES an existing behavior, it does not fix a bug: before this,
+// closing the last window QUIT the app (tao destroys the window -> Tauri
+// fires ExitRequested -> nothing prevented it -> ControlFlow::Exit), taking
+// every running agent with it. Verified empirically, because lib.rs's own
+// teardown comment claims the opposite and is wrong. So the product question
+// this answers is "should closing the window kill your agents", and the
+// answer here is no.
+//
+// The CLI rides the same state: `termic new` from a shell auto-launches with
+// `--headless`, which boots STRAIGHT into windowless mode so a shell command never
+// steals a window or a dock icon (docs/plans/cli.md Phase 3).
+//
+// COST NOTE, measured, and the reason `termic://windowless` exists: hiding the
+// WINDOW does not pause xterm's renderers. They key on ZERO GEOMETRY, which
+// `display: none` produces and a hidden NSWindow does NOT — a windowless
+// window still reports full layout (measured 1368×1190 with 7 live canvases).
+// Without telling the webview to collapse the panes, a windowless Termic keeps
+// running WebGL draws for a window nobody can see. docs/performance.md bear
+// trap 2, at window scope.
+static WINDOWLESS: AtomicBool = AtomicBool::new(false);
+/// Whether a window has ever been on screen this process. A `--headless`
+/// launch that has never shown one stays `Accessory` (no dock icon) — a shell
+/// command must not put Termic in the dock. Once the user has actually seen a
+/// window we keep the dock icon for the rest of the process lifetime, because
+/// close-keeps-the-dock-icon is the macOS convention (Mail, Messages).
+static SHOWN_ONCE: AtomicBool = AtomicBool::new(false);
+/// Set by `close_prompt_ack` when the webview confirms it received a close
+/// request. Guards the fallback below - see the CloseAction::Ask arm.
+static CLOSE_PROMPT_ACKED: AtomicBool = AtomicBool::new(false);
+/// How long to wait for that ack. Generous: it only has to beat a human
+/// reaching for the mouse, and firing early would steal a dismissal.
+const CLOSE_PROMPT_ACK_GRACE: Duration = Duration::from_secs(5);
+
+/// 32×32 template image of the app mark (the pixelated "T" from
+/// icons/icon.svg, minus the squircle). Built in code rather than shipped as
+/// a PNG so it cannot drift from a rasterizer or need a build step; macOS
+/// recolors template images itself, so only alpha matters.
+fn tray_icon_image() -> tauri::image::Image<'static> {
+    const W: usize = 32;
+    // Master geometry: crossbar 6 cells × 2, stem 2 cells × 5, stem centered.
+    // Gaps are dropped deliberately — at menu-bar size they read as mud.
+    //
+    // CELL=4 puts the 6×7 grid at 24×28 inside 32×32 (4px side / 2px top-bottom
+    // padding, ~34% ink). That is deliberately heavier than icons/icon.svg's
+    // ~25% padding and heavier than the inset system items next to it, and it
+    // was CHECKED in a real menu bar and preferred. Don't "fix" it to 3 on
+    // theory alone: 3 renders the same mark at 18×21 and reads thinner than
+    // intended. Verify in an actual menu bar before changing it.
+    const CELL: usize = 4;
+    const X0: usize = (W - 6 * CELL) / 2;
+    const Y0: usize = (W - 7 * CELL) / 2;
+    let mut rgba = vec![0u8; W * W * 4];
+    let mut fill = |cx: usize, cy: usize| {
+        for y in Y0 + cy * CELL..Y0 + (cy + 1) * CELL {
+            for x in X0 + cx * CELL..X0 + (cx + 1) * CELL {
+                let i = (y * W + x) * 4;
+                rgba[i + 3] = 255; // black + opaque; macOS tints it
+            }
+        }
+    };
+    for cx in 0..6 { fill(cx, 0); fill(cx, 1); }        // crossbar
+    for cy in 2..7 { fill(2, cy); fill(3, cy); }        // stem
+    tauri::image::Image::new_owned(rgba, W as u32, W as u32)
+}
+
+/// Build the menu-bar item. Created once, hidden until we're windowless, so
+/// a normal windowed session shows nothing new in the menu bar.
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    use tauri::tray::TrayIconBuilder;
+
+    let show = MenuItem::with_id(app, "tray_show", "Show Termic", true, None::<&str>)?;
+    let sep = PredefinedMenuItem::separator(app)?;
+    let quit = MenuItem::with_id(app, "tray_quit", "Quit Termic", true, None::<&str>)?;
+    // Separator so Quit is not one slip away from Show: this Quit kills every
+    // running agent, and it is the item people reach for by muscle memory.
+    let menu = Menu::with_items(app, &[&show, &sep, &quit])?;
+
+    let tray = TrayIconBuilder::with_id("main")
+        .icon(tray_icon_image())
+        .icon_as_template(true)
+        .tooltip("Termic")
+        .menu(&menu)
+        // Clicking the icon opens the MENU (either button), so both actions
+        // are always one predictable gesture away. No bare left-click
+        // shortcut: "click = show" would make Quit reachable only by
+        // right-click, which is undiscoverable for the one action that stops
+        // your agents.
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "tray_show" => leave_windowless(app),
+            // The user-facing quit besides ⌘Q. app.exit drives
+            // RunEvent::Exit → cleanup_children, so PTYs die with us.
+            "tray_quit" => app.exit(0),
+            _ => {}
+        })
+        .build(app)?;
+    // Hidden until the window goes away. The item is a STATE, not a preference: its
+    // presence is exactly the signal "Termic is running without a window", so
+    // there is nothing for a setting to add. A windowed session shows no new
+    // chrome.
+    let _ = tray.set_visible(false);
+    Ok(())
+}
+
+/// Current windowless state, for the webview to read at boot. A `--headless`
+/// launch calls enter_windowless() from setup(), long before main.tsx has run
+/// listen(), so that first edge is emitted into the void - Tauri has no event
+/// replay. Without this the flag would sit false for the whole life of a
+/// headless instance, which quietly re-breaks BOTH pane collapse (bear trap
+/// 2b) and the windowless-means-nothing-is-focused rule that lets a finished
+/// agent still notify.
+#[tauri::command]
+fn window_is_windowless() -> bool {
+    WINDOWLESS.load(Ordering::SeqCst)
+}
+
+/// The webview confirming it got `termic://close-requested`. Presence of an
+/// ack is the only thing distinguishing "no listener" from "user is thinking".
+#[tauri::command]
+fn close_prompt_ack() {
+    CLOSE_PROMPT_ACKED.store(true, Ordering::SeqCst);
+}
+
+/// What the close button should do, given the stored setting. Split out and
+/// pure so the "unknown value must not quit" rule is unit-testable: a corrupt
+/// or future settings file falls back to ASKING, never to destroying agents.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum CloseAction {
+    Ask,
+    MenuBar,
+    Quit,
+}
+
+pub(crate) fn close_action_from(setting: Option<&str>) -> CloseAction {
+    match setting {
+        Some("menubar") => CloseAction::MenuBar,
+        Some("quit") => CloseAction::Quit,
+        _ => CloseAction::Ask,
+    }
+}
+
+/// Persisted by the close prompt's "Don't ask again" checkbox, and by the
+/// Settings control.
+#[tauri::command]
+fn window_close_choice(app: AppHandle, action: String, remember: bool) -> Result<(), String> {
+    if remember {
+        let mut s = load_settings_inner();
+        s.close_action = Some(action.clone());
+        save_settings_inner(&s).map_err(|e| e.to_string())?;
+    }
+    match action.as_str() {
+        "menubar" => enter_windowless(&app),
+        // The user asked for teardown: RunEvent::Exit -> cleanup_children
+        // SIGKILLs every PTY, so agents do not outlive the app.
+        "quit" => app.exit(0),
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Returns whether the menu-bar item is actually there. Load-bearing: it is
+/// the ONLY way back from an Accessory (dock-iconless) windowless state, so
+/// `enter_windowless` refuses to drop the dock icon without it.
+fn set_tray_visible(app: &AppHandle, visible: bool) -> bool {
+    match app.tray_by_id("main") {
+        Some(tray) => tray.set_visible(visible).is_ok(),
+        None => false,
+    }
+}
+
+/// Hide the window and go windowless. Idempotent.
+pub(crate) fn enter_windowless(app: &AppHandle) {
+    use tauri::Manager;
+    if WINDOWLESS.load(Ordering::SeqCst) {
+        return;
+    }
+    if let Some(win) = app.get_webview_window("main") {
+        // Hiding a NATIVE FULLSCREEN window is orderOut: on a window that owns
+        // a Space - it orphans that Space and can restore into it later. Leave
+        // fullscreen first; harmless when not in it.
+        if win.is_fullscreen().unwrap_or(false) {
+            let _ = win.set_fullscreen(false);
+        }
+        // Order matters: flag AFTER the hide is dispatched. Setting it first
+        // meant a failed hide() left us flagged windowless with a visible
+        // window, and every later close early-returned - the red button became
+        // a permanent silent no-op. Caveat: Tauri's hide() returns Ok once the
+        // message is SENT, not once the window is off screen, so this catches a
+        // dead dispatcher and nothing subtler.
+        if win.hide().is_err() {
+            dlog("[windowless] hide failed; staying foreground");
+            return;
+        }
+    }
+    WINDOWLESS.store(true, Ordering::SeqCst);
+    dlog("[windowless] entered (window hidden, agents keep running)");
+    // Underscore-prefixed: only READ under the macOS gate below, and an
+    // unused-variable warning off macOS would be noise, not signal.
+    let _tray_up = set_tray_visible(app, true);
+    // Collapse the panes so xterm's renderers actually pause (see the cost
+    // note above). The webview stays alive and fully functional — it owns
+    // PTY lifetime and every work-state signal the CLI's `--wait` rides.
+    let _ = app.emit("termic://windowless", true);
+    // A shell-launched instance that has never shown a window keeps no dock
+    // icon; one the user has already seen behaves like a normal macOS app.
+    //
+    // Only ever drop the dock icon when the menu-bar item is actually up:
+    // Accessory + no window + no tray would be an app with NO way back short
+    // of `termic open`. Keeping the dock icon is the safe degradation.
+    #[cfg(target_os = "macos")]
+    if !SHOWN_ONCE.load(Ordering::SeqCst) {
+        if _tray_up {
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+        } else {
+            dlog("[windowless] no menu-bar item; keeping the dock icon as the way back");
+        }
+    }
+}
+
+/// Bring the UI back. Drives the menu-bar item, dock-icon clicks
+/// (RunEvent::Reopen), and the CLI's `raise` verb. Idempotent.
+pub(crate) fn leave_windowless(app: &AppHandle) {
+    use tauri::Manager;
+    let was = WINDOWLESS.swap(false, Ordering::SeqCst);
+    SHOWN_ONCE.store(true, Ordering::SeqCst);
+    if was {
+        dlog("[windowless] left (window restored)");
+    }
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    // Ask for geometry back BEFORE showing. This is ordering-by-intent, not a
+    // guarantee: the emit is fire-and-forget and a still-clamped webview can
+    // commit up to ~1s later, so a brief empty frame on restore is possible.
+    // The zero→non-zero edge is also what repairs xterm's viewport scroller
+    // (lib/xtermViewportSync).
+    let _ = app.emit("termic://windowless", false);
+    if let Some(win) = app.get_webview_window("main") {
+        // Unminimize here, not at the call sites: the tray's "Show Termic" and
+        // RunEvent::Reopen used to skip it while `raise` did it, so the three
+        // entry points disagreed.
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    // Window is back, so the item has nothing left to say.
+    set_tray_visible(app, false);
+}
+
 pub fn run() {
     // WebKitGTK 2.42+ defaults to its DMA-BUF renderer. It's the FAST path on
     // AMD/Intel (X11 and Wayland) and MUST stay on there: disabling it drops
@@ -9753,7 +10026,85 @@ pub fn run() {
                 }
                 let _ = position_on_cursor_monitor(&win);
             }
-            let _ = win.show();
+            // The menu-bar item exists from boot but stays hidden until we
+            // windowless, so a normal windowed session gains nothing visible.
+            if let Err(e) = build_tray(app.handle()) {
+                dlog(&format!("[tray] build failed: {e}"));
+            }
+
+            // `--headless` (how the CLI auto-launches us) boots straight into
+            // windowless mode: no window, no dock icon, agents still spawnable.
+            // Everything else launches normally.
+            let headless = std::env::args().any(|a| a == "--headless");
+            if headless {
+                dlog("[windowless] booting --headless (no window, no dock icon)");
+                enter_windowless(app.handle());
+            } else {
+                let _ = win.show();
+                SHOWN_ONCE.store(true, Ordering::SeqCst);
+            }
+
+            // Close (red button) sends us windowless instead of
+            // quitting. ⌘Q and the menu-bar Quit become the only teardown
+            // paths, so closing the window no longer kills running agents.
+            //
+            // macOS ONLY, deliberately. Close-keeps-the-app-running is a mac
+            // convention (Mail, Messages); on Windows and most Linux desktops
+            // closing the window is expected to QUIT, and silently turning that
+            // into minimize-to-tray is the kind of default people hate. Those
+            // platforms keep Tauri's native close. `--headless` still
+            // goes windowless everywhere, because there the user asked for no
+            // window. See docs/plans/windows.md.
+            #[cfg(target_os = "macos")]
+            {
+                let handle = app.handle().clone();
+                win.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        // ALWAYS prevent first, then decide. Letting the close
+                        // through and going windowless afterwards would race the
+                        // window's own teardown, and "ask" needs the window
+                        // alive to show the prompt in it.
+                        api.prevent_close();
+                        // KNOWN EXCEPTION to "no sync IO on the event-loop
+                        // thread" (docs/ipc.md): load_settings_inner() reads +
+                        // parses settings.json here. Once per click of a button
+                        // a human pressed, on a file we just wrote, so it is
+                        // bounded and unmeasurable - but it IS the rule being
+                        // bent, and re-reading is what makes a Settings change
+                        // apply without a restart.
+                        match close_action_from(load_settings_inner().close_action.as_deref()) {
+                            CloseAction::MenuBar => enter_windowless(&handle),
+                            CloseAction::Quit => handle.exit(0),
+                            // The webview owns the prompt (CloseDialog, whose
+                            // dismissal cancels the close outright); it answers
+                            // via window_close_choice.
+                            CloseAction::Ask => {
+                                let _ = handle.emit("termic://close-requested", ());
+                                // The emit is fire-and-forget, so a webview that
+                                // never wired its listener (initWindowlessMode
+                                // rejected, or the click landed mid-boot) would
+                                // leave the red button a silent no-op with only
+                                // Cmd-Q left. The webview ACKs the request the
+                                // moment it receives it; no ack means no
+                                // listener, so fall back to the NON-destructive
+                                // outcome. Keyed on the ack rather than on a
+                                // choice, because a user who DISMISSES the
+                                // prompt is cancelling the close on purpose and
+                                // must not be overridden.
+                                CLOSE_PROMPT_ACKED.store(false, Ordering::SeqCst);
+                                let fb = handle.clone();
+                                thread::spawn(move || {
+                                    thread::sleep(CLOSE_PROMPT_ACK_GRACE);
+                                    if !CLOSE_PROMPT_ACKED.load(Ordering::SeqCst) {
+                                        dlog("[windowless] no close-prompt ack; going windowless");
+                                        enter_windowless(&fb);
+                                    }
+                                });
+                            }
+                        }
+                    }
+                });
+            }
 
             // Dev-only automation bridge (no-op unless debug build AND
             // TERMIC_AUTOMATION=1) - lets an agent drive this instance
@@ -9763,7 +10114,9 @@ pub fn run() {
             // verbs stay behind the "Enable CLI" setting + per-boot
             // token). See cli_server.rs + docs/plans/cli.md.
             cli_server::start(app.handle().clone());
-            let _ = win.set_focus();
+            if !headless {
+                let _ = win.set_focus();
+            }
             #[cfg(target_os = "macos")]
             {
                 round_window_corners_for_tahoe(&win);
@@ -9812,6 +10165,7 @@ pub fn run() {
             cli_server::cli_prompt_report,
             cli_server::cli_install_symlink,
             cli_server::cli_install_status,
+            window_close_choice, window_is_windowless, close_prompt_ack,
             list_monospace_fonts, list_font_families,
             themes_list, themes_dir,
         ])
@@ -9833,8 +10187,11 @@ pub fn run() {
             if matches!(event, tauri::RunEvent::Ready) {
                 set_dev_dock_icon();
             }
-            // App-level teardown: when Tauri tears down (last window
-            // closed on macOS doesn't fire this, but Cmd-Q does) make
+            // App-level teardown. (An older comment here claimed a last-window
+            // close does not fire this; that was wrong - it did, which is why
+            // closing used to kill every agent. Close is now intercepted, so
+            // the practical triggers are Cmd-Q, the menu-bar Quit, and the
+            // close prompt's Quit.) Make
             // sure we don't orphan any child we spawned. That means
             // both the streaming script process groups
             // (RUNNING_SCRIPTS) AND every live PTY (agent terminals,
@@ -9842,6 +10199,18 @@ pub fn run() {
             // our way out the door — no time for graceful SIGTERMs.
             if matches!(event, tauri::RunEvent::Exit) {
                 cleanup_children(app);
+            }
+            // Dock-icon click on a windowless app (applicationShouldHandle-
+            // Reopen). Unhandled before, but moot then: closing the window
+            // quit the app outright, so there was nothing to reopen.
+            // macOS-only in Tauri
+            // (the variant does not exist elsewhere - naming it unconditionally
+            // fails to compile on the Linux CI runner).
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
+                if !has_visible_windows {
+                    leave_windowless(app);
+                }
             }
         });
 }
@@ -10111,6 +10480,27 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    // The close button routes on a STRING from settings.json. Anything the
+    // app does not recognise must fall back to ASKING: quitting kills every
+    // running agent, so a corrupt, hand-edited, or future-version settings
+    // file must never be able to pick the destructive branch by accident.
+    #[test]
+    fn close_action_defaults_to_ask_and_never_to_quit() {
+        assert_eq!(close_action_from(Some("menubar")), CloseAction::MenuBar);
+        assert_eq!(close_action_from(Some("quit")), CloseAction::Quit);
+        // Unset (fresh install / upgrade from a build without the field).
+        assert_eq!(close_action_from(None), CloseAction::Ask);
+        assert_eq!(close_action_from(Some("ask")), CloseAction::Ask);
+        // Junk, case variants, and a hypothetical future value all ask.
+        for junk in ["", "Quit", "QUIT", "menu bar", "background", "nonsense"] {
+            assert_eq!(
+                close_action_from(Some(junk)),
+                CloseAction::Ask,
+                "unrecognised close_action {junk:?} must ask, not act",
+            );
+        }
+    }
 
     #[test]
     fn pty_ring_caps_and_reports_truncation() {

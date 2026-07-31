@@ -11,9 +11,10 @@ advertisement (protocol v2). Phase 2 implemented on top - `send`
 (+`--shell`, backlog replay, detach keys, opt-in `--resize`), `apply`
 (exit 10 goes live), `diff`, `path`, and the result readers `logs`
 (per-PTY ring buffer) and `result` (claude transcript reader), protocol
-v3. Phase 3 pending; `termic mcp` stays parked under discussion and NOT
-approved (see Phasing). Sections below note where the implementation
-refined the original design.
+v3. Phase 3 in progress - windowless mode landed; Homebrew and
+`termic events --json` still pending. `termic mcp` stays parked under
+discussion and NOT approved (see Phasing). Sections below note where the
+implementation refined the original design.
 
 A `termic` command that creates tasks, lists them with live agent state, focuses
 the GUI, injects prompts, and attaches a real TTY to an agent's PTY, from any
@@ -697,6 +698,41 @@ protocol change.
   later; hooks themselves are a separate future feature, not part of this
   plan.
 
+  Windowless mode implemented, where measurement refined the sketch:
+  - The trap's "keep the webview alive hidden" branch WON on evidence, so
+    no orchestration moved to Rust. A hidden webview under
+    `ActivationPolicy::Accessory` is not suspended: JS keeps running
+    indefinitely at WebKit's 1 Hz background-timer floor, and Rust->JS
+    event delivery (the path PTY output takes) is not throttled at all
+    (measured full rate). Every settle constant is >=3s and the byte-quiet
+    check is wall-clock (`Date.now() - lastOutputAt`), so detection
+    semantics are unchanged; the clamp costs latency, not correctness.
+    `PUSH_DEBOUNCE_MS` (80) stretches to ~1s, well inside the server's
+    120s staleness cutoff. Verified end to end: with the app windowless,
+    `termic list` still reports live per-task work state from the pushed
+    cache.
+  - Scope note: this is macOS app semantics (Close -> windowless, Quit ->
+    teardown), NOT a separate daemon. It is also ORTHOGONAL to the rest of
+    Phase 3 - as this plan already said, "the socket protocol does not change
+    for it". `events --json` and Homebrew do not depend on it, and the
+    CLI-facing part is just `--headless` plus the `open --args` change. The
+    substance is a product decision: closing the window used to QUIT Termic
+    and kill every running agent, and now it does not. There is no headless-without-a-
+    webview mode, and per the design there must not be: the webview owns
+    PTY lifetime (unmounting a task kills its agent) and every work-state
+    signal.
+  - The cost model is the opposite of the intuition, and is why windowless
+    mode has a webview half: hiding the WINDOW does not pause xterm's
+    renderers (they key on zero geometry, which only `display:none`
+    produces). See docs/performance.md bear trap 2b for the numbers.
+    Windowless mode keeps agents alive; it does not make Termic cheaper,
+    and it reclaims no memory.
+  - `--headless` (how the CLI auto-launches) boots straight into
+    windowless mode so a shell command never steals a window or a dock icon.
+    An instance that has never shown a window stays `Accessory`; once the
+    user has seen one, the dock icon persists for the process lifetime,
+    matching Mail/Messages.
+
 ### `termic mcp`: under discussion, NOT approved
 
 A stdio<->socket shim (~a day) that would make termic drivable by any MCP
@@ -789,12 +825,16 @@ Incremental review, big-bang exposure.
 - **Do not serve the socket on the IPC/main thread.** Sync IO on the WKWebView
   event-loop thread froze the Mac once already (docs/ipc.md). The automation
   bridge's dedicated-thread model is the template.
-- **Webview RPC needs a live webview.** Fine in v1 (app dies with the window),
-  but Phase 3's windowless mode must either keep the webview alive hidden or
-  move the orchestration handlers down to Rust first.
+- **Webview RPC needs a live webview.** RESOLVED in Phase 3 by keeping the
+  webview alive hidden (measured: not suspended, see Phasing), so no
+  orchestration moved to Rust. The constraint is now permanent rather than
+  transitional: windowless mode MUST keep the webview alive, because the
+  webview owns PTY lifetime (unmounting a task kills its agent) and every
+  work-state signal `--wait` rides. A future "no webview at all" daemon would
+  have to move both down to Rust first.
 - **Occluded windows freeze rAF** (docs/automation.md). The prompt-injection
   settle path must stay on wall-clock timers, never rAF, or `termic new -p`
-  breaks exactly when the app is backgrounded, which for a CLI is always.
+  breaks exactly when the app is windowless, which for a CLI is always.
 - **cwd resolution is ambiguous**: a path can be inside a project repo AND a
   task worktree of another project (worktrees live under `~/termic/tasks/`).
   Resolve worktree-first, then longest project-path prefix; `--project`

@@ -24,7 +24,8 @@ until `make e2e` is green and this file reflects it.
 | ✅ Create (wizard) | NewTaskDialog: name + shell CLI + Main-checkout → Create → task exists | `task.e2e.ts` |
 | ✅ Task spawn | Task created; agent PTY comes alive; PTY write round-trips; agent OSC title reaches the app | `task.e2e.ts` |
 | ✅ Agent working | After a real submit, the agent enters the working state | `agent.e2e.ts` |
-| ✅ Agent attention | A backgrounded agent flags completion (unread/done) when it finishes | `agent.e2e.ts` |
+| ✅ Agent attention | An agent you are not viewing flags completion (unread/done) when it finishes | `agent.e2e.ts` |
+| ✅ Windowless completion | An agent finishing while Termic is windowless still flags unread/done, even for the task that was active | `app.e2e.ts` |
 | ✅ Pending work defers done | An agent that backgrounds work and returns to its idle title holds the done badge back past byte-quiet (4s) and the settle timer (5s); done fires once its status line clears | `agent.e2e.ts` |
 | ✅ A hold that never clears ends | A status line that never clears cannot pin a tab to "working": the absolute ceiling force-clears it (shortened for the test via `localStorage.workDoneCeilingMs`) | `agent.e2e.ts` |
 | ✅ A premature done is taken back | A done fired at a stage boundary is undone when the agent goes back to work (spinner returns, stale bullet drops), and the turn's real completion still fires | `agent.e2e.ts` |
@@ -63,6 +64,7 @@ until `make e2e` is green and this file reflects it.
 | ✅ Signal inspector layout | Observed titles render whole (no clipped column) and each row offers a copy button | `settings.e2e.ts` |
 | ✅ Dialogs/palettes | Shortcuts help, prompt palette, broadcast open (and close) | `app.e2e.ts` |
 | ✅ More dialogs | Changelog, welcome, race dialog open | `app.e2e.ts` |
+| ✅ Windowless mode | Close backgrounds without killing the task; panes collapse to zero geometry; agent output keeps flowing; `raise` restores window + panes | `app.e2e.ts` |
 | ✅ Agent race | Fire one prompt at 2 agents: cohort recorded, both spawn a PTY + receive the prompt (lastInputAt) + drive a fakeagent OSC title; runs on a no-remote repo; RaceDialog gates Start then steppers+prompt launch it; a name collision surfaces an error and records no new race | `task.e2e.ts` |
 | ✅ Preferences | Sandbox default, editor font, terminal font setters | `settings.e2e.ts` |
 | ✅ Agent extras | YOLO toggle; aux (bottom) terminal | `agent.e2e.ts` |

@@ -6,7 +6,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, TerminalSquare, Copy, Check, ChevronUp, ChevronDown, ChevronRight, X, Loader2 } from "lucide-react";
 import { PopoverRoot, PopoverTrigger, PopoverContent } from "@/components/ui/Popover";
 import { useUI } from "@/store/ui";
-import { useApp } from "@/store/app";
+import { isUserWatching, useApp } from "@/store/app";
+import {
+  QUIET_MS, SAMPLE_MS, SCROLLBACK_STABLE_SAMPLES, SETTLE_SAMPLES,
+} from "@/lib/settleTiming";
 import { cn } from "@/lib/utils";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -43,15 +46,15 @@ import { ReviewCommentsBar } from "./ReviewCommentsBar";
 
 interface Props { task: Task; tab: TerminalTab; active: boolean; }
 
-// Settled-detection knobs. We sample the visible buffer every SAMPLE_MS and
-// mark the tab "settled" once SETTLE_SAMPLES consecutive samples produce the
-// same hash. Net stillness threshold = SETTLE_SAMPLES * SAMPLE_MS = 6 s.
-// This only fires when the tab was ALREADY in "working" — so a 6 s gap in
-// the middle of an agent turn would demote spuriously only if every sender
-// signal also fell silent during that gap. Acceptable tradeoff vs. 12 s of
-// stale spinner after a real finish.
-const SAMPLE_MS = 3000;
-const SETTLE_SAMPLES = 2;
+// Settled-detection knobs live in lib/settleTiming.ts, which documents the
+// 1 Hz floor a hidden webview clamps them to and is asserted on by
+// settleTiming.test.ts. We sample the visible buffer every SAMPLE_MS and mark
+// the tab "settled" once SETTLE_SAMPLES consecutive samples produce the same
+// hash. Net stillness threshold = SETTLE_SAMPLES * SAMPLE_MS = 6 s. This only
+// fires when the tab was ALREADY in "working" — so a 6 s gap in the middle of
+// an agent turn would demote spuriously only if every sender signal also fell
+// silent during that gap. Acceptable tradeoff vs. 12 s of stale spinner after
+// a real finish.
 // Seconds a finished "Run setup" tab lingers before auto-closing (counter in
 // the "Setup finished." banner; click closes immediately).
 const SETUP_AUTO_CLOSE_S = 5;
@@ -359,7 +362,11 @@ const captureArmedRef = useRef(false);
     // focus-gating below so a loop the user is watching keeps advancing.
     if (sendNextQueuedRef.current?.()) return true;
     const app = useApp.getState();
-    const isActive = app.activeTaskId === task.id && app.activeTab[task.id] === tab.id;
+    // Shared predicate: also false while windowless, where there is no window
+    // to have seen anything. Without that this returns early, sets "idle", and
+    // never reaches markAttention - so a task left active when the window
+    // closed would finish with no badge and no notification.
+    const isActive = isUserWatching(task.id, tab.id);
     if (seen || isActive) {
       // Acknowledged: clear to idle, no badge, no bell.
       debugLogRef.current?.("done-seen", reason);
@@ -948,8 +955,7 @@ const captureArmedRef = useRef(false);
       // Snapshot focus at the moment the agent went idle (work finished).
       // If the user was looking then, they saw the result even if they
       // navigate away before this 5s timer fires → no badge.
-      const a = useApp.getState();
-      const seenAtIdle = a.activeTaskId === task.id && a.activeTab[task.id] === tab.id;
+      const seenAtIdle = isUserWatching(task.id, tab.id);
       settleTimer = setTimeout(() => {
         wdlog(`settle fired → workState=done`);
         fireDone(`settle timer (${reason})`, "done", seenAtIdle);
@@ -2098,11 +2104,6 @@ const captureArmedRef = useRef(false);
     // toggling the setting in Settings takes effect immediately without
     // requiring a terminal remount. Previously captured at render time
     // (stale snapshot) which meant the toggle had no effect on mounted tabs.
-    const QUIET_MS = 4_000;
-    // 3 samples × 3s = 9s of no NEW scrollback lines before declaring
-    // done from scrollback-stability. Tolerant of slow tool output;
-    // strict enough to fire even when a status counter keeps ticking.
-    const SCROLLBACK_STABLE_SAMPLES = 3;
     // ABSOLUTE ceiling — see the check below. Resolved here rather than per
     // tick: the tick is already the hot path (it hashes the viewport), and a
     // debug knob has no business adding a storage read to it.

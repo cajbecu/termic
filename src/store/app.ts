@@ -2,6 +2,7 @@
 // updates (immutable replacements, not in-place mutations).
 
 import { create } from "zustand";
+import { useUI } from "@/store/ui";
 import type { Project, Task, Tab, TerminalTab, PersistedTab, SplitTree, PaneLeaf, SplitDir } from "@/lib/types";
 import {
   findLeaf, getAllLeaves, countLeaves, replaceNode, removeLeaf,
@@ -425,6 +426,38 @@ function durablePersistedTabs(tabs: Tab[] | undefined): PersistedTab[] {
     }));
 }
 
+
+/**
+ * True when the user can actually SEE this tab, and therefore does not need a
+ * badge, bell, or OS notification for it.
+ *
+ * The windowless clause is load-bearing. `activeTaskId` is only ever a PROXY
+ * for "the user is looking at this", and the proxy breaks the moment there is
+ * no window at all: closing to the menu bar leaves activeTaskId set, so every
+ * completion signal for that task would be swallowed exactly when a
+ * notification is the only way to learn about it.
+ *
+ * Pass `tabId` to ask about one tab, or omit it for the task-level question
+ * (the OS-notification gate, which is not per-tab).
+ *
+ * Four call sites used to spell this predicate out independently and had
+ * already drifted: fireDone/seenAtIdle omitted the split-pane leaf, so a tab
+ * the user was watching in a split still got a badge. They all route here now.
+ */
+export function isUserWatchingIn(s: AppState, taskId: string, tabId?: string): boolean {
+  if (useUI.getState().windowless) return false;
+  if (s.activeTaskId !== taskId) return false;
+  if (tabId === undefined) return true;
+  const tree = s.splitTree[taskId];
+  const paneId = s.activePaneId[taskId];
+  const leaf = (tree && paneId) ? findLeaf(tree, paneId) : null;
+  return s.activeTab[taskId] === tabId || leaf?.activeTabId === tabId;
+}
+
+/** `isUserWatchingIn` against the current store. */
+export function isUserWatching(taskId: string, tabId?: string): boolean {
+  return isUserWatchingIn(useApp.getState(), taskId, tabId);
+}
 
 export const useApp = create<AppState>((set, get) => ({
   projects: [],
@@ -2149,8 +2182,12 @@ export const useApp = create<AppState>((set, get) => ({
     let effective = state;
     const tree = s.splitTree[taskId];
     const activePaneLeaf = tree ? findLeaf(tree, s.activePaneId[taskId]) : null;
-    const isFocused = s.activeTaskId === taskId &&
-      (s.activeTab[taskId] === tabId || activePaneLeaf?.activeTabId === tabId);
+    // `activeTaskId` is a proxy for "the user is looking at this", which
+    // stops holding the moment Termic is windowless: the window is GONE, so
+    // nothing is focused however the store is set. Without this, closing to
+    // the menu bar with a task active downgrades its "done" to "idle" and the
+    // user comes back to no badge for work that finished while they were away.
+    const isFocused = isUserWatchingIn(s, taskId, tabId);
     if (isFocused) {
       if (effective === "done") {
         effective = "idle";

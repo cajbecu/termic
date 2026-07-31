@@ -454,6 +454,11 @@ export interface Settings {
    *  disabled CLI fails fast with a clear error rather than a launch
    *  timeout. See docs/plans/cli.md. */
   cli_enabled?: boolean;
+  /** What the window's close button does. Absent/"ask" = show the close
+   *  prompt (whose "Don't ask again" checkbox writes the choice back here);
+   *  "menubar" = close to the menu bar, agents keep running; "quit" = quit
+   *  Termic and kill every agent. */
+  close_action?: "ask" | "menubar" | "quit";
   /** Canonical repo paths hidden from the Add Project discovery list.
    *  Discovery still finds them; the picker filters them out until restored. */
   discovery_dismissed?: string[];

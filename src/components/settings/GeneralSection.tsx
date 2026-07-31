@@ -18,9 +18,15 @@ import { useApp } from "@/store/app";
 import { ExcludeEditor } from "./ExcludeEditor";
 import { Block, SectionTitle, Toggle, useBackendSettings } from "./Controls";
 import { cn, cleanLines } from "@/lib/utils";
+import { IS_MAC } from "@/lib/shortcuts";
 
 export function GeneralSection() {
-  const { settings, store } = useBackendSettings();
+  const { settings, store, patch } = useBackendSettings();
+  // What the window's close button does. A backend Settings field Rust
+  // re-reads on every close, so a change here applies without a restart.
+  // Three-way rather than a toggle because "ask me" has to remain reachable:
+  // ticking "Don't ask again" in the close prompt is otherwise a one-way door.
+  const [closeAction, setCloseAction] = useState<"ask" | "menubar" | "quit">("ask");
   const [reposDir, setReposDir] = useState("");
   const [originalDir, setOriginalDir] = useState("");
   const [busy, setBusy] = useState(false);
@@ -29,6 +35,20 @@ export function GeneralSection() {
   // dirty check.
   const [fileExclude, setFileExclude] = useState<string[]>([]);
   const [fileExcludeOriginal, setFileExcludeOriginal] = useState("");
+
+  useEffect(() => {
+    if (!settings) return;
+    setCloseAction(settings.close_action ?? "ask");
+  }, [settings]);
+
+  async function saveCloseAction(v: "ask" | "menubar" | "quit") {
+    if (!settings) return;
+    const prev = closeAction;
+    setCloseAction(v);
+    if (!(await patch({ close_action: v }))) {
+      setCloseAction(prev);   // persist failed: don't show unsaved state
+    }
+  }
 
   const loadRemoteImages = usePrefs(s => s.loadRemoteImages);
   const setLoadRemoteImages = usePrefs(s => s.setLoadRemoteImages);
@@ -137,6 +157,34 @@ export function GeneralSection() {
           </Button>
         </div>
       </Block>
+
+      {/* macOS only: the CloseRequested handler that reads close_action is
+          #[cfg(target_os = "macos")], because Windows and most Linux desktops
+          expect close to quit (docs/plans/windows.md). Rendering the control
+          elsewhere would save a setting nothing reads. */}
+      {IS_MAC && <Block id="setting-close-action">
+        <div className="flex flex-col gap-1">
+          <div className="text-[13.5px] text-[var(--color-fg)]">When you close the window</div>
+          <p className="text-[12.5px] text-[var(--color-fg-dim)] leading-relaxed max-w-2xl">
+            Closing used to quit Termic and stop every running agent. Keeping
+            them in the menu bar leaves them working, and Quit (⌘Q, or the
+            menu-bar item) becomes the only thing that stops them. The
+            menu-bar item appears whenever Termic is running without a window.
+          </p>
+          <div className="mt-2 max-w-sm">
+            <select
+              value={closeAction}
+              onChange={(e) => saveCloseAction(e.target.value as "ask" | "menubar" | "quit")}
+              className="h-9 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 text-[13px] text-[var(--color-fg)] outline-none transition-colors focus:border-[var(--color-accent)] focus:ring-[3px] focus:ring-[var(--color-accent-soft)]"
+              data-testid="close-action-select"
+            >
+              <option value="ask">Ask me each time</option>
+              <option value="menubar">Keep agents running in the menu bar</option>
+              <option value="quit">Quit Termic and stop agents</option>
+            </select>
+          </div>
+        </div>
+      </Block>}
 
       <Block
         id="setting-load-remote-images"

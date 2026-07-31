@@ -267,7 +267,10 @@ fn handle(stream: TcpStream, app: tauri::AppHandle) -> std::io::Result<()> {
                         });
                     }
                     if on {
-                        let _ = win.show();
+                        // Clear windowless too, or the panes stay collapsed and the
+            // window comes up blank (dev-only path, but confusing).
+            crate::leave_windowless(&app);
+            let _ = win.show();
                         let _ = win.set_focus();
                     }
                     respond(stream, 200, "application/json",
