@@ -9950,14 +9950,34 @@ pub(crate) fn close_action_from(setting: Option<&str>) -> CloseAction {
     }
 }
 
+/// Clicking "Keep in Menu Bar" is an explicit ask for the tray as the way
+/// back, even if it was previously turned off in Settings > General — a
+/// button that says "menu bar" should not leave the menu bar item off.
+/// Pure so the condition is unit-testable without an AppHandle.
+fn should_reenable_tray(action: &str, tray_enabled: Option<bool>) -> bool {
+    action == "menubar" && tray_enabled == Some(false)
+}
+
 /// Persisted by the close prompt's "Don't ask again" checkbox, and by the
 /// Settings control.
 #[tauri::command]
 fn window_close_choice(app: AppHandle, action: String, remember: bool) -> Result<(), String> {
-    if remember {
+    if remember || action == "menubar" {
         let mut s = load_settings_inner();
-        s.close_action = Some(action.clone());
-        save_settings_inner(&s).map_err(|e| e.to_string())?;
+        let mut changed = false;
+        if remember {
+            s.close_action = Some(action.clone());
+            changed = true;
+        }
+        // enter_windowless() re-reads tray_enabled() right after this, so
+        // clearing it here alone is enough to bring the tray up live.
+        if should_reenable_tray(&action, s.tray_enabled) {
+            s.tray_enabled = None;
+            changed = true;
+        }
+        if changed {
+            save_settings_inner(&s).map_err(|e| e.to_string())?;
+        }
     }
     match action.as_str() {
         "menubar" => enter_windowless(&app),
@@ -10773,6 +10793,21 @@ mod tests {
                 "unrecognised close_action {junk:?} must ask, not act",
             );
         }
+    }
+
+    #[test]
+    fn keep_in_menu_bar_reenables_a_disabled_tray() {
+        // The one case that matters: tray was off, user explicitly asked to
+        // keep Termic in the menu bar.
+        assert!(should_reenable_tray("menubar", Some(false)));
+        // Already on (None = default-on, or explicit true): nothing to do.
+        assert!(!should_reenable_tray("menubar", None));
+        assert!(!should_reenable_tray("menubar", Some(true)));
+        // A disabled tray must stay disabled for any OTHER close action —
+        // this is specifically about the "menu bar" button, not a general
+        // "any close re-enables it" rule.
+        assert!(!should_reenable_tray("quit", Some(false)));
+        assert!(!should_reenable_tray("ask", Some(false)));
     }
 
     #[test]

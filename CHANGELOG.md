@@ -4,7 +4,7 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [0.25.1] - 2026-07-31
+## [0.25.2] - 2026-07-31
 
 A tray attention list, CLI send and attach, and several agent work-state fixes.
 
@@ -16,7 +16,7 @@ A tray attention list, CLI send and attach, and several agent work-state fixes.
 - Drag a file from the sidebar tree onto a terminal to type its path at the prompt, the same affordance a Finder drag already had. (#136)
 - Resume now lives behind one row in the project menu that opens a submenu of your last 5 archived sessions, instead of listing them at the top level.
 - History gets a bulk "empty the archive" action, behind a destructive confirmation naming the exact count.
-- The menu-bar item can be turned off in Settings, General, for anyone who doesn't want a permanent icon there. On by default; applies live, no restart needed.
+- A "Show Termic in the menu bar" toggle in Settings, General, for anyone who doesn't want a permanent icon there. On by default and applies live, no restart needed. Choosing "Keep in Menu Bar" from the close prompt turns it back on if it was off, since that button is an explicit ask for the tray as your way back in.
 
 ### Bug fixes
 - Claude's questions and permission prompts are detected as needing your input instead of being marked done, and a backgrounded subagent still running no longer shows as finished.
