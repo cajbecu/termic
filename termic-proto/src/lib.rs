@@ -31,7 +31,10 @@ use std::io::{self, BufRead, Read, Write};
 /// the bidirectional `attach` session (AttachFrame lines after the
 /// accepted request). Exit codes 10 (apply conflict) and 11 (attach
 /// target closed) become live.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
+
+/// serde default for `QuitData::running`.
+pub(crate) fn default_true() -> bool { true }
 
 /// Socket + token file names inside the app's data dir.
 pub const SOCKET_FILE: &str = "termic.sock";
@@ -224,6 +227,22 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
+    /// Shut the app down: every PTY, script process group, in-flight grep
+    /// and spotlight session goes with it (the same teardown Cmd-Q does).
+    /// Authenticated, because it is the most destructive thing the socket
+    /// can do. The confirmation prompt is the CLI's job (`--yes` skips it);
+    /// the server never asks.
+    Quit {
+        /// Actually quit. Defaults to FALSE, i.e. preview only.
+        ///
+        /// Deliberately phrased so the fail-open direction is the safe one.
+        /// The protocol tolerates unknown fields by design, so `previw: true`
+        /// or any future rename would silently take the default - and for the
+        /// most destructive verb on the socket that default must not be
+        /// "tear the app down".
+        #[serde(default)]
+        commit: bool,
+    },
     /// Archive a task. Live agent PTYs are SIGKILLed first. The
     /// confirmation prompt is the CLI's job (`--yes` skips it); the
     /// server never asks.
@@ -399,6 +418,7 @@ pub enum ReplyData {
     Open(OpenData),
     New(NewData),
     Wait(WaitData),
+    Quit(QuitData),
     Archive(ArchiveData),
     ProjectList(ProjectListData),
     ProjectAdd(ProjectAddData),
@@ -465,6 +485,37 @@ pub struct WaitData {
     pub task_id: String,
     #[serde(flatten)]
     pub result: WaitResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QuitData {
+    /// Always true from the server (it answered, so it was running). The
+    /// not-running case is synthesised by the CLI with `running: false`, so
+    /// a script can branch on this one field either way.
+    #[serde(default = "crate::default_true")]
+    pub running: bool,
+    /// Tasks with at least one live agent PTY.
+    #[serde(default)]
+    pub tasks_with_agents: u32,
+    /// Live agent PTYs that will die (or died) with the app.
+    #[serde(default)]
+    pub live_agents: u32,
+    /// TASKS the webview reports as working, not agents: the work-state
+    /// cache aggregates per task, so two busy tabs in one task count once.
+    /// Named for what it counts rather than what a caller might hope.
+    /// Clamped to `tasks_with_agents`, because a lagging cache can otherwise
+    /// name a task whose agent PTY is already gone.
+    ///
+    /// `None` means UNKNOWN, not zero: the cache went stale, so the webview
+    /// stopped reporting. The distinction is load-bearing for a confirmation
+    /// prompt - collapsing it into 0 would render "nothing is working" and
+    /// "I cannot tell" identically, and understating what is about to die is
+    /// the wrong direction for a safety question. `live_agents` is ground
+    /// truth either way; only this field can go dark.
+    #[serde(default)]
+    pub working_tasks: Option<u32>,
+    /// False for `preview`, true when the app is on its way out.
+    pub quitting: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1095,6 +1146,8 @@ mod tests {
                 cwd: None,
             },
             Command::Wait { task: None, project: None, timeout_ms: None, cwd: Some("/t".into()) },
+            Command::Quit { commit: false },
+            Command::Quit { commit: true },
             Command::Archive { task: "fix-auth".into(), project: Some("web".into()) },
             Command::ProjectAdd { path: "/repo/web".into(), non_git: false },
             Command::ProjectAdd { path: "/notes/plain".into(), non_git: true },
@@ -1210,6 +1263,13 @@ mod tests {
             ReplyData::Wait(WaitData {
                 task_id: "w1".into(),
                 result: WaitResult { outcome: WaitOutcome::Timeout, state: None, detail: Some("x".into()) },
+            }),
+            ReplyData::Quit(QuitData {
+                running: true,
+                tasks_with_agents: 2,
+                live_agents: 3,
+                working_tasks: Some(1),
+                quitting: true,
             }),
             ReplyData::Archive(ArchiveData {
                 task_id: "w1".into(),

@@ -92,6 +92,13 @@ Rules that matter:
 - `"$TERMIC_CLI" project add <path>` - register a repo (needed once
   before creating tasks in it).
 
+DO NOT run `"$TERMIC_CLI" quit`. Its `about` in `help --json` says the
+same, so this block and the machine surface agree. It exists for the
+human at the keyboard, not for you. It kills EVERY agent in EVERY task, including the sibling
+agents you may be coordinating with and the session you are running in,
+and it reverts any active spotlight session, which force-checks-out the
+project's main checkout. `archive` is scoped to one task; this is not.
+
 (`attach` exists too, but it is interactive and needs a real TTY; as an
 agent you want `send`/`logs`/`result` instead.)
 

@@ -123,16 +123,21 @@ fn try_connect(paths: &SocketPaths) -> std::io::Result<Conn> {
 pub fn connect_or_launch(paths: &SocketPaths, no_launch: bool) -> Result<Conn, CliError> {
     match try_connect(paths) {
         Ok(c) => return Ok(c),
-        Err(_) if no_launch => {
-            return Err(CliError::new(
-                exit_code::APP_NOT_RUNNING,
-                "Termic must be open (--no-launch given)",
-            ));
-        }
+        // An EXPLICIT socket path outranks the no-launch message: the user
+        // pointed us somewhere, and "Termic must be open" would hide the fact
+        // that we were looking at their path and did not find it. `quit`
+        // passes no_launch internally, so without this ordering its
+        // misconfiguration error would blame a flag the user never typed.
         Err(_) if paths.custom => {
             return Err(CliError::new(
                 exit_code::APP_NOT_RUNNING,
                 format!("Termic is not listening on TERMIC_SOCKET ({})", paths.socket.display()),
+            ));
+        }
+        Err(_) if no_launch => {
+            return Err(CliError::new(
+                exit_code::APP_NOT_RUNNING,
+                "Termic must be open (--no-launch given)",
             ));
         }
         Err(_) => {}
@@ -295,6 +300,52 @@ pub fn reply_to_result(reply: proto::Reply) -> Result<proto::ReplyData, CliError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // `quit` passes no_launch internally and swallows APP_NOT_RUNNING into a
+    // success, but ONLY on the default socket. These two pin the arm ordering
+    // that makes that safe: an EXPLICIT TERMIC_SOCKET must produce the
+    // path-naming error, not the no-launch one, so the swallow (which keys on
+    // `custom`) cannot report "nothing to quit" for a socket the user pointed
+    // us at while agents are still running elsewhere.
+    #[test]
+    fn an_explicit_socket_that_is_missing_names_the_path() {
+        let paths = SocketPaths {
+            socket: PathBuf::from("/nonexistent/termic-explicit.sock"),
+            token_file: PathBuf::from("/nonexistent/termic-explicit.token"),
+            custom: true,
+        };
+        let err = match connect_or_launch(&paths, true) {
+            Ok(_) => panic!("nothing should be listening on this path"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code, exit_code::APP_NOT_RUNNING);
+        assert!(
+            err.message.contains("TERMIC_SOCKET"),
+            "an explicit socket must name itself, got: {}",
+            err.message,
+        );
+        assert!(
+            !err.message.contains("--no-launch"),
+            "must not blame a flag the user never typed: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn the_default_socket_falls_back_to_the_no_launch_message() {
+        let paths = SocketPaths {
+            socket: PathBuf::from("/nonexistent/termic-default.sock"),
+            token_file: PathBuf::from("/nonexistent/termic-default.token"),
+            custom: false,
+        };
+        let err = match connect_or_launch(&paths, true) {
+            Ok(_) => panic!("nothing should be listening on this path"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code, exit_code::APP_NOT_RUNNING);
+        assert!(!err.message.contains("TERMIC_SOCKET"), "got: {}", err.message);
+    }
+
     use termic_proto::{ErrorCode, Reply, ReplyData};
 
     #[test]
