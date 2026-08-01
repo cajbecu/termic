@@ -214,8 +214,10 @@ describe("editor save", () => {
 });
 
 // P2: the editor handles non-markdown code files (CodeMirror language support).
-// Creates a Python file, opens it, asserts CodeMirror renders it with
-// syntax-highlight token spans. Git-cleans the file away.
+// Writes a file, opens it, asserts CodeMirror renders it with syntax-highlight
+// token spans — with no language extension a file renders as zero classed
+// spans, so that assertion is what proves langForPath resolved the grammar.
+// Git-cleans the files away.
 const fixture = process.env.E2E_FIXTURE ?? path.join(process.cwd(), ".e2e", "fixture-repo");
 
 describe("code editor", () => {
@@ -229,44 +231,34 @@ describe("code editor", () => {
     }
   });
 
-  it("opens a code file with syntax highlighting", async () => {
-    await waitForAppShell();
-    await requireTermicApi();
-    taskId = await openTask("e2e-code");
-
-    writeFileSync(
-      path.join(fixture, "hello.py"),
-      "def greet(name):\n    return f'hi {name}'\n",
-    );
+  // Write `name`, open it from the tree, assert it loaded and is highlighted.
+  const openHighlighted = async (name: string, source: string, marker: string) => {
+    writeFileSync(path.join(fixture, name), source);
     await browser.execute(
       (id) => window.__termic!.useApp.getState().bumpFsRevision(id),
       taskId,
     );
 
-    // Open it in the editor.
+    const sel = `[data-path="${name}"]`;
     await browser.waitUntil(
-      () =>
-        browser.execute(
-          () => !!document.querySelector('[data-path="hello.py"]'),
-        ),
-      { timeout: 10_000, timeoutMsg: "hello.py never appeared in the tree" },
+      () => browser.execute((s) => !!document.querySelector(s), sel),
+      { timeout: 10_000, timeoutMsg: `${name} never appeared in the tree` },
     );
-    await browser.execute(() =>
-      (document.querySelector('[data-path="hello.py"]') as HTMLElement).click(),
-    );
+    await browser.execute((s) => {
+      (document.querySelector(s) as HTMLElement).click();
+    }, sel);
 
     // CodeMirror renders the content...
     await browser.waitUntil(
       () =>
-        browser.execute(() =>
-          (document.querySelector(".cm-content")?.textContent ?? "").includes(
-            "greet",
-          ),
+        browser.execute(
+          (m) =>
+            (document.querySelector(".cm-content")?.textContent ?? "").includes(m),
+          marker,
         ),
-      { timeout: 10_000, timeoutMsg: "CodeMirror never loaded hello.py" },
+      { timeout: 10_000, timeoutMsg: `CodeMirror never loaded ${name}` },
     );
-    // ...with syntax-highlight token spans (the Python language extension is
-    // active, so keywords/strings become classed spans).
+    // ...with syntax-highlight token spans.
     await browser.waitUntil(
       () =>
         browser.execute(
@@ -274,8 +266,57 @@ describe("code editor", () => {
             document.querySelectorAll(".cm-content .cm-line span[class]")
               .length > 0,
         ),
-      { timeout: 8_000, timeoutMsg: "no syntax-highlight token spans" },
+      { timeout: 8_000, timeoutMsg: `no syntax-highlight token spans for ${name}` },
+    );
+  };
+
+  it("opens a code file with syntax highlighting", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask("e2e-code");
+
+    await openHighlighted(
+      "hello.py",
+      "def greet(name):\n    return f'hi {name}'\n",
+      "greet",
     );
     await snap("code-editor.png");
+  });
+
+  it("highlights protobuf, including the proto3 syntax the legacy mode misses", async () => {
+    await openHighlighted(
+      "hello.proto",
+      'syntax = "proto3";\n\n/* a block\n   comment */\nmessage Greeting {\n  oneof body {\n    string text = 1;\n    map<string, string> fields = 2;\n  }\n}\n',
+      "Greeting",
+    );
+
+    // The `oneof` and the block comment land inside classed spans — with the
+    // unpatched legacy mode both fall through as unstyled text.
+    const styled = await browser.execute(() =>
+      [...document.querySelectorAll(".cm-content .cm-line span[class]")].map(
+        (s) => s.textContent ?? "",
+      ),
+    );
+    expect(styled).toContain("oneof");
+    expect(styled.some((t) => t.includes("a block"))).toBe(true);
+
+    await snap("code-editor-proto.png");
+  });
+
+  it("highlights elixir", async () => {
+    await openHighlighted(
+      "hello.ex",
+      'defmodule Greeter do\n  @greeting "hi"\n\n  def greet(name) do\n    name |> String.trim() |> then(&"#{@greeting} #{&1}")\n  end\nend\n',
+      "Greeter",
+    );
+
+    const styled = await browser.execute(() =>
+      [...document.querySelectorAll(".cm-content .cm-line span[class]")].map(
+        (s) => s.textContent ?? "",
+      ),
+    );
+    expect(styled).toContain("defmodule");
+
+    await snap("code-editor-elixir.png");
   });
 });

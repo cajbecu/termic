@@ -88,6 +88,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "codemirror": "^6.0.2",
+    "codemirror-lang-elixir": "^4.0.1",
     "dompurify": "^3.4.11",
     "lucide-react": "^0.469.0",
     "markdown-it": "^14.2.0",
