@@ -4,7 +4,7 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [0.25.2] - 2026-07-31
+## [0.25.3] - 2026-08-01
 
 A tray attention list, CLI send and attach, and several agent work-state fixes.
 
@@ -17,6 +17,7 @@ A tray attention list, CLI send and attach, and several agent work-state fixes.
 - Resume now lives behind one row in the project menu that opens a submenu of your last 5 archived sessions, instead of listing them at the top level.
 - History gets a bulk "empty the archive" action, behind a destructive confirmation naming the exact count.
 - A "Show Termic in the menu bar" toggle in Settings, General, for anyone who doesn't want a permanent icon there. On by default and applies live, no restart needed. Choosing "Keep in Menu Bar" from the close prompt turns it back on if it was off, since that button is an explicit ask for the tray as your way back in.
+- `termic quit` tears a windowless Termic down from the shell, naming what it's about to kill (agents, working tasks) and asking to confirm, or `--yes` for scripts. Windowless mode had left the menu-bar Quit as the only way to stop Termic, backwards for a CLI-driven setup.
 
 ### Bug fixes
 - Claude's questions and permission prompts are detected as needing your input instead of being marked done, and a backgrounded subagent still running no longer shows as finished.
@@ -29,7 +30,7 @@ A tray attention list, CLI send and attach, and several agent work-state fixes.
 - The termic CLI's Getting started commands in Settings can now be selected and copied.
 
 ### Thanks
-- Michael Hohlios (@MHohlios) for CLI phases 2 and 3 (send, attach, logs, result, diff, apply) and the agent signal proposer.
+- Michael Hohlios (@MHohlios) for CLI phases 2 and 3 (send, attach, logs, result, diff, apply), `termic quit`, and the agent signal proposer.
 - ghelton-procense for the CLI Getting started selectable-text fix.
 
 ## [0.24.0] - 2026-07-24
