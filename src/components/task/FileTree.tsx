@@ -383,6 +383,10 @@ function TreeNode({ taskId, entry, depth, rel, root, expanded, children_, toggle
     }
   }
 
+  // Double-click pins the preview tab, the Sublime/VS Code/JetBrains gesture
+  // (single click = temporary preview, double = keep). Opening the file in its
+  // OS default app lives in the right-click menu instead (CopyPathItems), where
+  // every one of those editors also puts it. See the discussion on GH #147.
   function onDoubleClick() {
     if (entry.is_dir) return;
     const existing = tabs.find(t => t.type === "edit" && t.path === rel);

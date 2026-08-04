@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { archiveTask, dismissOverlays, ensureActiveTask, openTask, requireTermicApi, snap, waitForAppShell } from "../helpers";
 
@@ -430,3 +430,214 @@ describe("file tree", () => {
   });
 });
 
+// P2: the file row's right-click menu hands the file to the OS (GH #147).
+// Cases: the two OS actions lead the menu in the agreed order; a binary the
+// editor can't render (.blend), a text file it CAN render (.scad) and an image
+// with its own in-app viewer (.png) all open externally; a folder offers no
+// "Open in default app"; and double-click still PINS rather than launching.
+//
+// The .scad case is the one that settled the design discussion: it is plain
+// text, so the editor renders it perfectly, yet the user still wants OpenSCAD.
+// No "is this file renderable" heuristic can express that, which is why this
+// lives on an explicit menu entry rather than a gesture.
+//
+// The e2e binary records opens to a log instead of running them (see
+// `open_file_external` in lib.rs): the suite must not launch Blender, and the
+// reveal fallback would pop a Finder window over the window under test.
+describe("open a file in its default app", () => {
+  let taskId: string | undefined;
+  const openedLog = path.join(process.cwd(), ".e2e", "profile", "e2e-opened.log");
+
+  after(async () => {
+    rmSync(openedLog, { force: true });
+    for (const f of ["e2e-model.blend", "e2e-part.scad", "e2e-shot.png"]) {
+      rmSync(path.join(fixture, f), { force: true });
+    }
+    rmSync(path.join(fixture, "e2e-open-dir"), { force: true, recursive: true });
+    if (taskId) await archiveTask(taskId);
+  });
+
+  const opened = () => {
+    try {
+      return readFileSync(openedLog, "utf8").split("\n").filter(Boolean);
+    } catch {
+      return [];   // not written yet — the caller is inside a waitUntil
+    }
+  };
+
+  // Dispatched, not driven: a WebDriver right-click does not reach Radix's
+  // onContextMenu in this WKWebView (measured), the same class of gap as its
+  // double-click. A `contextmenu` MouseEvent goes through the real Radix
+  // trigger, so everything from the menu opening downwards is genuinely
+  // exercised — which the gesture-based version could never claim.
+  const openRowMenu = async (rel: string) => {
+    await browser.execute((sel) => {
+      const el = document.querySelector(sel) as HTMLElement;
+      if (!el) throw new Error(`no row ${sel}`);
+      const r = el.getBoundingClientRect();
+      el.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true, cancelable: true, button: 2,
+          clientX: r.left + 10, clientY: r.top + 10,
+        }),
+      );
+    }, `[data-path="${rel}"]`);
+    await browser.waitUntil(async () => (await menuItems()).length > 0, {
+      timeout: 8_000,
+      timeoutMsg: `the context menu never opened for ${rel}`,
+    });
+  };
+
+  // Scoped to the menu that holds the path items, never a bare [role="menu"]:
+  // menus stack, and a closing one can linger in the DOM (see the e2e skill).
+  //
+  // Labels come from innerText, one line per item, NOT from a [role="menuitem"]
+  // query: ContextMenuItem passes role={undefined} for plain items (it only
+  // sets a role for the radio variant), so the ARIA selector matches nothing.
+  const menuItems = () =>
+    browser.execute(() => {
+      const menu = [...document.querySelectorAll('[role="menu"]')].find((m) =>
+        (m as HTMLElement).innerText.includes("Copy path"),
+      ) as HTMLElement | undefined;
+      if (!menu) return [] as string[];
+      return menu.innerText.split("\n").map((s) => s.trim()).filter(Boolean);
+    });
+
+  const clickMenuItem = (label: string) =>
+    browser.execute((text) => {
+      const menu = [...document.querySelectorAll('[role="menu"]')].find((m) =>
+        (m as HTMLElement).innerText.includes("Copy path"),
+      ) as HTMLElement | undefined;
+      if (!menu) throw new Error("the path context menu is not open");
+      // Deepest element whose own text is exactly the label, so a wrapper that
+      // happens to contain it doesn't get clicked instead.
+      const item = [...menu.querySelectorAll("*")]
+        .reverse()
+        .find((i) => (i as HTMLElement).innerText?.trim() === text) as HTMLElement | undefined;
+      if (!item) throw new Error(`no menu item "${text}"`);
+      item.click();
+    }, label);
+
+  const openExternally = async (rel: string) => {
+    rmSync(openedLog, { force: true });
+    await openRowMenu(rel);
+    await clickMenuItem("Open in default app");
+    await browser.waitUntil(() => opened().length > 0, {
+      timeout: 8_000,
+      timeoutMsg: `"Open in default app" on ${rel} never reached the backend`,
+    });
+    return opened();
+  };
+
+  it("leads the menu with the two OS actions, in order", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+
+    // Written BEFORE the task opens, at the repo root, so the tree picks them
+    // up on its initial load rather than through a mid-run refresh.
+    writeFileSync(path.join(fixture, "e2e-model.blend"), Buffer.from([0x00, 0xff, 0x00]));
+    writeFileSync(path.join(fixture, "e2e-part.scad"), "cube([1,1,1]);\n");
+    // This describe's own folder, so the dir case does not depend on one that
+    // another describe creates in a different task.
+    mkdirSync(path.join(fixture, "e2e-open-dir"), { recursive: true });
+    // A 1x1 PNG: the routing class with its OWN in-app viewer (previewPaths).
+    writeFileSync(
+      path.join(fixture, "e2e-shot.png"),
+      Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        "base64",
+      ),
+    );
+
+    taskId = await openTask("e2e-open");
+    await dismissOverlays();
+    await ensureActiveTask(taskId);
+    await browser.waitUntil(
+      () => browser.execute(() => !!document.querySelector('[data-path="e2e-model.blend"]')),
+      { timeout: 15_000, timeoutMsg: "the .blend row never appeared in the tree" },
+    );
+
+    await openRowMenu("e2e-model.blend");
+    const items = await menuItems();
+    expect(items[0]).toBe("Open in default app");
+    expect(items[1]).toMatch(/^Reveal in /);
+    await snap("file-context-menu.png");
+    await browser.keys(["Escape"]);
+  });
+
+  it("opens a binary the editor cannot render", async () => {
+    // .blend is not valid UTF-8, so clicking it only ever gets the "it looks
+    // binary" editor message. The case with no in-app answer at all.
+    const paths = await openExternally("e2e-model.blend");
+    expect(paths.some((p) => p.endsWith("/e2e-model.blend"))).toBe(true);
+    // Absolute, not task-relative: the backend shells out with no task context.
+    expect(paths[paths.length - 1].startsWith("/")).toBe(true);
+  });
+
+  it("opens a text file the editor renders perfectly well", async () => {
+    const paths = await openExternally("e2e-part.scad");
+    expect(paths.some((p) => p.endsWith("/e2e-part.scad"))).toBe(true);
+  });
+
+  it("opens an image that has its own in-app viewer", async () => {
+    // A PNG already previews in the app, so the external open is an ADDITION
+    // here. "termic can show it" is not a reason to withhold the real editor.
+    const paths = await openExternally("e2e-shot.png");
+    expect(paths.some((p) => p.endsWith("/e2e-shot.png"))).toBe(true);
+  });
+
+  it("offers no default-app entry for a folder", async () => {
+    // `openPath` on a directory already means "open it in the file manager",
+    // so a folder would otherwise show the same action twice.
+    await openRowMenu("e2e-open-dir");
+    const items = await menuItems();
+    expect(items).not.toContain("Open in default app");
+    expect(items[0]).toMatch(/^Open in /);   // the file-manager entry leads
+    await browser.keys(["Escape"]);
+  });
+
+  it("keeps double-click as pin, launching nothing", async () => {
+    // The convention Simion flagged: single click previews, double click keeps
+    // the tab. A regression here would launch an app from a gesture that every
+    // major editor uses for pinning.
+    rmSync(openedLog, { force: true });
+    const previewTabs = () =>
+      browser.execute(
+        (id) =>
+          (window.__termic!.useApp.getState().tabs[id] ?? [])
+            .filter((t: any) => t.type === "edit" && t.path === "e2e-part.scad").length,
+        taskId,
+      );
+    await browser.execute(
+      (sel) => (document.querySelector(sel) as HTMLElement).click(),
+      '[data-path="e2e-part.scad"]',
+    );
+    // Wait for the tab before the second click: onDoubleClick looks the tab up
+    // in the `tabs` array from its own render, so firing both in one
+    // synchronous block would hand it a stale list and pin nothing. A real
+    // user's two clicks are separated by a re-render; this reproduces that.
+    await browser.waitUntil(async () => (await previewTabs()) > 0, {
+      timeout: 8_000,
+      timeoutMsg: "the first click never opened a preview tab",
+    });
+    await browser.execute(
+      (sel) =>
+        (document.querySelector(sel) as HTMLElement).dispatchEvent(
+          new MouseEvent("dblclick", { bubbles: true, cancelable: true }),
+        ),
+      '[data-path="e2e-part.scad"]',
+    );
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          (id) =>
+            (window.__termic!.useApp.getState().tabs[id] ?? []).some(
+              (t: any) => t.type === "edit" && t.path === "e2e-part.scad" && !t.preview,
+            ),
+          taskId,
+        ),
+      { timeout: 8_000, timeoutMsg: "double-click no longer pins the preview tab" },
+    );
+    expect(opened()).toEqual([]);
+  });
+});
