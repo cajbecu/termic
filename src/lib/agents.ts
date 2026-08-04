@@ -582,8 +582,10 @@ export function decideResume(opts: {
  *    C. name_args (claude `--name`):
  *       - Appended on every primary-tab spawn (worktree or repo-root,
  *         mint or resume) so the task name is always visible.
- *       - Skipped for secondary "+" tabs (`isPrimary=false`) and
- *         no-task spawns (`task` absent).
+ *       - Skipped for secondary "+" tabs (`isPrimary=false`), no-task
+ *         spawns (`task` absent), and whenever `resumeOverride` is set
+ *         (renaming on every relaunch would reassign the session's
+ *         display name out from under the override's `--resume` target).
  *
  *    D. always-applied:
  *       - `yolo_args` appended LAST so a subcommand-style resume
@@ -666,8 +668,11 @@ export function spawnArgsForCli(
     ...resumeBlock,
     // name_args on every primary-tab spawn (worktree or repo-root, mint or
     // resume) so claude always shows the task name. Skipped for
-    // secondary "+" tabs (isPrimary=false) and no-task spawns.
-    ...(opts.isPrimary && opts.task ? (caps.name_args ?? []) : []),
+    // secondary "+" tabs (isPrimary=false), no-task spawns, and whenever a
+    // resumeOverride is active: renaming the session on every relaunch
+    // reassigns its display name out from under the override's target, so
+    // the next `--resume <name>` no longer matches (breaks after 1 relaunch).
+    ...(opts.isPrimary && opts.task && !override ? (caps.name_args ?? []) : []),
     ...(opts.yolo ? (caps.yolo_args ?? []) : []),
   ];
   return composed.map(a => expandArg(a, vars));

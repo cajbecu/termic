@@ -88,6 +88,18 @@ describe("spawnArgsForCli", () => {
     expect(second).toContain("improve-tests");
   });
 
+  it("omits name_args when a resumeOverride is active", () => {
+    const fakeTask = { id: "ws1", name: "Improve Tests", branch: "main", port: 1420 } as any;
+    // A verbatim --resume override targets the session by name; renaming it
+    // via --name on every relaunch would break the next override's lookup.
+    const args = spawnArgsForCli("claude", {
+      yolo: false, resume: false, isPrimary: true,
+      task: fakeTask, resumeOverride: "--resume {WORKSPACE_NAME}",
+    });
+    expect(args).not.toContain("--name");
+    expect(args).toContain("--resume");
+  });
+
   it("omits name_args for secondary (+) tabs", () => {
     const fakeTask = { id: "ws1", name: "Improve Tests", branch: "main", port: 1420 } as any;
     // Secondary tabs (isPrimary falsy) start fresh and never carry --name.
