@@ -139,12 +139,15 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
       // Status fetch failed — leave the current (now-viewed) diff open.
     }
   };
-  // Same syntax theme as the editor. A change re-renders → the effect
-  // below rebuilds the diff view with the new palette. The "auto" syntax
-  // theme also follows the app palette, so rebuild on theme switch too.
-  const editorThemeId = usePrefs(s => s.editorThemeId);
+  // Same syntax theme as the editor, independently configurable per app
+  // mode. A change re-renders → the effect below rebuilds the diff view
+  // with the new palette. The "auto" syntax theme also follows the app
+  // palette, so rebuild on theme switch too.
+  const editorThemeIdDark = usePrefs(s => s.editorThemeIdDark);
+  const editorThemeIdLight = usePrefs(s => s.editorThemeIdLight);
   const themeMode = usePrefs(s => s.themeMode);
   const appIsLight = resolveTheme(themeMode) === "light";
+  const editorThemeId = appIsLight ? editorThemeIdLight : editorThemeIdDark;
 
   function setModeAndPersist(m: Mode) {
     writeMode(m);

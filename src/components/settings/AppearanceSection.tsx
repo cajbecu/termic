@@ -38,8 +38,10 @@ export function AppearanceSection() {
   const selectTab = (id: AppearanceTab) => { setPreviewArmed(true); setSubTab(id); };
   const editorFontId    = usePrefs(s => s.editorFontId);
   const setEditorFontId = usePrefs(s => s.setEditorFontId);
-  const editorThemeId    = usePrefs(s => s.editorThemeId);
-  const setEditorThemeId = usePrefs(s => s.setEditorThemeId);
+  const editorThemeIdDark    = usePrefs(s => s.editorThemeIdDark);
+  const setEditorThemeIdDark = usePrefs(s => s.setEditorThemeIdDark);
+  const editorThemeIdLight    = usePrefs(s => s.editorThemeIdLight);
+  const setEditorThemeIdLight = usePrefs(s => s.setEditorThemeIdLight);
   const terminalFontId  = usePrefs(s => s.terminalFontId);
   const setTerminalFontId = usePrefs(s => s.setTerminalFontId);
   const terminalFontSize = usePrefs(s => s.terminalFontSize);
@@ -243,10 +245,18 @@ export function AppearanceSection() {
       />
 
       <Field
-        label="Editor theme"
-        hint="Syntax color scheme for the code editor and diff viewer."
+        label="Editor theme (dark)"
+        hint="Syntax color scheme for the code editor and diff viewer, when termic's own theme is dark."
         control={
-          <ThemeSelect value={editorThemeId} onChange={setEditorThemeId} />
+          <ThemeSelect value={editorThemeIdDark} onChange={setEditorThemeIdDark} />
+        }
+      />
+
+      <Field
+        label="Editor theme (light)"
+        hint="Syntax color scheme for the code editor and diff viewer, when termic's own theme is light."
+        control={
+          <ThemeSelect value={editorThemeIdLight} onChange={setEditorThemeIdLight} />
         }
       />
 
@@ -559,11 +569,13 @@ async function getUser(id: number) {
 }`;
 
 function CodePreview() {
-  const themeId  = usePrefs(s => s.editorThemeId);
+  const themeIdDark  = usePrefs(s => s.editorThemeIdDark);
+  const themeIdLight = usePrefs(s => s.editorThemeIdLight);
   const size     = usePrefs(s => s.editorFontSize);
   const ligatures = usePrefs(s => s.codeLigatures);
   const themeMode = usePrefs(s => s.themeMode);
   const appIsLight = resolveTheme(themeMode) === "light";
+  const themeId = appIsLight ? themeIdLight : themeIdDark;
   const hostRef  = useRef<HTMLDivElement>(null);
   const viewRef  = useRef<EditorView | null>(null);
   const themeComp = useRef(new Compartment());

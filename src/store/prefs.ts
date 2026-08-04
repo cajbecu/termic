@@ -27,6 +27,7 @@ import {
 
 const LS_EDITOR_FONT   = "editorFont";
 const LS_EDITOR_THEME  = "editorThemeId";
+const LS_EDITOR_THEME_LIGHT = "editorThemeIdLight";
 const LS_TERMINAL_FONT = "terminalFont";
 const LS_TERMINAL_SIZE = "terminalFontSize";
 const LS_EDITOR_SIZE   = "editorFontSize";
@@ -499,10 +500,16 @@ interface PrefsState {
   customThemeRev: number;
   /** Font for the CodeMirror editor + diff viewer. */
   editorFontId: string;
-  /** Syntax theme for the editor + diff viewer (atomone, tokyo-night, …).
-   *  Independent of the app `themeMode` — the surface still tracks the
-   *  app palette, only the token colors come from this. */
-  editorThemeId: string;
+  /** Syntax theme for the editor + diff viewer under a dark app theme
+   *  (atomone, tokyo-night, …). The surface still tracks the app palette
+   *  regardless of which syntax theme is chosen — only the token colors
+   *  come from this. */
+  editorThemeIdDark: string;
+  /** Same as `editorThemeIdDark`, but for a light app theme. Kept separate
+   *  so switching the app between light/dark doesn't force the same
+   *  syntax theme on both (a dark-optimized theme can look wrong on a
+   *  light app surface, and vice versa). */
+  editorThemeIdLight: string;
   /** Font for the xterm terminals (main + aux). Kept separate because power
    *  users often want a Nerd Font for the shell but a clean prose-friendly
    *  font for the editor. */
@@ -583,7 +590,8 @@ interface PrefsState {
   splitPaneDimAmount: number;
 
   setEditorFontId:    (id: string) => void;
-  setEditorThemeId:   (id: string) => void;
+  setEditorThemeIdDark:  (id: string) => void;
+  setEditorThemeIdLight: (id: string) => void;
   setTerminalFontId:  (id: string) => void;
   setTerminalFontSize:(px: number) => void;
   setTerminalLetterSpacing:(px: number) => void;
@@ -695,7 +703,11 @@ export const APPEARANCE_DEFAULTS = {
 } as const;
 
 const initialEditorFont   = lsGet(LS_EDITOR_FONT, APPEARANCE_DEFAULTS.editorFontId);
-const initialEditorTheme  = lsGet(LS_EDITOR_THEME, "auto");
+const initialEditorThemeDark  = lsGet(LS_EDITOR_THEME, "auto");
+// Seeds from the pre-split value on first read (no LS_EDITOR_THEME_LIGHT
+// key yet) so an existing explicit pick (or "auto") keeps applying to
+// both modes exactly as before, until the user overrides light on its own.
+const initialEditorThemeLight = lsGet(LS_EDITOR_THEME_LIGHT, initialEditorThemeDark);
 const initialTerminalFont = lsGet(LS_TERMINAL_FONT, APPEARANCE_DEFAULTS.terminalFontId);
 const initialTerminalSize = lsGetNum(LS_TERMINAL_SIZE, APPEARANCE_DEFAULTS.terminalFontSize);
 const initialTerminalLetterSpacing = Math.max(0, Math.round(lsGetNum(LS_TERMINAL_LETTERSPACING, APPEARANCE_DEFAULTS.terminalLetterSpacing)));
@@ -764,7 +776,8 @@ export const usePrefs = create<PrefsState>(set => ({
   sandboxBypassPermissions: initialSandboxBypass,
   allowScope: initialAllowScope,
   editorFontId: initialEditorFont,
-  editorThemeId: initialEditorTheme,
+  editorThemeIdDark: initialEditorThemeDark,
+  editorThemeIdLight: initialEditorThemeLight,
   terminalFontId: initialTerminalFont,
   terminalFontSize: initialTerminalSize,
   terminalLetterSpacing: initialTerminalLetterSpacing,
@@ -790,9 +803,13 @@ export const usePrefs = create<PrefsState>(set => ({
     applyEditorFont(id);
     set({ editorFontId: id });
   },
-  setEditorThemeId: (id) => {
+  setEditorThemeIdDark: (id) => {
     try { localStorage.setItem(LS_EDITOR_THEME, id); } catch {}
-    set({ editorThemeId: id });
+    set({ editorThemeIdDark: id });
+  },
+  setEditorThemeIdLight: (id) => {
+    try { localStorage.setItem(LS_EDITOR_THEME_LIGHT, id); } catch {}
+    set({ editorThemeIdLight: id });
   },
   setTerminalFontId: (id) => {
     try { localStorage.setItem(LS_TERMINAL_FONT, id); } catch {}

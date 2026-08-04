@@ -169,12 +169,15 @@ export function EditorPane({ task, tab, active, onContent }: {
 
   const editorFontSize = usePrefs(s => s.editorFontSize);
   const codeLigatures  = usePrefs(s => s.codeLigatures);
-  // Syntax theme (atomone, tokyo-night, …). Surfaces track the app
-  // palette via CSS vars; the "auto" syntax theme also follows the app
-  // palette so a light app never renders dark tokens on a light bg (#40).
-  const editorThemeId  = usePrefs(s => s.editorThemeId);
+  // Syntax theme (atomone, tokyo-night, …), independently configurable per
+  // app mode (#40): a dark-optimized theme can look wrong on a light app
+  // surface, and vice versa. "auto" within each still follows the app
+  // palette so a light app never renders dark tokens on a light bg.
+  const editorThemeIdDark  = usePrefs(s => s.editorThemeIdDark);
+  const editorThemeIdLight = usePrefs(s => s.editorThemeIdLight);
   const themeMode      = usePrefs(s => s.themeMode);
   const appIsLight     = resolveTheme(themeMode) === "light";
+  const editorThemeId  = appIsLight ? editorThemeIdLight : editorThemeIdDark;
 
   // Everything in the theme compartment: the chosen syntax theme plus the
   // surface overrides (font-size / ligatures fold in here too). All

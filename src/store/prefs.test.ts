@@ -58,6 +58,49 @@ describe("prefs: loadRemoteImages", () => {
   });
 });
 
+describe("prefs: editorThemeIdDark / editorThemeIdLight", () => {
+  beforeEach(() => {
+    vi.stubGlobal("localStorage", fakeLocalStorage());
+    vi.resetModules();
+  });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("both default to auto with nothing in localStorage", async () => {
+    const { usePrefs } = await import("./prefs");
+    expect(usePrefs.getState().editorThemeIdDark).toBe("auto");
+    expect(usePrefs.getState().editorThemeIdLight).toBe("auto");
+  });
+
+  // Pre-split installs only ever wrote the single "editorThemeId" key. An
+  // explicit pick applied under both app modes, so on first load after the
+  // split, both selectors must seed from it identically — otherwise an
+  // existing user's chosen theme silently vanishes from one mode.
+  it("seeds editorThemeIdLight from the pre-split editorThemeId when unset", async () => {
+    localStorage.setItem("editorThemeId", "tokyo-night");
+    const { usePrefs } = await import("./prefs");
+    expect(usePrefs.getState().editorThemeIdDark).toBe("tokyo-night");
+    expect(usePrefs.getState().editorThemeIdLight).toBe("tokyo-night");
+  });
+
+  it("editorThemeIdLight uses its own key once explicitly set, independent of dark", async () => {
+    localStorage.setItem("editorThemeId", "tokyo-night");
+    localStorage.setItem("editorThemeIdLight", "github-light");
+    const { usePrefs } = await import("./prefs");
+    expect(usePrefs.getState().editorThemeIdDark).toBe("tokyo-night");
+    expect(usePrefs.getState().editorThemeIdLight).toBe("github-light");
+  });
+
+  it("setEditorThemeIdDark/Light update state and persist independently", async () => {
+    const { usePrefs } = await import("./prefs");
+    usePrefs.getState().setEditorThemeIdDark("nord");
+    usePrefs.getState().setEditorThemeIdLight("xcode-light");
+    expect(usePrefs.getState().editorThemeIdDark).toBe("nord");
+    expect(usePrefs.getState().editorThemeIdLight).toBe("xcode-light");
+    expect(localStorage.getItem("editorThemeId")).toBe("nord");
+    expect(localStorage.getItem("editorThemeIdLight")).toBe("xcode-light");
+  });
+});
+
 // #83: light themes must raise the terminal's minimumContrastRatio so CLI
 // truecolor fg (which bypasses the ANSI-16 remap) stays readable on a light
 // bg; dark themes leave it at 1 (off) so their tuned palettes are untouched.
