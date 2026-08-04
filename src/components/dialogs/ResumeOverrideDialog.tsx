@@ -93,6 +93,11 @@ export function ResumeOverrideDialog() {
         <span className="font-mono">{"{BRANCH}"}</span> expand per launch. Leave
         empty for the default behavior. Restart the agent tab to apply.
       </p>
+      <p className="mb-4 text-[12.5px] leading-snug text-[var(--color-fg-dim)]">
+        <span className="font-mono">--name</span> is skipped while an override
+        is set: renaming the session on every relaunch would break this
+        override's lookup on the next one.
+      </p>
 
       <label className="block text-[13.5px]">
         Resume arguments
