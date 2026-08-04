@@ -443,7 +443,7 @@ function FontSelect({ value, onChange, fonts }: {
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[180px]"
+        className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] pl-3 pr-8 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[180px]"
       >
         <optgroup label="Bundled">{bundled.map(renderOption)}</optgroup>
         <optgroup label="Installed">{installed.map(renderOption)}</optgroup>
@@ -464,7 +464,7 @@ function ThemeSelect({ value, onChange }: { value: string; onChange: (id: string
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[180px]"
+      className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] pl-3 pr-8 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[180px]"
     >
       {EDITOR_THEMES.map(t => (
         <option key={t.id} value={t.id}>{t.label}</option>

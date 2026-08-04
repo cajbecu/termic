@@ -187,7 +187,7 @@ export function GeneralSection() {
             <select
               value={closeAction}
               onChange={(e) => saveCloseAction(e.target.value as "ask" | "menubar" | "quit")}
-              className="h-9 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 text-[13px] text-[var(--color-fg)] outline-none transition-colors focus:border-[var(--color-accent)] focus:ring-[3px] focus:ring-[var(--color-accent-soft)]"
+              className="h-9 w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] pl-3 pr-8 text-[13px] text-[var(--color-fg)] outline-none transition-colors focus:border-[var(--color-accent)] focus:ring-[3px] focus:ring-[var(--color-accent-soft)]"
               data-testid="close-action-select"
             >
               <option value="ask">Ask me each time</option>

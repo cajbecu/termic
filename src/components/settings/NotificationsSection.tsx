@@ -59,7 +59,7 @@ export function NotificationsSection() {
             <select
               value={completionSoundId}
               onChange={(e) => setCompletionSoundId(e.target.value as typeof completionSoundId)}
-              className="h-9 min-w-0 flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 text-[13px] text-[var(--color-fg)] outline-none transition-colors focus:border-[var(--color-accent)] focus:ring-[3px] focus:ring-[var(--color-accent-soft)]"
+              className="h-9 min-w-0 flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] pl-3 pr-8 text-[13px] text-[var(--color-fg)] outline-none transition-colors focus:border-[var(--color-accent)] focus:ring-[3px] focus:ring-[var(--color-accent-soft)]"
             >
               {COMPLETION_SOUND_OPTIONS.map(option => (
                 <option key={option.id} value={option.id}>{option.label}</option>

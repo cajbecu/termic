@@ -689,7 +689,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
                 value={draft.default_cli}
                 onChange={(e) => patch("default_cli", e.target.value)}
                 className={cn(
-                  "rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[140px]",
+                  "rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] pl-3 pr-8 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[140px]",
                   flashRing("default_cli"),
                 )}
               >
