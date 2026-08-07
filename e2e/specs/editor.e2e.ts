@@ -1,7 +1,7 @@
 import { execSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { archiveTask, openTask, requireTermicApi, snap, waitForAppShell } from "../helpers";
+import { archiveTask, ensureActiveTask, openTask, requireTermicApi, snap, waitForAppShell } from "../helpers";
 
 declare global {
   interface Window {
@@ -76,10 +76,11 @@ describe("editor open", () => {
     });
   });
 
-  // NOTE: editor search (⌘F) is keyboard-shortcut-only in CodeMirror and does
+  // NOTE: CodeMirror's OWN ⌘F search panel is keyboard-shortcut-only and does
   // not route reliably across window-focus states in this harness (see the
-  // environment-limited list in docs/plans/e2e-coverage.md), so it is a manual
-  // check, not a spec.
+  // environment-limited list in docs/plans/e2e-coverage.md), so it stays a
+  // manual check. The markdown preview's ⌘F is a plain window listener and IS
+  // covered — see "find in markdown preview" at the bottom of this file.
 
   it("renders the markdown Preview", async () => {
     // README is a .md file → MarkdownPane. Switch to the Preview view and
@@ -1173,5 +1174,656 @@ describe("directory links", () => {
 
     await archiveTask(second);
     await browser.execute((id) => window.__termic!.useApp.getState().setActiveTask(id), taskId);
+  });
+});
+
+// ── find in markdown preview (⌘F) ────────────────────────────────────────────
+// The money assertion is never "something is highlighted" but "the highlighted
+// text IS the query", read out of the real DOM. Matches are wrapped in <mark>,
+// so what these assert is what the engine paints.
+//
+// This is deliberate: the previous implementation used the CSS Custom Highlight
+// API, and in WKWebView that registry stayed perfectly correct while the paint
+// landed on unrelated <code> elements. A spec that read the registry passed
+// while the feature was visibly broken, so nothing here reads it.
+//
+// ⌘F is dispatched as a synthetic window keydown: unlike CodeMirror's keymap
+// (see the NOTE in "editor open" above) the preview's handler is a plain window
+// listener, so it routes reliably here.
+
+/** Prose hits, plus code/bold/link that do NOT contain the query — the shape
+ *  that exposed the old bug, where code spans lit up instead of the matches. */
+const findDoc = [
+  "# find doc", "",
+  "needle alpha here", "",
+  "prose with `inlineCode` inside", "",
+  "needle beta here", "",
+  "**bold text** and [a link](https://example.com)", "",
+  "```", "fenced block contents", "```", "",
+  "needle gamma here", "",
+  // Hard-wrapped on purpose: one rendered line, a literal newline in the DOM.
+  "a paragraph whose wrapped phrase", "spans two source lines", "",
+  // Literal dot vs any-char, for the regex-escaping case.
+  "a.b and axb", "",
+].join("\n");
+
+const FIND_INPUT = 'input[placeholder="Find in preview"]';
+
+type FindPaint = {
+  /** textContent of every <mark>, in document order. */
+  texts: string[];
+  /** Tag of each mark's parent, so "wrapped the whole code span" is visible. */
+  parents: string[];
+  /** Text of the current (solid) match's containing element, so an off-by-N
+   *  active match shows up rather than just "something is orange". */
+  currentContext: string[];
+  counter: string;
+  /** Resolved background of a plain vs the current match. Structure alone
+   *  can't tell you the rules in index.css still exist: delete them and the
+   *  marks silently fall back to the UA yellow with every other assertion here
+   *  still green. These two must differ, and neither may be transparent. */
+  markBg: string;
+  currentBg: string;
+};
+
+/** Scope to ONE task's subtree wherever a task id is known. Unscoped, this
+ *  picks "the first laid-out preview in the document", which quietly means the
+ *  Changelog dialog's portal-mounted one whenever that is open. */
+const readFind = (taskId?: string) =>
+  browser.execute((inputSel, id): FindPaint => {
+    const shown = (el: Element) => el.getBoundingClientRect().width > 0;
+    const root = id ? document.querySelector(`[data-task-id="${id}"]`) ?? document : document;
+    const hostEl = Array.from(root.querySelectorAll(".markdown-body")).find(shown);
+    const marks = hostEl ? Array.from(hostEl.querySelectorAll("mark.md-find")) : [];
+    const bar = Array.from(root.querySelectorAll(inputSel)).find(shown)?.parentElement;
+    const bg = (m: Element | undefined) => m ? getComputedStyle(m).backgroundColor : "";
+    return {
+      texts: marks.map((m) => m.textContent ?? ""),
+      parents: marks.map((m) => m.parentElement?.tagName ?? "?"),
+      currentContext: marks.filter((m) => m.classList.contains("md-find-current"))
+        .map((m) => m.parentElement?.textContent ?? ""),
+      counter: Array.from(bar?.querySelectorAll("span") ?? [])
+        .map((s) => s.textContent?.trim() ?? "")
+        .find((t) => /^\d+\/\d+$/.test(t)) ?? "",
+      markBg: bg(marks.find((m) => !m.classList.contains("md-find-current"))),
+      currentBg: bg(marks.find((m) => m.classList.contains("md-find-current"))),
+    };
+  }, FIND_INPUT, taskId ?? "");
+
+/** Poll until `ok` holds, then hand back that reading. Required, not hygiene:
+ *  the re-mark is debounced (FIND_DEBOUNCE_MS) so the DOM trails the keystroke,
+ *  and the counter renders from React state on top of that. */
+const waitFind = async (ok: (p: FindPaint) => boolean, msg: string, taskId?: string) => {
+  let last: FindPaint = {
+    texts: [], parents: [], currentContext: [], counter: "", markBg: "", currentBg: "",
+  };
+  await browser.waitUntil(async () => { last = await readFind(taskId); return ok(last); },
+    { timeout: 8_000, timeoutMsg: msg });
+  return last;
+};
+
+const pressCmdF = () =>
+  browser.execute(() => {
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "f", metaKey: true, bubbles: true, cancelable: true }),
+    );
+  });
+
+/** Type one character at a time, the way a person does: React sees N input
+ *  events, and each re-runs the search. A single value assignment would skip
+ *  every intermediate state. */
+const typeFind = async (q: string) => {
+  for (let i = 1; i <= q.length; i++) {
+    await browser.execute((v, inputSel) => {
+      const shown = (el: Element) => el.getBoundingClientRect().width > 0;
+      const el = Array.from(document.querySelectorAll(inputSel)).find(shown) as HTMLInputElement;
+      if (!el) throw new Error("no visible find bar to type into");
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }, q.slice(0, i), FIND_INPUT);
+  }
+};
+
+const pressInFind = (key: string, shift = false) =>
+  browser.execute((k, sh, inputSel) => {
+    const shown = (el: Element) => el.getBoundingClientRect().width > 0;
+    const el = Array.from(document.querySelectorAll(inputSel)).find(shown) as HTMLInputElement;
+    if (!el) throw new Error("no visible find bar to key into");
+    el.dispatchEvent(
+      new KeyboardEvent("keydown", { key: k, shiftKey: sh, bubbles: true, cancelable: true }),
+    );
+  }, key, shift, FIND_INPUT);
+
+const findBarCount = () =>
+  browser.execute((inputSel) => {
+    const shown = (el: Element) => el.getBoundingClientRect().width > 0;
+    return Array.from(document.querySelectorAll(inputSel)).filter(shown).length;
+  }, FIND_INPUT);
+
+describe("find in markdown preview", () => {
+  let taskId: string | undefined;
+  const DOC = "find-doc.md";
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    writeFileSync(path.join(fixture, DOC), findDoc);
+    taskId = await openTask("e2e-find");
+    await browser.execute((id, p) => {
+      const app = window.__termic!.useApp.getState();
+      app.openPreviewTab(id, { type: "edit", path: p, title: p });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const tab = app.tabs[id].find((t: any) => t.type === "edit" && t.path === p);
+      app.persistTab(id, tab.id);
+      app.patchTab(id, tab.id, { mdView: "preview" });
+    }, taskId, DOC);
+    await browser.waitUntil(
+      () => browser.execute((id) => Array.from(
+        document.querySelectorAll(`[data-task-id="${id}"] .markdown-body`))
+        .some((h) => h.getBoundingClientRect().width > 0
+          && (h as HTMLElement).textContent?.includes("needle gamma")), taskId),
+      { timeout: 15_000, timeoutMsg: `${DOC} preview never rendered` },
+    );
+  });
+
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+    try {
+      execSync(`git -C "${fixture}" clean -fd`);
+    } catch {
+      /* nothing */
+    }
+  });
+
+  it("marks exactly the searched text, never the code spans around it", async () => {
+    await pressCmdF();
+    await browser.waitUntil(async () => (await findBarCount()) === 1,
+      { timeout: 8_000, timeoutMsg: "find bar never opened" });
+    await typeFind("needle");
+
+    const p = await waitFind((x) => x.counter === "1/3", "never settled on 3 matches", taskId);
+    // Three prose hits. The old bug marked the code/fenced spans instead, so
+    // asserting the TEXT (not a count) is what makes this case load-bearing.
+    expect(p.texts).toEqual(["needle", "needle", "needle"]);
+    expect(p.parents).toEqual(["P", "P", "P"]);
+    expect(p.currentContext[0]).toContain("alpha"); // first occurrence
+    // The rules in index.css are still doing something, and the current match
+    // is distinguishable from the rest.
+    expect(p.markBg).not.toBe(p.currentBg);
+    for (const c of [p.markBg, p.currentBg]) {
+      expect(c).not.toBe("rgba(0, 0, 0, 0)");
+      expect(c).toBeTruthy();
+    }
+    await snap("preview-find.png");
+  });
+
+  it("steps forward and back in step with the counter, wrapping at both ends", async () => {
+    // Re-establish the precondition rather than inheriting it: one failure
+    // above should not cascade into a misleading failure here. Retyping the
+    // query already on screen must not cost the reader their next Enter, which
+    // is exactly what flushFind's "did the result set change" check protects.
+    await typeFind("needle");
+    await waitFind((x) => x.counter === "1/3", "search never settled before stepping", taskId);
+
+    await pressInFind("Enter");
+    let p = await waitFind((x) => x.counter === "2/3", "never stepped to 2/3", taskId);
+    expect(p.currentContext[0]).toContain("beta");
+
+    await pressInFind("Enter");
+    await pressInFind("Enter"); // 3/3 -> wraps to 1/3
+    p = await waitFind((x) => x.counter === "1/3", "never wrapped forward to 1/3", taskId);
+    expect(p.currentContext[0]).toContain("alpha");
+
+    await pressInFind("Enter", true); // back past the start -> wraps to 3/3
+    p = await waitFind((x) => x.counter === "3/3", "never wrapped back to 3/3", taskId);
+    expect(p.currentContext[0]).toContain("gamma");
+    // Exactly one match is ever the current one.
+    expect(p.currentContext).toHaveLength(1);
+  });
+
+  it("replaces the previous run on a second search instead of stacking on it", async () => {
+    await typeFind("fenced");
+    // Wait on THIS query's marks, never on a count the previous query also had:
+    // the re-mark is debounced, so a stale reading can satisfy a loose predicate.
+    const p = await waitFind((x) => x.texts.join("|") === "fenced",
+      "second search never replaced the first", taskId);
+    expect(p.counter).toBe("1/1");         // the needles are gone, not still lit
+  });
+
+  it("matches inside a code span when the query is actually there", async () => {
+    await typeFind("inlineCode");
+    const p = await waitFind((x) => x.texts.join("|") === "inlineCode",
+      "code-span match never landed", taskId);
+    expect(p.parents).toEqual(["CODE"]);
+  });
+
+  // markdown-it runs with breaks:false, so a hard-wrapped paragraph carries the
+  // source newline into the text node while rendering as one line. Searching
+  // the phrase the reader plainly sees must not come back empty.
+  it("matches a phrase that the markdown source hard-wrapped", async () => {
+    await typeFind("wrapped phrase spans");
+    const p = await waitFind((x) => x.texts.join("|").startsWith("wrapped phrase"),
+      "hard-wrapped phrase never matched", taskId);
+    expect(p.texts).toEqual(["wrapped phrase\nspans"]);
+    expect(p.parents).toEqual(["P"]);
+    expect(p.counter).toBe("1/1");
+  });
+
+  it("treats a regex metacharacter in the query as literal text", async () => {
+    await typeFind("a.b");
+    // "axb" is present in the doc and must NOT match a literal ".".
+    const p = await waitFind((x) => x.texts.join("|") === "a.b",
+      "metacharacter search never settled on the literal match", taskId);
+    expect(p.counter).toBe("1/1");
+  });
+
+  it("drops every mark when the query stops matching", async () => {
+    await typeFind("zzz-no-such-text");
+    const p = await waitFind((x) => x.counter === "0/0", "never went to zero matches", taskId);
+    expect(p.texts).toEqual([]);
+  });
+
+  it("restores the document when find closes", async () => {
+    await typeFind("needle");
+    await waitFind((x) => x.texts.length === 3, "search never settled before closing", taskId);
+
+    await pressInFind("Escape");
+    await browser.waitUntil(async () => (await findBarCount()) === 0,
+      { timeout: 5_000, timeoutMsg: "find bar never closed" });
+
+    const after = await browser.execute(() => {
+      const shown = (el: Element) => el.getBoundingClientRect().width > 0;
+      const h = Array.from(document.querySelectorAll(".markdown-body")).find(shown) as HTMLElement;
+      return {
+        marks: h.querySelectorAll("mark").length,
+        // The prose is one text node again, not the three splitText left.
+        text: h.textContent?.includes("needle alpha here") ?? false,
+        // Formatting the marks were wrapped around survived.
+        code: !!h.querySelector("code"),
+      };
+    });
+    expect(after).toEqual({ marks: 0, text: true, code: true });
+  });
+
+  it("re-marks against the rebuilt DOM when a theme flip replaces it", async () => {
+    const original = await browser.execute(() => window.__termic!.usePrefs.getState().themeMode);
+    await pressCmdF();
+    await browser.waitUntil(async () => (await findBarCount()) === 1,
+      { timeout: 8_000, timeoutMsg: "find bar never reopened" });
+    await typeFind("needle");
+    await waitFind((x) => x.texts.length === 3, "search never settled before the flip", taskId);
+
+    // A theme flip re-runs the render effect, which replaces host.innerHTML and
+    // takes every <mark> with it. Force a real change: flipping to the theme
+    // already in effect rebuilds nothing and this case would test nothing.
+    const setTheme = async (mode: string, cls: string) => {
+      await browser.execute((m) => window.__termic!.usePrefs.getState().setThemeMode(m), mode);
+      await browser.waitUntil(
+        () => browser.execute((c) => document.documentElement.classList.contains(c), cls),
+        { timeout: 8_000, timeoutMsg: `theme never became ${mode}` },
+      );
+    };
+    await setTheme("dark", "dark");
+    await setTheme("light", "light");
+
+    const p = await waitFind((x) => x.texts.length === 3,
+      "matches never came back after the rebuild", taskId);
+    expect(p.texts).toEqual(["needle", "needle", "needle"]);
+    expect(p.parents).toEqual(["P", "P", "P"]);
+    expect(p.counter).toBe("1/3");
+
+    if (original) {
+      await browser.execute((m) => window.__termic!.usePrefs.getState().setThemeMode(m), original);
+    }
+  });
+});
+
+// ── who owns ⌘F ──────────────────────────────────────────────────────────────
+// Every visited task and every open markdown tab keeps its MarkdownPreview
+// mounted, each with its own capture-phase window keydown listener that stops
+// propagation. These are the cases where more than one of them believed the
+// keystroke was theirs. Marks are per-preview now, so this is purely about the
+// keystroke — no shared registry left to fight over.
+
+describe("⌘F ownership across previews", () => {
+  let taskA: string | undefined;
+  let taskB: string | undefined;
+  let tabA = "";
+  const DOC = "own-a.md";
+  const DOC_B = "own-b.md";
+
+  const openMdPreview = async (taskId: string, name: string, marker: string) => {
+    const tabId = await browser.execute((id, p) => {
+      const app = window.__termic!.useApp.getState();
+      app.openPreviewTab(id, { type: "edit", path: p, title: p });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const tab = app.tabs[id].find((t: any) => t.type === "edit" && t.path === p);
+      app.persistTab(id, tab.id);
+      app.patchTab(id, tab.id, { mdView: "preview" });
+      return tab.id as string;
+    }, taskId, name);
+    // Scoped to THIS task's subtree and to what is laid out: the same document
+    // can be open in more than one task, and a hidden copy's textContent
+    // matches just as happily as the one we're waiting for.
+    await browser.waitUntil(
+      () => browser.execute((id, m) => Array.from(
+        document.querySelectorAll(`[data-task-id="${id}"] .markdown-body`))
+        .some((h) => h.getBoundingClientRect().width > 0
+          && (h as HTMLElement).textContent?.includes(m)), taskId, marker),
+      { timeout: 15_000, timeoutMsg: `${name} preview never rendered in ${taskId}` },
+    );
+    return tabId;
+  };
+
+  /** Find bars in the whole document, and which task each belongs to. */
+  const bars = () =>
+    browser.execute((inputSel) => {
+      const shown = (el: Element) => el.getBoundingClientRect().width > 0;
+      const inputs = Array.from(document.querySelectorAll(inputSel));
+      return {
+        total: inputs.length,
+        visible: inputs.filter(shown).length,
+        taskIds: inputs.map((i) => i.closest("[data-task-id]")?.getAttribute("data-task-id") ?? ""),
+      };
+    }, FIND_INPUT);
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    writeFileSync(path.join(fixture, DOC), "# own a\n\nneedle alpha\n\nneedle beta\n\nneedle gamma\n");
+    writeFileSync(path.join(fixture, DOC_B), "# own b\n\nneedle zulu\n\nneedle yankee\n");
+    taskA = await openTask("e2e-own-a");
+    await ensureActiveTask(taskA);
+    tabA = await openMdPreview(taskA, DOC, "needle gamma");
+  });
+
+  after(async () => {
+    if (taskA) await archiveTask(taskA);
+    if (taskB) await archiveTask(taskB);
+    try {
+      execSync(`git -C "${fixture}" clean -fd`);
+    } catch {
+      /* nothing */
+    }
+  });
+
+  it("does not open find in a task that is merely mounted behind the active one", async () => {
+    taskB = await openTask("e2e-own-b");
+    await ensureActiveTask(taskB);
+    await openMdPreview(taskB, DOC_B, "needle zulu");
+    // Back to A. B stays mounted (display:none), preview and all.
+    await ensureActiveTask(taskA!);
+
+    await pressCmdF();
+    await browser.waitUntil(async () => (await bars()).visible === 1,
+      { timeout: 8_000, timeoutMsg: "find bar never opened" });
+
+    const b = await bars();
+    expect(b.total).toBe(1);          // not "1 visible out of 2"
+    expect(b.taskIds).toEqual([taskA]);
+
+    await typeFind("needle");
+    const p = await waitFind((x) => x.texts.length === 3, "task A's search never settled", taskA);
+    expect(p.texts).toHaveLength(3);  // doc A's three, not doc B's two
+    expect(p.currentContext[0]).toContain("alpha");
+  });
+
+  it("leaves ⌘F to the focused split pane instead of the visible preview", async () => {
+    await pressInFind("Escape");
+    await browser.waitUntil(async () => (await bars()).visible === 0,
+      { timeout: 5_000, timeoutMsg: "find bar never closed" });
+
+    // Terminal into its own pane, and focus that pane. The preview is still on
+    // screen in main, but the keyboard now belongs to the terminal.
+    const termId = await browser.execute((id) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const t = window.__termic!.useApp.getState().tabs[id].find((x: any) => x.type === "terminal");
+      return t.id as string;
+    }, taskA);
+    await browser.execute((id, t) => window.__termic!.useApp.getState().moveTabToSplit(id, t, null, "right"),
+      taskA, termId);
+    // Read the new leaf's id from the STORE: the split tree is committed before
+    // React has re-rendered the pane's data-pane-id into the DOM.
+    const paneId: string = await browser.waitUntil(
+      () => browser.execute((id, t) => {
+        const tree = window.__termic!.useApp.getState().splitTree[id];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const leaves: any[] = [];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const walk = (n: any) => { if (n.type === "pane") leaves.push(n); else { walk(n.a); walk(n.b); } };
+        if (tree) walk(tree);
+        return leaves.find((l) => (l.tabIds ?? []).includes(t))?.id ?? "";
+      }, taskA, termId),
+      { timeout: 5_000, timeoutMsg: "the terminal never landed in its own split pane" },
+    );
+    await browser.execute((id, p) => window.__termic!.useApp.getState().setActivePaneId(id, p),
+      taskA, paneId);
+
+    await pressCmdF();
+    // The assertion is an absence, so wait on the state that would have
+    // produced a bar instead: the preview is on screen and the pane is focused.
+    await browser.waitUntil(
+      () => browser.execute((id, p) => {
+        const shown = (el: Element) => el.getBoundingClientRect().width > 0;
+        return window.__termic!.useApp.getState().activePaneId[id] === p
+          && !!Array.from(document.querySelectorAll(".markdown-body")).find(shown);
+      }, taskA, paneId),
+      { timeout: 5_000, timeoutMsg: "the split pane never took focus with the preview on screen" },
+    );
+    expect((await bars()).total).toBe(0);
+
+    // Back to a plain single-pane layout for the case below.
+    await browser.execute((id) => {
+      const app = window.__termic!.useApp.getState();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const term = app.tabs[id].find((t: any) => t.type === "terminal");
+      app.moveTabToMain(id, term.id);
+    }, taskA);
+    await browser.waitUntil(
+      () => browser.execute((id) => !window.__termic!.useApp.getState().splitTree[id], taskA),
+      { timeout: 5_000, timeoutMsg: "the split never collapsed back to a single pane" },
+    );
+  });
+
+  it("stands down while a modal is open, and takes ⌘F back on close", async () => {
+    // The case above collapsed the split by moving the terminal back to main,
+    // which made IT the active main tab. Put the reader in the markdown tab.
+    await browser.execute((id, t) => window.__termic!.useApp.getState().setActiveTabId(id, t),
+      taskA, tabA);
+    // A modal owns the keyboard and the tab underneath stays `active`. The
+    // preview's listener checks the focus trap rather than any per-dialog store
+    // flag, so this covers Settings and every other dialog too. Asserted without
+    // the changelog body rendering: it's fetched over the network and may never
+    // arrive here.
+    await browser.execute(() => window.__termic!.useUI.getState().openChangelog());
+    // Wait for the TRAP to hold focus, not merely for the node to exist: the
+    // preview checks activeElement, so the dialog being in the DOM is not yet
+    // the state under test. (Radix moves focus a frame or two after mount.)
+    await browser.waitUntil(
+      () => browser.execute(() =>
+        !!(document.activeElement as HTMLElement | null)?.closest?.('[role="dialog"]')),
+      { timeout: 5_000, timeoutMsg: "the changelog dialog never took focus" },
+    );
+
+    await pressCmdF();
+    // Assert on OWNERSHIP, not on "no bar anywhere": when the changelog body
+    // has loaded, the dialog's own preview legitimately opens one, and its bar
+    // lives in a portal with no [data-task-id] ancestor. What must not happen
+    // is the tab underneath claiming the key.
+    expect((await bars()).taskIds.filter((id) => id === taskA)).toEqual([]);
+
+    await browser.execute(() => window.__termic!.useUI.getState().closeChangelog());
+    // Wait for the trap to RELEASE focus, not for the node to leave the DOM.
+    // The dialog's exit animation is rAF-driven and rAF is throttled on an
+    // occluded window, so the element can outlive its own close here — which
+    // is exactly why the preview tests activeElement rather than the DOM.
+    await browser.waitUntil(
+      () => browser.execute(() =>
+        !(document.activeElement as HTMLElement | null)?.closest?.('[role="dialog"]')),
+      { timeout: 5_000, timeoutMsg: "the changelog dialog never released focus" },
+    );
+
+    await pressCmdF();
+    await browser.waitUntil(
+      async () => (await bars()).taskIds.includes(taskA!),
+      { timeout: 5_000, timeoutMsg: "the tab never got ⌘F back" });
+    await typeFind("needle");
+    await waitFind((x) => x.texts.length === 3, "the tab never searched again", taskA);
+  });
+
+  // Settings is a hand-rolled overlay, not a Radix dialog: it traps no focus and
+  // autofocuses nothing, so activeElement stays out in the tab underneath and
+  // the focus-trap probe alone cannot see it. Without the store check the
+  // preview claims ⌘F and opens a bar *beneath* the z-40 backdrop, with the
+  // keyboard in an invisible input.
+  it("stands down while the Settings overlay is open", async () => {
+    await pressInFind("Escape");
+    await browser.waitUntil(async () => (await bars()).visible === 0,
+      { timeout: 5_000, timeoutMsg: "find bar never closed" });
+
+    await browser.execute(() => window.__termic!.useApp.getState().openSettings());
+    await browser.waitUntil(
+      () => browser.execute(() => window.__termic!.useApp.getState().view.settingsOpen === true
+        && !!document.querySelector('[role="dialog"][aria-label="Settings"]')),
+      { timeout: 5_000, timeoutMsg: "settings never opened" },
+    );
+
+    await pressCmdF();
+    // Absence assertion, so wait on the state that would have produced a bar:
+    // settings up, and the markdown tab still the active one underneath.
+    await browser.waitUntil(
+      () => browser.execute((id, t) => window.__termic!.useApp.getState().activeTab[id] === t,
+        taskA!, tabA),
+      { timeout: 5_000, timeoutMsg: "the markdown tab was not the active one under settings" },
+    );
+    expect((await bars()).taskIds.filter((id) => id === taskA)).toEqual([]);
+
+    await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
+    await browser.waitUntil(
+      () => browser.execute(() => window.__termic!.useApp.getState().view.settingsOpen !== true),
+      { timeout: 5_000, timeoutMsg: "settings never closed" },
+    );
+    await pressCmdF();
+    await browser.waitUntil(async () => (await bars()).taskIds.includes(taskA!),
+      { timeout: 5_000, timeoutMsg: "the tab never got ⌘F back after settings" });
+    await pressInFind("Escape");
+  });
+
+  // The preview keeps its own <mark>s, so a tab recycled onto another file must
+  // drop them: the sole reason the render effect reads findOpenRef rather than
+  // the findOpen STATE, which still says "open" in that same commit.
+  it("drops its marks when the tab is recycled onto a different file", async () => {
+    await browser.execute((id, t) => window.__termic!.useApp.getState().setActiveTabId(id, t),
+      taskA, tabA);
+    await pressCmdF();
+    await browser.waitUntil(async () => (await bars()).visible === 1,
+      { timeout: 8_000, timeoutMsg: "find bar never opened" });
+    await typeFind("needle");
+    await waitFind((x) => x.texts.length === 3, "search never settled before the swap", taskA);
+
+    // Same tab, different file: what a single-click in the file tree does.
+    await browser.execute((id, t, p) => {
+      const app = window.__termic!.useApp.getState();
+      app.patchTab(id, t, { path: p, title: p, mdView: "preview" });
+    }, taskA, tabA, DOC_B);
+    await browser.waitUntil(
+      () => browser.execute((id, m) => Array.from(
+        document.querySelectorAll(`[data-task-id="${id}"] .markdown-body`))
+        .some((h) => h.getBoundingClientRect().width > 0
+          && (h as HTMLElement).textContent?.includes(m)), taskA, "needle zulu"),
+      { timeout: 10_000, timeoutMsg: "the tab never re-rendered onto doc B" },
+    );
+
+    // The bar closed with the swap and nothing is left painted over doc B.
+    await browser.waitUntil(async () => (await bars()).visible === 0,
+      { timeout: 5_000, timeoutMsg: "find stayed open across the file swap" });
+    expect((await readFind(taskA)).texts).toEqual([]);
+
+    // Put the tab back so later runs of this file start where they expect.
+    await browser.execute((id, t, p) => {
+      window.__termic!.useApp.getState().patchTab(id, t, { path: p, title: p, mdView: "preview" });
+    }, taskA, tabA, DOC);
+  });
+
+  // Split view is the one layout where two things on screen both want ⌘F, and
+  // it is the case the reporter hit. CodeMirror's keymap only binds while the
+  // EditorView has focus, so the preview must yield whenever the caret is in
+  // the editor and claim it only once the reader clicks into the preview.
+  describe("split view (editor beside preview)", () => {
+    before(async () => {
+      await browser.execute((id, t) => {
+        const app = window.__termic!.useApp.getState();
+        app.setActiveTabId(id, t);
+        app.patchTab(id, t, { mdView: "split" });
+      }, taskA, tabA);
+      await browser.waitUntil(
+        () => browser.execute((id) => {
+          const shown = (el: Element) => el.getBoundingClientRect().width > 0;
+          const root = document.querySelector(`[data-task-id="${id}"]`);
+          return !!root && !!Array.from(root.querySelectorAll(".cm-editor")).find(shown)
+            && !!Array.from(root.querySelectorAll(".markdown-body")).find(shown);
+        }, taskA),
+        { timeout: 10_000, timeoutMsg: "split view never showed both panes" },
+      );
+    });
+
+    after(async () => {
+      await browser.execute((id, t) => {
+        window.__termic!.useApp.getState().patchTab(id, t, { mdView: "preview" });
+      }, taskA, tabA);
+    });
+
+    it("yields ⌘F to the editor while the caret is in it", async () => {
+      await browser.execute((id) => {
+        const shown = (el: Element) => el.getBoundingClientRect().width > 0;
+        const root = document.querySelector(`[data-task-id="${id}"]`)!;
+        (Array.from(root.querySelectorAll(".cm-content")).find(shown) as HTMLElement).focus();
+      }, taskA);
+      await browser.waitUntil(
+        () => browser.execute(() => !!document.activeElement?.closest(".cm-editor")),
+        { timeout: 5_000, timeoutMsg: "the editor never took focus" },
+      );
+
+      await pressCmdF();
+      // The preview must not have opened a bar. CodeMirror's own panel is a
+      // different widget entirely, so scope to the preview's placeholder.
+      expect((await bars()).total).toBe(0);
+    });
+
+    it("claims ⌘F once the reader clicks into the preview", async () => {
+      // The real click path: the scroller's onMouseDown focuses the container,
+      // which is the only thing that makes contains(activeElement) meaningful
+      // in WKWebView (it won't focus non-editable content on its own).
+      //
+      // The precondition is "focus ARRIVED in the preview", not "focus left the
+      // editor" — those differ, and the weaker one flakes: focus passes through
+      // <body> on the way, and ⌘F correctly stands down there. So retry the
+      // mousedown until the container actually holds it.
+      await browser.waitUntil(
+        () => browser.execute((id) => {
+          const shown = (el: Element) => el.getBoundingClientRect().width > 0;
+          const root = document.querySelector(`[data-task-id="${id}"]`)!;
+          const host = Array.from(root.querySelectorAll(".markdown-body")).find(shown)!;
+          host.parentElement!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+          const ae = document.activeElement;
+          // The container is the focusable ancestor of the host; <body> is an
+          // ancestor too, hence excluding it explicitly.
+          return !!ae && ae !== document.body && ae.contains(host);
+        }, taskA),
+        { timeout: 5_000, timeoutMsg: "the preview container never took focus" },
+      );
+
+      await pressCmdF();
+      await browser.waitUntil(async () => (await bars()).visible === 1,
+        { timeout: 8_000, timeoutMsg: "the preview never claimed ⌘F after the click" });
+      await typeFind("needle");
+      const p = await waitFind((x) => x.texts.length === 3, "split preview never marked", taskA);
+      expect(p.texts).toEqual(["needle", "needle", "needle"]);
+      expect(p.parents).toEqual(["P", "P", "P"]);
+      await pressInFind("Escape");
+      await browser.waitUntil(async () => (await bars()).visible === 0,
+        { timeout: 5_000, timeoutMsg: "find bar never closed" });
+    });
   });
 });

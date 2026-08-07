@@ -539,43 +539,67 @@ export function attemptReveal(state: RevealState, host: HTMLElement | null, visi
 // The editor's Cmd+F is a CodeMirror keymap that only binds while an
 // EditorView has focus; the rendered preview is a plain imperative <div> with
 // no equivalent, so Cmd+F did nothing there. These helpers back a small
-// find bar that paints matches via the CSS Custom Highlight API — Ranges over
-// the existing text nodes, never a DOM mutation — so mermaid SVGs and the
-// hydrated task images the render effect owns are left untouched. On engines
-// without the API the search still scrolls to matches; it just doesn't paint.
+// find bar that wraps matches in <mark> elements. This DOES mutate the rendered
+// DOM, so anything that rebuilds innerHTML has to re-run the search afterwards
+// (the main render effect does). Mermaid subtrees are excluded from the walk;
+// image hydration only touches attributes, so it is unaffected.
 
-const HL_ALL = "md-find";
-const HL_CURRENT = "md-find-current";
+const FIND_MARK_CLASS = "md-find";
+const FIND_CURRENT_CLASS = "md-find-current";
+/** Re-mark delay. The walk+wrap is O(document) and the FIRST characters of a
+ *  query are the expensive ones, so this is what keeps typing cheap. See
+ *  `scheduleFind`. */
+const FIND_DEBOUNCE_MS = 90;
 
-/** Match colors for the two highlight registries. Injected at runtime instead
- *  of living in index.css because lightningcss (Vite's CSS minifier) doesn't
- *  parse the ::highlight() pseudo-element and warns on every build. The CSS
- *  vars resolve at paint time, so theme switches keep working. All matches get
- *  a soft accent wash; the active one a solid accent fill (its Highlight is
- *  registered at higher priority so it wins the overlap). */
-let findStyleInjected = false;
-function ensureFindHighlightStyle(): void {
-  if (findStyleInjected) return;
-  findStyleInjected = true;
-  const style = document.createElement("style");
-  style.textContent = `
-    ::highlight(${HL_ALL}) {
-      background-color: var(--color-accent-soft);
-    }
-    ::highlight(${HL_CURRENT}) {
-      background-color: var(--color-accent);
-      color: var(--color-accent-fg);
-    }`;
-  document.head.appendChild(style);
+/** Strip every `<mark>` this module added and stitch the text back together.
+ *  `normalize()` is load-bearing, not tidiness: wrapping splits a text node in
+ *  three, and without rejoining them the NEXT search can't match across the
+ *  seam a previous highlight left behind (search "need", then "needle").
+ *  Exported for tests. */
+export function unmarkFind(host: HTMLElement): void {
+  const marks = Array.from(host.querySelectorAll(`mark.${FIND_MARK_CLASS}`));
+  if (!marks.length) return;
+  for (const m of marks) {
+    const parent = m.parentNode;
+    if (!parent) continue;
+    while (m.firstChild) parent.insertBefore(m.firstChild, m);
+    parent.removeChild(m);
+  }
+  host.normalize();
 }
 
-/** Case-insensitive Ranges for every occurrence of `query` in the text under
- *  `host`. Skips mermaid diagram subtrees: their rendered SVG text isn't
- *  meaningfully searchable and Ranges inside <svg> don't highlight. */
-function collectFindRanges(host: HTMLElement, query: string): Range[] {
-  const ranges: Range[] = [];
-  const needle = query.toLowerCase();
-  if (!needle) return ranges;
+/** Case-insensitive literal matcher for `query`, with one deliberate liberty:
+ *  every whitespace run matches any whitespace run. `breaks: false` leaves the
+ *  markdown source's hard-wrap newlines inside the rendered text nodes, so a
+ *  phrase the reader sees on one line is "per task at\nmost" in the DOM. A
+ *  plain substring search finds nothing there, and since most docs in this repo
+ *  (and most READMEs) are hard-wrapped, that reads as "find is broken" for any
+ *  query longer than a word. */
+function findRegex(query: string): RegExp {
+  const literal = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(literal.replace(/\s+/g, "\\s+"), "gi");
+}
+
+/** Wrap every case-insensitive occurrence of `query` under `host` in a
+ *  `<mark>`, returning them in document order. Clears any previous run first.
+ *
+ *  We mutate the DOM rather than using the CSS Custom Highlight API, which
+ *  this app used to do: in WKWebView that API reports a perfectly correct
+ *  registry and then paints the wrong text (see docs/gotchas.md). A `<mark>`
+ *  is ordinary content styled by ordinary CSS, so there is no range-to-glyph
+ *  mapping left for the engine to get wrong, and inserting one invalidates
+ *  paint by itself.
+ *
+ *  Skips mermaid subtrees: their rendered SVG text isn't meaningfully
+ *  searchable, and splitting nodes inside one would corrupt the diagram.
+ *  Exported for tests. */
+export function markFindMatches(host: HTMLElement, query: string): HTMLElement[] {
+  // Unconditionally, and BEFORE the empty-query bail: clearing the search box
+  // has to remove the previous run's marks.
+  unmarkFind(host);
+  if (!query) return [];
+  const re = findRegex(query);
+
   const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
       if (!node.nodeValue) return NodeFilter.FILTER_REJECT;
@@ -585,48 +609,36 @@ function collectFindRanges(host: HTMLElement, query: string): Range[] {
       return NodeFilter.FILTER_ACCEPT;
     },
   });
-  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    const hay = node.nodeValue!.toLowerCase();
-    for (let from = hay.indexOf(needle); from !== -1; from = hay.indexOf(needle, from + needle.length)) {
-      const r = document.createRange();
-      r.setStart(node, from);
-      r.setEnd(node, from + needle.length);
-      ranges.push(r);
+  // Snapshot first: the walk is live, and wrapping mutates what it would visit.
+  const nodes: Text[] = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n as Text);
+
+  for (const node of nodes) {
+    const hay = node.nodeValue ?? "";
+    // Match length varies now that whitespace runs are elastic, so carry it.
+    const hits: { at: number; len: number }[] = [];
+    re.lastIndex = 0;
+    for (let m = re.exec(hay); m; m = re.exec(hay)) {
+      if (!m[0]) break; // a zero-width match would spin forever
+      hits.push({ at: m.index, len: m[0].length });
+    }
+    // Back to front: each splitText only disturbs offsets AFTER the split, so
+    // working right-to-left keeps the earlier hits in this node valid.
+    for (let k = hits.length - 1; k >= 0; k--) {
+      const match = node.splitText(hits[k].at);
+      match.splitText(hits[k].len);
+      const mark = document.createElement("mark");
+      mark.className = FIND_MARK_CLASS;
+      match.parentNode!.replaceChild(mark, match);
+      mark.appendChild(match);
     }
   }
-  return ranges;
+  return Array.from(host.querySelectorAll<HTMLElement>(`mark.${FIND_MARK_CLASS}`));
 }
 
-/** Paint all matches, with `current` on top (higher priority). No-op where the
- *  Highlight API is missing. */
-function paintFindHighlights(all: Range[], current: Range | null): void {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const reg = (globalThis as any).CSS?.highlights;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const H = (globalThis as any).Highlight;
-  if (!reg || !H) return;
-  ensureFindHighlightStyle();
-  reg.set(HL_ALL, new H(...all));
-  if (current) {
-    const cur = new H(current);
-    cur.priority = 1;
-    reg.set(HL_CURRENT, cur);
-  } else {
-    reg.delete(HL_CURRENT);
-  }
-}
-
-function clearFindHighlights(): void {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const reg = (globalThis as any).CSS?.highlights;
-  if (!reg) return;
-  reg.delete(HL_ALL);
-  reg.delete(HL_CURRENT);
-}
-
-/** Scroll `scroller` so `range` is centered, but only if it's off-screen. */
-function scrollFindRangeIntoView(scroller: HTMLElement, range: Range): void {
-  const r = range.getBoundingClientRect();
+/** Scroll `scroller` so `el` is centered, but only if it's off-screen. */
+function scrollMarkIntoView(scroller: HTMLElement, el: HTMLElement): void {
+  const r = el.getBoundingClientRect();
   const s = scroller.getBoundingClientRect();
   if (r.top >= s.top && r.bottom <= s.bottom) return; // already visible
   const top = scroller.scrollTop + (r.top - s.top) - s.height / 2 + r.height / 2;
@@ -635,7 +647,7 @@ function scrollFindRangeIntoView(scroller: HTMLElement, range: Range): void {
 
 export function MarkdownPreview(
   { text, themeDark, linkify = true, ctx, revealHeading, onRevealConsumed, visible = true,
-    editorVisible = false,
+    ownsFind, editorVisible = false,
     remoteImagesAllowed = true, onUnblockRemoteImages, onAlwaysLoadRemoteImages }: {
     text: string; themeDark: boolean; linkify?: boolean; ctx?: MarkdownCtx;
     /** Pending `#fragment` to scroll to once content renders (from a
@@ -653,6 +665,16 @@ export function MarkdownPreview(
      *  reveal effect waits for this before it will scroll. Defaults to true
      *  for callers (the Changelog dialog) that never hide their preview. */
     visible?: boolean;
+    /** Whether ⌘F belongs to this preview. Only one may say true app-wide.
+     *  `visible` is far too weak: a preview stays visible in an unfocused split
+     *  pane, and every background TASK's preview is mounted and visible within
+     *  its own task, so several would claim the key at once. Required with no
+     *  default, since defaulting to yes is exactly the bug.
+     *
+     *  Deliberately NOT named `active`: the sibling panes take an `active` that
+     *  means the weaker per-task "focus yourself", and quietly widening this to
+     *  match it is GH #71 all over again. */
+    ownsFind: boolean;
     /** Whether an editor pane is ALSO on screen (split view). Cmd+F is then
      *  ambiguous, so the preview only claims it when it (not the editor) is
      *  the focused pane; otherwise CodeMirror's own search keymap wins. When
@@ -704,33 +726,43 @@ export function MarkdownPreview(
   const [findQuery, setFindQuery] = useState("");
   const [findCount, setFindCount] = useState(0);
   const [findIndex, setFindIndex] = useState(0); // 0-based active match
-  // Live Ranges + active index kept in refs so the keydown listener and nav
-  // buttons don't fight stale closures between renders.
-  const findRangesRef = useRef<Range[]>([]);
+  // The live <mark>s + active index kept in refs so the keydown listener and
+  // nav buttons don't fight stale closures between renders. `findOpenRef` and
+  // `findQueryRef` are here for a related reason: the main render effect runs
+  // in the same commit as a closeFind() and would otherwise still see the bar
+  // as open, and the keydown listener must not re-subscribe per keystroke just
+  // to read a fresh query.
+  const findMarksRef = useRef<HTMLElement[]>([]);
   const findIndexRef = useRef(0);
+  const findOpenRef = useRef(false);
+  const findQueryRef = useRef("");
+  const findTimerRef = useRef<number | null>(null);
+  /** The query the marks on screen were built from, so a flush can tell a
+   *  real re-search from a no-op. Null until the first run. */
+  const lastRunQueryRef = useRef<string | null>(null);
 
-  // Highlight the i-th match (wrapping), repaint the "current" band, scroll it
-  // into view. No-op when there are no matches.
+  // Make the i-th match (wrapping) the current one and scroll it into view.
+  // No-op when there are no matches.
   const gotoMatch = (i: number) => {
-    const ranges = findRangesRef.current;
-    if (!ranges.length) return;
-    const n = ((i % ranges.length) + ranges.length) % ranges.length;
+    const marks = findMarksRef.current;
+    if (!marks.length) return;
+    const n = ((i % marks.length) + marks.length) % marks.length;
     findIndexRef.current = n;
     setFindIndex(n);
-    paintFindHighlights(ranges, ranges[n]);
+    marks.forEach((m, k) => m.classList.toggle(FIND_CURRENT_CLASS, k === n));
     const scroller = hostRef.current?.parentElement;
-    if (scroller) scrollFindRangeIntoView(scroller, ranges[n]);
+    if (scroller) scrollMarkIntoView(scroller, marks[n]);
   };
 
   // Re-run the search against the current DOM. `keepIndex` preserves the
   // active match across a re-render (buffer edit); otherwise it resets to 0.
   const runFind = (q: string, keepIndex = false) => {
     const host = hostRef.current;
-    const ranges = host && q ? collectFindRanges(host, q) : [];
-    findRangesRef.current = ranges;
-    setFindCount(ranges.length);
-    if (!ranges.length) {
-      clearFindHighlights();
+    const marks = host ? markFindMatches(host, q) : [];
+    lastRunQueryRef.current = q;
+    findMarksRef.current = marks;
+    setFindCount(marks.length);
+    if (!marks.length) {
       findIndexRef.current = 0;
       setFindIndex(0);
       return;
@@ -738,40 +770,107 @@ export function MarkdownPreview(
     gotoMatch(keepIndex ? findIndexRef.current : 0);
   };
 
+  // Debounce the re-mark, NOT the keystroke: the input updates immediately, only
+  // the DOM pass waits. markFindMatches walks every text node and inserts an
+  // element per hit, so the leading characters of a query are by far the most
+  // expensive (one letter over this repo's docs/gotchas.md is ~1,900 <mark>s,
+  // ~45ms) and they're exactly the ones the reader is about to type past. Nav
+  // and Enter flush rather than wait, so nothing observable is ever stale.
+  const cancelPendingFind = () => {
+    if (findTimerRef.current === null) return false;
+    clearTimeout(findTimerRef.current);
+    findTimerRef.current = null;
+    return true;
+  };
+  const scheduleFind = (q: string) => {
+    cancelPendingFind();
+    findTimerRef.current = window.setTimeout(() => {
+      findTimerRef.current = null;
+      runFind(q);
+    }, FIND_DEBOUNCE_MS);
+  };
+  /** Run any pending search now, so Enter never acts on a stale match list.
+   *  Returns true only when that search actually CHANGED the result set, which
+   *  tells the caller its "go to next match" is already satisfied: the reader
+   *  hasn't seen match 1 yet, so stepping past it would skip it. A pending run
+   *  for the query already on screen is a no-op, keeps the reader's position,
+   *  and must not eat their keystroke. */
+  const flushFind = () => {
+    if (!cancelPendingFind()) return false;
+    const q = findQueryRef.current;
+    const changed = q !== lastRunQueryRef.current;
+    runFind(q, !changed);
+    return changed;
+  };
+
+  const clearFind = () => {
+    cancelPendingFind();
+    if (hostRef.current) unmarkFind(hostRef.current);
+    findMarksRef.current = [];
+    setFindCount(0);
+    findIndexRef.current = 0;
+    setFindIndex(0);
+  };
+
   const openFind = () => {
     setFindOpen(true);
+    findOpenRef.current = true;
     // Select any existing query so the next keystroke replaces it, matching
-    // the editor's Cmd+F. rAF: the input has to be in the DOM first.
-    requestAnimationFrame(() => findInputRef.current?.select());
-    if (findQuery) runFind(findQuery, true);
+    // the editor's Cmd+F. focus() explicitly: select() implying focus is a
+    // convention, not a guarantee. rAF: the input has to be in the DOM first.
+    requestAnimationFrame(() => {
+      findInputRef.current?.focus();
+      findInputRef.current?.select();
+    });
+    if (findQueryRef.current) runFind(findQueryRef.current, true);
   };
   const closeFind = () => {
     setFindOpen(false);
-    clearFindHighlights();
-    findRangesRef.current = [];
-    setFindCount(0);
+    findOpenRef.current = false;
+    clearFind();
     // Hand focus back to the pane so a second Cmd+F reopens without a click.
     containerRef.current?.focus();
   };
 
-  // Cmd/Ctrl+F opens the bar, but only when this preview is the intended
-  // target. It must be laid out; then either it's already searching, OR no
-  // editor competes (preview-only / the editor-less Changelog dialog), OR — in
-  // split view — the preview is the focused pane. We can't lean on click-focus
-  // for that last check: WKWebView (Safari engine) doesn't move focus to a
-  // non-editable element on click, so `contains(activeElement)` would never go
-  // true. The scroller's onMouseDown below programmatically focuses the
-  // container to make it reliable, which also blurs CodeMirror so its keymap
-  // stops claiming Cmd+F once the reader clicks into the preview.
+  // Cmd/Ctrl+F opens the bar, but only in the preview that should get it. EVERY
+  // mounted preview runs this listener — one per open markdown tab, per visited
+  // task, plus the Changelog dialog's — and it's capture-phase + stopPropagation,
+  // so a wrong claim doesn't just open a stray bar: it eats the key from the
+  // terminal's search overlay and CodeMirror's keymap. `ownsFind` answers "am I
+  // the app's one live tab"; the rest of the gate answers "does something else
+  // hold the keyboard right this second", which the store can't see.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
       if (e.key !== "f" && e.key !== "F") return;
-      if (!visible) return;
+      if (!ownsFind) return;
       const c = containerRef.current;
       if (!c) return;
-      const mine = findOpen || !editorVisible || c.contains(document.activeElement);
-      if (!mine) return;
+      const ae = document.activeElement as HTMLElement | null;
+      const focusHere = !!ae && c.contains(ae);
+
+      // A modal owns the keyboard while it's open and the tab underneath is
+      // still `ownsFind`. Read off activeElement rather than "is a dialog in
+      // the DOM": a closing dialog's exit animation is rAF-driven and rAF
+      // freezes on an occluded window, so the node can outlive its focus trap.
+      // `!contains(c)` because the Changelog dialog hosts a preview of its own.
+      const trap = ae?.closest?.('[role="dialog"]');
+      if (trap && !trap.contains(c)) return;
+      // Settings is a hand-rolled overlay (App.tsx) that traps nothing and
+      // autofocuses nothing, so activeElement stays out in the tab underneath
+      // and the check above can't see it. Ask the store instead. Scoped to
+      // previews out in a task: one inside a dialog is on TOP of Settings.
+      if (useApp.getState().view.settingsOpen && !c.closest('[role="dialog"]')) return;
+
+      // Something else on screen has the keyboard AND its own find: the bottom
+      // split's terminal, a right-panel input, CodeMirror anywhere. None of
+      // those are in the task split tree, so `ownsFind` says nothing about them.
+      if (!focusHere && ae?.closest(".xterm, .cm-editor, input, textarea, [contenteditable]")) return;
+      // Split view with focus somewhere neutral: the editor is the default
+      // owner until the reader clicks into the preview. That click is what the
+      // scroller's onMouseDown at the bottom of this file exists to register.
+      if (editorVisible && !focusHere) return;
+
       e.preventDefault();
       e.stopPropagation();
       openFind();
@@ -779,27 +878,18 @@ export function MarkdownPreview(
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, editorVisible, findOpen, findQuery]);
-
-  // The buffer re-rendered (edit in split view, or a settle): the old Ranges
-  // point at detached nodes. Re-search the fresh DOM if the bar is open,
-  // keeping the active match where possible; otherwise drop any stale paint.
-  // Ordered AFTER the main render effect so it reads the new innerHTML.
-  useEffect(() => {
-    if (findOpen && findQuery) runFind(findQuery, true);
-    else clearFindHighlights();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [text]);
+  }, [ownsFind, editorVisible]);
 
   // A recycled tab now points at a different file: close find so its matches
-  // and highlight don't linger over unrelated content.
+  // don't linger over unrelated content.
   useEffect(() => {
     if (findOpen) closeFind();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ctx?.filePath]);
-
-  // Drop the global highlight registration when this preview unmounts.
-  useEffect(() => () => clearFindHighlights(), []);
+  // The marks need no unmount cleanup: they live in this preview's own subtree,
+  // which goes away with it, and nothing is registered globally. The debounce
+  // timer does, so it can't fire into a torn-down tree.
+  useEffect(() => () => { if (findTimerRef.current !== null) clearTimeout(findTimerRef.current); }, []);
 
   // Main imperative effect: parse → inject → hydrate images + mermaid.
   // Re-runs when the buffer text or the theme changes — deliberately NOT on
@@ -823,6 +913,14 @@ export function MarkdownPreview(
     host.innerHTML = renderSanitized(text || "");
     hydrateTaskImages(host, ctx, imgCacheRef.current!, { revalidatePositive: isNavigation });
     setHasBlockedRemoteImages(gateRemoteImages(host, remoteImagesAllowed));
+    // innerHTML above threw away every <mark>, so re-run the search against the
+    // fresh DOM. This lives HERE rather than in an effect keyed on `text`:
+    // effects run in declaration order, so a separate one could fire before
+    // this rebuild and mark the stale DOM, and it would miss the other deps
+    // (theme, remoteImagesAllowed) that also replace innerHTML. Reads the refs,
+    // not the state, because a tab recycled onto another file closes find in
+    // this same commit while the state here still says open.
+    if (findOpenRef.current && findQueryRef.current) runFind(findQueryRef.current, true);
     const blocks = Array.from(host.querySelectorAll<HTMLElement>(".mermaid-block"));
     if (blocks.length === 0) return () => { alive = false; };
 
@@ -1084,9 +1182,11 @@ export function MarkdownPreview(
           query={findQuery}
           count={findCount}
           index={findIndex}
-          onQueryChange={(q) => { setFindQuery(q); runFind(q); }}
-          onNext={() => gotoMatch(findIndexRef.current + 1)}
-          onPrev={() => gotoMatch(findIndexRef.current - 1)}
+          onQueryChange={(q) => { setFindQuery(q); findQueryRef.current = q; scheduleFind(q); }}
+          // flushFind lands on match 1, so a pending search makes "next" a no-op
+          // rather than a skip: type + Enter goes to the first hit, not the second.
+          onNext={() => { if (!flushFind()) gotoMatch(findIndexRef.current + 1); }}
+          onPrev={() => { flushFind(); gotoMatch(findIndexRef.current - 1); }}
           onClose={closeFind}
         />
       )}
@@ -1159,6 +1259,7 @@ function FindBar({
         autoComplete="off"
         className="w-44 bg-transparent text-[13px] text-[var(--color-fg)] outline-none placeholder:text-[var(--color-fg-faint)]"
       />
+      {/* Fixed width so stepping 9/10 → 10/10 doesn't shift the buttons. */}
       <span className="min-w-[3.25rem] shrink-0 text-right text-[11.5px] tabular-nums text-[var(--color-fg-faint)]">
         {query ? `${count ? index + 1 : 0}/${count}` : ""}
       </span>
@@ -1174,3 +1275,4 @@ function FindBar({
     </div>
   );
 }
+

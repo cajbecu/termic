@@ -84,7 +84,11 @@ export function ChangelogDialog() {
               Loading changelog…
             </div>
           }>
-            <MarkdownPreview text={stripHeader(markdown)} themeDark={themeDark} linkify={false} />
+            {/* Mounted only while the dialog is open, so find is ours whenever
+                it exists. A markdown tab underneath still says `ownsFind`, but
+                its listener stands down while a focus trap it isn't inside
+                holds the keyboard, and picks its search back up when we close. */}
+            <MarkdownPreview text={stripHeader(markdown)} themeDark={themeDark} linkify={false} ownsFind />
           </Suspense>
         </div>
       )}
