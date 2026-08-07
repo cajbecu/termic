@@ -4,7 +4,7 @@
 // Exposed as seed(opts) so wdio.conf can seed an ISOLATED profile per parallel
 // worker (own data dir + fixture repo + tasks/worktree base). Idempotent.
 import { execSync } from "node:child_process";
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
@@ -89,7 +89,63 @@ export function seed(o = {}) {
     sh("git branch --set-upstream-to=origin/main main", fixture);
   }
 
+  // 1b. Self-heal tracked fixture content. Specs that edit tracked files
+  // (git dirty-tree, editor save) restore them in after(), but a crashed
+  // or aborted run skips teardown and leaves the tree dirty; the git
+  // spec asserts clean-at-boot and its "Git" tab match breaks on the
+  // dirty-count badge. Tracked files only: untracked state (a spec's
+  // .termic.yaml, task droppings) is owned and cleaned by the specs.
+  // Unstage first: `checkout HEAD -- .` restores tracked paths but leaves
+  // a file staged as NEW sitting in the index; reset demotes it to
+  // untracked (spec-owned, like .termic.yaml). Then HEAD (not the bare
+  // `-- .` index form): a run that crashed after staging leaves the dirt
+  // in index AND worktree, where the index form is a no-op and the
+  // clean-tree spec still boots red.
+  try {
+    sh("git reset -q HEAD -- .", fixture);
+    sh("git checkout -q HEAD -- .", fixture);
+  } catch {
+    /* ignore */
+  }
+
   // 2. An unopened `sbcheck` worktree (the import-worktree spec expects it).
+  //
+  // The dir lives under $HOME and is SHARED by every termic checkout's
+  // fixture, so it can exist but belong to another checkout (its `.git`
+  // file points at that checkout's fixture). Such a dir blocks
+  // `worktree add` with "already exists" AND keeps this fixture's stale
+  // registration alive (git only prunes when the dir is gone or
+  // unreadable, verified: a foreign-owned dir is NOT prunable), which
+  // used to skip the re-add entirely and leave the import-worktree spec
+  // red forever, on whichever checkout lost the dir. Reclaim it: it is
+  // throwaway derived state on both sides, and the losing checkout's
+  // seed does the same reclaim right back on its next run.
+  // Owned means the back-pointer names THIS fixture AND the admin dir it
+  // points at still exists: a recreated .e2e (rm -rf, or this checkout
+  // being a re-made task worktree) leaves the dir's .git naming our path
+  // while the fixture no longer knows it, and treating that dangling
+  // state as "ours" would skip the reclaim and leave `worktree add`
+  // permanently blocked by the non-empty dir.
+  const sbcheckOwnedHere = () => {
+    try {
+      const gitfile = readFileSync(path.join(sbcheck, ".git"), "utf8");
+      const target = gitfile.replace(/^gitdir:\s*/, "").trim();
+      return gitfile.includes(path.join(fixture, ".git")) && existsSync(target);
+    } catch {
+      return false;
+    }
+  };
+  if (existsSync(sbcheck) && !sbcheckOwnedHere()) {
+    rmSync(sbcheck, { recursive: true, force: true });
+  }
+  // With a foreign dir gone (or the dir deleted out from under git), the
+  // leftover registration is now genuinely dangling; prune BEFORE listing
+  // so the includes() check below reflects reality.
+  try {
+    sh("git worktree prune", fixture);
+  } catch {
+    /* ignore */
+  }
   let worktrees = "";
   try {
     worktrees = shOut("git worktree list", fixture);
@@ -101,7 +157,15 @@ export function seed(o = {}) {
     try {
       sh(`git worktree add -q "${sbcheck}" -b sbcheck`, fixture);
     } catch {
-      /* already exists */
+      // -b fails when the branch survived a removed worktree; attach the
+      // existing branch instead of seeding nothing. Guarded: seed() must
+      // never hard-fail the whole suite over this fixture nicety, and a
+      // missing sbcheck only reddens the one import spec.
+      try {
+        sh(`git worktree add -q "${sbcheck}" sbcheck`, fixture);
+      } catch {
+        /* leave it to the import spec to report */
+      }
     }
   }
 

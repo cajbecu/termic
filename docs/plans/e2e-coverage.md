@@ -27,6 +27,7 @@ until `make e2e` is green and this file reflects it.
 | ✅ Agent attention | An agent you are not viewing flags completion (unread/done) when it finishes | `agent.e2e.ts` |
 | ✅ CLI tabs (unit) | `termic tab` on an UNMOUNTED task keeps every persisted agent and its session id, does not steal the default-target role, and a shell tab does not strand the task agentless | `store/cliTab.integration.test.ts` |
 | ✅ CLI tab ids end to end | Over the real control socket: `tab` returns a stable id; `logs --tab` resolves it to THAT tab's own PTY (the `PtyRole.tab_id` thread); `send --tab` delivers to the targeted tab only; `tab -p` confirms delivery into the new tab; `status` lists the strip with the same ids and 1-based indices; a missed selector is a typed not_found and a duplicate title refuses as ambiguous | `cli.e2e.ts` |
+| ✅ CLI rename end to end | Over the real control socket (GH #153): `rename` retitles by explicit name, the reply carries the persisted NEW name and old_name, the store reflects it live; a same-project duplicate refuses with a typed conflict | `cli.e2e.ts` |
 | ✅ CLI send --tab (unit) | Targeted send delivers/queues on the TARGET tab's own state, refuses vanished (unknown_tab), non-agent (not_sendable), dead (tab_not_live) targets, spawn-pending waits for the racing PTY, --resume/--fresh conflict, incapable --wait refused | `store/cliSend.integration.test.ts` |
 | ✅ Windowless completion | An agent finishing while Termic is windowless still flags unread/done, even for the task that was active | `app.e2e.ts` |
 | ✅ Pending work defers done | An agent that backgrounds work and returns to its idle title holds the done badge back past byte-quiet (4s) and the settle timer (5s); done fires once its status line clears | `agent.e2e.ts` |
@@ -52,7 +53,7 @@ until `make e2e` is green and this file reflects it.
 | ✅ Command palette | Opens/lists; filters; command activation closes it; Escape closes | `app.e2e.ts` |
 | ✅ File finder | ⌘P lists the repo's files; selecting one opens an editor tab | `files.e2e.ts` |
 | ✅ Git stage/unstage/commit | Stage → unstage → re-stage + commit → clean | `git.e2e.ts` |
-| ✅ Task rename/delete | Rename updates store+sidebar; delete removes the task entirely | `task.e2e.ts` |
+| ✅ Task rename/delete | Rename updates store+sidebar; duplicate name refused (IPC) + toast (inline flow, GH #153); delete removes the task entirely | `task.e2e.ts` |
 | ✅ Git diff | Open a diff tab for a changed file | `git.e2e.ts` |
 | ✅ Inline review comments | Select a diff line → tooltip → compose → save, three times; line numbers stay level with the code throughout (GH #157) | `git.e2e.ts` |
 | ✅ Find in files | ⇧⌘F opens; a repo-present query returns a result row | `files.e2e.ts` |

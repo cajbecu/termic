@@ -688,6 +688,9 @@ pub(crate) fn handle_request(req: &Request, host: &dyn CliHost, sink: &mut dyn E
         Command::Archive { task, project } => {
             handle_archive(&req.id, host, task, project.as_deref())
         }
+        Command::Rename { task, project, name, cwd } => {
+            handle_rename(&req.id, host, task.as_deref(), project.as_deref(), cwd.as_deref(), name)
+        }
         Command::ProjectAdd { path, non_git } => {
             handle_project_add(&req.id, host, path, *non_git)
         }
@@ -1558,6 +1561,14 @@ fn handle_wait(
             deadline,
             strict_target: true,
             queued: false,
+            // `wait` asks "is this TASK (or, with --tab, this tab)
+            // quiescent NOW", not "did my turn settle": with no
+            // prompt_id the watch's own-turn check short-circuits
+            // before trust_done is ever read, so the flag is inert
+            // here. Kept true because that states the verb's semantics
+            // (any cached done IS the answer); the site where the value
+            // is load-bearing is `send` (false: a stale done badge must
+            // not settle OUR prompt).
             trust_done: true,
         },
         sink,
@@ -2239,6 +2250,11 @@ fn handle_tab(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Re
             deadline,
             strict_target: false,
             queued,
+            // Safe ONLY because the tab is brand new: any done it shows
+            // is genuinely ours. Contrast send --tab (false: a targeted
+            // PRE-EXISTING tab often wears a stale done badge from its
+            // last turn). Flipping this without re-deriving that
+            // difference reintroduces the stale-done bug.
             trust_done: true,
         },
         sink,
@@ -2296,6 +2312,68 @@ fn handle_archive(id: &str, host: &dyn CliHost, task: &str, project: Option<&str
             project: project_name,
             killed_agents: killed,
         }),
+    )
+}
+
+// ───────────────────────────── rename ────────────────────────────────
+
+/// Rename a task's display label. The branch and worktree directory are
+/// untouched (pushed branches and live PTY cwds reference them). Routed
+/// through the webview rename_task RPC so the sidebar updates live; the
+/// webview's task_rename re-checks the duplicate, this pre-check exists
+/// to pin the Conflict error code (an RPC failure surfaces as Internal).
+fn handle_rename(
+    id: &str,
+    host: &dyn CliHost,
+    task: Option<&str>,
+    project: Option<&str>,
+    cwd: Option<&str>,
+    name: &str,
+) -> Reply {
+    let new_name = name.trim();
+    if new_name.is_empty() {
+        return Reply::err(id, ErrorCode::BadRequest, "name cannot be empty");
+    }
+    let (projects, tasks) = host.projects_tasks();
+    let t = match resolve_task_arg(&projects, &tasks, task, project, cwd) {
+        Ok(t) => t.clone(),
+        Err(e) => return Reply { id: id.into(), ok: false, data: None, error: Some(e) },
+    };
+    if let Some(dup) = tasks.iter().find(|d| {
+        d.id != t.id
+            && !d.archived
+            && d.project_id == t.project_id
+            && d.name.eq_ignore_ascii_case(new_name)
+    }) {
+        return Reply::err(
+            id,
+            ErrorCode::Conflict,
+            format!("task {} already exists", qualified(&projects, dup)),
+        );
+    }
+    if let Err(e) = host.rpc(
+        "rename_task",
+        serde_json::json!({ "taskId": t.id, "name": new_name }),
+        PROJECT_RPC_TIMEOUT,
+    ) {
+        return Reply::err(id, ErrorCode::Internal, format!("rename failed ({e})"));
+    }
+    // Re-read from disk so the reply reflects what was persisted, not
+    // what we asked for (task_rename trims; a racing write loses cleanly).
+    let (projects, tasks) = host.projects_tasks();
+    let renamed = match tasks.iter().find(|w| w.id == t.id) {
+        Some(w) => summarize(w, &projects, None, None),
+        None => {
+            return Reply::err(
+                id,
+                ErrorCode::Internal,
+                "task disappeared during rename",
+            )
+        }
+    };
+    Reply::ok(
+        id,
+        ReplyData::Rename(proto::RenameData { task: renamed, old_name: t.name }),
     )
 }
 
@@ -2448,8 +2526,10 @@ fn qualified(projects: &[Project], task: &Task) -> String {
 
 /// Resolve a task from an optional name, falling back to the caller's
 /// cwd (worktree first, then main-checkout prefix), the same rule
-/// `open` uses. Verbs that read or wait go through this; destructive
-/// verbs (archive) deliberately require the explicit name.
+/// `open` uses. Verbs that read or wait go through this, and so does
+/// `rename` (by design: an agent retitling its OWN task is the GH #153
+/// use case, and a rename is cheap to undo); destructive verbs
+/// (archive, apply) deliberately require the explicit name.
 pub(crate) fn resolve_task_arg<'a>(
     projects: &[Project],
     tasks: &'a [Task],
@@ -2484,6 +2564,11 @@ pub(crate) fn resolve_task_arg<'a>(
 /// Resolve a task by name, id, or qualified `project/name`; `--project`
 /// filters first. A name matching tasks in more than one project errors
 /// listing the candidates (docs/plans/cli.md).
+///
+/// An exact id match wins OUTRIGHT, before any name matching: ids are
+/// the authoritative handle (the injected help tells agents to hold the
+/// id precisely because names can be renamed or reused), so a task
+/// NAMED like another task's id must not shadow it into ambiguity.
 pub(crate) fn resolve_by_name<'a>(
     projects: &[Project],
     tasks: &'a [Task],
@@ -2507,11 +2592,18 @@ pub(crate) fn resolve_by_name<'a>(
         None => live.clone(),
     };
 
+    // Ids first, and alone: ids are unique, so this can never be
+    // ambiguous, and a name that happens to equal some task's id must
+    // not drag that task into a name-vs-id tie.
+    if let Some(t) = scoped.iter().copied().find(|t| t.id == raw) {
+        return Ok(t);
+    }
+
     let matches = |candidates: &[&'a Task], name: &str| -> Vec<&'a Task> {
         candidates
             .iter()
             .copied()
-            .filter(|t| t.name.eq_ignore_ascii_case(name) || t.id == name)
+            .filter(|t| t.name.eq_ignore_ascii_case(name))
             .collect()
     };
 
@@ -3704,6 +3796,10 @@ mod tests {
         /// Tasks "created" by a scripted new_task rpc (appended to
         /// `tasks` on the reload handle_new performs).
         extra_tasks: Mutex<Vec<Task>>,
+        /// id -> new name applied by a scripted rename_task rpc, so the
+        /// reload handle_rename performs sees the persisted rename the
+        /// way the real webview's task_rename write would provide it.
+        renames: Mutex<HashMap<String, String>>,
         killed: Mutex<Vec<String>>,
         /// (tasks with agents, live agents) the stub reports for `quit`.
         live_agents: (u32, u32),
@@ -3766,6 +3862,7 @@ mod tests {
                 rpc_calls: Mutex::new(Vec::new()),
                 setup_chunks: Vec::new(),
                 extra_tasks: Mutex::new(Vec::new()),
+                renames: Mutex::new(HashMap::new()),
                 killed: Mutex::new(Vec::new()),
                 ops: Mutex::new(Vec::new()),
                 cache: AgentCache::new(),
@@ -3815,6 +3912,12 @@ mod tests {
         fn projects_tasks(&self) -> (Vec<Project>, Vec<Task>) {
             let mut tasks = self.tasks.clone();
             tasks.extend(self.extra_tasks.lock().unwrap().iter().cloned());
+            let renames = self.renames.lock().unwrap();
+            for t in &mut tasks {
+                if let Some(n) = renames.get(&t.id) {
+                    t.name = n.clone();
+                }
+            }
             (self.projects.clone(), tasks)
         }
         fn work_states(&self, _ids: &[String]) -> Option<HashMap<String, WorkStateInfo>> {
@@ -3852,6 +3955,20 @@ mod tests {
                 .get(method)
                 .cloned()
                 .unwrap_or_else(|| Err(format!("no scripted rpc result for {method}")));
+            if method == "rename_task" {
+                if result.is_ok() {
+                    // Mirror the webview: task_rename persisted before the
+                    // RPC resolved, so the reload sees the new name. Without
+                    // this, handle_rename's re-read returns the STALE name
+                    // and the reply contract goes unasserted.
+                    if let (Some(tid), Some(name)) = (
+                        params.get("taskId").and_then(|t| t.as_str()),
+                        params.get("name").and_then(|n| n.as_str()),
+                    ) {
+                        self.renames.lock().unwrap().insert(tid.into(), name.into());
+                    }
+                }
+            }
             if method == "new_task" {
                 if let Ok(v) = &result {
                     // Mirror the webview: the create committed, so the
@@ -4856,6 +4973,131 @@ mod tests {
             *host.ops.lock().unwrap(),
             vec!["detach:w3:archived", "kill:w3", "rpc:archive_task"]
         );
+    }
+
+    fn rename_cmd(task: Option<&str>, project: Option<&str>, name: &str) -> Command {
+        Command::Rename {
+            task: task.map(str::to_string),
+            project: project.map(str::to_string),
+            name: name.into(),
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn rename_routes_through_the_webview_rpc() {
+        let host = StubHost::default();
+        host.script_rpc("rename_task", Ok(serde_json::Value::Null));
+        let reply = handle(
+            &req(rename_cmd(Some("solo"), None, "  PR 9 - retitle  "), Some("tok")),
+            &host,
+        );
+        assert!(reply.ok, "{reply:?}");
+        let Some(ReplyData::Rename(r)) = reply.data else { panic!("expected rename, got {reply:?}") };
+        assert_eq!(r.old_name, "solo");
+        assert_eq!(r.task.id, "w3");
+        // The reply reflects what was PERSISTED (the post-RPC disk
+        // re-read), not the pre-rename snapshot: the stub mirrors the
+        // webview's write, so a stale reply fails here.
+        assert_eq!(r.task.name, "PR 9 - retitle");
+        let calls = host.rpc_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "rename_task");
+        assert_eq!(calls[0].1["taskId"], "w3");
+        // The server trims before sending; the webview must never see
+        // padding it would have to re-trim.
+        assert_eq!(calls[0].1["name"], "PR 9 - retitle");
+    }
+
+    #[test]
+    fn rename_rejects_an_empty_name_before_resolving() {
+        let host = StubHost::default();
+        let reply = handle(&req(rename_cmd(Some("solo"), None, "   "), Some("tok")), &host);
+        let err = reply.error.expect("error");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert!(err.message.contains("empty"), "{}", err.message);
+        assert!(host.rpc_calls.lock().unwrap().is_empty(), "nothing reached the webview");
+    }
+
+    #[test]
+    fn rename_refuses_a_same_project_duplicate() {
+        // w1 "fix-auth" lives in web alongside w3 "solo"; the check is
+        // case-insensitive, matching `new`'s collision rule.
+        let host = StubHost::default();
+        let reply = handle(&req(rename_cmd(Some("solo"), None, "Fix-Auth"), Some("tok")), &host);
+        let err = reply.error.expect("error");
+        assert_eq!(err.code, ErrorCode::Conflict);
+        assert!(err.message.contains("web/fix-auth"), "{}", err.message);
+        assert!(host.rpc_calls.lock().unwrap().is_empty(), "nothing reached the webview");
+    }
+
+    #[test]
+    fn rename_allows_a_cross_project_duplicate_and_a_case_fix() {
+        // "solo" exists only in web, so api/fix-auth may take it: name
+        // resolution disambiguates cross-project dups with --project.
+        let host = StubHost::default();
+        host.script_rpc("rename_task", Ok(serde_json::Value::Null));
+        let reply =
+            handle(&req(rename_cmd(Some("fix-auth"), Some("api"), "solo"), Some("tok")), &host);
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(host.rpc_calls.lock().unwrap()[0].1["taskId"], "w2");
+
+        // Self is excluded from the duplicate check, so a case-only
+        // rename of the SAME task is not a conflict with itself.
+        let host = StubHost::default();
+        host.script_rpc("rename_task", Ok(serde_json::Value::Null));
+        let reply = handle(&req(rename_cmd(Some("solo"), None, "SOLO"), Some("tok")), &host);
+        assert!(reply.ok, "{reply:?}");
+    }
+
+    #[test]
+    fn rename_without_a_task_resolves_from_cwd() {
+        let host = StubHost::default();
+        host.script_rpc("rename_task", Ok(serde_json::Value::Null));
+        let cmd = Command::Rename {
+            task: None,
+            project: None,
+            name: "retitled".into(),
+            cwd: Some("/tasks/web/solo/src".into()),
+        };
+        let reply = handle(&req(cmd, Some("tok")), &host);
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(host.rpc_calls.lock().unwrap()[0].1["taskId"], "w3");
+    }
+
+    #[test]
+    fn rename_ambiguous_name_errors_without_touching_the_webview() {
+        let host = StubHost::default();
+        let reply = handle(&req(rename_cmd(Some("fix-auth"), None, "new"), Some("tok")), &host);
+        let err = reply.error.expect("error");
+        assert_eq!(err.code, ErrorCode::Ambiguous);
+        assert!(host.rpc_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_exact_id_match_beats_a_task_named_like_that_id() {
+        // A task renamed (or created) with another task's ID as its NAME
+        // must not shadow id lookups into ambiguity: ids are the handle
+        // the injected help tells agents to hold. w1 is a task id in the
+        // default fixture; name w3 "w1" and resolve "w1" by id.
+        let mut host = StubHost::default();
+        host.tasks[2].name = "w1".into(); // w3's record, now NAMED "w1"
+        let (projects, tasks) = host.projects_tasks();
+        let t = resolve_by_name(&projects, &tasks, "w1", None).expect("id resolves");
+        assert_eq!(t.id, "w1", "the id's task wins, not the impostor name");
+        // The impostor is still reachable by ITS id.
+        let t = resolve_by_name(&projects, &tasks, "w3", None).expect("impostor by id");
+        assert_eq!(t.name, "w1");
+    }
+
+    #[test]
+    fn rename_rpc_failure_is_internal() {
+        let host = StubHost::default();
+        host.script_rpc("rename_task", Err("webview exploded".into()));
+        let reply = handle(&req(rename_cmd(Some("solo"), None, "new"), Some("tok")), &host);
+        let err = reply.error.expect("error");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(err.message.contains("rename failed"), "{}", err.message);
     }
 
     #[test]

@@ -15,6 +15,8 @@ v5. Phase 3 in progress - windowless mode landed, `termic quit` landed;
 tab management (GH #138) landed in full: part 1 (`termic tab` + stable
 tab ids) and part 2 (`--tab <n|id|title>` targeting on
 send/wait/attach/logs, tabs listed in `status`, `tab -p`), protocol v6.
+`rename` (GH #153, label only; branch + dir keep their names) lands on
+top, protocol v7.
 Homebrew
 is settled, not pending: the cask ships, a CLI-only formula is a non-goal
 (see Distribution). `termic events --json` is SEQUENCED BEHIND hooks, not
@@ -281,6 +283,17 @@ termic apply <task> [--yes]                   # the GUI's "send diff to main"
                                               # which leaves conflict markers IN MAIN and
                                               # must say so explicitly ("main checkout
                                               # left conflicted, resolve or reset")
+termic rename [<task>] <name>                 # GH #153. Retitle a task: the LABEL only,
+                                              # branch + worktree dir keep their
+                                              # creation-time names (pushed branches,
+                                              # live PTY cwds). Without <task> targets
+                                              # $TERMIC_TASK_ID (the caller's own task),
+                                              # then cwd like `open`. Same-project live
+                                              # duplicate -> Conflict (mirrors `new`'s
+                                              # collision rule; task_rename enforces it
+                                              # too, so the GUI shares the guard). Routed
+                                              # through the rename_task webview RPC so
+                                              # the sidebar updates live
 termic archive <task> [--yes]                 # kills the task's live PTYs FIRST (the
                                               # task_set_sandbox SIGKILL precedent;
                                               # today NEITHER lib.rs task_archive nor
