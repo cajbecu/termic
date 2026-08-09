@@ -6,7 +6,7 @@ are generated from it. See the `release` skill for how entries are added.
 
 ## [0.26.0] - 
 
-The CLI addresses individual tabs and adopts worktrees you already have, folder links browse in the editor, and the diff finally renders images.
+CLI tab targeting and worktree adoption, folder browsing in the editor, and image diffs.
 
 ### Features
 - `termic tab` opens another tab in a task and prints its id, and every verb that talks to a task takes `--tab` to aim at one: `send --tab`, `logs --tab`, `tab -p` to open and prompt in a single call. `status` lists the strip with the same ids and 1-based indices, and a selector that misses is a typed error naming the candidates rather than a silent default. `termic agents` prints the configured agent registry. (#138, #154, #156)
