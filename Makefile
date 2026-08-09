@@ -103,6 +103,10 @@ doctor: ## Verify the dev env without installing anything (CI-friendly, exits no
 # ─── dev ──────────────────────────────────────────────────────────────
 
 dev: ## Run termic in dev mode (Vite HMR + Rust auto-rebuild).
+	@# A freshly pulled commit can add npm deps (tsc then fails with
+	@# TS2307 "Cannot find module"). npm install is a ~1s no-op when
+	@# node_modules is already in sync, so always run it first.
+	@npm install --no-fund --no-audit
 	@# Run dev.mjs directly (not via `npm run`): npm 11 swallows Ctrl+C and
 	@# orphans the tauri/cargo/app subtree. Direct exec makes node the
 	@# process-group leader so dev.mjs's signal handler can tear the group down.
