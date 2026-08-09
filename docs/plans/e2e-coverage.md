@@ -46,6 +46,8 @@ until `make e2e` is green and this file reflects it.
 | ✅ Git dirty | Modify a file → Git panel leaves clean state, git status reports it | `git.e2e.ts` |
 | ✅ Settings | Toggling a preference lands in the prefs store + control reflects it | `settings.e2e.ts` |
 | ✅ GPU renderer toggle | Appearance → Terminal exposes the WebGL toggle on macOS (GH #140); flipping the real switch lands in prefs, both directions | `settings.e2e.ts` |
+| ✅ Editor theme per app mode | Appearance → Editor offers a dark AND a light syntax theme select, each writing only its own pref; on the rendered side the app mode selects the matching pref, the light pref repaints while the app stays light, and a write to the dark pref changes nothing until the app goes dark | `settings.e2e.ts`, `editor.e2e.ts` |
+| ✅ Select chrome | Every settings `<select>` computes `appearance: none` with the repainted chevron and reserves room for it, so WKWebView's native bevel cannot come back (one bare-element rule, all selects at once) | `settings.e2e.ts` |
 | ✅ Tabs | Add a terminal tab via the "+" menu; switch active tab | `tabs-layout.e2e.ts` |
 | ✅ Tab rename | Double-click inline edit commits the new name | `tabs-layout.e2e.ts` |
 | ✅ Theme | Picker switches theme; palette class applied to `<html>` | `tabs-layout.e2e.ts` |

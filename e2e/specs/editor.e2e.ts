@@ -393,6 +393,204 @@ describe("code editor", () => {
   });
 });
 
+// The syntax theme is configured independently per app mode (dark / light):
+// a dark-optimized scheme reads as unusable on a light surface and vice versa,
+// so `editorThemeId` was split into `editorThemeIdDark` + `editorThemeIdLight`
+// (EditorPane picks one via `resolveTheme(themeMode)`).
+//
+// Two things can regress here and only one is visible from the prefs store, so
+// both are asserted against the RENDERED tokens: the app mode must select the
+// matching pref, and each pref must only reach its own mode. The old single
+// pref passes the first check trivially (one value for both modes), so the
+// case that actually pins the split is the last one: editing the dark pref
+// while the app is light must change nothing on screen.
+describe("editor theme per app mode", () => {
+  let taskId: string | undefined;
+  let originals: { mode: string; dark: string; light: string } | undefined;
+
+  after(async () => {
+    if (originals) {
+      await browser.execute((o) => {
+        const p = window.__termic!.usePrefs.getState();
+        p.setThemeMode(o.mode as any);
+        p.setEditorThemeIdDark(o.dark);
+        p.setEditorThemeIdLight(o.light);
+      }, originals);
+    }
+    if (taskId) await archiveTask(taskId);
+    try {
+      execSync(`git -C "${fixture}" clean -fd`);
+    } catch {
+      /* nothing */
+    }
+  });
+
+  /** Computed colors of every highlighted token in the visible editor, in
+   *  document order. A theme swap repaints the syntax layer, so this string
+   *  changes; asserting the whole set (rather than one hand-picked span)
+   *  means the case does not depend on which token a given theme colors. */
+  const tokenColors = () =>
+    browser.execute((id) => {
+      const content = [
+        ...document.querySelectorAll(`[data-task-id="${id}"] .cm-content`),
+      ].find((e) => (e as HTMLElement).clientWidth > 0) as HTMLElement | undefined;
+      if (!content) throw new Error("no visible .cm-content");
+      const spans = [...content.querySelectorAll(".cm-line span[class]")];
+      if (!spans.length) throw new Error("no highlighted token spans");
+      return spans.map((s) => getComputedStyle(s).color).join("|");
+    }, taskId!);
+
+  /** Apply a prefs change and wait for CodeMirror's theme compartment to
+   *  actually repaint (it reconfigures in an effect, so the DOM lags the
+   *  store by a tick). Returns the new fingerprint. */
+  const applyAndSettle = async (mutate: () => Promise<unknown>, before: string) => {
+    await mutate();
+    await browser.waitUntil(async () => (await tokenColors()) !== before, {
+      timeout: 8_000,
+      timeoutMsg: "editor tokens never repainted after the theme change",
+    });
+    return tokenColors();
+  };
+
+  let darkColors = "";
+  let lightColors = "";
+
+  it("paints the dark pref's theme while the app theme is dark", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask("e2e-theme-mode");
+
+    originals = await browser.execute(() => {
+      const p = window.__termic!.usePrefs.getState();
+      return {
+        mode: p.themeMode,
+        dark: p.editorThemeIdDark,
+        light: p.editorThemeIdLight,
+      };
+    });
+
+    // Two schemes that differ in every token color, so a mode/pref mix-up
+    // cannot coincidentally produce the same paint.
+    await browser.execute(() => {
+      const p = window.__termic!.usePrefs.getState();
+      p.setThemeMode("dark");
+      p.setEditorThemeIdDark("github-dark");
+      p.setEditorThemeIdLight("github-light");
+    });
+
+    const name = "theme-probe.py";
+    writeFileSync(
+      path.join(fixture, name),
+      "def greet(name):\n    return f'hi {name}'\n",
+    );
+    await browser.execute(
+      (id) => window.__termic!.useApp.getState().bumpFsRevision(id),
+      taskId,
+    );
+    const sel = `[data-path="${name}"]`;
+    await browser.waitUntil(
+      () => browser.execute((s) => !!document.querySelector(s), sel),
+      { timeout: 10_000, timeoutMsg: `${name} never appeared in the tree` },
+    );
+    await browser.execute((s) => {
+      (document.querySelector(s) as HTMLElement).click();
+    }, sel);
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          (id) =>
+            [
+              ...document.querySelectorAll(`[data-task-id="${id}"] .cm-content`),
+            ].some(
+              (e) =>
+                (e as HTMLElement).clientWidth > 0 &&
+                (e.textContent ?? "").includes("greet") &&
+                e.querySelectorAll(".cm-line span[class]").length > 0,
+            ),
+          taskId,
+        ),
+      { timeout: 10_000, timeoutMsg: "CodeMirror never highlighted the probe file" },
+    );
+
+    darkColors = await tokenColors();
+    expect(darkColors.length).toBeGreaterThan(0);
+    await snap("editor-theme-dark-mode.png");
+  });
+
+  it("switches to the light pref's theme when the app goes light", async () => {
+    lightColors = await applyAndSettle(
+      () =>
+        browser.execute(() =>
+          window.__termic!.usePrefs.getState().setThemeMode("light"),
+        ),
+      darkColors,
+    );
+    expect(lightColors).not.toBe(darkColors);
+    await snap("editor-theme-light-mode.png");
+  });
+
+  it("repaints from the LIGHT pref while the app stays light", async () => {
+    // Same app mode throughout: only the light pref moves, so this isolates
+    // the light select from the mode flip above.
+    const next = await applyAndSettle(
+      () =>
+        browser.execute(() =>
+          window.__termic!.usePrefs.getState().setEditorThemeIdLight("xcode-light"),
+        ),
+      lightColors,
+    );
+    expect(next).not.toBe(lightColors);
+    lightColors = next;
+  });
+
+  it("ignores the DARK pref while the app is light", async () => {
+    // The regression the split exists to prevent. With one shared pref this
+    // repaints the light editor in a dark scheme.
+    await browser.execute(() =>
+      window.__termic!.usePrefs.getState().setEditorThemeIdDark("aura"),
+    );
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(
+          () => window.__termic!.usePrefs.getState().editorThemeIdDark,
+        )) === "aura",
+      { timeout: 8_000, timeoutMsg: "editorThemeIdDark never took" },
+    );
+    // "Nothing happened" cannot be waited for, and reading straight back would
+    // pass even if the repaint were merely one tick behind. So run a full
+    // round trip on the LIGHT pref (each leg awaited to a real repaint) and
+    // only then assert: by the time the second leg lands, the dark write is
+    // many render ticks old, and the fingerprint is back to exactly where it
+    // was before the dark pref moved.
+    const detour = await applyAndSettle(
+      () =>
+        browser.execute(() =>
+          window.__termic!.usePrefs.getState().setEditorThemeIdLight("github-light"),
+        ),
+      lightColors,
+    );
+    const stillLight = await applyAndSettle(
+      () =>
+        browser.execute(() =>
+          window.__termic!.usePrefs.getState().setEditorThemeIdLight("xcode-light"),
+        ),
+      detour,
+    );
+    expect(stillLight).toBe(lightColors);
+
+    // ...and flipping back to dark now shows the newly-picked dark theme, so
+    // the write was not merely ignored everywhere.
+    const backToDark = await applyAndSettle(
+      () =>
+        browser.execute(() =>
+          window.__termic!.usePrefs.getState().setThemeMode("dark"),
+        ),
+      lightColors,
+    );
+    expect(backToDark).not.toBe(darkColors);
+  });
+});
+
 /** A real (if empty) 2-page PDF. Byte offsets are computed as the string is
  *  built, and every byte is ASCII, so the xref table is valid and WKWebView
  *  renders pages instead of an error view. */

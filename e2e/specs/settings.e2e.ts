@@ -91,12 +91,22 @@ describe("settings rail", () => {
    *  whole run dies mid-case. Same discipline as the signal-inspector
    *  snapshot. */
   let gpuOriginal: boolean | undefined;
+  /** Same discipline for the two editor-theme prefs: the case below writes
+   *  both, and later specs in the run read the editor. */
+  let editorThemeOriginals: { dark: string; light: string } | undefined;
 
   after(async () => {
     if (gpuOriginal !== undefined) {
       await browser.execute((v) => {
         window.__termic!.usePrefs.getState().setTerminalGpuEnabled(v);
       }, gpuOriginal);
+    }
+    if (editorThemeOriginals) {
+      await browser.execute((o) => {
+        const p = window.__termic!.usePrefs.getState();
+        p.setEditorThemeIdDark(o.dark);
+        p.setEditorThemeIdLight(o.light);
+      }, editorThemeOriginals);
     }
     await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
   });
@@ -375,6 +385,112 @@ describe("settings rail", () => {
       () => !!document.getElementById("setting-load-remote-images"),
     );
     expect(found).toBe(true);
+  });
+
+  // The syntax theme is per app mode now (dark and light are separate prefs).
+  // The rendered result is pinned in editor.e2e.ts; this is the control side:
+  // Appearance -> Editor must offer BOTH selects, and each must write only its
+  // own pref. A single-select regression fails on the second half.
+  it("offers a dark and a light editor theme, each writing its own pref", async () => {
+    await clickRail("Appearance");
+    await clickAppearanceTab("editor");
+    await waitForText("Editor theme (dark)");
+    const pane = await paneText();
+    expect(pane).toContain("Editor theme (dark)");
+    expect(pane).toContain("Editor theme (light)");
+
+    const before = await browser.execute(() => {
+      const p = window.__termic!.usePrefs.getState();
+      return { dark: p.editorThemeIdDark, light: p.editorThemeIdLight };
+    });
+    editorThemeOriginals = before;
+
+    /** The <select> in the row whose label matches, driven through a real
+     *  change event so React's onChange runs (setting .value alone does not). */
+    const pickTheme = (label: string, id: string) =>
+      browser.execute(
+        (lbl, val) => {
+          const labelEl = [
+            ...document.querySelectorAll('[data-testid="settings-pane"] div'),
+          ].find((d) => d.textContent?.trim() === lbl);
+          const sel = labelEl
+            ?.closest(".justify-between")
+            ?.querySelector("select") as HTMLSelectElement | null;
+          if (!sel) throw new Error("no select for: " + lbl);
+          const setter = Object.getOwnPropertyDescriptor(
+            HTMLSelectElement.prototype,
+            "value",
+          )!.set!;
+          setter.call(sel, val);
+          sel.dispatchEvent(new Event("change", { bubbles: true }));
+        },
+        label,
+        id,
+      );
+
+    await pickTheme("Editor theme (light)", "github-light");
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(
+          () => window.__termic!.usePrefs.getState().editorThemeIdLight,
+        )) === "github-light",
+      { timeout: 8_000, timeoutMsg: "editorThemeIdLight never took" },
+    );
+    // The light pick must not have dragged the dark pref along with it.
+    const darkAfterLight = await browser.execute(
+      () => window.__termic!.usePrefs.getState().editorThemeIdDark,
+    );
+    expect(darkAfterLight).toBe(before.dark);
+
+    await pickTheme("Editor theme (dark)", "github-dark");
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(
+          () => window.__termic!.usePrefs.getState().editorThemeIdDark,
+        )) === "github-dark",
+      { timeout: 8_000, timeoutMsg: "editorThemeIdDark never took" },
+    );
+    const lightAfterDark = await browser.execute(
+      () => window.__termic!.usePrefs.getState().editorThemeIdLight,
+    );
+    expect(lightAfterDark).toBe("github-light");
+  });
+
+  // WKWebView paints its own bevelled gradient over a <select> no matter what
+  // background/border CSS the element carries, which read as a stray system
+  // widget on the light theme's flat panels. The reset is a bare-element rule
+  // in index.css, so it is one deletion away from coming back on every select
+  // at once; assert it on every select the settings pane renders.
+  it("strips the native chrome from every settings select", async () => {
+    await clickRail("Appearance");
+    await clickAppearanceTab("editor");
+    await waitForText("Editor font");
+
+    const selects = await browser.execute(() =>
+      [...document.querySelectorAll('[data-testid="settings-pane"] select')].map(
+        (s) => {
+          const cs = getComputedStyle(s);
+          return {
+            appearance: cs.appearance,
+            webkit: cs.webkitAppearance,
+            image: cs.backgroundImage,
+            padRight: parseFloat(cs.paddingRight),
+          };
+        },
+      ),
+    );
+    expect(selects.length).toBeGreaterThan(0);
+    for (const s of selects) {
+      expect(s.appearance).toBe("none");
+      expect(s.webkit).toBe("none");
+      // appearance:none drops the native arrow too, so the rule repaints one.
+      expect(s.image).toContain("svg");
+      // ...and the instance has to reserve room for it, or the longest option
+      // label runs under the chevron. `pr-8` is 32px at 100% UI zoom; assert
+      // the property (clears the 14px glyph + its 0.6em inset) not the class.
+      expect(s.padRight).toBeGreaterThanOrEqual(24);
+    }
+    await snap("settings-select-chrome.png");
   });
 });
 
