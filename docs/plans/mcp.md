@@ -160,9 +160,11 @@ Mechanics:
   never enters any env; the data dir deny stays the final FS rule.
 - **Uncaged tasks** get a `full`-scope per-task token when the
   feature is on (attribution, not new capability). Outside clients
-  (Claude Desktop etc.) authenticate with the existing `cli-token`
-  file, mapping to `full`, so the endpoint doubles as the surface the
-  original `termic mcp` was for. No stdio shim needed.
+  (Claude Desktop etc.) authenticate with a dedicated per-boot
+  `mcp-token` file (0600, same handling as `cli-token`, never the
+  same value; see the Phase A threat model), mapping to `full`, so
+  the endpoint doubles as the surface the original `termic mcp` was
+  for. No stdio shim needed.
 
 **Scoped requests pass two checks in order.** First the project
 allow-list. Then monotonicity, because project scope alone is an
@@ -203,6 +205,43 @@ Scoped v1 tools: `task_new`, `task_send`, `task_wait`, `task_status`,
   "credentials from the environment" posture is the sanctioned local
   shape.
 
+## Phase A threat model
+
+Phase A opens an outside-reachable surface before any sandbox work,
+so it needs its own threat model; "nothing in-cage changes" covers
+caged agents only. Loopback TCP is a wider boundary than the unix
+socket: the socket had three gates (0600 socket file, getpeereid
+same-uid check, token), TCP keeps only the token, and it is reachable
+by every local process regardless of uid and by browser JavaScript.
+Phase A compensates from day one rather than inheriting:
+
+- **Own credential.** The endpoint authenticates against a dedicated
+  per-boot `mcp-token` file (0600, 128+ bits), never reusing
+  `cli-token`. A leak compromises one surface, and rotation is
+  decoupled. All cli.md token invariants apply: never in the app
+  process env, data dir denied to cages, scoped per-task tokens only
+  inside their one cage.
+- **Cross-uid processes** can connect to the port but cannot read the
+  0600 token file. The token is the entire boundary here; that single
+  factor is why the custody rules above are strict.
+- **Same-uid processes** that read the token get full orchestration.
+  That is the socket's existing posture (a same-uid process can
+  already do anything as the user), but the socket had peer-cred and
+  file-perm depth in front of its token; here there is none, so the
+  server does constant-time token comparison and logs and backs off
+  on auth failures.
+- **Browser JavaScript (CSRF against loopback).** Any web page can
+  fire requests at 127.0.0.1. Three independent stops, all Phase A
+  requirements: the token rides an `Authorization` header a browser
+  never attaches cross-origin; the spec-required `Mcp-Method` header
+  makes every request non-simple, forcing a CORS preflight the
+  server never answers; and any request carrying an `Origin` header
+  is rejected outright, with no CORS headers ever emitted.
+- **Peer identification is not attempted.** Mapping a loopback
+  4-tuple to a pid is the same unreliable-under-adversary check
+  cli.md rejected for the socket; at most it is logged as telemetry,
+  never used as a gate.
+
 ## Settings and exposure
 
 Same landing discipline as the CLI: merged is not live.
@@ -218,9 +257,12 @@ Same landing discipline as the CLI: merged is not live.
 ## Phasing
 
 - **Phase A: endpoint + full scope.** Listener, stateless core,
-  legacy tolerance, registry-generated tools, `cli-token` -> full.
-  Outside clients work; nothing in-cage changes. Measures real client
-  behavior and context cost before any security-sensitive work.
+  legacy tolerance, registry-generated tools, `mcp-token` -> full,
+  and the full Phase A threat model above (own token file, Origin
+  rejection, preflight-hostile headers, auth backoff) as landing
+  requirements, not follow-ups. Outside clients work; nothing
+  in-cage changes. Measures real client behavior and context cost
+  before the sandbox work.
 - **Phase B: scoped tokens.** The two sandbox knobs, provisioning,
   parentage, project filter + monotonicity, seatbelt port allow,
   scope-filtered `tools/list`. Its own PR and review; this IS
@@ -238,6 +280,10 @@ E2e rig (isolated `TERMIC_DATA_DIR`, fake-agent) plus:
   `_meta` rejection matrix, header checks.
 - Registry parity: `help --json` and `tools/list` render from one
   source; drift = red.
+- Phase A boundary: no token -> 401 with no information; wrong token
+  -> same; any request with an Origin header -> rejected, no CORS
+  headers in any response; `cli-token` is not accepted as
+  `mcp-token`.
 - Sandbox, behavioral: in an Enforce cage without the checkbox, the
   MCP port refuses; with it, the MCP port connects and every OTHER
   loopback port still refuses. A scoped token cannot call full-scope
@@ -270,5 +316,3 @@ E2e rig (isolated `TERMIC_DATA_DIR`, fake-agent) plus:
    which revision? Phase A's in-cage value is zero until claude does.
 2. Does caged `task_new` ship in Phase B v1, or does scoped v1 start
    with send/wait/reads and add create after field experience?
-3. One credential file or two? Reusing `cli-token` for full-scope MCP
-   is one story but couples rotation.
