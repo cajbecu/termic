@@ -462,6 +462,11 @@ export interface Settings {
    *  disabled CLI fails fast with a clear error rather than a launch
    *  timeout. See docs/plans/cli.md. */
   cli_enabled?: boolean;
+  /** One-time marker for the "CLI graduated, turn it on" migration (lib.rs,
+   *  `migrate_cli_enabled_default`). Backend-owned: the UI never writes it,
+   *  but it has to round-trip through the settings object the UI saves, or
+   *  the migration would re-fire and undo a user's opt-out. */
+  cli_default_migrated?: boolean;
   /** What the window's close button does. Absent/"ask" = show the close
    *  prompt (whose "Don't ask again" checkbox writes the choice back here);
    *  "menubar" = close to the menu bar, agents keep running; "quit" = quit

@@ -919,6 +919,38 @@ fn stamp_schema_version() {
     }
 }
 
+/// One-time flip of `cli_enabled` to true for profiles that predate the CLI
+/// graduating out of experimental (0.26.0).
+///
+/// Changing the serde default is not enough on its own: `save_settings_inner`
+/// writes the whole struct, so every profile that has ever opened Settings has
+/// an explicit `cli_enabled: false` on disk, and a default only applies to a
+/// missing field. This rewrites the value once and stamps
+/// `cli_default_migrated` so it never fires again, which is what makes turning
+/// the CLI back off stick.
+///
+/// Best-effort by design: a failed write leaves the marker unstamped and the
+/// migration simply retries next launch. Nothing here can fail in a way that
+/// should block startup.
+fn migrate_cli_enabled_default() {
+    let mut s = settings_load();
+    if apply_cli_default_migration(&mut s) {
+        let _ = save_settings_inner(&s);
+    }
+}
+
+/// Pure half of the migration, so the rule can be tested without a settings
+/// file (`TERMIC_DATA_DIR` is process-global and would race parallel tests).
+/// Returns whether `s` changed and therefore needs writing.
+fn apply_cli_default_migration(s: &mut Settings) -> bool {
+    if s.cli_default_migrated {
+        return false;
+    }
+    s.cli_enabled = true;
+    s.cli_default_migrated = true;
+    true
+}
+
 /// Exclusive migration lock, released on drop. Guards against two concurrent
 /// launches migrating the same data dir at once (the app is single-instance in
 /// practice, but nothing enforces it — a double-click or a stray second dev
@@ -8833,12 +8865,39 @@ pub struct Settings {
     #[serde(default)]
     pub discovery_dismissed: Vec<String>,
     /// "Enable CLI" (Settings, General): gates every authenticated verb of
-    /// the `termic` control socket. Default OFF; the server always binds and
-    /// answers hello regardless, so a disabled CLI fails fast with a clear
-    /// error instead of a launch-then-timeout dead end (docs/plans/cli.md,
-    /// Landing). Re-read per request, so flipping it applies live.
-    #[serde(default)]
+    /// the `termic` control socket. The server always binds and answers hello
+    /// regardless, so a disabled CLI fails fast with a clear error instead of
+    /// a launch-then-timeout dead end (docs/plans/cli.md, Landing). Re-read
+    /// per request, so flipping it applies live.
+    ///
+    /// Default ON since the CLI left experimental. Access is gated by the
+    /// per-boot token in `<data_dir>/cli-token` (0600, never placed in any
+    /// child's env, cli_server.rs), so the default does not widen the trust
+    /// boundary: it only removes a setup step.
+    ///
+    /// The default alone only reaches fresh profiles and files predating the
+    /// field, because the whole struct is serialized on every save, so any
+    /// existing profile already carries an explicit `cli_enabled: false`.
+    /// `cli_default_migrated` is what reaches those.
+    #[serde(default = "default_true")]
     pub cli_enabled: bool,
+    /// One-time marker for the "CLI graduated, turn it on" migration
+    /// (`migrate_cli_enabled_default`). False/absent means the flip has not
+    /// happened for this profile yet.
+    ///
+    /// A dedicated marker rather than a `schema_version` bump: that counter
+    /// belongs to the workspaces->tasks data migration, which gates on
+    /// `>= TASKS_SCHEMA_VERSION`, so raising it would re-run that migration
+    /// for every existing install.
+    ///
+    /// It cannot distinguish "off because that was the default" from "off
+    /// because the user turned it off", since both are stored as plain
+    /// `false`. The flip is therefore deliberately a one-shot: it runs once
+    /// and stamps this, so anyone who switches the CLI back off keeps it off
+    /// forever after. Accepted because the CLI shipped off by default, so
+    /// nearly every `false` on disk is the default rather than a decision.
+    #[serde(default)]
+    pub cli_default_migrated: bool,
     /// What the window's close button does: "ask" (default) | "menubar" |
     /// "quit". "ask" shows the close prompt whose "Don't ask again" checkbox
     /// writes the chosen one back here. Stored rather than inferred so the
@@ -10683,6 +10742,12 @@ pub fn run() {
             // layout. Best-effort + gated by settings.schema_version, so it's a
             // cheap no-op on every launch after the first.
             migrate_workspaces_to_tasks();
+            // One-time flip of cli_enabled for profiles that predate the CLI
+            // graduating (0.26.0). Ordered after the task migration and before
+            // the window so the control socket's first request already reads
+            // the migrated value; cli_enabled is re-read per request, so even
+            // an in-flight one picks it up.
+            migrate_cli_enabled_default();
             // The main window is created HERE (not in tauri.conf.json) so the
             // macOS traffic-light inset can be chosen per-OS. macOS Tahoe (26+)
             // stopped vertically centering the window controls in an overlay
@@ -11231,6 +11296,37 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    // CLI graduation (0.26.0): the serde default only reaches profiles with
+    // the field absent, so existing installs need the one-time flip. The
+    // contract worth pinning is that it is ONE time: without the marker check
+    // the CLI would switch itself back on at every launch and there would be
+    // no way to keep it off.
+    #[test]
+    fn cli_migration_turns_it_on_for_an_existing_profile_that_had_it_off() {
+        let mut s = Settings { cli_enabled: false, cli_default_migrated: false, ..Default::default() };
+        assert!(apply_cli_default_migration(&mut s), "should report a change to persist");
+        assert!(s.cli_enabled);
+        assert!(s.cli_default_migrated, "marker must be stamped so it never re-runs");
+    }
+
+    #[test]
+    fn cli_migration_never_re_enables_after_the_user_turns_it_off() {
+        // The state right after someone switches the CLI off post-migration.
+        let mut s = Settings { cli_enabled: false, cli_default_migrated: true, ..Default::default() };
+        assert!(!apply_cli_default_migration(&mut s), "must not rewrite settings");
+        assert!(!s.cli_enabled, "an explicit opt-out has to survive relaunch");
+    }
+
+    #[test]
+    fn cli_migration_stamps_a_fresh_profile_without_changing_the_answer() {
+        // Fresh install: the serde default already gave us true, but the
+        // marker still has to be stamped or the flip stays pending forever.
+        let mut s = Settings { cli_enabled: true, cli_default_migrated: false, ..Default::default() };
+        assert!(apply_cli_default_migration(&mut s));
+        assert!(s.cli_enabled);
+        assert!(s.cli_default_migrated);
+    }
 
     fn role(kind: &str, task: &str) -> PtyRole {
         PtyRole { task_id: task.into(), tab_id: None, kind: kind.into(), is_default: false }

@@ -1,12 +1,15 @@
-// termic CLI control plane. Off by default: the socket always binds and
-// answers hello, but every verb stays refused until this is on. Enabling
-// auto-installs the command (no prompt) into ~/.local/bin; the button
-// upgrades it to a system-wide /usr/local/bin install.
+// termic CLI control plane. ON by default: the socket always binds and
+// answers hello, and the verbs are live unless this is switched off.
+// Enabling auto-installs the command (no prompt) into ~/.local/bin; the
+// button upgrades it to a system-wide /usr/local/bin install.
 //
-// Marked EXPERIMENTAL in the rail and the title. It qualifies under the rule
-// in docs/ui.md: off by default because the surface is still settling (the
-// wire protocol is versioned and Phase 2+ verbs are unbuilt), not off for
-// safety or taste. It graduates by dropping the badge, not by moving page.
+// Graduated out of EXPERIMENTAL. Per the rule in docs/ui.md the badge marks a
+// surface that is still settling and is therefore off by default, and it
+// graduates by dropping the badge rather than moving page, so the badge and
+// the default had to change together: keeping either one alone would have
+// left the rail contradicting the setting. Being on by default does not widen
+// the trust boundary, since every verb still needs the per-boot token from
+// <data_dir>/cli-token (0600, never in any child's env, cli_server.rs).
 
 import { useEffect, useState } from "react";
 import { cliInstallSymlink, cliInstallStatus } from "@/lib/ipc";
@@ -18,8 +21,13 @@ import { cn } from "@/lib/utils";
 export function CliSection() {
   const { settings, patch } = useBackendSettings();
   // "Enable CLI": backend Settings field, saved immediately on toggle.
-  // Absent = off. Gates every authenticated verb of the `termic` control
-  // socket (docs/plans/cli.md).
+  // Gates every authenticated verb of the `termic` control socket
+  // (docs/plans/cli.md). Absent from the file = ON, since the backend fills
+  // the field with its default before this ever sees it.
+  //
+  // Seeded false rather than true on purpose: this renders for one frame
+  // before settingsLoad resolves, and showing "enabled" for a profile that
+  // has the CLI switched off is the worse of the two flashes.
   const [cliEnabled, setCliEnabled] = useState(false);
   // Install state (path / command name / PATH-awareness), plus the
   // in-flight flag + last result line of an install action.
@@ -74,12 +82,12 @@ export function CliSection() {
 
   return (
     <div className="flex flex-col gap-7">
-      <SectionTitle title="Termic CLI" badge="Experimental" />
+      <SectionTitle title="Termic CLI" />
 
       <Block first>
         <Toggle
           label="Enable CLI"
-          hint={`Let the ${name} command drive this app from any shell: create tasks and stream their setup, wait for an agent to go quiet, list and check tasks, archive them, and add or remove projects. Off by default. Agents in an enforced sandbox never get access. Turning this off refuses every command immediately (the command stays installed).`}
+          hint={`Let the ${name} command drive this app from any shell: create tasks and stream their setup, wait for an agent to go quiet, list and check tasks, archive them, and add or remove projects. On by default, and access needs a token only this Mac's user can read. Agents in an enforced sandbox never get access. Turning this off refuses every command immediately (the command stays installed).`}
           value={cliEnabled}
           onChange={saveCliEnabled}
         />
@@ -139,9 +147,6 @@ export function CliSection() {
           <div><span className="text-[var(--color-fg)]">{name} list</span></div>
           <div><span className="text-[var(--color-fg)]">{name} wait fix-auth</span></div>
         </div>
-        <p className="mt-2.5 text-[12px] text-[var(--color-fg-faint)]">
-          Experimental: the commands and their output can still change between releases.
-        </p>
       </Block>
 
       {/* The "agents as users" path (docs/plans/cli.md). Every task PTY is
