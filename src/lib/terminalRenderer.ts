@@ -7,13 +7,14 @@
 // Remove once the retina-thinness bug is fixed.
 
 import { WebglAddon } from "@xterm/addon-webgl";
+import { CanvasAddon } from "@xterm/addon-canvas";
 import type { Terminal } from "@xterm/xterm";
 import { usePrefs } from "@/store/prefs";
 import { terminalFontReady, isTerminalFontReady } from "@/lib/terminalFontReady";
 import { keepAtlasCanvasConnected } from "@/lib/atlasCanvasGuard";
 import * as ipc from "@/lib/ipc";
 
-function dumpRenderer(addon: WebglAddon | null): void {
+function dumpRenderer(addon: WebglAddon | CanvasAddon | null): void {
   /* eslint-disable @typescript-eslint/no-explicit-any */
   const r: any = (addon as any)?._renderer;
   if (!r) { console.log("[termic renderer] no WebGL renderer"); return; }
@@ -31,16 +32,23 @@ function dumpRenderer(addon: WebglAddon | null): void {
   /* eslint-enable @typescript-eslint/no-explicit-any */
 }
 
-/** Load xterm's WebGL renderer onto `term`. Returns a disposable —
- *  call `dispose()` BEFORE `term.dispose()` so the render loop can't
- *  fire on a half-disposed terminal. If WebGL is unsupported (throw) OR the
- *  user disabled the GPU renderer (the `terminalGpuEnabled` pref — escape
- *  hatch for Linux/WebKitGTK boxes where WebGL runs on a software rasterizer
- *  and typing crawls, and for macOS battery users: on macOS 26 each live GL
- *  surface costs ~10pp of standing WindowServer CPU even at zero draw calls,
- *  GH #140), the load is skipped and xterm's built-in DOM renderer remains.
- *  Read once at mount; toggling the pref takes effect on the next terminal
- *  spawn (relaunch to switch every open terminal). */
+/** Load the renderer named by the `terminalRenderer` pref onto `term`.
+ *  Returns a disposable: call `dispose()` BEFORE `term.dispose()` so the
+ *  render loop can't fire on a half-disposed terminal. On "dom", or if the
+ *  addon throws (unsupported), nothing is loaded and xterm's built-in DOM
+ *  renderer remains. Read once at mount; changing the pref takes effect on
+ *  the next terminal spawn (relaunch to switch every open terminal).
+ *
+ *  GH #140 reported the macOS 26 WebGL surface costing ~33pp of WindowServer
+ *  while idle and asked for a way off it. Re-measuring on an M1 Max at a
+ *  comparable canvas size (~3.4M device px) did not reproduce that: WebGL
+ *  costs ~1pp more WindowServer than DOM, and DOM's total is actually WORSE
+ *  once WebContent and WebKit's GPU process are counted, which the issue did
+ *  not measure. Under sustained output WebGL is ~2.7x cheaper than either
+ *  alternative. So WebGL stays the default and this pref is a compatibility
+ *  escape hatch (software rasterizers on Linux/WebKitGTK, driver bugs), NOT a
+ *  battery lever. Canvas is the one option that genuinely lowers idle cost,
+ *  and it pays for that under load. */
 /** GH #70: the bundled JetBrains Mono is a lazy @font-face; xterm's WebGL atlas
  *  keys glyphs per (char, fg, bg, ext) with no font in the key, so a glyph
  *  rasterized against the fallback stays wrong-height until the cell happens to
@@ -90,12 +98,23 @@ export async function awaitTerminalFonts(
 }
 
 export function loadTerminalRenderer(term: Terminal): { dispose(): void } {
-  let addon: WebglAddon | null = null;
+  let addon: WebglAddon | CanvasAddon | null = null;
   let disposed = false;
 
   const attach = () => {
-    if (disposed || addon || !usePrefs.getState().terminalGpuEnabled) return;
+    const kind = usePrefs.getState().terminalRenderer;
+    if (disposed || addon || kind === "dom") return;
     try {
+      if (kind === "canvas") {
+        // No GL context, so no onContextLoss and no shared texture atlas to
+        // park: the canvas renderer owns its own <canvas> layers inside the
+        // terminal element, and disposing it takes them with it. That is the
+        // whole reason it exists as a middle option.
+        const c = new CanvasAddon();
+        term.loadAddon(c);
+        addon = c;
+        return;
+      }
       const a = new WebglAddon();
       a.onContextLoss(() => a.dispose());
       // Atlas swaps (font/theme/dpr). Microtask: the event fires before the
@@ -107,7 +126,7 @@ export function loadTerminalRenderer(term: Terminal): { dispose(): void } {
       // the addon to forward it). Park before the idle warm-up rasterizes.
       keepAtlasCanvasConnected(a);
     } catch {
-      addon = null;  // WebGL unsupported → xterm's DOM renderer remains
+      addon = null;  // renderer unsupported → xterm's DOM renderer remains
     }
   };
 
@@ -119,7 +138,11 @@ export function loadTerminalRenderer(term: Terminal): { dispose(): void } {
   // a live renderer. xterm's DOM renderer covers the gap. GPU-off and warm-face
   // attach right away; a face that never loads still resolves terminalFontReady
   // and gets GPU (consistent fallback, not the mixed-height "waves").
-  if (isTerminalFontReady() || !usePrefs.getState().terminalGpuEnabled) {
+  //
+  // The canvas renderer keys its glyph cache the same way, so it needs the
+  // same gate; only "dom" can attach unconditionally, and for it attach() is
+  // a no-op anyway.
+  if (isTerminalFontReady() || usePrefs.getState().terminalRenderer === "dom") {
     attach();
   } else {
     terminalFontReady.then(() => { if (!disposed && !addon) attach(); });
@@ -136,7 +159,8 @@ export function loadTerminalRenderer(term: Terminal): { dispose(): void } {
       disposed = true;
       dumpTimers.forEach(t => window.clearTimeout(t));
       // Park the shared atlas canvas before this pane's DOM unmounts with it.
-      keepAtlasCanvasConnected(addon, term.element);
+      // Only WebGL has one; the canvas renderer's layers die with its dispose.
+      if (addon instanceof WebglAddon) keepAtlasCanvasConnected(addon, term.element);
       try { addon?.dispose(); } catch { /* already gone */ }
     },
   };

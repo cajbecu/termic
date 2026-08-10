@@ -15,6 +15,21 @@ const clickToggleByLabel = (label: string) =>
     sw.click();
   }, label);
 
+/** Drive the renderer <select> the way a user does. A plain `.click()` on an
+ *  <option> does not commit a value in WKWebView, so set it and dispatch the
+ *  change React listens for. Scoped by the option values, which are the pref
+ *  values themselves, rather than by label text that copy edits would break. */
+const selectRendererByValue = (value: "webgl" | "canvas" | "dom") =>
+  browser.execute((v) => {
+    const sel = [...document.querySelectorAll("select")].find(
+      (s) => [...s.options].some((o) => o.value === v) &&
+             [...s.options].some((o) => o.value === "webgl"),
+    ) as HTMLSelectElement | undefined;
+    if (!sel) throw new Error("renderer select not found");
+    sel.value = v;
+    sel.dispatchEvent(new Event("change", { bubbles: true }));
+  }, value);
+
 // Settings/preferences subsystem. Guards that a real toggle in the Settings
 // overlay flips the pref in the prefs store and the control reflects it.
 describe("settings", () => {
@@ -90,7 +105,7 @@ describe("settings rail", () => {
    *  none); this after() is the backstop for the shared profile when the
    *  whole run dies mid-case. Same discipline as the signal-inspector
    *  snapshot. */
-  let gpuOriginal: boolean | undefined;
+  let gpuOriginal: "webgl" | "canvas" | "dom" | undefined;
   /** Same discipline for the two editor-theme prefs: the case below writes
    *  both, and later specs in the run read the editor. */
   let editorThemeOriginals: { dark: string; light: string } | undefined;
@@ -98,7 +113,7 @@ describe("settings rail", () => {
   after(async () => {
     if (gpuOriginal !== undefined) {
       await browser.execute((v) => {
-        window.__termic!.usePrefs.getState().setTerminalGpuEnabled(v);
+        window.__termic!.usePrefs.getState().setTerminalRenderer(v);
       }, gpuOriginal);
     }
     if (editorThemeOriginals) {
@@ -283,47 +298,55 @@ describe("settings rail", () => {
     expect(interfacePane).not.toContain("Terminal font");
   });
 
-  // GH #140: the GPU renderer toggle used to be hidden behind !IS_MAC, forcing
-  // Mac users to hand-edit localStorage to reach the DOM renderer (whose whole
-  // point on macOS is cutting the standing WindowServer cost of an idle WebGL
-  // surface). The suite runs on macOS, so asserting the control exists IS the
-  // regression guard for the exposure.
-  it("exposes the GPU renderer toggle on the Terminal tab and it lands in prefs", async () => {
+  // GH #140: the renderer control used to be hidden behind !IS_MAC, forcing
+  // Mac users to hand-edit localStorage to escape WebGL. It is now a three-way
+  // picker (webgl / canvas / dom) on every platform. The suite runs on macOS,
+  // so asserting the control exists IS the regression guard for the exposure.
+  //
+  // Canvas is the case worth driving through the real <select>: it is the only
+  // value the legacy boolean could not express, so a regression that dropped
+  // the enum back to a toggle would still pass a webgl <-> dom test.
+  it("exposes the three-way renderer picker on the Terminal tab and it lands in prefs", async () => {
     // Explicitly select the Terminal sub-tab: a click on the rail item is a
     // no-op when Appearance is already open, and the previous case leaves it
     // on Interface.
     await clickRail("Appearance");
     await clickAppearanceTab("terminal");
-    await waitForText("GPU (WebGL) terminal renderer");
+    await waitForText("Terminal renderer");
 
-    const LABEL = "GPU (WebGL) terminal renderer";
     const original = await browser.execute(
-      () => window.__termic!.usePrefs.getState().terminalGpuEnabled,
+      () => window.__termic!.usePrefs.getState().terminalRenderer,
     );
     gpuOriginal = original;
     const pref = () =>
-      browser.execute(() => window.__termic!.usePrefs.getState().terminalGpuEnabled);
+      browser.execute(() => window.__termic!.usePrefs.getState().terminalRenderer);
 
-    // The finally puts the pref back through the setter even when an
-    // assertion between the two clicks throws, so the next case (which needs
-    // the WebGL canvas) never runs with GPU off. Idempotent on success.
+    // The finally puts the pref back through the setter even when an assertion
+    // mid-case throws, so the next case (which asserts a canvas mounts in the
+    // preview) never runs on the DOM renderer, which creates none.
     try {
-      await clickToggleByLabel(LABEL);
-      await browser.waitUntil(async () => (await pref()) === !original, {
+      await selectRendererByValue("canvas");
+      await browser.waitUntil(async () => (await pref()) === "canvas", {
         timeout: 8_000,
-        timeoutMsg: "terminalGpuEnabled never flipped",
+        timeoutMsg: "terminalRenderer never became canvas",
       });
+      // The legacy boolean is a second view of the same setting, so it has to
+      // follow: a drift here means the toggle and the mounted renderer disagree.
+      expect(
+        await browser.execute(() => window.__termic!.usePrefs.getState().terminalGpuEnabled),
+      ).toBe(false);
 
-      // Back through the same control, so the off -> on transition is
-      // exercised through the real switch too.
-      await clickToggleByLabel(LABEL);
-      await browser.waitUntil(async () => (await pref()) === original, {
+      await selectRendererByValue("webgl");
+      await browser.waitUntil(async () => (await pref()) === "webgl", {
         timeout: 8_000,
-        timeoutMsg: "terminalGpuEnabled never flipped back",
+        timeoutMsg: "terminalRenderer never went back to webgl",
       });
+      expect(
+        await browser.execute(() => window.__termic!.usePrefs.getState().terminalGpuEnabled),
+      ).toBe(true);
     } finally {
       await browser.execute((v) => {
-        window.__termic!.usePrefs.getState().setTerminalGpuEnabled(v);
+        window.__termic!.usePrefs.getState().setTerminalRenderer(v);
       }, original);
     }
   });

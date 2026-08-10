@@ -3,6 +3,7 @@
 // governs xterm. Sizes are independent.
 
 import { usePrefs, resolveTheme, BUNDLED_FONT_ID, MONO_FONT_OPTIONS, APPEARANCE_DEFAULTS, availableMonoFonts, availableMonoFontsAsync, sortFontOptions, stackFor } from "@/store/prefs";
+import type { TerminalRendererKind } from "@/store/prefs";
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { EDITOR_THEMES, resolveEditorTheme, editorSurfaceTheme } from "@/lib/editorTheme";
@@ -52,8 +53,8 @@ export function AppearanceSection() {
   const setTerminalScrollback = usePrefs(s => s.setTerminalScrollback);
   const terminalOptionAsMeta = usePrefs(s => s.terminalOptionAsMeta);
   const setTerminalOptionAsMeta = usePrefs(s => s.setTerminalOptionAsMeta);
-  const terminalGpuEnabled = usePrefs(s => s.terminalGpuEnabled);
-  const setTerminalGpuEnabled = usePrefs(s => s.setTerminalGpuEnabled);
+  const terminalRenderer = usePrefs(s => s.terminalRenderer);
+  const setTerminalRenderer = usePrefs(s => s.setTerminalRenderer);
   const editorFontSize = usePrefs(s => s.editorFontSize);
   const setEditorFontSize = usePrefs(s => s.setEditorFontSize);
   const uiScale = usePrefs(s => s.uiScale);
@@ -100,7 +101,7 @@ export function AppearanceSection() {
     terminalLetterSpacing === APPEARANCE_DEFAULTS.terminalLetterSpacing &&
     terminalScrollback    === APPEARANCE_DEFAULTS.terminalScrollback &&
     terminalOptionAsMeta  === APPEARANCE_DEFAULTS.terminalOptionAsMeta &&
-    terminalGpuEnabled    === APPEARANCE_DEFAULTS.terminalGpuEnabled &&
+    terminalRenderer      === APPEARANCE_DEFAULTS.terminalRenderer &&
     editorFontSize        === APPEARANCE_DEFAULTS.editorFontSize &&
     uiScale               === APPEARANCE_DEFAULTS.uiScale &&
     codeLigatures         === APPEARANCE_DEFAULTS.codeLigatures &&
@@ -191,18 +192,20 @@ export function AppearanceSection() {
         />
       )}
 
-      {/* All platforms (GH #140). Mac WebGL always works, but each live GL
-          surface carries a standing WindowServer/compositor cost on macOS 26
-          even at zero draw calls — measured ~10pp WindowServer CPU per idle
-          visible terminal. Off trades throughput under heavy output for
-          battery; the default stays on. */}
-      <Toggle
-        label="GPU (WebGL) terminal renderer"
-        hint={IS_MAC
-          ? "Renders terminal text on the GPU, keeping heavy output fast and smooth. Turning it off uses less power while terminals sit idle, which can help battery life. Applies to terminals opened after the change; relaunch to switch the ones already open."
-          : "Renders terminal text on the GPU, keeping heavy output fast and smooth. Turn off if typing feels laggy: some Linux/WebKitGTK setups run WebGL on a software rasterizer, where the plain renderer is faster. Applies to terminals opened after the change; relaunch to switch the ones already open."}
-        value={terminalGpuEnabled}
-        onChange={setTerminalGpuEnabled}
+      {/* All platforms (GH #140). Was a WebGL on/off toggle justified by a
+          macOS 26 battery claim; measurement did not support that, so the
+          framing is now "pick the renderer that suits the machine" and canvas
+          exists as the actual idle-cost lever. Numbers behind the hints, one
+          idle terminal maximized at ~3.4M device px, total CPU across
+          WindowServer + WebContent + WebKit.GPU + app, M1 Max / macOS 26.5:
+          idle canvas 8.7 / webgl 13.7 / dom 14.6, and under sustained output
+          webgl 30% of a core against canvas 75% and dom 80%. So WebGL stays
+          the default, canvas only wins when terminals mostly sit idle, and
+          DOM is a compatibility fallback rather than a saving. */}
+      <Field
+        label="Terminal renderer"
+        hint={"GPU (WebGL) is the default and by far the cheapest while output is flowing.\nCanvas draws on the GPU too but without a live WebGL surface, so it costs less while terminals sit idle and more under heavy output. Pick it on a laptop with a lot of idle terminals.\nDOM is the compatibility fallback: no GPU path at all. Use it if text renders wrong or typing lags, which some Linux/WebKitGTK setups hit because WebGL runs there on a software rasterizer.\nApplies to terminals opened after the change; relaunch to switch the ones already open."}
+        control={<RendererSelect value={terminalRenderer} onChange={setTerminalRenderer} />}
       />
 
       {/* Live terminal preview — spawns a real shell in $HOME so
@@ -458,6 +461,24 @@ function FontSelect({ value, onChange, fonts }: {
         <span>Show all fonts</span>
       </label>
     </div>
+  );
+}
+
+/** Renderer picker (GH #140). Labels lead with what the thing IS, so the
+ *  option list still reads sensibly once collapsed to the selected value. */
+function RendererSelect({ value, onChange }: {
+  value: TerminalRendererKind; onChange: (v: TerminalRendererKind) => void;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value as TerminalRendererKind)}
+      className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] pl-3 pr-8 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[180px]"
+    >
+      <option value="webgl">GPU (WebGL), default</option>
+      <option value="canvas">Canvas</option>
+      <option value="dom">DOM (compatibility)</option>
+    </select>
   );
 }
 

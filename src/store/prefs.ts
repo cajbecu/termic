@@ -44,6 +44,7 @@ const LS_TERMINAL_LETTERSPACING = "terminalLetterSpacing";
 const LS_TERMINAL_SCROLLBACK   = "terminalScrollback";
 const LS_TERMINAL_OPTION_AS_META = "terminalOptionAsMeta";
 const LS_TERMINAL_GPU            = "terminalGpuEnabled";
+const LS_TERMINAL_RENDERER       = "terminalRenderer";
 const LS_TERMINAL_COPY_ON_SELECT = "terminalCopyOnSelect";
 const LS_TASK_EXPAND_MODE = "taskExpandMode";
 const LS_HIDE_INACTIVE_PROJECTS = "hideInactiveProjects";
@@ -67,6 +68,19 @@ const clampUiScale = (pct: number): number =>
 
 /** Markdown edit-tab view: source editor, rendered preview, or both. */
 export type MarkdownView = "source" | "preview" | "split";
+
+/** Which xterm renderer backs a terminal. "webgl" is the default fast path.
+ *  "canvas" rasterizes glyphs the same way but hands the compositor a plain
+ *  2D canvas rather than a live GL surface. "dom" is xterm's fallback, which
+ *  builds real DOM nodes per cell. */
+export type TerminalRendererKind = "webgl" | "canvas" | "dom";
+
+/** Narrow an untrusted localStorage string to a renderer kind. */
+export const parseTerminalRenderer = (
+  v: string | null | undefined,
+  fallback: TerminalRendererKind,
+): TerminalRendererKind =>
+  v === "webgl" || v === "canvas" || v === "dom" ? v : fallback;
 
 export type BuiltinThemeMode = "auto" | "light" | "dark" | "claude" | "solarized" | "cobalt" | "matrix" | "rosepine";
 /** The user's selection: a built-in mode, or a custom theme file id
@@ -536,6 +550,15 @@ interface PrefsState {
    *  makes typing lag. Turning this OFF forces xterm's DOM renderer. Applies to
    *  terminals opened after the change (relaunch to switch every terminal). */
   terminalGpuEnabled: boolean;
+  /** Which xterm renderer to attach. Supersedes the two-state
+   *  `terminalGpuEnabled`, which could only pick between WebGL and DOM and so
+   *  had no way to name the middle option: xterm's 2D-canvas renderer, which
+   *  rasterizes glyphs like WebGL but composites one plain canvas layer
+   *  instead of a live GL surface. The two stay in sync (see
+   *  setTerminalRenderer) so the existing toggle keeps working; this is the
+   *  value the renderer actually reads. Applies to terminals opened after the
+   *  change (relaunch to switch every terminal). */
+  terminalRenderer: TerminalRendererKind;
   /** iTerm-style copy-on-select: a finished mouse selection in any terminal
    *  is written to the clipboard automatically. ON by default. */
   terminalCopyOnSelect: boolean;
@@ -598,6 +621,7 @@ interface PrefsState {
   setTerminalScrollback:  (n: number) => void;
   setTerminalOptionAsMeta: (v: boolean) => void;
   setTerminalGpuEnabled: (v: boolean) => void;
+  setTerminalRenderer: (v: TerminalRendererKind) => void;
   setTerminalCopyOnSelect: (v: boolean) => void;
   setEditorFontSize:  (px: number) => void;
   /** Set whole-app zoom (percent, clamped to UI_SCALE_MIN..MAX). */
@@ -696,6 +720,7 @@ export const APPEARANCE_DEFAULTS = {
   terminalScrollback:    5000,
   terminalOptionAsMeta:  false,
   terminalGpuEnabled:    true,
+  terminalRenderer:      "webgl" as TerminalRendererKind,
   editorFontSize:        13,
   uiScale:               100,
   codeLigatures:         true,
@@ -714,6 +739,12 @@ const initialTerminalLetterSpacing = Math.max(0, Math.round(lsGetNum(LS_TERMINAL
 const initialTerminalScrollback    = Math.max(1000, Math.min(100000, Math.round(lsGetNum(LS_TERMINAL_SCROLLBACK, APPEARANCE_DEFAULTS.terminalScrollback))));
 const initialTerminalOptionAsMeta  = lsGetBool(LS_TERMINAL_OPTION_AS_META, APPEARANCE_DEFAULTS.terminalOptionAsMeta);
 const initialTerminalGpuEnabled    = lsGetBool(LS_TERMINAL_GPU, APPEARANCE_DEFAULTS.terminalGpuEnabled);
+// No stored renderer means this profile predates the three-way pref, so honour
+// whatever the old boolean said rather than snapping everyone back to WebGL.
+const initialTerminalRenderer      = parseTerminalRenderer(
+  lsGet(LS_TERMINAL_RENDERER, ""),
+  initialTerminalGpuEnabled ? "webgl" : "dom",
+);
 const initialTerminalCopyOnSelect  = lsGetBool(LS_TERMINAL_COPY_ON_SELECT, true);
 const initialEditorSize   = lsGetNum(LS_EDITOR_SIZE, APPEARANCE_DEFAULTS.editorFontSize);
 const initialUiScale      = clampUiScale(lsGetNum(LS_UI_SCALE, APPEARANCE_DEFAULTS.uiScale));
@@ -784,6 +815,7 @@ export const usePrefs = create<PrefsState>(set => ({
   terminalScrollback: initialTerminalScrollback,
   terminalOptionAsMeta: initialTerminalOptionAsMeta,
   terminalGpuEnabled: initialTerminalGpuEnabled,
+  terminalRenderer: initialTerminalRenderer,
   terminalCopyOnSelect: initialTerminalCopyOnSelect,
   editorFontSize: initialEditorSize,
   uiScale: initialUiScale,
@@ -837,9 +869,26 @@ export const usePrefs = create<PrefsState>(set => ({
     try { localStorage.setItem(LS_TERMINAL_OPTION_AS_META, v ? "1" : "0"); } catch {}
     set({ terminalOptionAsMeta: v });
   },
+  // The boolean and the three-way pref are two views of one setting, so both
+  // setters write both keys. Letting them drift would mean the toggle and the
+  // renderer disagreed about what is mounted, and only the winner would be
+  // visible in the UI. Flipping the boolean back ON restores WebGL rather than
+  // canvas: "on" has always meant the GPU fast path.
   setTerminalGpuEnabled: (v) => {
-    try { localStorage.setItem(LS_TERMINAL_GPU, v ? "1" : "0"); } catch {}
-    set({ terminalGpuEnabled: v });
+    const kind: TerminalRendererKind = v ? "webgl" : "dom";
+    try {
+      localStorage.setItem(LS_TERMINAL_GPU, v ? "1" : "0");
+      localStorage.setItem(LS_TERMINAL_RENDERER, kind);
+    } catch {}
+    set({ terminalGpuEnabled: v, terminalRenderer: kind });
+  },
+  setTerminalRenderer: (v) => {
+    const gpu = v === "webgl";
+    try {
+      localStorage.setItem(LS_TERMINAL_RENDERER, v);
+      localStorage.setItem(LS_TERMINAL_GPU, gpu ? "1" : "0");
+    } catch {}
+    set({ terminalRenderer: v, terminalGpuEnabled: gpu });
   },
   setTerminalCopyOnSelect: (v) => {
     try { localStorage.setItem(LS_TERMINAL_COPY_ON_SELECT, v ? "1" : "0"); } catch {}
