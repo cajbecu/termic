@@ -142,6 +142,11 @@ coverage/
 # is intentionally tracked (investigation / resume docs live there).
 PLAN-*.md
 /plans/
+# Root-level scratchpad for anything local-only: market/competitor research,
+# GTM notes, half-finished drafts, throwaway analysis. Never tracked, so it
+# never has to be release-quality. Working docs meant for contributors go in
+# docs/plans/ (tracked) instead.
+/scratchpad/
 
 # ── per-repo termic config ────────────────────────────────────────────
 # .termic.yaml is meant to be committed in repos that USE termic. This
