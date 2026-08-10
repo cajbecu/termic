@@ -374,6 +374,10 @@ Open an issue to push something up the list or pick one off.
 - **Quick-jump to next waiting agent.** A keyboard shortcut to instantly
   focus the next agent that is waiting for input, so you can cycle through
   a multi-agent session without hunting for the right tab by eye.
+- **Opt-in usage telemetry.** Anonymous, opt-in analytics via a self-hosted
+  Umami instance — session counts, feature usage, crash rates. No code, no
+  prompts, no file paths; off by default, one toggle in Settings to enable.
+  Helps prioritize features with real usage data rather than guesswork.
 
 ---
 
