@@ -184,6 +184,32 @@ project runs commands by proxy. cli.md's rules apply verbatim:
   themselves and tasks they created through the token (the server
   records parentage).
 
+**Worked example.** Project A's task A1 has the default config; Project
+B's task B1 has its allow-list widened to [B, C]. At spawn,
+`provision()` mints one token per task and registers it server-side:
+
+```
+token_A -> {task: A1, projects: [A],    scope: scoped}
+token_B -> {task: B1, projects: [B, C], scope: scoped}
+```
+
+`token_A` is injected into A1's PTY env only, `token_B` into B1's
+only; the cage keeps them apart (a task cannot read another task's
+env or token, and the values are independent, so holding one teaches
+nothing about the other). Every request carries its token as a
+bearer header, and the server decides from the lookup alone:
+
+- Claude in A1 calls `task_send` targeting a Project C task: lookup
+  says projects [A], target is in C, refused before anything runs.
+- Claude in B1 makes the same call: projects [B, C] passes, THEN the
+  monotonicity check runs (target at least as caged as B1), then it
+  dispatches.
+
+The agent never asserts an identity; possession of the token IS the
+identity, decided at provision time by whoever edited the sandbox
+config. This is why the design leans on the stateless revision:
+identity is per-request, never per-connection.
+
 Scoped v1 tools: `task_new`, `task_send`, `task_wait`, `task_status`,
 `task_result`, `task_log`, `task_diff`. Full scope adds `task_list`,
 `task_archive`, `task_apply`, `task_open`, `task_rename`,
