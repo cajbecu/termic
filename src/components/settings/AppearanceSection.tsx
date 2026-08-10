@@ -204,7 +204,7 @@ export function AppearanceSection() {
           DOM is a compatibility fallback rather than a saving. */}
       <Field
         label="Terminal renderer"
-        hint={"GPU (WebGL) is the default and by far the cheapest while output is flowing.\nCanvas draws on the GPU too but without a live WebGL surface, so it costs less while terminals sit idle and more under heavy output. Pick it on a laptop with a lot of idle terminals.\nDOM is the compatibility fallback: no GPU path at all. Use it if text renders wrong or typing lags, which some Linux/WebKitGTK setups hit because WebGL runs there on a software rasterizer.\nApplies to terminals opened after the change; relaunch to switch the ones already open."}
+        hint={"GPU (WebGL) is the default and by far the cheapest while output is flowing.\nCanvas rasterizes glyphs without keeping a live WebGL surface, so it costs less while terminals sit idle and more under heavy output. Pick it if your terminals mostly sit idle. The saving tracks window size, not how many terminals you have open.\nDOM builds text out of ordinary page elements instead. It is the compatibility fallback: use it if text renders wrong or typing lags, which some Linux/WebKitGTK setups hit because WebGL runs there on a software rasterizer.\nApplies to terminals opened after the change; relaunch to switch the ones already open."}
         control={<RendererSelect value={terminalRenderer} onChange={setTerminalRenderer} />}
       />
 
