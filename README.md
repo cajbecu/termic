@@ -360,10 +360,11 @@ Open an issue to push something up the list or pick one off.
   Pluggable language server plugins (rust-analyzer, typescript-language-server,
   pyright, gopls and others) resolved from the user's toolchain automatically.
   A fast heuristic (ripgrep + tree-sitter) pass for all languages, then real
-  LSP where a server is present.
+  LSP where a server is present. ([#174](https://github.com/simion/termic/issues/174))
 - **Send selection to the agent as a reference.** Select text in the
   editor, right-click or hover, and push it into the active agent terminal
   as an `@file:123` style reference so the agent picks it up as context.
+  ([#174](https://github.com/simion/termic/issues/174))
 - **More coding agents.** First-class opencode, pi.dev, and cline support,
   plus exploring other CLI coding agents as they land. Launch presets for
   local models via ollama so an agent can run fully on-device.
