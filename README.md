@@ -376,9 +376,11 @@ Open an issue to push something up the list or pick one off.
   focus the next agent that is waiting for input, so you can cycle through
   a multi-agent session without hunting for the right tab by eye.
 - **Opt-in usage telemetry.** Anonymous, opt-in analytics via a self-hosted
-  Umami instance — session counts, feature usage, crash rates. No code, no
-  prompts, no file paths; off by default, one toggle in Settings to enable.
-  Helps prioritize features with real usage data rather than guesswork.
+  Umami instance. Strictly limited to usage patterns (which features are
+  used, how often) and crash reports — nothing else. No code, no prompts,
+  no file paths, no agent output, no project names. Minimum viable event
+  set: the goal is performance and feature prioritization, not surveillance.
+  Off by default, one toggle in Settings.
 
 ---
 
