@@ -215,10 +215,18 @@ describe("settings rail", () => {
     }
   });
 
-  it("marks the CLI page experimental", async () => {
+  // The CLI graduated in 0.26.0. Inverted rather than deleted: docs/ui.md ties
+  // the badge to being off by default, so a badge reappearing next to a
+  // setting we now ship enabled is a real contradiction to catch. Asserts both
+  // sites the badge used to render, the rail item and the page title.
+  it("no longer marks the CLI page experimental", async () => {
     await clickRail("Termic CLI");
     await waitForText("Enable CLI");
-    await waitForText("Experimental");
+    expect(await paneText()).not.toContain("Experimental");
+    const railText = await browser.execute(
+      () => (document.querySelector('[data-rail-item="cli"]') as HTMLElement)?.textContent ?? "",
+    );
+    expect(railText.toLowerCase()).not.toContain("exp");
   });
 
   it("documents that agents in tasks can drive the CLI", async () => {
@@ -325,6 +333,18 @@ describe("settings rail", () => {
     // mid-case throws, so the next case (which asserts a canvas mounts in the
     // preview) never runs on the DOM renderer, which creates none.
     try {
+      // All three values must be reachable from the control. Guards against a
+      // regression that drops the picker back to a two-state toggle, which a
+      // webgl <-> dom test alone would still pass.
+      const options = await browser.execute(() => {
+        const sel = [...document.querySelectorAll("select")].find(
+          (s) => [...s.options].some((o) => o.value === "webgl"),
+        ) as HTMLSelectElement | undefined;
+        return sel ? [...sel.options].map((o) => o.value) : [];
+      });
+      expect(options).toEqual(["webgl", "canvas", "dom"]);
+
+      // canvas: the value the legacy boolean could not express at all.
       await selectRendererByValue("canvas");
       await browser.waitUntil(async () => (await pref()) === "canvas", {
         timeout: 8_000,
@@ -332,6 +352,16 @@ describe("settings rail", () => {
       });
       // The legacy boolean is a second view of the same setting, so it has to
       // follow: a drift here means the toggle and the mounted renderer disagree.
+      expect(
+        await browser.execute(() => window.__termic!.usePrefs.getState().terminalGpuEnabled),
+      ).toBe(false);
+
+      // dom: the other non-default, and the one the old toggle's "off" meant.
+      await selectRendererByValue("dom");
+      await browser.waitUntil(async () => (await pref()) === "dom", {
+        timeout: 8_000,
+        timeoutMsg: "terminalRenderer never became dom",
+      });
       expect(
         await browser.execute(() => window.__termic!.usePrefs.getState().terminalGpuEnabled),
       ).toBe(false);
