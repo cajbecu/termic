@@ -48,7 +48,16 @@ function dumpRenderer(addon: WebglAddon | CanvasAddon | null): void {
  *  alternative. So WebGL stays the default and this pref is a compatibility
  *  escape hatch (software rasterizers on Linux/WebKitGTK, driver bugs), NOT a
  *  battery lever. Canvas is the one option that genuinely lowers idle cost,
- *  and it pays for that under load. */
+ *  and it pays for that under load.
+ *
+ *  The cost also does NOT stack per surface, which the earlier "~10pp per
+ *  idle visible terminal" note here got wrong in kind rather than in degree.
+ *  Ten split terminals cost +0.8pp of WindowServer and +0.2pp of GPU over
+ *  one (n=2 each, same maximized window), against the ~70pp a per-surface
+ *  cost would predict. It tracks total canvas AREA, which the window size
+ *  fixes, so splitting a window ten ways divides the same pixels rather than
+ *  multiplying them. Practical consequence: window size and display scaling
+ *  are the variables that matter here, not how many terminals are on screen. */
 /** GH #70: the bundled JetBrains Mono is a lazy @font-face; xterm's WebGL atlas
  *  keys glyphs per (char, fg, bg, ext) with no font in the key, so a glyph
  *  rasterized against the fallback stays wrong-height until the cell happens to
