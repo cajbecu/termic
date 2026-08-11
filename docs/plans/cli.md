@@ -16,13 +16,14 @@ tab management (GH #138) landed in full: part 1 (`termic tab` + stable
 tab ids) and part 2 (`--tab <n|id|title>` targeting on
 send/wait/attach/logs, tabs listed in `status`, `tab -p`), protocol v6.
 `rename` (GH #153, label only; branch + dir keep their names) lands on
-top, protocol v7.
+top, protocol v7. Phase 4 is PLANNED, not implemented: prompt library
+access (`termic prompts`, `-P/--library` on new/send/tab), protocol v9
+(see Phasing).
 Homebrew
 is settled, not pending: the cask ships, a CLI-only formula is a non-goal
 (see Distribution). `termic events --json` is SEQUENCED BEHIND hooks, not
 merely deferred: see Phasing.
-`termic mcp` stays parked under discussion and NOT approved (see
-Phasing). Sections below note where the implementation refined the
+Sections below note where the implementation refined the
 original design.
 
 A `termic` command that creates tasks, lists them with live agent state, focuses
@@ -545,13 +546,10 @@ tool it can discover. Two pieces, cheap because the mechanisms exist:
   parsing prose; under future scoped tokens it reflects the caller's
   effective scope, so a scoped agent learns exactly what it may do.
 
-This is the path to #59's workflow with no MCP required: the agent sees
+This is the path to #59's workflow: the agent sees
 `TERMIC_CLI` in its env, runs `termic help`, and calls
-`termic new fix-auth -p "..."` directly. That is the whole of #59, which is
-why the `termic mcp` shim it was written against is now parked under
-discussion rather than scheduled (see Phasing): it was the MCP-native upgrade
-for orchestrators that want tools instead of a shell, and no such orchestrator
-exists here yet. Env advertisement and the help conventions land with Phase 1,
+`termic new fix-auth -p "..."` directly. That is the whole of #59, and it
+was closed on that basis. Env advertisement and the help conventions land with Phase 1,
 when the verbs an agent needs exist.
 
 Two conventions field testing settled (Phase 1):
@@ -580,9 +578,8 @@ Two conventions field testing settled (Phase 1):
   `CLAUDE.md`, or any agent's instruction channel. A vendor-specific
   skill wrapper was considered and rejected: Claude-only distribution
   is not worth maintaining a second copy. Phase 2 adds an install
-  action for the block. `termic mcp` would supersede all of it for
-  MCP-native orchestrators, but it is parked under discussion (see
-  Phasing), so the instructions block is the distribution story.
+  action for the block; the instructions block is the distribution
+  story.
 
 ## Security: the socket is a sandbox boundary
 
@@ -975,32 +972,43 @@ client whose server is missing.
     user has seen one, the dock icon persists for the process lifetime,
     matching Mail/Messages.
 
-### `termic mcp`: under discussion, NOT approved
+### Phase 4 (planned): prompt library
 
-A stdio<->socket shim (~a day) that would make termic drivable by any MCP
-client - an outer Claude Code session orchestrating termic tasks - with the
-same auth and policy, no new surface. The converged pattern in the space
-(vibe-kanban, container-use).
+Not implemented; protocol v9. The prompt library (builtins + custom
+prompts) is GUI-only today; Phase 4 puts it on the CLI so scripts and
+agents can fire curated prompts without pasting bodies around.
 
-Parked 2026-07-24, the day 0.24.0 shipped the CLI. Not rejected on the merits:
-it is an overcomplication for the users that exist today. #59 is the use case
-it was meant to serve, and Phase 1's CLI closes that issue on its own (the
-agent reads `$TERMIC_CLI` from its env and runs `termic new`), so building it
-now means maintaining a second surface for nobody. #59 was closed saying as
-much.
-
-What would reopen it: an MCP client with NO shell tool that someone actually
-wants to orchestrate termic from (Claude Desktop, an IDE plugin without a
-terminal). Nothing running inside Termic qualifies - every agent there has a
-PTY, which is the whole point of the app - so the case has to come from
-outside. The context-window objection that killed it the first time (an MCP
-tool definition costs tokens in every session; a CLI costs nothing until it
-runs, @MHohlios on #59) applies to that client too, so "someone asked" is not
-sufficient on its own.
-
-If it is ever built, the design constraint stands: keep the tool count minimal
-and GENERATE the tool definitions from the same `help --json` metadata, so the
-CLI and MCP surfaces cannot drift.
+- **`termic prompts [--json]`** (plural, matching `agents`) lists id,
+  title, builtin/custom, enabled, modified. `termic prompts show <sel>`
+  prints the body, pipe-friendly.
+- **`-P/--library <sel>` on `new`, `send`, and `tab`**; `-p/--prompt`
+  stays literal text. The two COMPOSE: `-P` + `-p` delivers the library
+  body, a blank line, then the text, and `-p -` still reads stdin. That
+  composition is the cross-agent handoff enabler:
+  `termic result plan | termic new review --agent codex -P
+  builtin:review -p -`.
+- **Selectors mirror `resolve_tab_selector`'s identity philosophy**
+  (the stable id is the identity, the title is a convenience): exact id
+  first (`builtin:review`, custom UUID), then case-insensitive exact
+  title; ambiguity errors listing the candidates with ids, no match
+  errors pointing at `termic prompts`. Deleted builtins do not exist.
+  DISABLED prompts are fireable by explicit selector: disabled means
+  hidden from the dropdown, not dead. Documented contract: pin ids in
+  scripts, use titles interactively.
+- **Resolution happens in the webview at fire time** against the live
+  prompt store (`computePrompts`, src/store/prompts.ts), so user
+  overrides/renames/deletions are always current and unedited builtins
+  keep tracking shipped defaults.
+- **Plumbing**: a new read-only webview RPC `list_prompts` (the
+  cliRpc.ts registry); a Rust-side `resolve_prompt_selector` in
+  cli_server.rs substitutes the body into the existing confirmed
+  `prompt` path; the proto gains a `Prompts` command and an optional
+  `prompt_ref` on `New`/`Send`/`Tab`. `-P` errors resolve BEFORE task
+  creation or spawn (fail fast). Windowless mode works (the webview
+  runs). Sandbox posture unchanged: caged agents get no CLI surface,
+  listing included.
+- Phase 4 stays clear of `events --json`, which stays sequenced behind
+  hooks.
 
 ## Testing
 
