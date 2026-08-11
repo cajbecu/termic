@@ -60,8 +60,20 @@ function rpc(cmd: Record<string, unknown>): Promise<any> {
   });
 }
 
-/** Poll a tab's live PTY through the store (spawn is async). */
-async function waitForTabPty(taskId: string, tabId: string): Promise<void> {
+/**
+ * Poll a tab's live PTY (spawn is async), through BOTH sides that have to
+ * agree before the cases below can address it.
+ *
+ * The store's `ptyId` is not sufficient on its own: it lands as soon as the
+ * frontend's spawn call resolves, while `logs --tab` / `send --tab` resolve
+ * the id on the RUST side through the PTY-role registry. The two are not
+ * synchronized, so gating only on the store let a `logs --tab` fire into the
+ * gap and come back `ok: false` — an intermittent that only showed up in a
+ * loaded full-suite run and never in isolation.
+ *
+ * So wait for what the next test actually needs: the CLI resolving that id.
+ */
+async function waitForTabPty(taskId: string, tabId: string, taskName: string): Promise<void> {
   await browser.waitUntil(
     () =>
       browser.execute(
@@ -72,7 +84,15 @@ async function waitForTabPty(taskId: string, tabId: string): Promise<void> {
         taskId,
         tabId,
       ),
-    { timeout: 20_000, timeoutMsg: `tab ${tabId} never got a PTY` },
+    { timeout: 20_000, timeoutMsg: `tab ${tabId} never got a PTY in the store` },
+  );
+  await browser.waitUntil(
+    async () => (await rpc({ cmd: "logs", task: taskName, tab: tabId })).ok === true,
+    {
+      timeout: 20_000,
+      interval: 250,
+      timeoutMsg: `the CLI never resolved tab ${tabId} to a PTY`,
+    },
   );
 }
 
@@ -125,7 +145,7 @@ describe("termic tab: ids are addressable end to end (GH #138 part 2)", () => {
       secondTabId,
     );
     expect(inStore).toBe(true);
-    await waitForTabPty(taskId, secondTabId);
+    await waitForTabPty(taskId, secondTabId, "cli-tabs");
   });
 
   it("logs --tab resolves that id to that tab's own PTY", async () => {
