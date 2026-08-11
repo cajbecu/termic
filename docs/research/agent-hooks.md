@@ -104,30 +104,17 @@ session/thread id. That is enough to correlate (see below).
 ### What Xirp actually does (measured, not documented)
 
 Spotify's Xirp 0.12.0 was installed and driven on a real machine in
-August 2026. Its onboarding offers a "session hooks" step ("Installs
-lightweight hooks into coding agents so Xirp can tell when a session is
-working, idle, or waiting"), listing Claude and Codex only. Its own
-daemon log shows what it does otherwise, and the shape is worth knowing
-because it is the alternative to hooks:
+August 2026. Full teardown in [xirp.md](xirp.md). The parts that bear on
+this decision:
 
-- **tmux, not a PTY.** Sessions are `tmux new-session -d -s xirp-<uuid>
-  ... remain-on-exit on`. Session persistence across app restarts is
-  tmux's, not theirs.
-- **A separate daemon** on `127.0.0.1:<port>`, with the Electron app
-  connecting to it as a client. `CHIRP_DAEMON_PORT` is injected into
-  every session.
-- **A Node launcher**, `@chirp/squab/dist/cli.js --launch-claude
-  --session-id <uuid>`, rather than the agent binary directly.
-- **System prompt injection.** Every session gets `--append-system-prompt`
-  carrying a tutorial for their `chirp session new --goal ... --name ...
-  --new-branch ... --depends-on ... --project ...` CLI, so an agent can
-  spawn sibling sessions and queue dependent ones. A session DAG driven
-  by the agent. Not mentioned in any launch material.
-- **Titles by reading the CLI's own transcript.** `readClaudeTitleForSession`
-  scans `~/.claude/projects/<slug>/*.jsonl`. No hook needed for this.
-- **Env pinning**: `CLAUDE_CODE_NO_FLICKER=1`, `CLAUDE_CODE_SCROLL_SPEED=3`,
-  `DISABLE_AUTO_UPDATE`, `DISABLE_UPDATE_PROMPT`, `FORCE_COLOR=3`,
-  `COLORTERM=truecolor`, `LANG=C.UTF-8`. Geometry fixed at `-x 120 -y 30`.
+Its onboarding offers a "session hooks" step ("Installs lightweight
+hooks into coding agents so Xirp can tell when a session is working,
+idle, or waiting"), listing Claude and Codex only. Gemini is absent
+despite being a supported agent.
+
+It does not own a PTY: sessions are tmux, driven by a separate daemon,
+with the agent launched through a Node wrapper. Session titles come from
+reading Claude's own transcript JSONL, no hook involved.
 
 Observed with hooks NOT installed (the user's `~/.claude/settings.json`
 was never touched): the per-session context meter still reported a live

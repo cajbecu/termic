@@ -385,11 +385,23 @@ Open an issue to push something up the list or pick one off.
     compaction). If it earns its place it ships opt-in and off by
     default, with a real uninstall, and OSC stays authoritative
     regardless. Research and measurement plan in
-    [docs/plans/agent-hooks.md](docs/plans/agent-hooks.md).
-11. ~~**First-class git surface.** Commit / push / pull / branch switch from inside the app instead of dropping to the aux terminal.~~ (Done)
-12. ~~**More coding agents.** First-class opencode, pi.dev, and cline support, plus exploring other CLI coding agents as they land. Launch presets for local models via ollama so an agent can run fully on-device.~~ (Done)
-13. ~~**Flexible terminal splits.** iTerm-style pane splitting in any direction — horizontal, vertical, and nested — so multiple terminals, agents, or aux sessions can live side by side in the same workspace view without switching tabs.~~ (Done)
-14. ~~**Quick-jump to next waiting agent.** A keyboard shortcut to instantly focus the next agent that is waiting for input, so you can cycle through a multi-agent session without hunting for the right tab by eye.~~ (Done)
+    [docs/research/agent-hooks.md](docs/research/agent-hooks.md).
+11. **Intentional agent-driven orchestration.** The plumbing already
+    ships: agents get `TERMIC_CLI` and a tutorial in their environment,
+    so a running agent can spawn a task with `--wait`, prompt another one,
+    read its result and branch on the exit code. What is missing is
+    intent. Environment variables are passive, nothing puts that surface
+    in the model's context, and termic has no opinion about shape (fan
+    out, queue behind, supervisor and workers). Researching whether to
+    put the surface in the agent's context the way Spotify's Xirp does,
+    or to wait for the MCP endpoint where the schema is the
+    documentation, and how much orchestration the tool should suggest
+    rather than obey. Notes in
+    [docs/research/agent-orchestration.md](docs/research/agent-orchestration.md).
+12. ~~**First-class git surface.** Commit / push / pull / branch switch from inside the app instead of dropping to the aux terminal.~~ (Done)
+13. ~~**More coding agents.** First-class opencode, pi.dev, and cline support, plus exploring other CLI coding agents as they land. Launch presets for local models via ollama so an agent can run fully on-device.~~ (Done)
+14. ~~**Flexible terminal splits.** iTerm-style pane splitting in any direction — horizontal, vertical, and nested — so multiple terminals, agents, or aux sessions can live side by side in the same workspace view without switching tabs.~~ (Done)
+15. ~~**Quick-jump to next waiting agent.** A keyboard shortcut to instantly focus the next agent that is waiting for input, so you can cycle through a multi-agent session without hunting for the right tab by eye.~~ (Done)
 
 ---
 
