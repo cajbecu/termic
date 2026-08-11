@@ -398,10 +398,29 @@ Open an issue to push something up the list or pick one off.
     documentation, and how much orchestration the tool should suggest
     rather than obey. Notes in
     [docs/research/agent-orchestration.md](docs/research/agent-orchestration.md).
-12. ~~**First-class git surface.** Commit / push / pull / branch switch from inside the app instead of dropping to the aux terminal.~~ (Done)
-13. ~~**More coding agents.** First-class opencode, pi.dev, and cline support, plus exploring other CLI coding agents as they land. Launch presets for local models via ollama so an agent can run fully on-device.~~ (Done)
-14. ~~**Flexible terminal splits.** iTerm-style pane splitting in any direction — horizontal, vertical, and nested — so multiple terminals, agents, or aux sessions can live side by side in the same workspace view without switching tabs.~~ (Done)
-15. ~~**Quick-jump to next waiting agent.** A keyboard shortcut to instantly focus the next agent that is waiting for input, so you can cycle through a multi-agent session without hunting for the right tab by eye.~~ (Done)
+12. **Performance benchmarks in CI.** "Performance trumps polish" is the
+    first rule in this repo, and today it is enforced by review and habit.
+    Nothing measures it. The gap to close is a set of benchmark targets
+    (idle CPU with several terminals open, cold start to first paint,
+    main-thread jank while a TUI repaints hard, RSS growth across a long
+    agent session) wired into CI so a regression fails a PR instead of
+    surfacing weeks later as "feels slower lately". Inspired by
+    [Orca](https://github.com/stablyai/orca), which ships `bench:idle-cpu`,
+    `bench:startup` and `bench:main-thread-jank`. Worth noting it is a
+    cautionary tale as much as a model: Orca measures and still carries
+    open reports of 23-33% idle renderer CPU and memory that climbs over a
+    session. Measuring is not sufficient. Not measuring is worse.
+13. **Import Warp and Ghostty themes.** Termic has a native JSON theme
+    format, so a custom theme is a file drop away, but two large theme
+    ecosystems already exist and neither is ours. Scan `~/.warp/themes`
+    and Ghostty's theme directory, translate both into termic's format,
+    and let people pick from the library they already collected. Borrowed
+    from [Orca](https://github.com/stablyai/orca), which does the import
+    well and, unlike termic, has no native theme format underneath it.
+14. ~~**First-class git surface.** Commit / push / pull / branch switch from inside the app instead of dropping to the aux terminal.~~ (Done)
+15. ~~**More coding agents.** First-class opencode, pi.dev, and cline support, plus exploring other CLI coding agents as they land. Launch presets for local models via ollama so an agent can run fully on-device.~~ (Done)
+16. ~~**Flexible terminal splits.** iTerm-style pane splitting in any direction — horizontal, vertical, and nested — so multiple terminals, agents, or aux sessions can live side by side in the same workspace view without switching tabs.~~ (Done)
+17. ~~**Quick-jump to next waiting agent.** A keyboard shortcut to instantly focus the next agent that is waiting for input, so you can cycle through a multi-agent session without hunting for the right tab by eye.~~ (Done)
 
 ---
 
