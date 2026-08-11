@@ -416,6 +416,114 @@ machinery behind the "route every job to the best available price
 performance" line in the launch material. Not exposed in the UI at the
 time of writing.
 
+### Architecture map
+
+```
+┌─ Xirp.app (Electron, 183 MB) ──────────────────────────────────┐
+│  dist/main.js  22 KB  window, updater, daemon lifecycle        │
+│                                                                │
+│  dashboard/   React + Vite + Tailwind + xterm.js + Encore      │
+│               service worker + PWA manifest  (32 MB)           │
+└───────────────────────────┬────────────────────────────────────┘
+                            │ websocket, one connection
+┌───────────────────────────▼────────────────────────────────────┐
+│  @chirp/daemon   separate process, loopback TCP                │
+│                                                                │
+│  sessions  worktrees  git  github  prs  epics  todos  titles   │
+│  cost  telemetry  notifications  session-search  skills  rules │
+│  files  browser-proxy  perf  update  auth0  portal  licenses   │
+│                                                                │
+│  store: PGlite (Postgres+pgvector in wasm) via drizzle         │
+│  17 tables, 57 migrations                                      │
+│                                                                │
+│  oneshot: Claude Agent SDK, maxTurns 1, budget $0.05           │
+│           titles + PR review, billed to YOUR claude auth       │
+└───────┬──────────────────────────────┬─────────────────────────┘
+        │ node-pty                     │ https
+        ▼                              ▼
+   tmux attach ──► tmux server    backstage-api.spotify.com
+        │          (persistence)   /portal/v1/xirp/telemetry
+        ▼                          /…/associate-domain
+   node @chirp/squab                    {installation_id, email_domain}
+        │  harness adapters:
+        │  claude · codex · gemini · snipe · honk
+        │  canonical session IR, handoff, fork, hook-script gen
+        ▼ node-pty
+   the actual agent CLI
+        │
+        └─ hooks POST ──► daemon   (bearer token, ~/.chirp/hook-auth.token)
+
+  Portal (paid, optional) ──► MCP server at /api/mcp-actions/v1
+                              + "call workspace.get-project-context first"
+```
+
+### Tech stack
+
+**Desktop shell** (`@chirp/electron` 0.12.0, `author: Spotify`,
+`chirpEdition: external`, `chirpBuild: a4d33eb`): Electron,
+`electron-updater`, `pino` for logs, `semver`. `dist/main.js` is 22 KB.
+That is the entire desktop app.
+
+**Daemon** (`@chirp/daemon`, 195 modules):
+
+| Concern | Choice |
+|---|---|
+| Store | `@electric-sql/pglite` 0.4.5 (Postgres in wasm) + `pglite-socket`, with `pglite-old` 0.2.17 kept for migration |
+| ORM | `drizzle-orm` 0.45, 57 migrations |
+| Transport | `ws` 8.19, one websocket, ~330 message types |
+| Terminals | `node-pty` 1.1.0 |
+| Agents | `@anthropic-ai/claude-agent-sdk` ^0.2.20, `@modelcontextprotocol/sdk` ^1.27 |
+| Cloud | `@google-cloud/pubsub` 5.2.4, `google-gax`, `firebase` ^12.15 |
+| Auth | `jose` (JWT), Auth0 |
+| Validation | `zod` 4 |
+| Config parsing | `smol-toml` (Codex `config.toml`), `gray-matter` (skills frontmatter) |
+| Queueing | `p-queue`, `p-retry` |
+
+**Dashboard** (399 asset files, 32 MB): React, Vite, Tailwind,
+`zustand`, **xterm.js**, `shiki` for syntax highlighting, `mermaid` for
+diagrams, `katex` for maths, some Monaco, Spotify's **Encore** design
+system (`class="encore-layout-themes encore-xirp-dark-theme"`). Ships a
+service worker and a PWA manifest. Bundles JetBrains Mono Nerd Font and
+Inter as woff2, and still `preconnect`s to `fonts.googleapis.com`, so
+the UI reaches out to Google on load.
+
+The dashboard being a PWA served to a browser, with the daemon holding
+the state and the PTYs, is what makes "locally or remotely" possible.
+
+### How a terminal actually reaches the screen
+
+Four layers, and worth spelling out because termic has one.
+
+```
+dashboard (React + xterm.js in a webview or browser)
+        │  websocket, ~330 message types
+        ▼
+daemon (node)  terminal/bridge.js
+        │  node-pty 1.1.0, cols/rows, output ring buffer
+        ▼
+tmux attach-session -t xirp-<uuid>          ← persistence lives here
+        │
+        ▼
+tmux server, session created detached with remain-on-exit on
+        │
+        ▼
+node  @chirp/squab/dist/cli.js --launch-claude --session-id <uuid>
+        │  its own PTY supervisor, also node-pty
+        ▼
+claude / codex / gemini / snipe
+```
+
+`attachToTmux` spawns `tmux attach-session` inside a node-pty and keeps
+an `outputBuffer` with a byte cap so a reconnecting client can be
+replayed. Squab's own `pty/supervisor` sizes the inner PTY to the
+parent, forwards SIGWINCH, and tears down with an escalation ladder:
+polite `/exit\r`, then SIGINT, then SIGTERM, then SIGKILL, each with a
+bounded timeout. Both PTY layers are node-pty; `SQUAB_FORCE_NO_PTY=1`
+disables the inner one.
+
+For comparison, termic is one hop: Rust `portable-pty` to the agent,
+bytes to xterm.js in the same process.
+
 ### The daemon is a full backend
 
 `app.asar` unpacks to ~4,700 files. The Electron main process is 22 KB;
