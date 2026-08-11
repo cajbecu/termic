@@ -92,6 +92,13 @@ Rules that matter:
 - `"$TERMIC_CLI" wait <task> --timeout 10m` - block until an existing
   task's agent is quiescent (settled AND empty message queue).
 - `"$TERMIC_CLI" status <task> --json` - one task in depth.
+- `"$TERMIC_CLI" prompts --json` - the user's prompt library. Pass a
+  prompt to `new`/`send`/`tab` with `-P <id>` (e.g. `-P builtin:review`);
+  it delivers that prompt's body, and with `-p` too the body arrives
+  first, then a blank line, then your text - so
+  `... result plan | ... new review -P builtin:review -p -` hands one
+  agent's output to another under a curated prompt. Pin ids in scripts
+  (titles are user-editable); `prompts show <id>` prints a body.
 - `"$TERMIC_CLI" archive <task> --yes` - kill the task's agents and
   remove its worktree. Destructive; only when asked to clean up.
 - `"$TERMIC_CLI" project add <path>` - register a repo (needed once

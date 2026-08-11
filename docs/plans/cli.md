@@ -16,9 +16,11 @@ tab management (GH #138) landed in full: part 1 (`termic tab` + stable
 tab ids) and part 2 (`--tab <n|id|title>` targeting on
 send/wait/attach/logs, tabs listed in `status`, `tab -p`), protocol v6.
 `rename` (GH #153, label only; branch + dir keep their names) lands on
-top, protocol v7. Phase 4 is PLANNED, not implemented: prompt library
-access (`termic prompts`, `-P/--library` on new/send/tab), protocol v9
-(see Phasing).
+top, protocol v7; `--from`/`--resume` (GH #169) on top of that,
+protocol v8. Phase 4 implemented - prompt library access (`termic
+prompts [show]`, `-P/--library` on new/send/tab, the `list_prompts`
+webview RPC + Rust-side `resolve_prompt_selector`), protocol v9 (see
+Phasing).
 Homebrew
 is settled, not pending: the cask ships, a CLI-only formula is a non-goal
 (see Distribution). `termic events --json` is SEQUENCED BEHIND hooks, not
@@ -220,13 +222,14 @@ scope until the surface stabilizes. Completions (`termic completions zsh`,
 clap-generated) complete task names dynamically over the socket.
 
 ```
-termic new [name] [-p|--prompt <text>] [--agent claude|gemini|codex|<custom>]
+termic new [name] [-p|--prompt <text>] [-P|--library <sel>]
+           [--agent claude|gemini|codex|<custom>]
            [--worktree|--main] [--base <branch>] [--sandbox off|monitor|enforce|enforce-fs]
            [--yolo] [--project <name>] [--open] [--wait]   # a new --attach flag stayed unbuilt:
            [--from <path>] [--resume <session-id>]         # `termic new x && termic attach x`
                                                            # composes, so the flag is deferred
                                                            # until someone misses it
-                                                           # --from (GH #169, protocol v7) ADOPTS an
+                                                           # --from (GH #169, protocol v8) ADOPTS an
                                                            # existing registered worktree instead of
                                                            # creating one (name optional: defaults to
                                                            # its branch; excludes mode/--base; no setup
@@ -241,7 +244,8 @@ termic list [--project <name>] [-q]           # tasks + workState + diff stat (a
 termic open [<task>]                          # raise window, select task (cwd-aware)
 termic status <task>                          # one task in depth: agent state, branch,
                                               # dirty file count, session count
-termic send <task>|--here -p <text> [--wait]  # prompt the RUNNING agent; --tab <n|id|title>
+termic send <task>|--here [-p <text>]         # prompt the RUNNING agent; --tab <n|id|title>
+           [-P|--library <sel>] [--wait]      # (-p and/or -P, Phase 4 composition)
            [--tab <sel>]                      # targets one strip tab (agent tabs only);
                                               # if the target is mid-turn
                                               # this QUEUES (runPrompt.ts:42 already queues
@@ -328,8 +332,14 @@ termic agents                                 # what --agent / --terminal accept
                                               # id, kind, enabled, installed, usable.
                                               # The registry is per-user and editable,
                                               # so static help cannot carry it
+termic prompts [show <sel>] [--json]          # Phase 4: what -P/--library accepts
+                                              # (id, title, builtin/custom, enabled,
+                                              # modified; the library is per-user and
+                                              # editable, the agents argument again).
+                                              # `show` prints one prompt's body and
+                                              # nothing else, so it pipes
 termic tab <task> [--agent <id>|--terminal <id>|--shell]      # GH #138. A tab INSIDE a
-           [-p <text> [--wait]]               # running task: the "+" menu as a verb, and
+           [-p <text>|-P <sel> [--wait]]      # running task: the "+" menu as a verb, and
                                               # like that menu it distinguishes agent /
                                               # custom-terminal / aux-shell kinds, because
                                               # they differ in sandbox, resume and YOLO.
@@ -972,10 +982,10 @@ client whose server is missing.
     user has seen one, the dock icon persists for the process lifetime,
     matching Mail/Messages.
 
-### Phase 4 (planned): prompt library
+### Phase 4: prompt library
 
-Not implemented; protocol v9. The prompt library (builtins + custom
-prompts) is GUI-only today; Phase 4 puts it on the CLI so scripts and
+Implemented; protocol v9. The prompt library (builtins + custom
+prompts) was GUI-only; Phase 4 puts it on the CLI so scripts and
 agents can fire curated prompts without pasting bodies around.
 
 - **`termic prompts [--json]`** (plural, matching `agents`) lists id,
@@ -1009,6 +1019,35 @@ agents can fire curated prompts without pasting bodies around.
   listing included.
 - Phase 4 stays clear of `events --json`, which stays sequenced behind
   hooks.
+
+Implementation notes, where reality refined the sketch:
+
+- `prompts show` is not a second wire verb: one `Prompts { selector }`
+  command either lists (no bodies) or resolves one entry (body
+  included), so the two CLI forms cannot drift.
+- `send.prompt` became optional on the wire (serde default) so `-P`
+  stands alone; the server rejects a request where both are empty.
+- Composition normalizes the body's trailing newlines, so the seam is
+  exactly one blank line however the prompt was authored. A prompt
+  with an EMPTY body is refused by name (the empty `-p` rule: an empty
+  prompt would mint a delivery id nothing ever reports on).
+- `help --json` renders a parent verb with an OPTIONAL subcommand
+  (`prompts` beside `prompts show`); the old loop emitted nested
+  entries only, which would have hidden the bare list form from the
+  machine surface.
+- With `-P`, `-p -` tolerates EMPTY stdin (it means "no extra text"):
+  the handoff pipe must not die when the upstream produced nothing.
+  Without `-P`, empty stdin stays a hard error, since there would be
+  nothing to send at all.
+- The list form fetches no bodies over the webview RPC (`bodies:
+  false`; the builtins alone are ~16 KB per call). Wire budgets follow
+  the logs/diff rule but with a twist: `prompts show` trims an
+  oversized body and flags it `truncated` plus a stderr warning, never
+  marker text inside the body, because `show` pipes into agents and a
+  marker would arrive as instructions. Titles (user-authored, no length
+  cap in Settings) are clipped for the wire, and the COMPOSED prompt
+  re-checks the CLI's 900 KB gate server-side, since `-P` substitutes
+  the body after that gate ran on the literal alone.
 
 ## Testing
 

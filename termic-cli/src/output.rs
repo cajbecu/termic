@@ -5,8 +5,8 @@
 use serde::Serialize;
 use termic_proto::{
     send_mode, AgentsData, ApplyData, ArchiveData, DiffData, DiffStat, NewData, OpenData,
-    ProjectInfo, ProjectRemoveData, QuitData, RenameData, ResultData, SendData, StreamEvent,
-    TabData, TabStatus, TaskStatus, TaskSummary, WaitData, WaitOutcome, WaitResult,
+    ProjectInfo, ProjectRemoveData, PromptEntry, QuitData, RenameData, ResultData, SendData,
+    StreamEvent, TabData, TabStatus, TaskStatus, TaskSummary, WaitData, WaitOutcome, WaitResult,
 };
 
 /// One JSON object, compact, exactly as documented in each verb's help.
@@ -462,6 +462,34 @@ pub fn agents_text(a: &AgentsData) -> String {
             if e.enabled { "yes" } else { "no" },
             installed,
             if e.usable { "yes" } else { "no" },
+        ));
+    }
+    out.trim_end().to_string()
+}
+
+/// The prompt library as a table (Phase 4). Ids lead because they are
+/// the stable selector a script should pin; titles are user-editable
+/// conveniences (docs/plans/cli.md).
+pub fn prompts_text(prompts: &[PromptEntry]) -> String {
+    if prompts.is_empty() {
+        return "The prompt library is empty.".into();
+    }
+    // Custom prompt ids are UUIDs (36 chars) and titles are free text,
+    // so both columns size to the data (the agents_text rule), never
+    // narrower than their headers.
+    let idw = prompts.iter().map(|p| p.id.chars().count()).max().unwrap_or(0).max("ID".len());
+    let tw = prompts.iter().map(|p| p.title.chars().count()).max().unwrap_or(0).max("TITLE".len());
+    let mut out = format!("{:<idw$} {:<tw$} KIND     ENABLED  MODIFIED\n", "ID", "TITLE");
+    for p in prompts {
+        out.push_str(&format!(
+            "{:<idw$} {:<tw$} {:<8} {:<8} {}\n",
+            p.id,
+            p.title,
+            if p.builtin { "builtin" } else { "custom" },
+            if p.enabled { "yes" } else { "no" },
+            // A dash for custom prompts: modified only means something
+            // for a builtin (edited away from the shipped text).
+            if !p.builtin { "-" } else if p.modified { "yes" } else { "no" },
         ));
     }
     out.trim_end().to_string()
