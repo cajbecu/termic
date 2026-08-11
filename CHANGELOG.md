@@ -4,7 +4,7 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [0.26.0] - 
+## [0.26.0] - 2026-08-11
 
 CLI tab targeting and worktree adoption, folder browsing in the editor, and image diffs.
 
@@ -28,6 +28,7 @@ CLI tab targeting and worktree adoption, folder browsing in the editor, and imag
 - The editor's line-number gutter is opaque, so a long line scrolled right no longer shows through it. (#161)
 - The diff's line numbers stay level with the code when inline review comments are added. (#157)
 - Settings dropdowns no longer carry WKWebView's own bevelled gradient, which read as a stray system widget against the light theme's flat panels.
+- A run command with no label is no longer a nameless row in the Run menu and a nameless tab: it shows the command itself, clipped if it runs long, and the Settings label field previews what you'll get. Custom run tabs are keyed by label or by command, never both, so two unlabelled commands can't land on the same tab. (#177)
 - A resume override no longer has its session renamed out from under it: `--name` is skipped whenever a verbatim resume override is active, so the second relaunch can still find the session. The Resume override dialog says so.
 
 ### Thanks
@@ -35,6 +36,7 @@ CLI tab targeting and worktree adoption, folder browsing in the editor, and imag
 - Adam Matan (@adamatan) for folder listings in the editor, open-in-default-app, task reordering, the PDF page fix, and the branch label on the dev-build pill.
 - Alex Goodman (@wagoodman) for the find-in-preview fix and both gutter fixes.
 - Bohdan Shulha (@bohdan-shulha) for image diffs and protobuf/elixir highlighting.
+- Preeti Yuankrathok (@earthpyy) for the unlabelled run command fix.
 
 ## [0.25.3] - 2026-08-01
 
