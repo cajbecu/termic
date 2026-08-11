@@ -12,7 +12,8 @@
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import { repoConfigLoad, repoConfigLoadAt } from "@/lib/ipc";
-import type { Project, Task, TerminalTab } from "@/lib/types";
+import { runCommandKey, runCommandLabel } from "@/lib/runCommands";
+import type { Project, RunCommand, Task, TerminalTab } from "@/lib/types";
 
 export interface RunTarget {
   /** "" = host project; otherwise composition dir_name. */
@@ -164,13 +165,14 @@ export function customRunMember(label: string): string {
 
 /** Launch (or restart) a run tab for a user-configured custom command
  *  (GH #124). Behaves exactly like a Run tab (RunPane, pill controls,
- *  persistence) but is keyed by its label so it never collides with the
+ *  persistence) but is keyed by its label (or, unlabeled, by the command
+ *  itself, per `runCommandKey`) so it never collides with the
  *  primary host run (`member: ""`) or a composition member. `customTitle`
  *  is set so the label survives a persistence round-trip (restore otherwise
  *  rebuilds run-tab titles from `member`). Runs in the task's worktree — the
  *  PTY's spawn cwd; no spotlight repo-root redirect (that's host-only). */
-export function launchCustomRun(taskId: string, cmd: { label: string; command: string }): void {
-  const member = customRunMember(cmd.label);
+export function launchCustomRun(taskId: string, cmd: RunCommand): void {
+  const member = customRunMember(runCommandKey(cmd));
   const existing = (useApp.getState().tabs[taskId] ?? []).find(
     (t): t is TerminalTab => t.type === "terminal" && (t as TerminalTab).runTab?.member === member,
   );
@@ -181,7 +183,7 @@ export function launchCustomRun(taskId: string, cmd: { label: string; command: s
   useApp.getState().addTabToActivePane(taskId, {
     id: crypto.randomUUID(),
     type: "terminal",
-    title: cmd.label,
+    title: runCommandLabel(cmd),
     customTitle: true,
     cli: "custom",
     command: cmd.command,

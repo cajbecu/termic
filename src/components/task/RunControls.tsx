@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/Dropdown";
 import { ptyKill, openPath } from "@/lib/ipc";
 import { launchRunTabs, launchSetupTab, launchCustomRun, customRunMember, resolveRunTargets, runsAtRepoRoot, type RunTarget } from "@/lib/runTabs";
-import { resolveCustomCommands, type ResolvedCommand } from "@/lib/runCommands";
+import { resolveCustomCommands, runCommandKey, runCommandLabel, type ResolvedCommand } from "@/lib/runCommands";
 import { Play, Square, ChevronDown, Wrench, Globe, Settings, SlidersHorizontal } from "lucide-react";
 
 export function RunControls({ task }: { task: Task }) {
@@ -175,7 +175,7 @@ export function RunControls({ task }: { task: Task }) {
             <>
               <DropdownLabel>Run commands</DropdownLabel>
               {customCmds.map((cmd, i) => {
-                const tab = runTabs.find(t => t.runTab?.member === customRunMember(cmd.label));
+                const tab = runTabs.find(t => t.runTab?.member === customRunMember(runCommandKey(cmd)));
                 const runningCmd = !!tab?.ptyId;
                 return (
                   <DropdownItem
@@ -188,7 +188,7 @@ export function RunControls({ task }: { task: Task }) {
                     {runningCmd
                       ? <Square className="h-4 w-4 text-[var(--color-err)]" fill="currentColor" />
                       : <Play className="h-4 w-4" />}
-                    <span className="min-w-0 flex-1 truncate">{cmd.label}</span>
+                    <span className="min-w-0 flex-1 truncate">{runCommandLabel(cmd)}</span>
                   </DropdownItem>
                 );
               })}
