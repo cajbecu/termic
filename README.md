@@ -337,56 +337,50 @@ see in iTerm.
 
 Open an issue to push something up the list or pick one off.
 
-- **First-class git surface.** Commit / push / pull / branch switch from
-  inside the app instead of dropping to the aux terminal.
-- **Linear + GitHub PR integration.** Paste an issue / PR URL, get a
-  workspace seeded with title + body. Create the PR from the app via
-  `gh`. No OAuth.
-- **Sandbox parity on Linux + Windows.** macOS Seatbelt today; bubblewrap
-  / landlock on Linux and AppContainer on Windows are the gap.
-- **Docker-based sandboxing.** An opt-in, more brutal alternative to
-  Seatbelt: run each agent inside a container off a default, editable
-  Dockerfile that ships the supported agents. Install whatever your agents
-  need in the image; they cannot escape it and only see the paths you mount
-  (just the project repo(s) by default, everything else installed but not
-  mounted). Cross-platform for free, and pairs well with per-agent
-  credential injection (or a single CLI login) so you need not mount secrets
-  at all. See [#49](https://github.com/simion/termic/issues/49) for the kind
-  of host-toolchain friction this sidesteps.
-- **Windows prebuilts.** AppImage CI is live for Linux; Windows MSI is
-  the matching CI matrix entry.
-- **Code intelligence via language server plugins.** Cmd-click
-  go-to-definition, find class / symbol, hover types, inline diagnostics.
-  Pluggable language server plugins (rust-analyzer, typescript-language-server,
-  pyright, gopls and others) resolved from the user's toolchain automatically.
-  A fast heuristic (ripgrep + tree-sitter) pass for all languages, then real
-  LSP where a server is present. ([#174](https://github.com/simion/termic/issues/174))
-- **Send selection to the agent as a reference.** Select text in the
-  editor, right-click or hover, and push it into the active agent terminal
-  as an `@file:123` style reference so the agent picks it up as context.
-  ([#174](https://github.com/simion/termic/issues/174))
-- **More coding agents.** First-class opencode, pi.dev, and cline support,
-  plus exploring other CLI coding agents as they land. Launch presets for
-  local models via ollama so an agent can run fully on-device.
-- **Flexible terminal splits.** iTerm-style pane splitting in any direction
-  — horizontal, vertical, and nested — so multiple terminals, agents, or
-  aux sessions can live side by side in the same workspace view without
-  switching tabs.
-- **Quick-jump to next waiting agent.** A keyboard shortcut to instantly
-  focus the next agent that is waiting for input, so you can cycle through
-  a multi-agent session without hunting for the right tab by eye.
-- **Opt-in usage telemetry.** Anonymous, opt-in analytics via a self-hosted
-  Umami instance. Strictly limited to usage patterns (which features are
-  used, how often) and crash reports — nothing else. No code, no prompts,
-  no file paths, no agent output, no project names. Minimum viable event
-  set: the goal is performance and feature prioritization, not surveillance.
-  Off by default, one toggle in Settings.
+1. **Code intelligence via language server plugins.** Cmd-click
+   go-to-definition, find class / symbol, hover types, inline diagnostics.
+   Pluggable language server plugins (rust-analyzer, typescript-language-server,
+   pyright, gopls and others) resolved from the user's toolchain automatically.
+   A fast heuristic (ripgrep + tree-sitter) pass for all languages, then real
+   LSP where a server is present. ([#174](https://github.com/simion/termic/issues/174))
+2. **Mobile app.** A companion mobile application for remote control and monitoring of tasks on the go.
+3. **MCP Server Integration.** Add support for Model Context Protocol (MCP) servers to supply rich context directly to agents (currently being worked on by a contributor).
+4. **Linear + GitHub PR integration.** Paste an issue / PR URL, get a
+   workspace seeded with title + body. Create the PR from the app via
+   `gh`. No OAuth.
+5. **Sandbox parity on Linux + Windows.** macOS Seatbelt today; bubblewrap
+   / landlock on Linux and AppContainer on Windows are the gap.
+6. **Docker-based sandboxing.** An opt-in, more brutal alternative to
+   Seatbelt: run each agent inside a container off a default, editable
+   Dockerfile that ships the supported agents. Install whatever your agents
+   need in the image; they cannot escape it and only see the paths you mount
+   (just the project repo(s) by default, everything else installed but not
+   mounted). Cross-platform for free, and pairs well with per-agent
+   credential injection (or a single CLI login) so you need not mount secrets
+   at all. See [#49](https://github.com/simion/termic/issues/49) for the kind
+   of host-toolchain friction this sidesteps.
+7. **Windows prebuilts.** AppImage CI is live for Linux; Windows MSI is
+   the matching CI matrix entry.
+8. **Send selection to the agent as a reference.** Select text in the
+   editor, right-click or hover, and push it into the active agent terminal
+   as an `@file:123` style reference so the agent picks it up as context.
+   ([#174](https://github.com/simion/termic/issues/174))
+9. **Opt-in usage telemetry.** Anonymous, opt-in analytics via a self-hosted
+   Umami instance. Strictly limited to usage patterns (which features are
+   used, how often) and crash reports — nothing else. No code, no prompts,
+   no file paths, no agent output, no project names. Minimum viable event
+   set: the goal is performance and feature prioritization, not surveillance.
+   Off by default, one toggle in Settings.
+10. ~~**First-class git surface.** Commit / push / pull / branch switch from inside the app instead of dropping to the aux terminal.~~ (Done)
+11. ~~**More coding agents.** First-class opencode, pi.dev, and cline support, plus exploring other CLI coding agents as they land. Launch presets for local models via ollama so an agent can run fully on-device.~~ (Done)
+12. ~~**Flexible terminal splits.** iTerm-style pane splitting in any direction — horizontal, vertical, and nested — so multiple terminals, agents, or aux sessions can live side by side in the same workspace view without switching tabs.~~ (Done)
+13. ~~**Quick-jump to next waiting agent.** A keyboard shortcut to instantly focus the next agent that is waiting for input, so you can cycle through a multi-agent session without hunting for the right tab by eye.~~ (Done)
 
 ---
 
 ## Sponsors
 
-Termic is free, AGPL-3.0, and built by one person. If your team builds on AI coding agents and finds it useful, sponsoring helps keep it moving.
+Termic is free, AGPL-3.0, and built by its author and a growing group of dedicated open-source contributors. If your team builds on AI coding agents and finds it useful, sponsoring helps keep it moving.
 
 | [![DontPayFull](https://static.dontpayfull.com/static/images/logo/logo.png)](https://www.dontpayfull.com) |
 |---|
