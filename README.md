@@ -371,10 +371,25 @@ Open an issue to push something up the list or pick one off.
    no file paths, no agent output, no project names. Minimum viable event
    set: the goal is performance and feature prioritization, not surveillance.
    Off by default, one toggle in Settings.
-10. ~~**First-class git surface.** Commit / push / pull / branch switch from inside the app instead of dropping to the aux terminal.~~ (Done)
-11. ~~**More coding agents.** First-class opencode, pi.dev, and cline support, plus exploring other CLI coding agents as they land. Launch presets for local models via ollama so an agent can run fully on-device.~~ (Done)
-12. ~~**Flexible terminal splits.** iTerm-style pane splitting in any direction — horizontal, vertical, and nested — so multiple terminals, agents, or aux sessions can live side by side in the same workspace view without switching tabs.~~ (Done)
-13. ~~**Quick-jump to next waiting agent.** A keyboard shortcut to instantly focus the next agent that is waiting for input, so you can cycle through a multi-agent session without hunting for the right tab by eye.~~ (Done)
+10. **Investigating agent lifecycle hooks.** Termic infers "the agent
+    finished" from the terminal stream (OSC progress sequences and window
+    titles), which costs no config, works for every agent including ones
+    you add yourself, and keeps working inside the sandbox. Every
+    supported CLI now also exposes a lifecycle hook system that states it
+    outright, with a payload carrying the assistant's closing message,
+    whether the agent is blocked on a permission prompt or on a question,
+    and a warning before context compaction. Whether that is worth
+    writing into your agent config is an open question, so the first step
+    is measuring hooks against OSC across the scenarios that actually
+    break detection (interrupts, permission prompts, subagents,
+    compaction). If it earns its place it ships opt-in and off by
+    default, with a real uninstall, and OSC stays authoritative
+    regardless. Research and measurement plan in
+    [docs/plans/agent-hooks.md](docs/plans/agent-hooks.md).
+11. ~~**First-class git surface.** Commit / push / pull / branch switch from inside the app instead of dropping to the aux terminal.~~ (Done)
+12. ~~**More coding agents.** First-class opencode, pi.dev, and cline support, plus exploring other CLI coding agents as they land. Launch presets for local models via ollama so an agent can run fully on-device.~~ (Done)
+13. ~~**Flexible terminal splits.** iTerm-style pane splitting in any direction — horizontal, vertical, and nested — so multiple terminals, agents, or aux sessions can live side by side in the same workspace view without switching tabs.~~ (Done)
+14. ~~**Quick-jump to next waiting agent.** A keyboard shortcut to instantly focus the next agent that is waiting for input, so you can cycle through a multi-agent session without hunting for the right tab by eye.~~ (Done)
 
 ---
 
