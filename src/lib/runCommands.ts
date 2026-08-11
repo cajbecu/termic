@@ -31,21 +31,14 @@ export function defaultCommandFor(rel: string): string {
  *  run tab) to the width of a full shell line. */
 export const RUN_COMMAND_LABEL_MAX = 40;
 
-/** The identity of a run command: its label, or the command itself when the
- *  label is blank. Keys the `cmd:<key>` run-tab member, so it stays untrimmed
- *  of content — two different commands must never collapse onto one tab. */
-export function runCommandKey(cmd: RunCommand): string {
-  return cmd.label.trim() || cmd.command.trim();
-}
-
 /** What the Run dropdown and the run tab show for a command: the label, or
  *  the command when no label was given, clipped with an ellipsis past
  *  `RUN_COMMAND_LABEL_MAX`. */
 export function runCommandLabel(cmd: RunCommand): string {
-  const key = runCommandKey(cmd);
-  return key.length > RUN_COMMAND_LABEL_MAX
-    ? key.slice(0, RUN_COMMAND_LABEL_MAX - 1).trimEnd() + "…"
-    : key;
+  const text = cmd.label.trim() || cmd.command.trim();
+  return text.length > RUN_COMMAND_LABEL_MAX
+    ? text.slice(0, RUN_COMMAND_LABEL_MAX - 1).trimEnd() + "…"
+    : text;
 }
 
 /** An empty `.termic.yaml` shape, used when a repo has none yet. Mirrors the

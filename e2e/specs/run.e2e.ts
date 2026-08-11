@@ -7,7 +7,7 @@ import { archiveTask, ensureActiveTask, openTask, requireTermicApi, snap, waitFo
 // command. (No .termic.yaml needed, so the fixture repo stays clean.)
 describe("run tabs", () => {
   let taskId: string | undefined;
-  const MEMBER = "cmd:e2e-run";
+  const MEMBER = "label:e2e-run";
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -46,8 +46,9 @@ describe("run tabs", () => {
   });
 
   // An unlabeled command falls back to the command itself for both its tab
-  // identity (`cmd:<command>`, so two unlabeled commands never share a tab)
-  // and its visible title, clipped at 40 chars.
+  // identity (`cmd:<command>`, a namespace apart from a labeled command's
+  // `label:<label>`, so neither can collide with the other) and its visible
+  // title, clipped at 40 chars.
   it("titles an unlabeled command with its (clipped) command", async () => {
     const command = "echo unlabeled-run-command-with-a-very-long-tail";
     await browser.execute((id, cmd) => {
@@ -89,7 +90,7 @@ describe("run tabs", () => {
 // its PTY (what the Stop button does) and assert the run tab stops.
 describe("run stop", () => {
   let taskId: string | undefined;
-  const MEMBER = "cmd:e2e-stop";
+  const MEMBER = "label:e2e-stop";
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });

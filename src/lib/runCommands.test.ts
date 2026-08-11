@@ -9,25 +9,7 @@ vi.mock("@/lib/ipc", () => ({
 }));
 vi.mock("@/store/app", () => ({ useApp: { getState: () => ({ projects: [] }) } }));
 
-import { runCommandKey, runCommandLabel, RUN_COMMAND_LABEL_MAX } from "@/lib/runCommands";
-
-describe("runCommandKey", () => {
-  it("uses the label when one is set", () => {
-    expect(runCommandKey({ label: "Check", command: "make check-all" })).toBe("Check");
-  });
-
-  it("falls back to the command when the label is blank", () => {
-    expect(runCommandKey({ label: "", command: "make check-all" })).toBe("make check-all");
-    expect(runCommandKey({ label: "   ", command: "make check-all" })).toBe("make check-all");
-  });
-
-  it("keeps long commands intact so two commands never share a run tab", () => {
-    const a = { label: "", command: "npm run build -- --mode production --target one" };
-    const b = { label: "", command: "npm run build -- --mode production --target two" };
-    expect(runCommandKey(a)).not.toBe(runCommandKey(b));
-    expect(runCommandKey(a)).toBe(a.command);
-  });
-});
+import { runCommandLabel, RUN_COMMAND_LABEL_MAX } from "@/lib/runCommands";
 
 describe("runCommandLabel", () => {
   it("shows the command when no label is given", () => {

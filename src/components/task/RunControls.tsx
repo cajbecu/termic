@@ -21,8 +21,8 @@ import {
   DropdownLabel, DropdownSeparator,
 } from "@/components/ui/Dropdown";
 import { ptyKill, openPath } from "@/lib/ipc";
-import { launchRunTabs, launchSetupTab, launchCustomRun, customRunMember, resolveRunTargets, runsAtRepoRoot, type RunTarget } from "@/lib/runTabs";
-import { resolveCustomCommands, runCommandKey, runCommandLabel, type ResolvedCommand } from "@/lib/runCommands";
+import { launchRunTabs, launchSetupTab, launchCustomRun, customRunMember, isCustomRunMember, resolveRunTargets, runsAtRepoRoot, type RunTarget } from "@/lib/runTabs";
+import { resolveCustomCommands, runCommandLabel, type ResolvedCommand } from "@/lib/runCommands";
 import { Play, Square, ChevronDown, Wrench, Globe, Settings, SlidersHorizontal } from "lucide-react";
 
 export function RunControls({ task }: { task: Task }) {
@@ -38,10 +38,10 @@ export function RunControls({ task }: { task: Task }) {
   const isMultiRepo = (task.composition?.length ?? 0) > 0;
   const [targets, setTargets] = useState<RunTarget[]>([]);
   // Custom run commands (GH #124), personal + committed. Ad-hoc, keyed by
-  // `cmd:<label>` run tabs, so they're kept OUT of the primary Run/Stop
-  // button below and get their own dropdown section instead.
+  // their own run-tab members (see `customRunMember`), so they're kept OUT of
+  // the primary Run/Stop button below and get their own dropdown section.
   const [customCmds, setCustomCmds] = useState<ResolvedCommand[]>([]);
-  const primaryRunTabs = runTabs.filter(t => !(t.runTab?.member ?? "").startsWith("cmd:"));
+  const primaryRunTabs = runTabs.filter(t => !isCustomRunMember(t.runTab?.member));
   const runLabel = isMultiRepo ? "Run all" : "Run";
   const stopLabel = isMultiRepo ? "Stop all" : "Stop";
   const stopTip = isMultiRepo ? "Stop all running scripts" : "Stop the running scripts";
@@ -169,13 +169,13 @@ export function RunControls({ task }: { task: Task }) {
             </>
           )}
           {/* Custom run commands (GH #124) — the curated per-repo list,
-              personal + committed. Each toggles its own `cmd:<label>` run
-              tab; independent of the primary Run button above. */}
+              personal + committed. Each toggles its own run tab, keyed by
+              `customRunMember`; independent of the primary Run button above. */}
           {customCmds.length > 0 && (
             <>
               <DropdownLabel>Run commands</DropdownLabel>
               {customCmds.map((cmd, i) => {
-                const tab = runTabs.find(t => t.runTab?.member === customRunMember(runCommandKey(cmd)));
+                const tab = runTabs.find(t => t.runTab?.member === customRunMember(cmd));
                 const runningCmd = !!tab?.ptyId;
                 return (
                   <DropdownItem
