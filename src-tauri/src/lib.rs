@@ -4756,14 +4756,82 @@ pub(crate) fn kill_task_ptys(manager: &PtyManager, task_id: &str) -> usize {
     count
 }
 
-/// The task's ROLE-tagged PTYs that carry no `task_id`: today exactly
-/// the aux shell, which deliberately omits `task_id` (the sandbox
-/// trigger). Archive paths must kill it too; leaving a live shell
-/// inside a removed worktree is the same undefined state the agent
-/// kill exists to prevent. Kept separate from `kill_task_ptys` because
-/// `task_set_sandbox` reuses that one and a sandbox edit has no
-/// business killing the user's scratch shell.
-pub(crate) fn kill_task_role_ptys(manager: &PtyManager, task_id: &str) -> usize {
+/// How long a task's children get to exit on their own after SIGTERM before
+/// archive stops waiting and SIGKILLs them.
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Stop a task's PTYs politely, then guarantee they are gone.
+///
+/// Archive removes the worktree, and removing it under a live agent is
+/// undefined, so termination has to be certain. But SIGKILL as the FIRST
+/// signal gives an agent CLI no chance to flush its session transcript, and
+/// that transcript is what makes the task resumable and what `result` reads.
+/// Killing it outright is a silent data loss for anyone who archives a task
+/// they later want to resume or read back.
+///
+/// So: SIGTERM, a short bounded grace, then SIGKILL whatever is still up. The
+/// worktree removal that follows is as safe as before, because the SIGKILL
+/// sweep is unconditional; the grace only decides whether it has anything
+/// left to do.
+///
+/// The wait here is NOT the standing sleep-poll CLAUDE.md forbids. That rule
+/// is about loops that run forever and keep the CPU out of deep sleep; this
+/// runs once per archive, caps at STOP_GRACE, and returns the moment the last
+/// child is gone. `waitpid` is not an option: the waiter thread owns the
+/// Child, which is exactly why `child_pid` is kept as a raw pid here.
+///
+/// Returns how many PTYs were live when we started, matching kill_task_ptys.
+pub(crate) fn stop_task_ptys(manager: &PtyManager, task_id: &str) -> usize {
+    // Counts every matching slot, including any without a child_pid, so the
+    // reported number keeps matching kill_task_ptys. Only the ones with a pid
+    // can be signalled.
+    let victims: Vec<Option<u32>> = {
+        let map = manager.inner.lock();
+        map.iter()
+            .filter(|(_, slot)| slot.task_id.as_deref() == Some(task_id))
+            .map(|(_, slot)| slot.child_pid)
+            .collect()
+    };
+    let count = victims.len();
+    graceful_then_kill(&victims.into_iter().flatten().collect::<Vec<_>>());
+    count
+}
+
+/// SIGTERM, wait for exit up to STOP_GRACE, SIGKILL the remainder.
+/// Split out so both the task-tagged and the role-tagged sweeps share it.
+fn graceful_then_kill(pids: &[u32]) {
+    if pids.is_empty() {
+        return;
+    }
+    for &pid in pids {
+        unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+    }
+    // `kill(pid, 0)` probes liveness without signalling. A pid the waiter has
+    // already reaped fails with ESRCH, which is the exit we are waiting for.
+    let alive = |pid: u32| unsafe { libc::kill(pid as i32, 0) } == 0;
+    let deadline = std::time::Instant::now() + STOP_GRACE;
+    while std::time::Instant::now() < deadline {
+        if !pids.iter().any(|&p| alive(p)) {
+            return;
+        }
+        std::thread::sleep(STOP_POLL);
+    }
+    for &pid in pids.iter().filter(|&&p| alive(p)) {
+        unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+    }
+}
+
+/// Role-tagged counterpart of `stop_task_ptys`, same SIGTERM-then-SIGKILL
+/// contract.
+///
+/// Covers the task's PTYs that carry no `task_id`: today exactly the aux
+/// shell, which omits it deliberately (the sandbox trigger). Archive has to
+/// sweep these too, since a live shell inside a removed worktree is the same
+/// undefined state the agent kill exists to prevent. Kept separate from the
+/// task-tagged sweep because `task_set_sandbox` reuses that one, and a
+/// sandbox edit has no business killing the user's scratch shell.
+pub(crate) fn stop_task_role_ptys(manager: &PtyManager, task_id: &str) -> usize {
     let victims: Vec<Option<u32>> = {
         let map = manager.inner.lock();
         map.values()
@@ -4775,11 +4843,10 @@ pub(crate) fn kill_task_role_ptys(manager: &PtyManager, task_id: &str) -> usize 
             .collect()
     };
     let count = victims.len();
-    for pid in victims.into_iter().flatten() {
-        unsafe { libc::kill(pid as i32, libc::SIGKILL); }
-    }
+    graceful_then_kill(&victims.into_iter().flatten().collect::<Vec<_>>());
     count
 }
+
 
 /// Set the per-task YOLO flag and persist. No PTY kill — it only
 /// affects how the NEXT agent is launched (the frontend separately

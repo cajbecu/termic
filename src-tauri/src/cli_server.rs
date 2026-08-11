@@ -538,8 +538,10 @@ pub(crate) trait CliHost: Send + Sync {
     fn agent_cache(&self) -> &AgentCache;
     /// Delivery confirmations for CLI-injected prompts.
     fn prompt_reports(&self) -> &PromptReports;
-    /// SIGKILL every live PTY of a task (the task_set_sandbox
-    /// precedent); returns the victim count.
+    /// Stop every live PTY of a task and guarantee it is gone: SIGTERM,
+    /// a short grace, then SIGKILL the remainder. Returns the victim count.
+    /// The grace exists so an agent can flush its session transcript; the
+    /// SIGKILL sweep is what archive's worktree removal relies on.
     fn kill_task_ptys(&self, task_id: &str) -> u32;
     /// `git rev-parse --show-toplevel` for `new` run outside any
     /// registered project: is the cwd a repo we could register?
@@ -3033,8 +3035,14 @@ impl CliHost for TauriHost {
         // task_id): a live shell inside a removed worktree is the same
         // undefined state the agent kill prevents, and its attach
         // clients were just told "archived".
+        //
+        // SIGTERM first, SIGKILL only what does not go (crate::stop_*): an
+        // agent CLI that is killed outright never flushes its session
+        // transcript, and that transcript is what makes the task resumable
+        // and what `result` reads back. Termination is still guaranteed, so
+        // the worktree removal downstream is as safe as it was.
         let manager = self.app.state::<crate::PtyManager>();
-        (crate::kill_task_ptys(&manager, task_id) + crate::kill_task_role_ptys(&manager, task_id))
+        (crate::stop_task_ptys(&manager, task_id) + crate::stop_task_role_ptys(&manager, task_id))
             as u32
     }
     fn git_toplevel(&self, cwd: &str) -> Option<String> {

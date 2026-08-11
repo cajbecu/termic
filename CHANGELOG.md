@@ -23,6 +23,7 @@ CLI tab targeting and worktree adoption, folder browsing in the editor, and imag
 - The PDF preview keeps its page across tab switches instead of snapping back to page 1. (#148)
 
 ### Bug fixes
+- `termic archive` now asks a task's agents to stop before it kills them. It used to SIGKILL them outright, which gave an agent no chance to flush its session transcript, so archiving a task could quietly cost you the history that makes it resumable and that `termic result` reads. Anything still running after a short grace is killed as before, so the worktree is never removed under a live agent.
 - Find in the markdown preview marks the text you searched for, not the code spans around it. Stepping with Enter and Shift+Enter stays in step with the counter and wraps at both ends, a phrase the markdown source hard-wrapped still matches, and a regex metacharacter in the query is treated as literal text. (#168)
 - The editor's line-number gutter is opaque, so a long line scrolled right no longer shows through it. (#161)
 - The diff's line numbers stay level with the code when inline review comments are added. (#157)
