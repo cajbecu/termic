@@ -104,7 +104,9 @@ session/thread id. That is enough to correlate (see below).
 ### What Xirp actually does (measured, not documented)
 
 Spotify's Xirp 0.12.0 was installed and driven on a real machine in
-August 2026. Full teardown in [xirp.md](xirp.md). The parts that bear on
+August 2026. Full teardown in the appendix of
+[agent-orchestration.md](agent-orchestration.md#appendix-xirp-0120-teardown).
+The parts that bear on
 this decision:
 
 Its onboarding offers a "session hooks" step ("Installs lightweight
