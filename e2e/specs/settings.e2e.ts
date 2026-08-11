@@ -15,19 +15,14 @@ const clickToggleByLabel = (label: string) =>
     sw.click();
   }, label);
 
-/** Drive the renderer <select> the way a user does. A plain `.click()` on an
- *  <option> does not commit a value in WKWebView, so set it and dispatch the
- *  change React listens for. Scoped by the option values, which are the pref
- *  values themselves, rather than by label text that copy edits would break. */
+/** Click a segment of the renderer picker. Keyed off `data-renderer`, whose
+ *  values are the pref values themselves, so copy edits to the visible labels
+ *  cannot break the test the way matching on label text would. */
 const selectRendererByValue = (value: "webgl" | "canvas" | "dom") =>
   browser.execute((v) => {
-    const sel = [...document.querySelectorAll("select")].find(
-      (s) => [...s.options].some((o) => o.value === v) &&
-             [...s.options].some((o) => o.value === "webgl"),
-    ) as HTMLSelectElement | undefined;
-    if (!sel) throw new Error("renderer select not found");
-    sel.value = v;
-    sel.dispatchEvent(new Event("change", { bubbles: true }));
+    const btn = document.querySelector(`[data-renderer="${v}"]`) as HTMLElement | null;
+    if (!btn) throw new Error("renderer segment not found: " + v);
+    btn.click();
   }, value);
 
 // Settings/preferences subsystem. Guards that a real toggle in the Settings
@@ -336,12 +331,11 @@ describe("settings rail", () => {
       // All three values must be reachable from the control. Guards against a
       // regression that drops the picker back to a two-state toggle, which a
       // webgl <-> dom test alone would still pass.
-      const options = await browser.execute(() => {
-        const sel = [...document.querySelectorAll("select")].find(
-          (s) => [...s.options].some((o) => o.value === "webgl"),
-        ) as HTMLSelectElement | undefined;
-        return sel ? [...sel.options].map((o) => o.value) : [];
-      });
+      const options = await browser.execute(() =>
+        [...document.querySelectorAll("[data-renderer]")].map(
+          (b) => (b as HTMLElement).dataset.renderer,
+        ),
+      );
       expect(options).toEqual(["webgl", "canvas", "dom"]);
 
       // canvas: the value the legacy boolean could not express at all.

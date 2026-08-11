@@ -204,8 +204,8 @@ export function AppearanceSection() {
           DOM is a compatibility fallback rather than a saving. */}
       <Field
         label="Terminal renderer"
-        hint={"GPU (WebGL) is the default and by far the cheapest while output is flowing.\nCanvas rasterizes glyphs without keeping a live WebGL surface, so it costs less while terminals sit idle and more under heavy output. Pick it if your terminals mostly sit idle. The saving tracks window size, not how many terminals you have open.\nDOM builds text out of ordinary page elements instead. It is the compatibility fallback: use it if text renders wrong or typing lags, which some Linux/WebKitGTK setups hit because WebGL runs there on a software rasterizer.\nApplies to terminals opened after the change; relaunch to switch the ones already open."}
-        control={<RendererSelect value={terminalRenderer} onChange={setTerminalRenderer} />}
+        hint={"GPU (WebGL) is the fast path and the default. Canvas costs less while terminals sit idle and more under heavy output; DOM is the compatibility fallback if text renders wrong or typing lags. Applies to terminals opened after the change."}
+        control={<RendererPicker value={terminalRenderer} onChange={setTerminalRenderer} />}
       />
 
       {/* Live terminal preview — spawns a real shell in $HOME so
@@ -464,21 +464,35 @@ function FontSelect({ value, onChange, fonts }: {
   );
 }
 
-/** Renderer picker (GH #140). Labels lead with what the thing IS, so the
- *  option list still reads sensibly once collapsed to the selected value. */
-function RendererSelect({ value, onChange }: {
+const RENDERERS: Array<{ id: TerminalRendererKind; label: string }> = [
+  { id: "webgl",  label: "GPU (WebGL)" },
+  { id: "canvas", label: "Canvas" },
+  { id: "dom",    label: "DOM" },
+];
+
+/** Renderer picker (GH #140). Segmented rather than a <select> to match
+ *  LetterSpacingPicker directly above it: three short options that fit
+ *  inline, where showing all of them at once is what separates them. A
+ *  collapsed dropdown pushed that job onto the hint text, which is how the
+ *  hint turned into a six-line wall in the first place. */
+function RendererPicker({ value, onChange }: {
   value: TerminalRendererKind; onChange: (v: TerminalRendererKind) => void;
 }) {
   return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value as TerminalRendererKind)}
-      className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] pl-3 pr-8 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[180px]"
-    >
-      <option value="webgl">GPU (WebGL), default</option>
-      <option value="canvas">Canvas</option>
-      <option value="dom">DOM (compatibility)</option>
-    </select>
+    <div className="inline-flex items-stretch rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-[3px]">
+      {RENDERERS.map(({ id, label }) => (
+        <button
+          key={id} type="button" onClick={() => onChange(id)}
+          data-renderer={id}
+          className={cn(
+            "h-7 rounded-[5px] px-2.5 text-[12px] transition-colors",
+            value === id
+              ? "bg-[var(--color-accent-deep)] text-white"
+              : "text-[var(--color-fg-dim)] hover:text-[var(--color-fg)]",
+          )}
+        >{label}</button>
+      ))}
+    </div>
   );
 }
 
