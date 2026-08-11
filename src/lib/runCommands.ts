@@ -26,6 +26,21 @@ export function defaultCommandFor(rel: string): string {
   return `./${rel}`;
 }
 
+/** Longest display label before it gets clipped. Sized so a command still
+ *  reads as a command in the Run dropdown without stretching the menu (or the
+ *  run tab) to the width of a full shell line. */
+export const RUN_COMMAND_LABEL_MAX = 40;
+
+/** What the Run dropdown and the run tab show for a command: the label, or
+ *  the command when no label was given, clipped with an ellipsis past
+ *  `RUN_COMMAND_LABEL_MAX`. */
+export function runCommandLabel(cmd: RunCommand): string {
+  const text = cmd.label.trim() || cmd.command.trim();
+  return text.length > RUN_COMMAND_LABEL_MAX
+    ? text.slice(0, RUN_COMMAND_LABEL_MAX - 1).trimEnd() + "…"
+    : text;
+}
+
 /** An empty `.termic.yaml` shape, used when a repo has none yet. Mirrors the
  *  default RepositorySection builds. */
 function emptyRepoConfig(): RepoConfig {

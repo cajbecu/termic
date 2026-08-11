@@ -1,13 +1,13 @@
 import { execSync } from "node:child_process";
 import path from "node:path";
-import { archiveTask, openTask, requireTermicApi, snap, waitForAppShell } from "../helpers";
+import { archiveTask, ensureActiveTask, openTask, requireTermicApi, snap, waitForAppShell } from "../helpers";
 
 // P0: the Run feature (#54/#124) launches commands in dedicated run tabs.
 // Guards a custom run: it opens a run tab whose PTY actually executes the
 // command. (No .termic.yaml needed, so the fixture repo stays clean.)
 describe("run tabs", () => {
   let taskId: string | undefined;
-  const MEMBER = "cmd:e2e-run";
+  const MEMBER = "label:e2e-run";
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -44,13 +44,53 @@ describe("run tabs", () => {
     // surface here; PTY spawn + execution is covered by task-spawn's agent PTY.
     await snap("run.png");
   });
+
+  // An unlabeled command falls back to the command itself for both its tab
+  // identity (`cmd:<command>`, a namespace apart from a labeled command's
+  // `label:<label>`, so neither can collide with the other) and its visible
+  // title, clipped at 40 chars.
+  it("titles an unlabeled command with its (clipped) command", async () => {
+    const command = "echo unlabeled-run-command-with-a-very-long-tail";
+    await browser.execute((id, cmd) => {
+      window.__termic!.runTabs.launchCustomRun(id, { label: "", command: cmd });
+    }, taskId, command);
+
+    const tabId = await browser.waitUntil(
+      async () =>
+        (await browser.execute(
+          (id, member) =>
+            (window.__termic!.useApp.getState().tabs[id] ?? []).find(
+              (t: any) => t.runTab?.member === member,
+            )?.id,
+          taskId,
+          `cmd:${command}`,
+        )) as string | undefined,
+      { timeout: 15_000, timeoutMsg: "unlabeled run tab was not keyed by its command" },
+    );
+
+    await ensureActiveTask(taskId!);
+    // The tab strip shows the command, clipped to 40 chars with an ellipsis.
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(
+          (id, tab) =>
+            document
+              .querySelector(`[data-task-id="${id}"] [data-tab-id="${tab}"]`)
+              ?.textContent?.includes("echo unlabeled-run-command-with-a-very-…") ?? false,
+          taskId,
+          tabId,
+        )) === true,
+      { timeout: 10_000, timeoutMsg: "unlabeled run tab did not show the clipped command" },
+    );
+    await snap("run-unlabeled.png");
+  });
 });
 
 // P2: stopping a running script. Launch a long-running custom run, then kill
 // its PTY (what the Stop button does) and assert the run tab stops.
 describe("run stop", () => {
   let taskId: string | undefined;
-  const MEMBER = "cmd:e2e-stop";
+  const MEMBER = "label:e2e-stop";
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });

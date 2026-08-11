@@ -1,9 +1,11 @@
 // Editor for a list of extra Run commands (GH #124). Each row is a
-// label + command pair; an empty label falls back to the command at launch.
+// label + command pair; an empty label falls back to the command at launch
+// (`runCommandLabel`), which the Label placeholder previews.
 // Shared by the Settings "Run commands" surface and the Run Commands manager
 // dialog. Persistence is the caller's job (via `onChange`) so the same editor
 // backs both the personal (projects.json) and committed (.termic.yaml) lists.
 
+import { runCommandLabel } from "@/lib/runCommands";
 import type { RunCommand } from "@/lib/types";
 import { Trash2, Plus } from "lucide-react";
 
@@ -29,7 +31,7 @@ export function RunCommandsEditor({ value, onChange }: {
               <input
                 value={cmd.label}
                 onChange={(e) => update(i, { label: e.target.value })}
-                placeholder="Label"
+                placeholder={cmd.command.trim() ? runCommandLabel(cmd) : "Label"}
                 autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
                 className="w-40 shrink-0 rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-[12.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
               />
