@@ -1887,17 +1887,31 @@ function iconSize(compact: boolean) {
 // Code's continuous redraws, Codex's status counter). The internal
 // workState=="working" is always tracked so the done detector fires on
 // busy→idle transitions; this badge just surfaces it when enabled.
+// `data-testid="work-badge"` + `data-work-state` are the DOM hook the e2e
+// suite asserts on: this badge is what a user actually sees, so specs read it
+// instead of peeking at `tab.workState` in the store.
 function TabBadge({ reason }: { reason: "attention" | "done" | "working" }) {
   if (reason === "working") {
     return (
-      <span className="shrink-0 text-[var(--color-fg-faint)]" title="Agent working" aria-label="Working">
+      <span
+        data-testid="work-badge"
+        data-work-state="working"
+        className="shrink-0 text-[var(--color-fg-faint)]"
+        title="Agent working"
+        aria-label="Working"
+      >
         <Spinner size={12} />
       </span>
     );
   }
   if (reason === "attention") {
     return (
-      <span className="shrink-0 text-[var(--color-warn)]" title="Agent needs your input">
+      <span
+        data-testid="work-badge"
+        data-work-state="attention"
+        className="shrink-0 text-[var(--color-warn)]"
+        title="Agent needs your input"
+      >
         <Bell className="h-3 w-3" strokeWidth={2.5} />
       </span>
     );
@@ -1906,6 +1920,8 @@ function TabBadge({ reason }: { reason: "attention" | "done" | "working" }) {
   // @theme; themes can override). h-3.5 visually matches the bell + spinner.
   return (
     <span
+      data-testid="work-badge"
+      data-work-state="done"
       className="shrink-0 flex items-center justify-center"
       title="Agent finished a turn"
       aria-label="Work done"
@@ -2125,7 +2141,12 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
   }
 
   return (
-    <div className="mb-px">
+    // `data-sidebar-task-row` spans the header AND every expanded tab row, so
+    // an e2e spec can scope "the work badge the sidebar shows for this task"
+    // with one selector regardless of collapse state. Deliberately a distinct
+    // attribute from `data-sidebar-task-id` below, which the reorder drag
+    // hit-tests and must stay on the header alone.
+    <div className="mb-px" data-sidebar-task-row={w.id}>
       {/* Task header row. Also the drag handle and the hit-test target:
           data-sidebar-task-id lives HERE, not on the wrapper, because the wrapper
           spans every expanded tab row — its midpoint can sit far below the

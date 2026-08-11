@@ -145,6 +145,11 @@ export function MessageQueueButton({ taskId, compact = false, className, preferT
             <button
               type="button"
               disabled={!canQueue}
+              // DOM hook for the e2e suite: how many messages are waiting, and
+              // whether the loop is mid-send. Same numbers the label shows.
+              data-testid="queue-button"
+              data-queued={queuedCount}
+              data-queue-running={queueRunning ? "1" : "0"}
               className={cn(
                 // Filled chip (no border — keeps the footer clean) so it reads
                 // as a button via its background, not a faint label. text-[12.5px]

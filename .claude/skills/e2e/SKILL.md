@@ -65,11 +65,23 @@ One `it` = one user-observable outcome. All `it`s in a file share ONE launched
 window (boot once, assert many) — order them so earlier tests don't leave state
 that breaks later ones, or reset between them.
 
-## Reading real app state (prefer this over DOM scraping)
+## Reading real app state (for SETUP, and for what the DOM can't show)
 
 The e2e binary exposes `window.__termic` (stores + ipc + invoke — same handle
 the dev bridge uses; enabled via `VITE_E2E=1`, stripped from real release
-builds). Read state or drive real IPC through `browser.execute`:
+builds). Use it to **set up** state fast, to **locate** things (ids), and to
+read what genuinely has no DOM surface (PTY bytes — see rule 3).
+
+**Do NOT use it for the assertion when the feature has a visible surface.**
+`tab.workState === "working"` is the detector's private bookkeeping; the
+spinner badge is the feature. A spec that asserts the former keeps passing
+after the badge stops rendering. `agent.e2e.ts` is the reference: it submits
+through the terminal's own input path (`submitToAgent`) and asserts on
+`[data-testid="work-badge"]`'s `data-work-state` via `waitForWorkBadge` /
+`sidebarBadge`. When there is no hook yet, add a small `data-testid` +
+`data-*` state attribute to the component rather than reaching into the store.
+
+Read state or drive real IPC through `browser.execute`:
 
 ```ts
 // Read store state
@@ -95,18 +107,24 @@ old/non-e2e binary).
 
 1. **Never sleep.** No `setTimeout` / fixed waits. Use `browser.waitUntil`, the
    `waitFor*` helpers, or auto-retrying `expect`. Every wait is a *condition*.
-2. **Assert on state / DOM text, not pixels.** Screenshots are for humans to
-   eyeball, never for assertions.
+2. **Assert on what the user sees, not pixels and not internals.** Screenshots
+   are for humans to eyeball, never for assertions. Prefer DOM text /
+   `data-*` state attributes over store fields whenever a surface exists
+   (see the section above); fall back to store state only for rule 3.
 3. **Terminal content is NOT in the DOM.** xterm renders to a WebGL canvas, so
    `innerText` never contains PTY output no matter how long you wait. Assert
    terminal activity via store state — e.g. `tab.lastOutputAt` (bytes flowed)
    or `tab.liveTitle` (the agent's OSC title) read through `window.__termic`.
    All OTHER UI (sidebar, tabs, dialogs, Git panel) is normal DOM.
    `scripts/fake-agent.sh` mimics claude: it drives the OSC title with claude's
-   glyphs (`✳` idle / Braille spinner working). NOTE: `tab.workState ===
-   "working"` won't flip from a raw `ipc.ptyWrite` — termic gates the working
-   indicator on a real submit through its input path, so assert `liveTitle` for
-   OSC-title checks, not `workState`. See the task-spawn case in `e2e/specs/task.e2e.ts`.
+   glyphs (`✳` idle / Braille spinner working). NOTE: the working indicator
+   won't flip from a raw `ipc.ptyWrite` — termic gates it on a real submit
+   through its input path. Use `submitToAgent(taskId, text)`, which goes in
+   through xterm (insertText input event + Enter keydown/keyup) and therefore
+   arms the detector the way a keystroke does. Do NOT patch `lastInputAt` by
+   hand: that encodes how arming works into the spec and hides a broken submit
+   path. For pure OSC-title checks, assert `liveTitle` — see the task-spawn
+   case in `e2e/specs/task.e2e.ts`.
 4. **Semantic selectors.** Match by role / visible text (`clickByText`). Add a
    `data-testid` only where text is ambiguous or localized. Never depend on
    generated class names.

@@ -32,54 +32,28 @@ import { invoke } from "@tauri-apps/api/core";
 import { isUserWatching, useApp } from "@/store/app";
 import * as ipc from "@/lib/ipc";
 import { markUnattendedSpawn, takeUnattendedSpawn } from "@/lib/unattendedSpawns";
-import type { QueueItem, Tab, TerminalTab, Task, PersistedTab } from "@/lib/types";
+import type { QueueItem, Tab, TerminalTab, PersistedTab } from "@/lib/types";
 import { useUI } from "@/store/ui";
-
-// ── helpers ───────────────────────────────────────────────────────────
-
-function makeTermTab(overrides: Partial<TerminalTab> = {}): TerminalTab {
-  return {
-    id: crypto.randomUUID(),
-    type: "terminal",
-    title: "claude",
-    ptyId: "pty-1",
-    cli: "claude",
-    workState: "idle",
-    workProgress: null,
-    workProgressKind: null,
-    workClearedAt: undefined,
-    preview: false,
-    ...overrides,
-  } as TerminalTab;
-}
-
-function addTab(taskId: string, tab: Tab) {
-  useApp.setState(s => ({
-    tabs: { ...s.tabs, [taskId]: [...(s.tabs[taskId] ?? []), tab] },
-    activeTab: { ...s.activeTab, [taskId]: tab.id },
-  }));
-}
-
-function makeTask(overrides: Partial<Task> = {}): Task {
-  return {
-    id: "ws1", project_id: "p1", name: "Feature Foo", branch: "feature/foo",
-    base_branch: "main", path: "/x/ws1", cli: "claude", port: 1420,
-    created: "2024-01-01", archived: false,
-    ...overrides,
-  } as Task;
-}
+// Store interactor — the ONE place that knows the store's shape. Cases below
+// say what they mean ("what work state is that tab in?") instead of spelling
+// out `tabs[taskId].find(...) as TerminalTab` on every assertion.
+import {
+  focusTab,
+  getActiveTabId,
+  getTabIds,
+  getTabWorkState,
+  getTabs,
+  getTabsRef,
+  getTabUnread,
+  getTerminalTab,
+  makeTask,
+  makeTerminalTab as makeTermTab,
+  resetAppStore,
+  seedTab as addTab,
+} from "@/test-utils/store";
 
 beforeEach(() => {
-  // Reset store to clean state before each test.
-  useApp.setState({
-    tabs: {},
-    activeTab: {},
-    activeTaskId: null,
-    mountedTasks: new Set(),
-    tasks: [],
-    projects: [],
-    agents: [],
-  });
+  resetAppStore();
   vi.clearAllMocks();
 });
 
@@ -93,8 +67,7 @@ describe("setWorkState", () => {
 
     useApp.getState().setWorkState(taskId, tab.id, "working");
 
-    const result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
-    expect(result.workState).toBe("working");
+    expect(getTabWorkState(taskId, tab.id)).toBe("working");
   });
 
   it("transitions working → done", () => {
@@ -104,8 +77,7 @@ describe("setWorkState", () => {
 
     useApp.getState().setWorkState(taskId, tab.id, "done");
 
-    const result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
-    expect(result.workState).toBe("done");
+    expect(getTabWorkState(taskId, tab.id)).toBe("done");
   });
 
   // The focused-tab rule downgrades "done" to "idle" because the user is
@@ -120,20 +92,18 @@ describe("setWorkState", () => {
     const taskId = "ws-bg";
     const tab = makeTermTab({ workState: "working" });
     addTab(taskId, tab);
-    useApp.setState({ activeTaskId: taskId, activeTab: { [taskId]: tab.id } } as never);
+    focusTab(taskId, tab.id);
 
     useUI.getState().setWindowless(false);
     useApp.getState().setWorkState(taskId, tab.id, "done");
-    let result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
-    expect(result.workState).toBe("idle");
+    expect(getTabWorkState(taskId, tab.id)).toBe("idle");
 
     const tab2 = makeTermTab({ workState: "working" });
     addTab(taskId, tab2);
-    useApp.setState({ activeTaskId: taskId, activeTab: { [taskId]: tab2.id } } as never);
+    focusTab(taskId, tab2.id);
     useUI.getState().setWindowless(true);
     useApp.getState().setWorkState(taskId, tab2.id, "done");
-    result = useApp.getState().tabs[taskId].find(t => t.id === tab2.id) as TerminalTab;
-    expect(result.workState).toBe("done");
+    expect(getTabWorkState(taskId, tab2.id)).toBe("done");
     useUI.getState().setWindowless(false);
   });
 
@@ -144,7 +114,7 @@ describe("setWorkState", () => {
     const taskId = "watch-1";
     const tab = makeTermTab();
     addTab(taskId, tab);
-    useApp.setState({ activeTaskId: taskId, activeTab: { [taskId]: tab.id } } as never);
+    focusTab(taskId, tab.id);
 
     useUI.getState().setWindowless(false);
     expect(isUserWatching(taskId, tab.id)).toBe(true);
@@ -166,8 +136,7 @@ describe("setWorkState", () => {
 
     useApp.getState().setWorkState(taskId, tab.id, "working");
 
-    const result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
-    expect(result.workState).toBe("done");
+    expect(getTabWorkState(taskId, tab.id)).toBe("done");
   });
 
   it("sticky done: an unstamped done stays sticky", () => {
@@ -177,8 +146,7 @@ describe("setWorkState", () => {
 
     useApp.getState().setWorkState(taskId, tab.id, "working");
 
-    const result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
-    expect(result.workState).toBe("done");
+    expect(getTabWorkState(taskId, tab.id)).toBe("done");
   });
 
   it("a busy signal past the sticky window takes the tab back to working", () => {
@@ -191,9 +159,8 @@ describe("setWorkState", () => {
 
     useApp.getState().setWorkState(taskId, tab.id, "working");
 
-    const result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
-    expect(result.workState).toBe("working");
-    expect(result.workDoneAt).toBeUndefined();
+    expect(getTabWorkState(taskId, tab.id)).toBe("working");
+    expect(getTerminalTab(taskId, tab.id).workDoneAt).toBeUndefined();
   });
 
   it("drops the stale done badge when the agent goes back to work", () => {
@@ -207,8 +174,7 @@ describe("setWorkState", () => {
 
     useApp.getState().setWorkState(taskId, tab.id, "working");
 
-    const result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
-    expect(result.unread).toBeNull();
+    expect(getTabUnread(taskId, tab.id)).toBeNull();
   });
 
   it("keeps an attention badge when the agent goes back to work", () => {
@@ -224,9 +190,8 @@ describe("setWorkState", () => {
 
     useApp.getState().setWorkState(taskId, tab.id, "working");
 
-    const result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
-    expect(result.workState).toBe("working");
-    expect(result.unread?.reason).toBe("attention");
+    expect(getTabWorkState(taskId, tab.id)).toBe("working");
+    expect(getTabUnread(taskId, tab.id)?.reason).toBe("attention");
   });
 
   it("stamps workDoneAt on the transition to done", () => {
@@ -237,8 +202,7 @@ describe("setWorkState", () => {
     const before = Date.now();
     useApp.getState().setWorkState(taskId, tab.id, "done");
 
-    const result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
-    expect(result.workDoneAt).toBeGreaterThanOrEqual(before);
+    expect(getTerminalTab(taskId, tab.id).workDoneAt).toBeGreaterThanOrEqual(before);
   });
 
   it("idempotent: same state write causes no update", () => {
@@ -246,9 +210,9 @@ describe("setWorkState", () => {
     const tab = makeTermTab({ workState: "idle" });
     addTab(taskId, tab);
 
-    const before = useApp.getState().tabs[taskId];
+    const before = getTabsRef(taskId);
     useApp.getState().setWorkState(taskId, tab.id, "idle");
-    const after = useApp.getState().tabs[taskId];
+    const after = getTabsRef(taskId);
 
     // Same reference = no re-render triggered
     expect(after).toBe(before);
@@ -259,13 +223,12 @@ describe("setWorkState", () => {
     const tab = makeTermTab({ workState: "working" });
     addTab(taskId, tab);
     // Mark this task+tab as active (the user is looking at it)
-    useApp.setState({ activeTaskId: taskId, activeTab: { [taskId]: tab.id } });
+    focusTab(taskId, tab.id);
 
     useApp.getState().setWorkState(taskId, tab.id, "done");
 
-    const result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
     // "done" on the focused tab is silently downgraded to "idle"
-    expect(result.workState).toBe("idle");
+    expect(getTabWorkState(taskId, tab.id)).toBe("idle");
   });
 
   it("no-op on non-terminal tab", () => {
@@ -273,9 +236,9 @@ describe("setWorkState", () => {
     const editTab: Tab = { id: "edit-1", type: "edit", title: "foo.ts", path: "/x/foo.ts" } as any;
     addTab(taskId, editTab);
 
-    const before = useApp.getState().tabs[taskId];
+    const before = getTabsRef(taskId);
     useApp.getState().setWorkState(taskId, "edit-1", "working");
-    expect(useApp.getState().tabs[taskId]).toBe(before);
+    expect(getTabsRef(taskId)).toBe(before);
   });
 
   it("clears workProgress when leaving working state", () => {
@@ -285,8 +248,8 @@ describe("setWorkState", () => {
 
     useApp.getState().setWorkState(taskId, tab.id, "done");
 
-    const result = useApp.getState().tabs[taskId].find(t => t.id === tab.id) as TerminalTab;
     // workProgress cleared when not "working"
+    const result = getTerminalTab(taskId, tab.id);
     expect(result.workProgress).toBeNull();
     expect(result.workProgressKind).toBeNull();
   });
@@ -302,7 +265,7 @@ describe("closeTab", () => {
 
     useApp.getState().closeTab(taskId, tab.id);
 
-    expect(useApp.getState().tabs[taskId]).toHaveLength(0);
+    expect(getTabs(taskId)).toHaveLength(0);
   });
 
   it("adjusts active tab to the previous sibling", () => {
@@ -315,7 +278,7 @@ describe("closeTab", () => {
 
     useApp.getState().closeTab(taskId, "t2");
 
-    expect(useApp.getState().activeTab[taskId]).toBe("t1");
+    expect(getActiveTabId(taskId)).toBe("t1");
   });
 
   it("adjusts active tab to next sibling when first is closed", () => {
@@ -328,7 +291,7 @@ describe("closeTab", () => {
 
     useApp.getState().closeTab(taskId, "t1");
 
-    expect(useApp.getState().activeTab[taskId]).toBe("t2");
+    expect(getActiveTabId(taskId)).toBe("t2");
   });
 
   it("no-op when tab id does not exist", () => {
@@ -336,9 +299,9 @@ describe("closeTab", () => {
     const tab = makeTermTab();
     addTab(taskId, tab);
 
-    const before = useApp.getState().tabs[taskId];
+    const before = getTabsRef(taskId);
     useApp.getState().closeTab(taskId, "ghost-id");
-    expect(useApp.getState().tabs[taskId]).toBe(before);
+    expect(getTabsRef(taskId)).toBe(before);
   });
 });
 
@@ -619,9 +582,7 @@ describe("openPreviewTab", () => {
 // ── reorderTab (issue #6: drag-to-reorder) ────────────────────────────
 
 describe("reorderTab", () => {
-  function ids(taskId: string) {
-    return useApp.getState().tabs[taskId].map(t => t.id);
-  }
+  const ids = getTabIds;
   function seed(taskId: string, n: number) {
     for (let i = 0; i < n; i++) addTab(taskId, makeTermTab({ id: `t${i}` }));
   }

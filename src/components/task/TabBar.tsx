@@ -547,7 +547,17 @@ export function TabPill({ task, tab, active, paneFocused, compact, onSelect, onC
       {!isRenaming && (
         <span className="relative flex h-4 w-4 shrink-0 items-center justify-center">
           {(showFailed || showBell || showDone || showWorking) ? (
-            <span className="absolute inset-0 flex items-center justify-center transition-opacity group-hover:opacity-0">
+            <span
+              // DOM hook for the e2e suite. The badge is the user-visible
+              // proof of a tab's work state, so specs assert on this instead
+              // of reading `tab.workState` out of the store. Keep the value
+              // in sync with the priority chain above.
+              data-testid="work-badge"
+              data-work-state={
+                showFailed ? "failed" : showBell ? "attention" : showDone ? "done" : "working"
+              }
+              className="absolute inset-0 flex items-center justify-center transition-opacity group-hover:opacity-0"
+            >
               {showFailed && (
                 <span className="text-[var(--color-err)]" title="Exited with an error, click Restart to retry">
                   <AlertTriangle className="h-3.5 w-3.5" />

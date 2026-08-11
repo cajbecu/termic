@@ -1,59 +1,73 @@
-import { archiveTask, openTask, requireTermicApi, snap, waitForAppShell } from "../helpers";
+// Agent work-state, attention and queue flows.
+//
+// These cases assert on the BADGE the user sees (`[data-testid="work-badge"]`
+// in the tab strip and in the sidebar row), not on `tab.workState` in the
+// store. The store field is an implementation detail of the detector; the
+// badge is the feature. Reading the store here used to let the whole visual
+// layer break silently — the spinner could stop rendering and every one of
+// these tests would still pass.
+//
+// Submits go through `submitToAgent`, which drives xterm's own input path, so
+// no spec stamps `lastInputAt` by hand any more. Terminal OUTPUT is still read
+// from the store (`lastOutputAt`) — xterm paints to a WebGL canvas, so PTY
+// bytes are genuinely not in the DOM.
 
-// P0: after a real submit, termic must show the agent as "working". Work
+import {
+  archiveTask,
+  ensureActiveTask,
+  openTask,
+  queuedCount,
+  requireTermicApi,
+  requireWorkBadges,
+  sidebarBadge,
+  snap,
+  submitToAgent,
+  taskViewBadge,
+  waitForAgentPty,
+  waitForAppShell,
+  waitForWorkBadge,
+  waitForWorkBadgeGone,
+} from "../helpers";
+
+/** ms since the task's agent tab last produced PTY bytes. Not in the DOM. */
+const quietFor = (taskId: string) =>
+  browser.execute((id) => {
+    const t = window.__termic!.useApp.getState().tabs[id][0];
+    return Date.now() - (t.lastOutputAt ?? 0);
+  }, taskId);
+
+// P0: after a real submit, termic must SHOW the agent as working. Work
 // detection is gated on the tab having been submitted-to since spawn (guards
-// against cold-start false positives), so we stamp lastInputAt (what the app's
-// send path does) before the claude-like fake agent flips to its spinner title.
+// against cold-start false positives), which is exactly why the submit goes in
+// through the terminal's input path: it arms the detector the way a keystroke
+// does, so this covers the arming too.
 describe("agent working state", () => {
   let taskId: string | undefined;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
 
-  it("enters the working state after a submit", async () => {
+  it("shows the working badge after a submit", async () => {
     await waitForAppShell();
     await requireTermicApi();
+    await requireWorkBadges();
     taskId = await openTask("e2e-agent-working");
+    await waitForAgentPty(taskId);
 
-    await browser.waitUntil(
-      () =>
-        browser.execute((id) => {
-          const t = (window.__termic!.useApp.getState().tabs[id] ?? [])[0];
-          return !!t?.ptyId;
-        }, taskId),
-      { timeout: 20_000, interval: 250, timeoutMsg: "agent PTY never spawned" },
-    );
+    await submitToAgent(taskId, "do something");
 
-    // Arm the submit (stamp lastInputAt, as the real send path does) and send
-    // a prompt line so the fake agent flips to its working/spinner title.
-    await browser.execute((id) => {
-      const s = window.__termic!.useApp.getState();
-      const tab = s.tabs[id][0];
-      s.patchTab(id, tab.id, { lastInputAt: Date.now() });
-      window.__termic!.ipc.ptyWrite(
-        tab.ptyId,
-        Array.from(new TextEncoder().encode("do something\r")),
-      );
-    }, taskId);
-
-    await browser.waitUntil(
-      () =>
-        browser.execute(
-          (id) =>
-            window.__termic!.useApp.getState().tabs[id][0].workState ===
-            "working",
-          taskId,
-        ),
-      { timeout: 10_000, timeoutMsg: "agent never entered the working state" },
-    );
-
+    await waitForWorkBadge(taskId, "working", {
+      timeout: 10_000,
+      message: "the tab never showed a working badge after a submit",
+    });
     await snap("agent-working.png");
   });
 });
 
 // P0: when an agent you're NOT watching finishes, termic must raise attention
-// (unread / done) on its tab. Start an agent working, switch to another task so
-// it's backgrounded (still mounted), and assert it flags completion.
+// on its tab. Start an agent working, switch to another task so it's
+// backgrounded (still mounted), and assert its SIDEBAR row flags completion —
+// that row is the only surface a user can see it on while looking elsewhere.
 describe("agent attention", () => {
   let a: string | undefined;
   let b: string | undefined;
@@ -65,52 +79,28 @@ describe("agent attention", () => {
   it("flags a backgrounded agent's completion", async () => {
     await waitForAppShell();
     await requireTermicApi();
+    await requireWorkBadges();
 
     a = await openTask("e2e-attn-a");
-    await browser.waitUntil(
-      () =>
-        browser.execute((id) => {
-          const t = (window.__termic!.useApp.getState().tabs[id] ?? [])[0];
-          return !!t?.ptyId;
-        }, a),
-      { timeout: 20_000, interval: 250, timeoutMsg: "agent A PTY never spawned" },
-    );
-
-    // Submit a prompt so the agent goes to work.
-    await browser.execute((id) => {
-      const s = window.__termic!.useApp.getState();
-      const tab = s.tabs[id][0];
-      s.patchTab(id, tab.id, { lastInputAt: Date.now() });
-      window.__termic!.ipc.ptyWrite(
-        tab.ptyId,
-        Array.from(new TextEncoder().encode("do something\r")),
-      );
-    }, a);
-    await browser.waitUntil(
-      () =>
-        browser.execute(
-          (id) =>
-            window.__termic!.useApp.getState().tabs[id][0].workState ===
-            "working",
-          a,
-        ),
-      { timeout: 10_000, timeoutMsg: "agent A never started working" },
-    );
+    await waitForAgentPty(a);
+    await submitToAgent(a, "do something");
+    await waitForWorkBadge(a, "working", {
+      timeout: 10_000,
+      message: "agent A never showed a working badge",
+    });
 
     // Switch to a second task so A is backgrounded (kept mounted).
     b = await openTask("e2e-attn-b");
 
-    // A should flag completion: unread attention set, or workState -> done.
     await browser.waitUntil(
-      () =>
-        browser.execute((id) => {
-          const t = window.__termic!.useApp.getState().tabs[id][0];
-          return !!t.unread || t.workState === "done";
-        }, a),
+      async () => {
+        const badge = await sidebarBadge(a!);
+        return badge === "done" || badge === "attention";
+      },
       {
         timeout: 15_000,
         interval: 300,
-        timeoutMsg: "backgrounded agent never flagged completion",
+        timeoutMsg: "the backgrounded agent's sidebar row never flagged completion",
       },
     );
 
@@ -119,62 +109,59 @@ describe("agent attention", () => {
 });
 
 // P1: the message queue lets you line up input while an agent is busy; it
-// sends on idle. Cases: a message enqueued while working is HELD (not sent),
-// then DRAINS once the agent goes idle (queue empties + the PTY receives it).
+// sends on idle. Cases: a message enqueued while working is HELD (the footer
+// chip keeps counting it), then DRAINS once the agent goes idle (chip empties
+// + the PTY receives it).
 describe("message queue", () => {
   let taskId: string | undefined;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
 
-  const tab = () =>
-    browser.execute(
-      (id) => window.__termic!.useApp.getState().tabs[id][0],
-      taskId,
-    );
-
   it("holds a message while working, then drains it when idle", async () => {
     await waitForAppShell();
     await requireTermicApi();
+    await requireWorkBadges();
     taskId = await openTask("e2e-queue");
-    await browser.waitUntil(async () => !!(await tab())?.ptyId, {
-      timeout: 20_000,
-      interval: 250,
-      timeoutMsg: "agent PTY never spawned",
-    });
+    await waitForAgentPty(taskId);
 
-    // Put the agent to work (armed submit).
-    await browser.execute((id) => {
-      const s = window.__termic!.useApp.getState();
-      const t = s.tabs[id][0];
-      s.patchTab(id, t.id, { lastInputAt: Date.now() });
-      window.__termic!.ipc.ptyWrite(
-        t.ptyId,
-        Array.from(new TextEncoder().encode("work\r")),
-      );
-    }, taskId);
-    await browser.waitUntil(async () => (await tab())?.workState === "working", {
+    // Put the agent to work.
+    await submitToAgent(taskId, "work");
+    await waitForWorkBadge(taskId, "working", {
       timeout: 10_000,
-      timeoutMsg: "agent never started working",
+      message: "agent never showed a working badge",
     });
 
-    // Enqueue a message WHILE working — it must be held, not sent.
+    // Enqueue a message WHILE working — it must be held, not sent. Adding it
+    // is a store call (the composer lives in a popover; the queue engine, not
+    // the popover, is what this case is about), but the assertion is the
+    // footer chip's count.
     await browser.execute((id) => {
       const s = window.__termic!.useApp.getState();
       s.enqueueAgentMessage(id, s.tabs[id][0].id, "queued-msg");
     }, taskId);
-    expect((await tab())?.queue?.length ?? 0).toBeGreaterThanOrEqual(1);
+    await browser.waitUntil(async () => (await queuedCount(taskId!)) === 1, {
+      timeout: 8_000,
+      timeoutMsg: "the queue chip never counted the held message",
+    });
 
-    const before = (await tab())?.lastOutputAt ?? 0;
+    const before = await browser.execute(
+      (id) => window.__termic!.useApp.getState().tabs[id][0].lastOutputAt ?? 0,
+      taskId,
+    );
 
-    // Once the agent settles to idle, the queue drains: it empties and the
-    // PTY receives the queued line (new output).
+    // Once the agent settles to idle, the queue drains: the chip empties and
+    // the PTY receives the queued line (new output — canvas, so store-read).
     await browser.waitUntil(
       async () => {
-        const t = await tab();
-        return (t?.queue?.length ?? 0) === 0 && (t?.lastOutputAt ?? 0) !== before;
+        if ((await queuedCount(taskId!)) !== 0) return false;
+        const now = await browser.execute(
+          (id) => window.__termic!.useApp.getState().tabs[id][0].lastOutputAt ?? 0,
+          taskId,
+        );
+        return now !== before;
       },
-      { timeout: 20_000, interval: 300, timeoutMsg: "queue never drained on idle" },
+      { timeout: 15_000, interval: 300, timeoutMsg: "queue never drained on idle" },
     );
 
     await snap("message-queue.png");
@@ -317,64 +304,42 @@ describe("pending work defers done", () => {
     if (taskId) await archiveTask(taskId);
   });
 
-  const submit = (id: string, text: string) =>
-    browser.execute((wid, line) => {
-      const s = window.__termic!.useApp.getState();
-      const tab = s.tabs[wid][0];
-      s.patchTab(wid, tab.id, { lastInputAt: Date.now() });
-      window.__termic!.ipc.ptyWrite(
-        tab.ptyId,
-        Array.from(new TextEncoder().encode(line + "\r")),
-      );
-    }, id, text);
-
-  const tab0 = (id: string) =>
-    browser.execute((wid) => {
-      const t = window.__termic!.useApp.getState().tabs[wid][0];
-      return { workState: t.workState, unread: t.unread ?? null, lastOutputAt: t.lastOutputAt ?? 0 };
-    }, id);
-
   it("holds the done badge while the agent reports work outstanding", async () => {
     await waitForAppShell();
     await requireTermicApi();
+    await requireWorkBadges();
     taskId = await openTask("e2e-pending-work");
+    await waitForAgentPty(taskId);
 
-    await browser.waitUntil(
-      () => browser.execute((id) => !!(window.__termic!.useApp.getState().tabs[id] ?? [])[0]?.ptyId, taskId),
-      { timeout: 20_000, interval: 250, timeoutMsg: "agent PTY never spawned" },
-    );
-
-    await submit(taskId!, "#pending 2");
-    await browser.waitUntil(
-      async () => (await tab0(taskId!)).workState === "working",
-      { timeout: 10_000, timeoutMsg: "agent never started working" },
-    );
+    await submitToAgent(taskId, "#pending 2");
+    await waitForWorkBadge(taskId, "working", {
+      timeout: 10_000,
+      message: "agent never showed a working badge",
+    });
 
     // Give every done path a real chance to fire before asserting it did not.
     // Not a fixed sleep: this waits on app state (bytes stopped arriving) past
     // the two thresholds that would otherwise fire — byte-quiet at 4s and the
     // settle timer at 5s. Without clearing those, "still working" would prove
     // nothing.
-    await browser.waitUntil(
-      async () => Date.now() - (await tab0(taskId!)).lastOutputAt > 9_000,
-      { timeout: 30_000, interval: 500, timeoutMsg: "PTY never went quiet" },
-    );
+    await browser.waitUntil(async () => (await quietFor(taskId!)) > 9_000, {
+      timeout: 25_000,
+      interval: 500,
+      timeoutMsg: "PTY never went quiet",
+    });
 
-    const held = await tab0(taskId!);
-    expect(held.workState).toBe("working");
-    expect(held.unread).toBeNull();
+    // Still spinning, and no bell — the hold is a hold, not a swallowed done.
+    expect(await taskViewBadge(taskId)).toBe("working");
     await snap("agent-pending-held.png");
   });
 
   it("fires done once the agent's status line clears", async () => {
-    await submit(taskId!, "#settle");
-    await browser.waitUntil(
-      async () => {
-        const t = await tab0(taskId!);
-        return t.workState === "done" || t.workState === "idle" || !!t.unread;
-      },
-      { timeout: 25_000, interval: 300, timeoutMsg: "done never fired after the work landed" },
-    );
+    await submitToAgent(taskId!, "#settle");
+    await waitForWorkBadgeGone(taskId!, "working", {
+      timeout: 25_000,
+      interval: 300,
+      message: "done never fired after the work landed",
+    });
     await snap("agent-pending-settled.png");
   });
 });
@@ -400,39 +365,24 @@ describe("a hold that never clears still ends", () => {
   it("force-clears the working state at the absolute ceiling", async () => {
     await waitForAppShell();
     await requireTermicApi();
+    await requireWorkBadges();
     await browser.execute((ms) => localStorage.setItem("workDoneCeilingMs", String(ms)), CEILING_MS);
     taskId = await openTask("e2e-pending-ceiling");
-
-    await browser.waitUntil(
-      () => browser.execute((id) => !!(window.__termic!.useApp.getState().tabs[id] ?? [])[0]?.ptyId, taskId),
-      { timeout: 20_000, interval: 250, timeoutMsg: "agent PTY never spawned" },
-    );
+    await waitForAgentPty(taskId);
 
     // Same drill as the hold spec, and #settle is never sent: the pending line
     // stays on screen for the rest of the test.
-    await browser.execute((id) => {
-      const s = window.__termic!.useApp.getState();
-      const tab = s.tabs[id][0];
-      s.patchTab(id, tab.id, { lastInputAt: Date.now() });
-      window.__termic!.ipc.ptyWrite(
-        tab.ptyId,
-        Array.from(new TextEncoder().encode("#pending 2\r")),
-      );
-    }, taskId);
+    await submitToAgent(taskId, "#pending 2");
+    await waitForWorkBadge(taskId, "working", {
+      timeout: 10_000,
+      message: "agent never showed a working badge",
+    });
 
-    await browser.waitUntil(
-      () => browser.execute((id) => window.__termic!.useApp.getState().tabs[id][0].workState === "working", taskId),
-      { timeout: 10_000, timeoutMsg: "agent never started working" },
-    );
-
-    await browser.waitUntil(
-      () => browser.execute((id) => window.__termic!.useApp.getState().tabs[id][0].workState !== "working", taskId),
-      {
-        timeout: CEILING_MS + 20_000,
-        interval: 500,
-        timeoutMsg: "the held done never reached the ceiling — tab pinned to working",
-      },
-    );
+    await waitForWorkBadgeGone(taskId, "working", {
+      timeout: CEILING_MS + 20_000,
+      interval: 500,
+      message: "the held done never reached the ceiling — tab pinned to working",
+    });
     await snap("agent-pending-ceiling.png");
   });
 });
@@ -450,59 +400,67 @@ describe("a premature done is taken back", () => {
     if (b) await archiveTask(b);
   });
 
-  const state = (id: string) =>
-    browser.execute((wid) => {
-      const t = window.__termic!.useApp.getState().tabs[wid][0];
-      return { workState: t.workState, unread: t.unread ?? null };
-    }, id);
-
-  it("returns to working, then still fires the real done", async () => {
+  // The ONLY case in this file that needs more than mocha's 60s default, and
+  // it is raised on purpose rather than left to be killed by it. The fixture
+  // burns ~19s that cannot be compressed away: a 16s idle window (it must
+  // outlast STICKY_DONE_MS = 8s counted from when the done FIRES, ~6s in, or
+  // stage 2's busy signal is ignored as post-answer glyph flicker), plus
+  // stage 2 and the settle. Six sequential waits sit on top. Left at 60s, the
+  // last waits are unreachable: a stall gets killed mid-wait with mocha's
+  // generic "timeout of 60000ms exceeded" and no clue which signal never
+  // arrived. Raised, each wait reaches its own bound — so a stall FAILS FASTER
+  // (at the wait that broke) and names what it was waiting for.
+  it("returns to working, then still fires the real done", async function () {
+    this.timeout(95_000);
     await waitForAppShell();
     await requireTermicApi();
+    await requireWorkBadges();
 
     a = await openTask("e2e-stage-a");
-    await browser.waitUntil(
-      () => browser.execute((id) => !!(window.__termic!.useApp.getState().tabs[id] ?? [])[0]?.ptyId, a),
-      { timeout: 20_000, interval: 250, timeoutMsg: "agent PTY never spawned" },
-    );
+    await waitForAgentPty(a);
 
-    await browser.execute((id) => {
-      const s = window.__termic!.useApp.getState();
-      const tab = s.tabs[id][0];
-      s.patchTab(id, tab.id, { lastInputAt: Date.now() });
-      window.__termic!.ipc.ptyWrite(
-        tab.ptyId,
-        Array.from(new TextEncoder().encode("#stage\r")),
-      );
-    }, a);
-    await browser.waitUntil(
-      async () => (await state(a!)).workState === "working",
-      { timeout: 10_000, timeoutMsg: "agent never started working" },
-    );
-
-    // Background it so a done actually badges (a focused tab's done is
-    // downgraded to idle on the spot — nothing to take back).
+    // Task B exists BEFORE the submit. A's done only badges while nobody is
+    // watching it (a focused tab's done is downgraded to idle on the spot), so
+    // A has to be backgrounded before stage 1 ends — and creating a task takes
+    // ~1.5s, which used to race the fixture's stage-1 spinner. The fixture
+    // padded that spinner to 6s to cover the race. Creating B up front makes
+    // backgrounding a sub-millisecond store call instead, so there is nothing
+    // left to race and the fixture's padding could go (see `#stage` in
+    // scripts/fake-agent.sh).
     b = await openTask("e2e-stage-b");
+    await ensureActiveTask(a);
 
-    await browser.waitUntil(
-      async () => (await state(a!)).workState === "done",
-      { timeout: 20_000, interval: 300, timeoutMsg: "the premature done never fired" },
-    );
+    await submitToAgent(a, "#stage");
+    await waitForWorkBadge(a, "working", {
+      timeout: 10_000,
+      message: "agent never showed a working badge",
+    });
 
-    // Stage 2 starts. The spinner has to come back on its own.
-    await browser.waitUntil(
-      async () => (await state(a!)).workState === "working",
-      { timeout: 25_000, interval: 300, timeoutMsg: "the tab never went back to working" },
-    );
-    expect((await state(a!)).unread).toBeNull(); // the wrong bullet went with it
+    // Background A. From here on the sidebar row is the surface under test.
+    await ensureActiveTask(b);
+
+    await browser.waitUntil(async () => (await sidebarBadge(a!)) === "done", {
+      timeout: 15_000,
+      interval: 300,
+      timeoutMsg: "the premature done never showed in the sidebar",
+    });
+
+    // Stage 2 starts. The spinner has to come back on its own, and the wrong
+    // bullet has to go with it — a spinner is what the sidebar shows only once
+    // the done AND its bell are gone (attention outranks both).
+    await browser.waitUntil(async () => (await sidebarBadge(a!)) === "working", {
+      timeout: 15_000,
+      interval: 300,
+      timeoutMsg: "the sidebar row never went back to a working badge",
+    });
 
     // And the turn's real ending still has a done to spend.
     await browser.waitUntil(
       async () => {
-        const t = await state(a!);
-        return t.workState === "done" || !!t.unread;
+        const badge = await sidebarBadge(a!);
+        return badge === "done" || badge === "attention";
       },
-      { timeout: 25_000, interval: 300, timeoutMsg: "the real completion fired nothing" },
+      { timeout: 15_000, interval: 300, timeoutMsg: "the real completion badged nothing" },
     );
     await snap("agent-stage-recovered.png");
   });
@@ -519,37 +477,27 @@ describe("agent notifications", () => {
     if (taskId) await archiveTask(taskId);
   });
 
-  const send = (id: string, text: string) =>
-    browser.execute((wid, line) => {
-      const s = window.__termic!.useApp.getState();
-      const tab = s.tabs[wid][0];
-      s.patchTab(wid, tab.id, { lastInputAt: Date.now() });
-      window.__termic!.ipc.ptyWrite(
-        tab.ptyId,
-        Array.from(new TextEncoder().encode(line + "\r")),
-      );
-    }, id, text);
-
   it("raises attention with the agent's own wording", async () => {
     await waitForAppShell();
     await requireTermicApi();
+    await requireWorkBadges();
     taskId = await openTask("e2e-agent-notify");
+    await waitForAgentPty(taskId);
 
-    await browser.waitUntil(
-      () => browser.execute((id) => !!(window.__termic!.useApp.getState().tabs[id] ?? [])[0]?.ptyId, taskId),
-      { timeout: 20_000, interval: 250, timeoutMsg: "agent PTY never spawned" },
+    await submitToAgent(taskId, "#osc9 FakeAgent needs your permission");
+
+    // The bell is the visible half.
+    await waitForWorkBadge(taskId, "attention", {
+      timeout: 15_000,
+      message: "OSC 9 never raised an attention badge",
+    });
+    // The agent's own wording is carried on the notification, which has no DOM
+    // surface of its own (it goes to the OS notifier), so read it from state.
+    const message = await browser.execute(
+      (id) => window.__termic!.useApp.getState().tabs[id][0].unread?.message ?? null,
+      taskId,
     );
-
-    await send(taskId!, "#osc9 FakeAgent needs your permission");
-
-    await browser.waitUntil(
-      () =>
-        browser.execute((id) => {
-          const u = window.__termic!.useApp.getState().tabs[id][0].unread;
-          return u?.reason === "attention" && u?.message === "FakeAgent needs your permission";
-        }, taskId),
-      { timeout: 15_000, interval: 250, timeoutMsg: "OSC 9 never raised attention with its body" },
-    );
+    expect(message).toBe("FakeAgent needs your permission");
     await snap("agent-notify-attention.png");
   });
 
@@ -560,26 +508,19 @@ describe("agent notifications", () => {
       const s = window.__termic!.useApp.getState();
       s.clearAttention(id, s.tabs[id][0].id);
     }, taskId);
+    expect(await taskViewBadge(taskId!)).not.toBe("attention");
 
-    await send(taskId!, "#osc9 FakeAgent is waiting for your input");
+    await submitToAgent(taskId!, "#osc9 FakeAgent is waiting for your input");
 
     // Prove the directive was consumed (the PTY echoed past it) rather than
     // asserting on a race: bytes must have flowed after the send.
-    await browser.waitUntil(
-      async () => {
-        const t = await browser.execute(
-          (id) => window.__termic!.useApp.getState().tabs[id][0],
-          taskId,
-        );
-        return Date.now() - (t.lastOutputAt ?? 0) > 6_000;
-      },
-      { timeout: 30_000, interval: 500, timeoutMsg: "PTY never went quiet after the nag" },
-    );
+    await browser.waitUntil(async () => (await quietFor(taskId!)) > 6_000, {
+      timeout: 30_000,
+      interval: 500,
+      timeoutMsg: "PTY never went quiet after the nag",
+    });
 
-    const u = await browser.execute(
-      (id) => window.__termic!.useApp.getState().tabs[id][0].unread ?? null,
-      taskId,
-    );
-    expect(u?.reason).not.toBe("attention");
+    expect(await taskViewBadge(taskId!)).not.toBe("attention");
+    expect(await sidebarBadge(taskId!)).not.toBe("attention");
   });
 });

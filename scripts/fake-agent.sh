@@ -90,10 +90,13 @@ while IFS= read -r line; do
       set_title "✳ ${name}"
       continue ;;
     "#stage")
-      # ~6s of visible work before the misleading idle glyph. The done that
-      # follows only badges on a tab nobody is watching, so the test needs this
-      # long to background the task first; a 0.5s spin made that a race.
-      for i in $(seq 1 20); do set_title "${SPINNER[$((i % 8))]} ${name}"; sleep 0.3; done
+      # ~1.5s of visible work before the misleading idle glyph — just enough for
+      # termic to latch "working" (observed: ~0.7s from submit to badge).
+      # This used to be ~6s: the done that follows only badges on a tab nobody
+      # is watching, and the spec backgrounded the task by CREATING the second
+      # one here (~1.5s), which raced the spinner. The spec now creates that
+      # task up front and backgrounds with a store call, so the padding is gone.
+      for i in $(seq 1 5); do set_title "${SPINNER[$((i % 8))]} ${name}"; sleep 0.3; done
       echo "FAKE-AGENT stage 1 landed"
       set_title "✳ ${name}"              # looks finished, isn't
       sleep 16
