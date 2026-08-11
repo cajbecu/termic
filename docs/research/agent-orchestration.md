@@ -159,10 +159,12 @@ alongside the rest of the architecture. Spotify opened Xirp to public
 beta on 2026-08-10.
 
 **Provenance.** Public site and docs, their published release manifest,
-installing Xirp 0.12.0 on a Mac and using it, the log the app writes to
+installing Xirp 0.12.0 on a Mac and using it, extracting `app.asar` and
+reading the bundled daemon, dashboard and drizzle migrations, the log the
+app writes to
 `~/Library/Application Support/Xirp/xirp-external/xirp.log`, and reading
 the shipped JavaScript and TypeScript declaration files under
-`/Applications/Xirp.app/Contents/Resources/app.asar.unpacked/`. The
+`/Applications/Xirp.app/Contents/Resources/`. The
 `.d.ts` files carry their internal design rationale verbatim, including
 dated decision references, so most of the "why" below is theirs, not
 inferred. Reviewed 2026-08-11.
@@ -414,6 +416,165 @@ machinery behind the "route every job to the best available price
 performance" line in the launch material. Not exposed in the UI at the
 time of writing.
 
+### The daemon is a full backend
+
+`app.asar` unpacks to ~4,700 files. The Electron main process is 22 KB;
+everything real lives in `@chirp/daemon` (195 JS modules) and a
+`dashboard/` web app that ships with a service worker and a PWA
+manifest, which is how "locally or remotely" is meant to work.
+
+Notable dependencies bundled:
+
+- **`@anthropic-ai/claude-agent-sdk`** (11.6 MB, with its own vendored
+  `ripgrep` binary and tree-sitter wasm). They ship the SDK as well as
+  driving the CLIs.
+- **PGlite** (Postgres compiled to wasm, 8.7 MB) with **pgvector**, plus
+  `drizzle-orm`. Their local store is a real Postgres.
+
+### Their data model
+
+57 drizzle migrations. Tables: `projects`, `sessions`, `worktrees`,
+`messages`, `decisions`, `digests`, `todos`, `snapshots`, `settings`,
+`cost_records`, `epics`, `chunks`, `plan_reviews`, `monitored_prs`,
+`pr_events`, `pr_reviews`.
+
+`messages` and `decisions` both carry `embedding vector(1536)`, so the
+schema is built for semantic recall over past sessions and over captured
+architectural decisions. `digests` is a daily rollup: summary, sessions
+completed, total cost in USD, decision count, per-project stats.
+
+The interesting pair is `epics` and `chunks`:
+
+```
+epics:  slug, title, goal, goal_context, base_branch, model,
+        status (planned|...), proposal jsonb
+chunks: epic_id, ordinal, title, body, estimate, rationale,
+        depends_on jsonb, branch, status, pr_number, pr_url,
+        repo_name, session_id, attempts, last_error, kind
+```
+
+That is a goal-to-pull-requests pipeline: propose a plan, decompose it
+into chunks with a `depends_on` dependency graph, give each chunk a
+branch and a session, open a PR per chunk, count attempts, record the
+last error. Migration `0019_multi_parent_epic_chunks` widened the graph
+to multiple parents. None of this appears in the launch material or the
+public docs.
+
+### The websocket API
+
+Roughly 330 message types over a single websocket. Beyond the obvious
+session/worktree/git verbs, the ones worth knowing about:
+
+| Group | Types |
+|---|---|
+| Harness management | `harness:install`, `harness:update`, `harness:uninstall`, `harness:ensureNpmRegistry`, `harness:swapped` |
+| Cost | `cost:calculateUsage`, `cost:processTurnCosts`, `cost:reportedFields` |
+| Search | `session-search:search` |
+| Epics | `epic:attachSessionToEpic`, `epic:getChunkInfo` |
+| PR watching | `pr:watchSession`, `pr:refreshMonitoredRepos`, `pr:pubsubStatus`, `chirp:prWatcherPrompt`, `chirp:prWatcherRules` |
+| Permissions | `permission:request`, `permission:respond`, `permission:resolved` |
+| Worktrees | `worktree:recycle`, `worktree:runScript`, `worktree:teardownStarted` |
+| Sessions | `session:fork`, `session:stopRemote`, `session:acknowledge` |
+| Misc | `db:query`, `browser-proxy:start`, `transcript:uploadToGateway`, `workspace:scan`, `workspace:import` |
+
+They install and update the agent CLIs for the user over npm, which is a
+support burden termic has so far avoided and a convenience termic does
+not offer.
+
+### Telemetry: what actually leaves the machine
+
+Endpoint `https://backstage-api.spotify.com/portal/v1/xirp/telemetry`,
+plus `.../telemetry/associate-domain`.
+
+**On by default.** `getUsageTelemetryPreference` treats undefined as
+enabled. Opt out in settings or with `CHIRP_TELEMETRY=0`.
+
+The event envelope is `{event, params, installation_id, run_id,
+event_id, client_timestamp_ms, app_version, platform}`, zod-validated
+and `.strict()`. The event enum is closed:
+
+```
+daemon_started, harness_created, session_status_transition,
+session_lifetime, session_first_activity, session_active_concurrency,
+ui_view_opened, ui_tab_changed, portal_connected, portal_disconnected,
+portal_transcript_uploaded, session_portal_origin, onboarding_started,
+onboarding_step_viewed, onboarding_step_action, onboarding_completed,
+ws_message
+```
+
+Harness names are bucketed to `claude | codex | gemini | snipe | other`,
+counts are clamped, params are scalars only. No code, no paths, no
+project names, no prompts. As telemetry goes it is careful and it is
+worth copying the shape if termic ever ships its opt-in analytics.
+
+The one to notice is **`associate-domain`**, which posts
+`{installation_id, email_domain}`. Once you sign in, your anonymous
+install is linked to your employer's email domain. That is the Backstage
+playbook mechanised: give away the tool, learn which companies adopt it,
+sell them Portal.
+
+Tracked UI tabs also leak the roadmap: `overview, git, prs, files,
+memory, rules, skills, ideas`. There are `memory` and `ideas` surfaces
+that the public docs do not mention.
+
+### How Portal context is actually delivered
+
+`modules/portal/agent-config.js`. Not a magic context layer: Portal is
+an **MCP server** at `{portalOrigin}/api/mcp-actions/v1`, injected into
+the session's MCP config, plus a system prompt that says, in effect,
+"before doing any other work you MUST call `workspace.get-project-context`
+with this project id, even if you do not think you need it".
+
+Auth is neat. Instead of baking a token into the MCP config they set a
+`headersHelper`, a `node -e` one-liner that reads the access token from
+`~/.chirp/portal-auth.json` and prints
+`{"Authorization":"Bearer ..."}`. The token never sits in the config
+file. They also validate that the referrer origin matches the Portal
+origin (or localhost) before injecting anything.
+
+### The oneshot path
+
+`oneshot/` runs the bundled Claude Agent SDK CLI with `maxTurns: 1`,
+`tools: []`, `persistSession: false` and `maxBudgetUsd: 0.05`, against
+`ANTHROPIC_API_KEY` or whatever `claude` on PATH is already signed in
+with. Their own error string: "No Anthropic credentials found. Set
+ANTHROPIC_API_KEY or sign in to Claude Code to enable title generation
+and PR review."
+
+So on the free edition their AI features bill to *your* subscription.
+There is also an `ai-gateway:anthropicEnv` capability, so the Portal
+edition can inject gateway env and route the same calls through
+Spotify's AI gateway.
+
+Title generation is a two-step: prefer the title Claude already wrote in
+its own transcript, and only if that is missing call
+`claude-haiku-4-5-20251001` with this system prompt (verbatim):
+
+> You are a title generator. The user will give you context from a
+> coding session: an optional goal, early messages, and recent messages.
+> Reply with ONLY a 3-5 word title that captures the high-level goal and
+> outcome of the session. Use sentence case (only capitalize the first
+> word and proper nouns). No quotes, no punctuation, no explanation, no
+> conversation. Just the title. Do not include git or GitHub
+> nomenclature (branch names, PR references).
+
+They guard it with an `isCustomName` flag so a user rename is never
+overwritten, and re-check that flag after the async call returns.
+
+### Session search is keyword, not vectors
+
+Despite the `vector(1536)` columns, the external edition's
+`session-search` is SQL `ILIKE` over session metadata plus a **streaming
+scan of the agents' own transcript files on disk**: Claude's
+`~/.claude/projects/**/<uuid>.jsonl` and Codex's `rollout-*` files, read
+line by line with an abort signal, matching all query words and
+extracting a snippet.
+
+That is the most directly stealable thing in the whole bundle. "Search
+everything any agent ever did in this repo" needs no index, no
+embeddings, no server and no upload. termic already knows which task
+produced which session.
+
 ### Data directory
 
 `~/Library/Application Support/Xirp/xirp-external/`:
@@ -447,24 +608,34 @@ time of writing.
 
 ### What they have that termic does not
 
-Worth keeping honest:
+Worth keeping honest, roughly in order of how much I would want it:
 
-0. **Cross-harness handoff that actually works.** The canonical session
-   IR plus per-harness codecs, described above. termic has nothing like
-   it.
-1. **Organizational context.** Portal's catalog, ownership and
-   dependency graph loaded at session start. termic has no equivalent
-   and no plan for one.
-2. **Context-window meter per session.** Cheap to add, genuinely useful
-   past a dozen sessions, and readable from the transcript JSONL.
-3. **Auto-named sessions**, from the same transcript.
-4. **A grid of live terminals across sessions.** termic splits inside a
-   task only. Note this is also the workload where Electron should hurt
-   most, so it is a benchmark worth running before copying.
-5. **Orchestration in the system prompt.** See
-   [agent-orchestration.md](agent-orchestration.md). termic ships the
-   same capability through `TERMIC_CLI_HELP` in the environment, which
-   is passive: nothing puts it in context.
+1. **Local transcript search.** A streaming keyword scan over the
+   agents' own JSONL transcripts, no index and no embeddings needed.
+   The cheapest large feature in the bundle and the one to copy first.
+2. **Cross-harness handoff that actually works.** The canonical session
+   IR plus per-harness codecs described above. termic has nothing like
+   it, and nobody else ships it either.
+3. **Organizational context.** Portal's catalog, ownership and
+   dependency graph at session start, delivered as an MCP server plus a
+   "call this first" instruction. termic has no equivalent.
+4. **Context-window meter per session**, readable from the transcript
+   without hooks.
+5. **Auto-named sessions**, from the same transcript, with a
+   custom-name guard so a user rename is never clobbered.
+6. **A goal-to-PRs pipeline.** Epics decomposed into chunks with a
+   dependency graph, one branch, session and PR per chunk, attempts and
+   last error recorded. termic has no planning layer at all.
+7. **Cost tracking per turn**, plus a daily digest rolling up sessions
+   completed, total USD and decisions captured.
+8. **Orchestration the agent can see.** termic ships the same
+   capability through `TERMIC_CLI_HELP` in the environment, which is
+   passive: nothing puts it in the model's context.
+9. **A grid of live terminals across sessions.** termic splits inside a
+   task only. Also the workload where Electron should hurt most, so
+   benchmark before copying.
+10. **Harness install and update over npm**, from inside the app.
+11. **Session fork** and worktree recycling.
 
 ### What termic has that they do not
 
