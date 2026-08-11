@@ -204,7 +204,7 @@ export function AppearanceSection() {
           DOM is a compatibility fallback rather than a saving. */}
       <Field
         label="Terminal renderer"
-        hint={"GPU (WebGL) is the fast path and the default. Canvas costs less while terminals sit idle and more under heavy output; DOM is the compatibility fallback if text renders wrong or typing lags. Applies to terminals opened after the change."}
+        hint={"GPU (WebGL) is the default and the right choice for almost everyone. Switch only if you hit glitches: text drawn wrong, flicker or leftover artifacts, or typing that lags on a setup running WebGL through a software rasterizer. Canvas and DOM both cost more than twice the CPU of WebGL under heavy output, so there is no performance reason to move off it. Applies to terminals opened after the change."}
         control={<RendererPicker value={terminalRenderer} onChange={setTerminalRenderer} />}
       />
 
