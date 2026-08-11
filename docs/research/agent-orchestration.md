@@ -152,6 +152,80 @@ For reference, so the research does not rebuild it:
 All of it is JSON-capable via `--output-format json`, which matters if
 an agent is the caller.
 
+## Prior art: Spotify's published practice (Honk, Fleet Management)
+
+Xirp is the small public half. Spotify has been writing about the big
+private half for a year, and those posts are more useful than the app,
+because they are about making unsupervised agents produce correct work
+rather than about arranging terminals.
+
+**Honk** is their background coding agent: Claude Agent SDK, running in
+Kubernetes, driven by **Fleetshift** (their Fleet Management
+orchestrator) which picks target repos, schedules, opens PRs and tracks
+them. Kicked off from Slack, GitHub Enterprise or an IDE. 1,500+ merged
+PRs by Nov 2025; 240 PRs in one dataset migration saving an estimated 10
+engineering weeks; a Java migration across backend services in three
+days; 60 to 90% time savings versus manual for migrations. Fleet
+Management overall has merged **2.5 million** automated maintenance PRs,
+most auto-merged without human review.
+
+Their stated org-level numbers: 99% of engineers use AI coding tools
+weekly, 94% report increased productivity, **76% more pull requests**.
+Note the 99% is about AI tools generally, not about Xirp; the Xirp
+launch claims 1,300+ engineers and 36,000+ sessions.
+
+Four things from those posts are directly useful here.
+
+**1. Verifiers as tools, auto-selected by the repo.** Verification is
+exposed to the agent as MCP tools that activate based on what is in the
+codebase (a `pom.xml` turns on the Maven verifier). Their line: "the
+agent doesn't know what the verification does and how, it just knows
+that it can (and in certain cases must) call it." Output is regex-parsed
+so the agent sees only the relevant errors instead of a build log.
+
+**2. Verification is gated on the Stop hook.** All relevant verifiers
+run before a PR is created, via Claude Code's `Stop` hook, and a failing
+verifier blocks the PR. This is the counterpoint to
+[agent-hooks.md](agent-hooks.md), which rules out blocking hooks for
+termic. Their use case justifies blocking because the hook is a quality
+gate on unsupervised work; ours would be observation only. Worth being
+explicit that the two uses are different rather than assuming hooks are
+observational by nature.
+
+**3. "The Judge."** A separate LLM reviews the proposed diff against the
+original prompt before the PR is opened. It **vetoes about 25%** of
+thousands of sessions, and course correction succeeds roughly half of
+those times. The most common trigger is scope creep: the agent
+refactoring beyond what was asked. That is a cheap, measurable,
+model-agnostic guardrail, and it maps onto a real termic feature: run a
+judge over `termic diff` before the human ever looks.
+
+**4. Containment is deliberate.** The agent may view code, edit files
+and run verifiers. Pushing, talking to users and prompt authoring happen
+outside it. It runs in "heavily sandboxed containers with minimal
+permissions and restricted system access", and they explicitly traded
+flexibility for predictability and security. They also deliberately
+**withhold** code search and documentation tools, because dynamic
+tool-fetching reduced predictability, and ask users to condense context
+into the prompt up front so prompts stay testable and version
+controllable.
+
+That last point is Spotify's own engineering blog arguing termic's
+sandbox thesis, at a scale nobody can dismiss.
+
+Their prompting rules, worth stealing wholesale for termic's docs:
+describe the end state rather than the steps (for Claude specifically),
+state preconditions for when *not* to act because "agents are eager to
+act on your prompt, to a fault", use concrete code examples, define a
+verifiable goal rather than "improve this", one change per prompt, and
+ask the agent afterwards what was missing from the prompt.
+
+Sources: [Honk part 1](https://engineering.atspotify.com/2025/11/spotifys-background-coding-agent-part-1),
+[part 2, context engineering](https://engineering.atspotify.com/2025/11/context-engineering-background-coding-agents-part-2),
+[part 3, feedback loops](https://engineering.atspotify.com/2025/12/feedback-loops-background-coding-agents-part-3),
+[part 4, dataset migrations](https://engineering.atspotify.com/2026/4/background-coding-agents-dataset-migrations-honk-part-4),
+[Coding is no longer the constraint](https://engineering.atspotify.com/2026/6/code-with-claude-coding-is-no-longer-the-constraint).
+
 ## Appendix: Xirp 0.12.0 teardown
 
 Kept here because the orchestration choice above only makes sense

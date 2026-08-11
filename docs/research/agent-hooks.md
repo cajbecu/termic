@@ -303,6 +303,18 @@ user's agent:
 
 - **Never** emit `decision: "block"`, `permissionDecision`, or any other
   control field. We observe, we do not gate.
+
+  Worth knowing that Spotify does the opposite, on purpose: their
+  background agent runs all relevant verifiers on the `Stop` hook and a
+  failing verifier **blocks** PR creation
+  ([Honk part 3](https://engineering.atspotify.com/2025/12/feedback-loops-background-coding-agents-part-3)).
+  That is a defensible use of a blocking hook because the agent is
+  unsupervised and the hook is the quality gate. termic's case is the
+  opposite: a human is watching, and a hook that stalls their agent is a
+  worse bug than a late notification. Two different jobs, so do not read
+  their design as permission to gate. See
+  [agent-orchestration.md](agent-orchestration.md) for the rest of their
+  published practice.
 - Set `async: true` where the CLI supports it (Claude does). Claude and
   Gemini otherwise run hooks synchronously inside the agent loop.
 - Short timeout (1s or less). Fail open on every path.

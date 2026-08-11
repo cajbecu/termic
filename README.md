@@ -417,10 +417,19 @@ Open an issue to push something up the list or pick one off.
     and let people pick from the library they already collected. Borrowed
     from [Orca](https://github.com/stablyai/orca), which does the import
     well and, unlike termic, has no native theme format underneath it.
-14. ~~**First-class git surface.** Commit / push / pull / branch switch from inside the app instead of dropping to the aux terminal.~~ (Done)
-15. ~~**More coding agents.** First-class opencode, pi.dev, and cline support, plus exploring other CLI coding agents as they land. Launch presets for local models via ollama so an agent can run fully on-device.~~ (Done)
-16. ~~**Flexible terminal splits.** iTerm-style pane splitting in any direction — horizontal, vertical, and nested — so multiple terminals, agents, or aux sessions can live side by side in the same workspace view without switching tabs.~~ (Done)
-17. ~~**Quick-jump to next waiting agent.** A keyboard shortcut to instantly focus the next agent that is waiting for input, so you can cycle through a multi-agent session without hunting for the right tab by eye.~~ (Done)
+14. **Search every session you have ever run.** The agent CLIs already
+    write full transcripts to disk (`~/.claude/projects/**`, Codex's
+    rollout files), and termic already knows which task produced which
+    session. A streaming keyword scan over those files answers "what did
+    we already try, and where" with no index, no embeddings, no server
+    and nothing leaving the machine. Spotify's Xirp ships exactly this
+    shape and pairs it with upload to their hosted portal; the local
+    half is the interesting half. Notes in
+    [docs/research/agent-orchestration.md](docs/research/agent-orchestration.md).
+15. ~~**First-class git surface.** Commit / push / pull / branch switch from inside the app instead of dropping to the aux terminal.~~ (Done)
+16. ~~**More coding agents.** First-class opencode, pi.dev, and cline support, plus exploring other CLI coding agents as they land. Launch presets for local models via ollama so an agent can run fully on-device.~~ (Done)
+17. ~~**Flexible terminal splits.** iTerm-style pane splitting in any direction — horizontal, vertical, and nested — so multiple terminals, agents, or aux sessions can live side by side in the same workspace view without switching tabs.~~ (Done)
+18. ~~**Quick-jump to next waiting agent.** A keyboard shortcut to instantly focus the next agent that is waiting for input, so you can cycle through a multi-agent session without hunting for the right tab by eye.~~ (Done)
 
 ---
 
