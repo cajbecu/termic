@@ -130,6 +130,46 @@ sounds won't work." So the entire work-state feature is a hard dependency
 on mutating the user's agent config, and declining it degrades to a
 confident wrong answer rather than to nothing.
 
+#### How their hook transport is built
+
+Read out of the shipped `.d.ts` files, which carry their design
+rationale verbatim. Worth knowing because it is the same problem this
+doc has to solve, already solved once.
+
+- **A generated script, not a shell snippet.** Their launcher module
+  generates Node script bytes per (agent, event). The installer writes
+  them to disk once. The script reads the agent's native payload on
+  stdin, wraps it in a versioned envelope (`squab.hook/v1`) and POSTs to
+  their daemon, using only Node built-ins. Their stated reasons: no
+  `jq`, no `curl`, no shell subprocess per hook fire.
+- **HTTP with a bearer token**, persisted at `~/.chirp/hook-auth.token`,
+  mode 0600, generated once on first daemon launch. The token is
+  embedded as a literal in the generated script, so rotating it means
+  regenerating and reinstalling every script. They rejected per-launch
+  random tokens because every restart would invalidate installed scripts
+  and hooks would 401 silently.
+- **Token deliberately not passed by environment.** Their comment: env
+  inheritance "leaks tokens into child processes the agent might spawn
+  (e.g. PreToolUse hooks fire on every Bash tool call in claude's TUI,
+  each subprocess inheriting the env)".
+- **Session id extracted at runtime** from the hook payload rather than
+  injected at install time, so it is one script per (agent, event)
+  regardless of how many sessions share a cwd. Otherwise you need N
+  scripts plus rotation and GC.
+- **A canonical camelCase event enum**, explicitly not Claude's
+  PascalCase, so Claude's vocabulary does not leak into a
+  harness-agnostic surface. Adapters that cannot take hooks surface
+  `NO_HOOKS_ADAPTER`, and installation is gated on a per-adapter,
+  per-event capability answer rather than blindly writing to
+  `~/.claude/settings.json`.
+
+Termic's version is simpler on two of these by construction. The
+transport is the existing Unix socket with a `getpeereid` same-uid
+check, so there is no token to embed, persist or rotate, and nothing to
+leak into a child process. The parts worth copying are the per-(agent,
+event) generated script, runtime session-id extraction, the versioned
+envelope, and the per-adapter capability gate.
+
 Two constraints for this design fall out of that:
 
 1. **Hooks are never the only source of work state.** OSC stays

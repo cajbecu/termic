@@ -101,17 +101,23 @@ to fan out. The trust question moves from "is this code correct" to
    validation. The MCP route is typed, discoverable and per-task
    scoped, but it only reaches MCP-capable clients and is still in
    design.
-4. **Does `--depends-on` need to exist?** `termic wait <task> && termic
+4. **Is a canonical session IR worth building?** Xirp's handoff proves
+   the shape works: an agent-neutral entry list plus a per-harness
+   codec, writing the target's own native session file and resuming
+   into it. termic has no cross-harness handoff at all today. That is a
+   bigger feature than orchestration and it is now a known-solvable
+   problem rather than a marketing claim.
+5. **Does `--depends-on` need to exist?** `termic wait <task> && termic
    send ...` already composes it. A dedicated flag is one call instead of
    two, and it survives the caller's own session ending. Decide whether
    that is worth a new surface.
-5. **How much shape do we bake in?** Fan out, queue behind, supervisor
+6. **How much shape do we bake in?** Fan out, queue behind, supervisor
    and workers. Today termic bakes in none: the user asks, the tool
    obeys. That is a defensible position and it is also possibly just
    indecision. Xirp picked "the model decides, in English". A third
    option is to make the intended shape visible before it runs, without
    drawing a graph.
-6. **Opt-in or default?** An agent that can spawn agents is a cost
+7. **Opt-in or default?** An agent that can spawn agents is a cost
    multiplier and a blast-radius multiplier. If injection ships, it
    almost certainly ships behind a toggle, and possibly with a cap on
    depth or on total spawned tasks.
@@ -153,11 +159,13 @@ alongside the rest of the architecture. Spotify opened Xirp to public
 beta on 2026-08-10.
 
 **Provenance.** Public site and docs, their published release manifest,
-and installing Xirp 0.12.0 on a Mac and using it. Runtime details come
-from the log the app writes to
-`~/Library/Application Support/Xirp/xirp-external/xirp.log` and from its
-own data directory. The application bundle was not decompiled. Reviewed
-2026-08-11.
+installing Xirp 0.12.0 on a Mac and using it, the log the app writes to
+`~/Library/Application Support/Xirp/xirp-external/xirp.log`, and reading
+the shipped JavaScript and TypeScript declaration files under
+`/Applications/Xirp.app/Contents/Resources/app.asar.unpacked/`. The
+`.d.ts` files carry their internal design rationale verbatim, including
+dated decision references, so most of the "why" below is theirs, not
+inferred. Reviewed 2026-08-11.
 
 ### What it is
 
@@ -219,6 +227,93 @@ Geometry is fixed at 120x30 at creation.
 `CLAUDE_CODE_SCROLL_SPEED=3`, plus `CHIRP_SESSION_ID`,
 `CHIRP_PROJECT_ID`, `CHIRP_NOTIFICATION_ID`, `CHIRP_DAEMON_PORT`,
 `CHIRP_EDITION=external`.
+
+### Cross-harness handoff: an agent-neutral session IR
+
+The headline claim ("switch harness mid-project without losing context")
+is real, and better engineered than the marketing describes. This is the
+most valuable thing in the teardown.
+
+`dist/session/canonical.d.ts` defines a **canonical session format**: an
+agent-neutral entry list used as the interchange between per-agent
+adapters. Entry types:
+
+```
+user_message | assistant_message | tool_use | tool_result
+| image | system_note | path | handoff_marker
+```
+
+`tool_use` and `tool_result` stay linked through `id` / `toolUseId`, so
+a receiving agent can still pair them. Consecutive assistant `text`
+blocks are concatenated, because the block structure is Claude-internal
+and meaningless cross-agent.
+
+Each harness has an adapter under `dist/session/adapters/` implementing
+`readNative`, `writeNative`, `resumeArgs`, `sessionRoot`,
+`findBySessionId`, `locateLatest`, optional `sanitize`,
+`writeNoticeSeed`, and `onSessionMovedIn` / `onSessionMovedOut`.
+
+The handoff (`dist/session/handoff.js`, `performHandoff`) runs:
+
+1. Locate the source session file by session id, falling back to the
+   most recent one in that cwd.
+2. `readNative` it into canonical entries.
+3. Append a `handoff_marker` carrying from, to, reason, timestamp and
+   permission mode.
+4. The **target** adapter's `writeNative` writes the receiving
+   harness's own native session file.
+5. Launch the target with its `resumeArgs`, so it resumes into a
+   session that was manufactured for it.
+6. Update a manifest, notify both adapters that the session moved, and
+   delete the source file.
+
+So the model receives the actual prior conversation, not a summary.
+
+Details worth stealing:
+
+- **Lossy by declaration.** Their comment states what does not survive:
+  thinking blocks with model signatures, attachment metadata,
+  planning-mode state. Anything no other harness understands is dropped
+  rather than faked.
+- **Freshness guard.** `HandoffStaleSourceError` refuses to seed from a
+  session file older than the orchestrator's boot, so a handoff cannot
+  silently graft an unrelated old transcript onto a new session.
+- **Empty source** produces a notice seed ("Your previous session was
+  empty, so I've started a fresh session") instead of an error.
+- **A human-facing summary, kept out of the model's turn.** Claude and
+  Codex TUIs load a resumed JSONL silently, so their adapters emit a
+  *native* summary record (`summary` for Claude, `compacted` for Codex)
+  at the top of the seed file, rendering the last 3 user/assistant
+  exchanges truncated to 500 chars each. Their comment is explicit that
+  this is NOT a fabricated user message, because that "would pollute the
+  LLM's first turn with a fabricated user input". That distinction is
+  the kind of thing that is obvious only after you get it wrong once.
+
+### Two harnesses nobody has reported: snipe and honk
+
+`dist/session/adapters/` ships five adapters: `claude`, `codex`,
+`gemini`, **`snipe`** and **`honk`**. Neither of the last two appears in
+any launch material.
+
+**snipe** is a coding agent of Spotify's own, not a router as the
+settings file suggested. Its adapter documents "snipe 1.x, session
+version 4", sessions at `~/.snipe/sessions/--<slug(cwd)>--/<uuid>.jsonl`,
+its own JSONL vocabulary (`session`, `model_change`,
+`thinking_level_change`, `message`), and its own skills directory
+convention (`.snipe/skills/`, alongside `.claude/skills/` and
+`.agents/skills/`). Their own `settings.json` carries snipe defaults
+including `auto_route` and `classification_method`.
+
+**honk** is a hosted service. Quoting the adapter comment: "Honk is the
+remote Claude Code service that snipe wraps via `snipe --honk`. Sessions
+live on Honk's server, identified by server-side numeric ids; nothing is
+written to the local filesystem." The adapter is deliberately degenerate:
+registered so the launcher knows about it, with every canonical-pipeline
+slot returning null or throwing.
+
+Read that against the "vendor-neutral" positioning. They are
+commoditizing the agent layer and shipping both an agent and a hosted
+backend for it at the same time.
 
 ### The internal name is Chirp
 
@@ -354,6 +449,9 @@ time of writing.
 
 Worth keeping honest:
 
+0. **Cross-harness handoff that actually works.** The canonical session
+   IR plus per-harness codecs, described above. termic has nothing like
+   it.
 1. **Organizational context.** Portal's catalog, ownership and
    dependency graph loaded at session start. termic has no equivalent
    and no plan for one.
