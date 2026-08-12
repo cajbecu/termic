@@ -361,17 +361,13 @@ Open an issue to push something up the list or pick one off.
    of host-toolchain friction this sidesteps.
 7. **Windows prebuilts.** AppImage CI is live for Linux; Windows MSI is
    the matching CI matrix entry.
-8. **Send selection to the agent as a reference.** Select text in the
-   editor, right-click or hover, and push it into the active agent terminal
-   as an `@file:123` style reference so the agent picks it up as context.
-   ([#174](https://github.com/simion/termic/issues/174))
-9. **Opt-in usage telemetry.** Anonymous, opt-in analytics via a self-hosted
+8. **Opt-in usage telemetry.** Anonymous, opt-in analytics via a self-hosted
    Umami instance. Strictly limited to usage patterns (which features are
    used, how often) and crash reports — nothing else. No code, no prompts,
    no file paths, no agent output, no project names. Minimum viable event
    set: the goal is performance and feature prioritization, not surveillance.
    Off by default, one toggle in Settings.
-10. **Investigating agent lifecycle hooks.** Termic infers "the agent
+9. **Investigating agent lifecycle hooks.** Termic infers "the agent
     finished" from the terminal stream (OSC progress sequences and window
     titles), which costs no config, works for every agent including ones
     you add yourself, and keeps working inside the sandbox. Every
@@ -386,7 +382,7 @@ Open an issue to push something up the list or pick one off.
     default, with a real uninstall, and OSC stays authoritative
     regardless. Research and measurement plan in
     [docs/research/agent-hooks.md](docs/research/agent-hooks.md).
-11. **Intentional agent-driven orchestration.** The plumbing already
+10. **Intentional agent-driven orchestration.** The plumbing already
     ships: agents get `TERMIC_CLI` and a tutorial in their environment,
     so a running agent can spawn a task with `--wait`, prompt another one,
     read its result and branch on the exit code. What is missing is
@@ -398,14 +394,14 @@ Open an issue to push something up the list or pick one off.
     documentation, and how much orchestration the tool should suggest
     rather than obey. Notes in
     [docs/research/agent-orchestration.md](docs/research/agent-orchestration.md).
-12. **Import Warp and Ghostty themes.** Termic has a native JSON theme
+11. **Import Warp and Ghostty themes.** Termic has a native JSON theme
     format, so a custom theme is a file drop away, but two large theme
     ecosystems already exist and neither is ours. Scan `~/.warp/themes`
     and Ghostty's theme directory, translate both into termic's format,
     and let people pick from the library they already collected. Borrowed
     from [Orca](https://github.com/stablyai/orca), which does the import
     well and, unlike termic, has no native theme format underneath it.
-13. **On-device dictation for agent prompts.** Prompts to a coding agent
+12. **On-device dictation for agent prompts.** Prompts to a coding agent
     are prose, not code: a paragraph of intent, constraints and a bit of
     context. That is the kind of text people speak faster than they
     type, and it is worth more here than in a normal editor because one

@@ -1,7 +1,7 @@
 import { execSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { archiveTask, ensureActiveTask, openTask, requireTermicApi, snap, waitForAppShell } from "../helpers";
+import { archiveTask, cliRpc, ensureActiveTask, openTask, requireTermicApi, snap, waitForAgentReady, waitForAppShell, waitForText } from "../helpers";
 
 declare global {
   interface Window {
@@ -2086,5 +2086,158 @@ describe("⌘F ownership across previews", () => {
       await browser.waitUntil(async () => (await bars()).visible === 0,
         { timeout: 5_000, timeoutMsg: "find bar never closed" });
     });
+  });
+});
+
+// Roadmap item 8 / GH #174: select code in the editor, push it at the agent as
+// an `@file:12-40` reference. The value is that the reference is TYPED and left
+// uncommitted, so the user finishes the sentence — which is why the delivery
+// assertion below reads the agent's PTY ring rather than a store flag: only the
+// ring can show that the exact reference text (and nothing else) arrived.
+describe("send selection to agent", () => {
+  let taskId: string | undefined;
+  let editTabId: string | undefined;
+  let agentTabId: string | undefined;
+  const TASK = "e2e-send-ref";
+
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+  });
+
+  /** The selection tooltip's button, or null when no selection is standing. */
+  const sendButton = () =>
+    browser.execute(() => {
+      const el = document.querySelector('[data-testid="send-selection-to-agent"]');
+      return el ? (el as HTMLElement).textContent : null;
+    }) as Promise<string | null>;
+
+  /** Select whole lines `a`..`b` (1-based) through CodeMirror's own API and
+   *  focus the view, exactly as a drag-select would leave it. */
+  const selectLines = (a: number, b: number) =>
+    browser.execute((id, from, to) => {
+      const host = document.querySelector(`[data-task-id="${id}"] .cm-editor`) as HTMLElement | null;
+      const view = (host as unknown as { __cmView?: any } | null)?.__cmView;
+      if (!view) throw new Error("CodeMirror e2e hook missing (build with make e2e)");
+      const doc = view.state.doc;
+      view.dispatch({ selection: { anchor: doc.line(from).from, head: doc.line(to).to } });
+      // Focus the contentDOM, not view.focus(): the latter does not take in
+      // this webview (see the find-vs-editor cases above, same trick).
+      (host!.querySelector(".cm-content") as HTMLElement).focus();
+    }, taskId!, a, b);
+
+  const activeTabId = () =>
+    browser.execute((id) => window.__termic!.useApp.getState().activeTab[id], taskId!);
+
+  it("opens a file with a live agent alongside it", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask(TASK);
+    // The reference has to land in a REAL agent PTY, so wait for the fixture
+    // agent to be up rather than for a ptyId to merely exist.
+    await waitForAgentReady(taskId);
+    agentTabId = await activeTabId();
+
+    editTabId = await browser.execute((id) => {
+      const app = window.__termic!.useApp.getState();
+      app.openPreviewTab(id, { type: "edit", path: "README.md", title: "README.md" });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const tab = app.tabs[id].find((t: any) => t.type === "edit" && t.path === "README.md");
+      app.persistTab(id, tab.id);
+      return tab.id as string;
+    }, taskId);
+
+    await browser.waitUntil(
+      () => browser.execute((id) =>
+        !!document.querySelector(`[data-task-id="${id}"] .cm-content`), taskId),
+      { timeout: 10_000, timeoutMsg: "the editor never mounted" },
+    );
+  });
+
+  it("offers the button only while lines are selected", async () => {
+    expect(await sendButton()).toBe(null);
+
+    await selectLines(1, 2);
+    await browser.waitUntil(async () => (await sendButton()) !== null,
+      { timeout: 5_000, timeoutMsg: "the send button never appeared for a selection" });
+    expect(await sendButton()).toBe("Send lines 1-2 to agent");
+
+    // Collapsing the selection retracts it — the action only makes sense with
+    // something selected.
+    await browser.execute((id) => {
+      const host = document.querySelector(`[data-task-id="${id}"] .cm-editor`) as unknown as
+        { __cmView?: any };
+      host.__cmView.dispatch({ selection: { anchor: 0 } });
+    }, taskId);
+    await browser.waitUntil(async () => (await sendButton()) === null,
+      { timeout: 5_000, timeoutMsg: "the send button outlived the selection" });
+  });
+
+  it("labels a single-line selection in the singular", async () => {
+    await selectLines(1, 1);
+    await browser.waitUntil(async () => (await sendButton()) !== null,
+      { timeout: 5_000, timeoutMsg: "no button for a one-line selection" });
+    expect(await sendButton()).toBe("Send line 1 to agent");
+  });
+
+  it("types the reference into the agent and hands focus over", async () => {
+    await selectLines(1, 2);
+    await browser.waitUntil(async () => (await sendButton()) !== null,
+      { timeout: 5_000, timeoutMsg: "the send button never appeared" });
+    // mousedown, not click: the button acts on mousedown so the editor can't
+    // clear the selection first.
+    await browser.execute(() => {
+      const el = document.querySelector('[data-testid="send-selection-to-agent"]') as HTMLElement;
+      el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    });
+
+    // The user is put in front of the agent they just fed.
+    await browser.waitUntil(async () => (await activeTabId()) === agentTabId,
+      { timeout: 8_000, timeoutMsg: "the agent tab never became active" });
+    await waitForText("Sent @README.md:1-2");
+
+    // Delivery, from the PTY's own ring: submit the line the user was left
+    // holding, and the fixture agent echoes back exactly what it read.
+    await browser.execute((id, tab) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const t = (window.__termic!.useApp.getState().tabs[id] ?? []).find((x: any) => x.id === tab);
+      return window.__termic!.ipc.ptyWrite(t.ptyId, [13]);
+    }, taskId!, agentTabId);
+    await browser.waitUntil(
+      async () => {
+        const logs = await cliRpc({ cmd: "logs", task: TASK });
+        return logs.ok && logs.data.data.includes("FAKE-AGENT echo: @README.md:1-2");
+      },
+      { timeout: 30_000, timeoutMsg: "the reference never reached the agent's PTY" },
+    );
+    await snap("send-selection-to-agent.png");
+  });
+
+  it("does nothing on the shortcut with no selection, sends with one", async () => {
+    // Back to the editor, cursor collapsed.
+    await browser.execute((id, tab) =>
+      window.__termic!.useApp.getState().setActiveTabId(id, tab), taskId, editTabId);
+    await browser.execute((id) => {
+      const host = document.querySelector(`[data-task-id="${id}"] .cm-editor`) as unknown as
+        { __cmView?: any };
+      host.__cmView.dispatch({ selection: { anchor: 0 } });
+      host.__cmView.focus();
+    }, taskId);
+
+    const press = () => browser.execute(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "a", metaKey: true, altKey: true, bubbles: true,
+      }));
+    });
+
+    // No selection: the key falls through, nothing is sent, the editor keeps
+    // the stage.
+    await press();
+    expect(await activeTabId()).toBe(editTabId);
+
+    await selectLines(1, 1);
+    await press();
+    await browser.waitUntil(async () => (await activeTabId()) === agentTabId,
+      { timeout: 8_000, timeoutMsg: "the shortcut never sent the selection" });
+    await waitForText("Sent @README.md:1");
   });
 });

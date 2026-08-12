@@ -14,51 +14,12 @@
 // precedent) with the per-boot token from the profile dir, so the whole
 // server path runs: auth, task resolution, the selector resolver, the
 // webview RPCs.
-import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import os from "node:os";
 import { dataDir } from "../../wdio.conf.js";
-import { archiveTask, openTask, requireTermicApi, waitForAppShell } from "../helpers.js";
-
-const socketPath = path.join(dataDir, "termic.sock");
-const token = () => fs.readFileSync(path.join(dataDir, "cli-token"), "utf8").trim();
-
-/** One request over a fresh connection; stream lines (heartbeats,
- *  state events) are skipped, the final Reply resolves. */
-function rpc(cmd: Record<string, unknown>): Promise<any> {
-  return new Promise((resolve, reject) => {
-    const c = net.createConnection(socketPath);
-    let buf = "";
-    const to = setTimeout(() => {
-      c.destroy();
-      reject(new Error("no reply from the control socket within 30s"));
-    }, 30_000);
-    c.on("connect", () =>
-      c.write(JSON.stringify({ id: "e2e", token: token(), ...cmd }) + "\n"),
-    );
-    c.on("data", d => {
-      buf += d.toString();
-      let nl;
-      while ((nl = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, nl);
-        buf = buf.slice(nl + 1);
-        if (!line.trim()) continue;
-        const msg = JSON.parse(line);
-        if (msg.stream) continue; // heartbeat / state / queued events
-        clearTimeout(to);
-        c.end();
-        resolve(msg);
-        return;
-      }
-    });
-    c.on("error", e => {
-      clearTimeout(to);
-      reject(e);
-    });
-  });
-}
+import { archiveTask, cliRpc as rpc, openTask, requireTermicApi, waitForAppShell } from "../helpers.js";
 
 /**
  * Poll a tab's live PTY (spawn is async), through BOTH sides that have to

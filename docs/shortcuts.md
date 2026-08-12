@@ -21,3 +21,9 @@
 ## Prompt palette (⌥⌘P)
 
 `prompt-palette` (default ⌥⌘P) is a plain single-chord shortcut that opens `PromptPalette.tsx`: a searchable list of enabled prompts (fuzzy-filtered by title only). Enter runs the highlighted one; while the query is empty, digits `1-9` fire the top rows directly (a positional accelerator, Raycast-style, not a persisted per-prompt key). Firing goes through `fireOrPickDestination` in `src/lib/promptFire.ts`, which sends straight to the focused agent tab or falls back to the shared destination-picker dialog (`PromptDestinationDialog.tsx`) when there's no focused live agent. The Prompts dropdown in `UnifiedBar.tsx` always opens the picker so you can tweak the body and choose a target.
+
+## Send selection to agent (⌥⌘A)
+
+`send-selection-to-agent` is contextual, not global: it has no `case` in `useShortcuts`. `EditorPane` owns it, and answers only when the selection is non-empty AND the editor either holds DOM focus or is the visible active tab (`focused ? focused !== v.dom : !isActive`) — the two are mutually exclusive, so two mounted editors can never both fire on one press. With no selection it does not `preventDefault`, so the chord falls through untouched.
+
+The same action has a pointer route with no shortcut involved: `agentRefExt.ts` puts a "Send lines 12-40 to agent" button over any selection (a CodeMirror tooltip, deliberately not a Radix context menu, which would claim right-click across the whole editor). Both call `sendAgentRef` in `src/lib/agentRef.ts`, which types `@path:12-40 ` into the task's agent PTY **without** a CR: the reference is context, and the sentence around it is the user's to write.

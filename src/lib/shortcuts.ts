@@ -56,7 +56,8 @@ export type ShortcutId =
   | "zoom-out"
   | "zoom-reset"
   | "stage-file"
-  | "discard-file";
+  | "discard-file"
+  | "send-selection-to-agent";
 
 export type ShortcutGroup = "Navigation" | "Tabs" | "Terminal" | "Git" | "General";
 
@@ -173,6 +174,12 @@ export const SHORTCUT_DEFS: ShortcutDef[] = [
     hint: "Scale the whole app down", defaultBinding: B("-", { cmd: true }) },
   { id: "zoom-reset", group: "General", label: "Reset zoom",
     hint: "Return the app to 100%", defaultBinding: B("0", { cmd: true }) },
+  // Contextual (editor): handled in EditorPane, not the global switch, and
+  // only when that editor holds focus AND has a non-empty selection. Any
+  // other time the key falls through untouched.
+  { id: "send-selection-to-agent", group: "General", label: "Send selection to agent",
+    hint: "Types the selected lines into the agent as an @file:12-40 reference. Nothing is submitted, so you finish the sentence.",
+    defaultBinding: B("a", { cmd: true, alt: true }) },
 
   // Git — contextual: these act on the file selected in the Git panel and
   // are handled there (GitPanel), not the global handler. The discard

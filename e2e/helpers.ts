@@ -2,8 +2,15 @@
 // declarative by using these; when the UI changes, fix the flow in ONE place.
 // See the `e2e` skill for the full authoring guide.
 
+import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { dataDir } from "../wdio.conf.js";
+
+const socketPath = path.join(dataDir, "termic.sock");
+/** Per-boot CLI token, read fresh: the app rewrites it on every launch. */
+const cliToken = () => fs.readFileSync(path.join(dataDir, "cli-token"), "utf8").trim();
 
 const artifactsDir = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -723,6 +730,48 @@ export async function queuedCount(taskId: string): Promise<number | null> {
 /** Both badge surfaces for a task: `[tab strip, sidebar row]`. */
 export async function workBadges(taskId: string): Promise<Array<WorkBadge | null>> {
   return Promise.all([taskViewBadge(taskId), sidebarBadge(taskId)]);
+}
+
+/**
+ * One request over the REAL control socket, on a fresh connection; stream
+ * lines (heartbeats, state events) are skipped and the final Reply resolves.
+ *
+ * This is the only way a spec can read what actually landed in a PTY:
+ * `pty_logs_tail` is not a Tauri command, so `{cmd:"logs"}` here is the sole
+ * route to the agent's output ring. Terminal content is NOT in the DOM (xterm
+ * renders to a canvas), and store state only carries timestamps.
+ */
+export function cliRpc(cmd: Record<string, unknown>): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const c = net.createConnection(socketPath);
+    let buf = "";
+    const to = setTimeout(() => {
+      c.destroy();
+      reject(new Error("no reply from the control socket within 30s"));
+    }, 30_000);
+    c.on("connect", () =>
+      c.write(JSON.stringify({ id: "e2e", token: cliToken(), ...cmd }) + "\n"),
+    );
+    c.on("data", d => {
+      buf += d.toString();
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (!line.trim()) continue;
+        const msg = JSON.parse(line);
+        if (msg.stream) continue; // heartbeat / state / queued events
+        clearTimeout(to);
+        c.end();
+        resolve(msg);
+        return;
+      }
+    });
+    c.on("error", e => {
+      clearTimeout(to);
+      reject(e);
+    });
+  });
 }
 
 /** Assert `window.__termic` is present (i.e. the e2e build exposed state). */

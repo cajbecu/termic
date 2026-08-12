@@ -32,6 +32,9 @@ import { properties } from "@codemirror/legacy-modes/mode/properties";
 import { proto3 } from "@/lib/protoMode";
 import { taskFileRead, taskFileWrite } from "@/lib/ipc";
 import { attachHiddenScrollRestore } from "@/lib/hiddenScrollRestore";
+import { agentRefExtension, selectedLineRange } from "./agentRefExt";
+import { formatAgentRef, sendAgentRef } from "@/lib/agentRef";
+import { bindingMatches } from "@/lib/shortcuts";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import { usePrefs, resolveTheme } from "@/store/prefs";
@@ -150,6 +153,9 @@ export function EditorPane({ task, tab, active, onContent }: {
   const onContentRef = useRef(onContent);
   onContentRef.current = onContent;
   const viewRef = useRef<EditorView | null>(null);
+  // Live tab.path for callbacks captured inside the mount effect.
+  const pathRef = useRef(tab.path);
+  pathRef.current = tab.path;
   const langCompRef = useRef(new Compartment());
   // Theme lives in its own compartment so font-size / ligatures changes can be
   // reconfigured live without recreating the entire EditorView.
@@ -254,6 +260,13 @@ export function EditorPane({ task, tab, active, onContent }: {
               // any input that appears inside the editor's DOM.
               noAutocorrectOnPanelInputs,
               lintGutter(),
+              // Selection → "Send lines X-Y to agent". Reads tab.path through
+              // the ref so a preview tab that swaps files (same EditorView is
+              // rebuilt, but the closure is captured at create time) can never
+              // hand the agent a reference to the file it used to show.
+              agentRefExtension((startLine, endLine) => {
+                void sendAgentRef(task.id, formatAgentRef(pathRef.current, startLine, endLine));
+              }),
               indentUnit.of("  "),
               EditorState.tabSize.of(2),
               EditorView.updateListener.of(u => {
@@ -318,6 +331,29 @@ export function EditorPane({ task, tab, active, onContent }: {
   // Focused = this task is up front AND this tab is the active main-pane tab
   // (edit/diff tabs only open in the main pane, not in split panes).
   const isActive = useApp(s => s.activeTaskId === task.id && s.activeTab[task.id] === tab.id);
+
+  // Keyboard route to the same send. A window listener rather than a
+  // CodeMirror keymap entry because the binding is user-rebindable (usePrefs).
+  // Which editor answers: the one holding DOM focus; when focus is somewhere
+  // else entirely (file tree, terminal, nowhere), the visible active tab. That
+  // pair is exclusive, so two mounted editors can never both fire on one press.
+  const sendRefBinding = usePrefs(s => s.shortcuts["send-selection-to-agent"]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!bindingMatches(e, sendRefBinding)) return;
+      const v = viewRef.current;
+      if (!v) return;
+      const focused = (document.activeElement as HTMLElement | null)?.closest?.(".cm-editor");
+      if (focused ? focused !== v.dom : !isActive) return;
+      const lines = selectedLineRange(v.state);
+      if (!lines) return;      // nothing selected: let the key fall through
+      e.preventDefault();
+      e.stopPropagation();
+      void sendAgentRef(task.id, formatAgentRef(pathRef.current, lines.startLine, lines.endLine));
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [sendRefBinding, task.id, isActive]);
 
   // Swap fresh disk content into the live view, annotated so it doesn't flip
   // the dirty dot. Used by both the silent preview-reload path and the user
