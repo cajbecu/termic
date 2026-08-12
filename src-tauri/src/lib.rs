@@ -10052,7 +10052,6 @@ async fn detect_clis() -> Vec<CliInfo> {
 }
 
 fn detect_clis_blocking() -> Vec<CliInfo> {
-    let home = dirs::home_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     let agents = load_settings_inner().agents;
     // Probe agents concurrently — each agent costs a login-shell spawn
     // (`sh -lc`, which sources the user's profile and can take hundreds
@@ -10063,7 +10062,6 @@ fn detect_clis_blocking() -> Vec<CliInfo> {
     let handles: Vec<_> = agents.iter().map(|agent| {
         let id = agent.id.clone();
         let bin = agent.command.trim().to_string();
-        let home = home.clone();
         thread::spawn(move || {
             let bin = bin.as_str();
             let mut found = false;
@@ -10093,15 +10091,13 @@ fn detect_clis_blocking() -> Vec<CliInfo> {
                         }
                     }
                 }
-                // Fallback: probe common macOS install locations directly.
+                // Fallback: probe common install locations directly. Same
+                // list the PATH fallback unions in, and for the same
+                // reason (the login shell that would have found these is
+                // exactly what just failed) — kept in one place so a dir
+                // added there is never missing from the install badge.
                 if !found {
-                    for c in [
-                        format!("{home}/.local/bin/{bin}"),
-                        format!("/opt/homebrew/bin/{bin}"),
-                        format!("/usr/local/bin/{bin}"),
-                        format!("{home}/.bun/bin/{bin}"),
-                        format!("{home}/.cargo/bin/{bin}"),
-                    ] {
+                    for c in shell_env::fallback_dirs().iter().map(|d| format!("{d}/{bin}")) {
                         if Path::new(&c).exists() {
                             found = true;
                             path = c;

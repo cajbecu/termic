@@ -65,6 +65,7 @@ const MAX_KICKED_RETRIES: u32 = 10;
 static STATE: OnceLock<State> = OnceLock::new();
 static PROBE_STARTED: Once = Once::new();
 static RESOLVED_SHELL: OnceLock<String> = OnceLock::new();
+static FALLBACK_DIRS: OnceLock<Vec<String>> = OnceLock::new();
 
 /// The login-shell environment as currently known — the fallback until
 /// a probe succeeds, the real thing after.
@@ -586,33 +587,116 @@ fn is_env_key(k: &str) -> bool {
 /// per shell), but covers the common static installers so at least
 /// `claude`, `codex`, `gemini` resolve.
 pub(crate) fn fallback_path(current: &str) -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let extras: Vec<String> = vec![
-        "/opt/homebrew/bin".into(),
-        "/opt/homebrew/sbin".into(),
-        "/usr/local/bin".into(),
-        "/usr/local/sbin".into(),
-        format!("{home}/.local/bin"),
-        format!("{home}/.bun/bin"),
-        format!("{home}/.deno/bin"),
-        format!("{home}/.cargo/bin"),
-        format!("{home}/.volta/bin"),
-        format!("{home}/.npm-global/bin"),
-        format!("{home}/n/bin"),
-    ];
-
     let mut seen: std::collections::HashSet<String> =
         current.split(':').map(String::from).collect();
     let mut out = current.to_string();
-    for p in extras {
+    for p in fallback_dirs() {
         if seen.insert(p.clone()) {
             if !out.is_empty() {
                 out.push(':');
             }
-            out.push_str(&p);
+            out.push_str(p);
         }
     }
     out
+}
+
+/// The well-known tool dirs, resolved against this account. The one
+/// source of truth for "where a CLI is likely installed": the PATH
+/// fallback unions these in, and CLI detection probes them directly when
+/// its login-shell lookup fails (the same degraded window). Cached after
+/// the first call: the account cannot change under a running process,
+/// and `passwd_name` must not run on several threads at once (CLI
+/// detection probes every agent in parallel).
+pub(crate) fn fallback_dirs() -> &'static [String] {
+    FALLBACK_DIRS.get_or_init(|| fallback_extras(&account_home(), &account_user()))
+}
+
+/// `$HOME`, or the passwd entry when it is unset. Same reasoning as
+/// `passwd_shell`: launchd hands a GUI `.app` a minimal environment, and
+/// the passwd database is the authority that does not depend on it.
+fn account_home() -> String {
+    let env_home = std::env::var("HOME").unwrap_or_default();
+    if !env_home.is_empty() {
+        return env_home;
+    }
+    dirs::home_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// `$USER`, or `getpwuid(getuid())->pw_name` when it is unset.
+fn account_user() -> String {
+    let env_user = std::env::var("USER").unwrap_or_default();
+    if !env_user.is_empty() {
+        return env_user;
+    }
+    passwd_name().unwrap_or_default()
+}
+
+/// The current user's login name from the passwd database.
+#[cfg(unix)]
+fn passwd_name() -> Option<String> {
+    use std::ffi::CStr;
+    // SAFETY: as in `passwd_shell` — getpwuid returns a pointer into a
+    // static libc buffer; we copy pw_name out immediately and never
+    // retain the pointer.
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() || (*pw).pw_name.is_null() {
+            return None;
+        }
+        let s = CStr::from_ptr((*pw).pw_name).to_str().ok()?.to_string();
+        (!s.is_empty()).then_some(s)
+    }
+}
+
+#[cfg(not(unix))]
+fn passwd_name() -> Option<String> {
+    None
+}
+
+/// The dir list itself, split out from the account lookups so it stays
+/// testable for an account with no resolvable home or user name.
+fn fallback_extras(home: &str, user: &str) -> Vec<String> {
+    // Nix profiles lead: a nix-darwin login PATH puts them ahead of
+    // homebrew and of /usr/bin, so when a tool exists in both places
+    // this picks the same binary the user's own terminal runs. Within
+    // the nix set, per-user before system, as nix-darwin orders them.
+    // Every one of these is stable by design (a generation switch flips
+    // the symlink behind the path), and nix deliberately keeps out of
+    // /etc/paths.d, so there is no registry a GUI app could read
+    // instead. Without them, everything installed to a nix profile is
+    // invisible whenever this fallback is in use.
+    let mut extras: Vec<String> = Vec::new();
+    if !user.is_empty() {
+        extras.push(format!("/etc/profiles/per-user/{user}/bin"));
+    }
+    if !home.is_empty() {
+        extras.push(format!("{home}/.nix-profile/bin"));
+        // With `use-xdg-base-directories` (nix 2.14+) the per-user
+        // profile lives here instead, and ~/.nix-profile never exists.
+        extras.push(format!("{home}/.local/state/nix/profile/bin"));
+    }
+    extras.push("/run/current-system/sw/bin".into());
+    extras.push("/nix/var/nix/profiles/default/bin".into());
+
+    extras.extend([
+        "/opt/homebrew/bin".to_string(),
+        "/opt/homebrew/sbin".to_string(),
+        "/usr/local/bin".to_string(),
+        "/usr/local/sbin".to_string(),
+    ]);
+    if !home.is_empty() {
+        extras.extend([
+            format!("{home}/.local/bin"),
+            format!("{home}/.bun/bin"),
+            format!("{home}/.deno/bin"),
+            format!("{home}/.cargo/bin"),
+            format!("{home}/.volta/bin"),
+            format!("{home}/.npm-global/bin"),
+            format!("{home}/n/bin"),
+        ]);
+    }
+    extras
 }
 
 #[cfg(test)]
@@ -654,6 +738,77 @@ mod tests {
             assert!(result.contains(&format!("{home}/.cargo/bin")),
                 "must add cargo bin dir");
         }
+    }
+
+    #[test]
+    fn fallback_path_adds_nix_profile_dirs() {
+        let extras = fallback_extras("/Users/x", "x");
+        for dir in [
+            "/etc/profiles/per-user/x/bin",
+            "/Users/x/.nix-profile/bin",
+            "/run/current-system/sw/bin",
+            "/nix/var/nix/profiles/default/bin",
+        ] {
+            assert!(extras.iter().any(|p| p == dir), "must add {dir}");
+        }
+    }
+
+    #[test]
+    fn fallback_path_adds_system_nix_dirs_without_home_or_user() {
+        // A GUI process can launch with neither set. The two system-wide
+        // nix profiles don't depend on either, so they still apply.
+        let extras = fallback_extras("", "");
+        assert!(extras.iter().any(|p| p == "/run/current-system/sw/bin"));
+        assert!(extras.iter().any(|p| p == "/nix/var/nix/profiles/default/bin"));
+    }
+
+    #[test]
+    fn fallback_path_adds_xdg_nix_profile_dir() {
+        // use-xdg-base-directories (nix 2.14+) moves the per-user
+        // profile here and leaves no ~/.nix-profile behind.
+        let extras = fallback_extras("/Users/x", "x");
+        assert!(extras.iter().any(|p| p == "/Users/x/.local/state/nix/profile/bin"));
+    }
+
+    #[test]
+    fn fallback_path_prefers_nix_over_homebrew() {
+        // A nix-darwin login PATH puts the nix profiles ahead of
+        // homebrew, so a tool installed in both must resolve the same
+        // way here as it does in the user's own terminal.
+        let extras = fallback_extras("/Users/x", "x");
+        let at = |dir: &str| extras.iter().position(|p| p == dir).unwrap();
+        assert!(at("/run/current-system/sw/bin") < at("/opt/homebrew/bin"));
+        assert!(at("/etc/profiles/per-user/x/bin") < at("/opt/homebrew/bin"));
+    }
+
+    #[test]
+    fn fallback_path_skips_per_user_nix_dirs_without_home_or_user() {
+        // Neither $HOME/$USER nor the passwd entry resolved. Interpolating
+        // the empties would yield a bogus /etc/profiles/per-user//bin
+        // and /.nix-profile/bin.
+        let extras = fallback_extras("", "");
+        assert!(
+            !extras.iter().any(|p| p.contains("/etc/profiles/per-user/")),
+            "no per-user profile without $USER, got: {extras:?}"
+        );
+        assert!(
+            !extras.iter().any(|p| p.starts_with("/.")),
+            "no home-relative dirs without $HOME, got: {extras:?}"
+        );
+    }
+
+    #[test]
+    fn fallback_path_keeps_nix_dirs_in_nix_darwin_order() {
+        let extras = fallback_extras("/Users/x", "x");
+        let at = |dir: &str| extras.iter().position(|p| p == dir).unwrap();
+        assert!(
+            at("/etc/profiles/per-user/x/bin") < at("/run/current-system/sw/bin"),
+            "per-user profile must precede the system profile"
+        );
+        assert!(
+            at("/run/current-system/sw/bin") < at("/nix/var/nix/profiles/default/bin"),
+            "system profile must precede the default profile"
+        );
     }
 
     #[test]
