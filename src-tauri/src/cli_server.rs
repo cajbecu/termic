@@ -698,6 +698,7 @@ pub(crate) fn handle_request(req: &Request, host: &dyn CliHost, sink: &mut dyn E
             )
         }
         Command::Agents => handle_agents(req, host),
+        Command::Prompts { .. } => handle_prompts(req, host),
         Command::Tab { .. } => handle_tab(req, host, sink),
         Command::Archive { task, project } => {
             handle_archive(&req.id, host, task, project.as_deref())
@@ -922,6 +923,7 @@ fn handle_new(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Re
     let Command::New {
         name,
         prompt,
+        prompt_ref,
         agent,
         mode,
         base,
@@ -970,7 +972,8 @@ fn handle_new(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Re
         return fail(ErrorCode::BadRequest, "the task name is empty".into());
     }
     // An empty prompt would mint a prompt id nothing ever reports on
-    // and burn the whole delivery timeout under --wait.
+    // and burn the whole delivery timeout under --wait. (`-P` resolves
+    // further down, after the cheap validations.)
     let prompt = prompt.as_ref().filter(|p| !p.trim().is_empty());
 
     let (projects, tasks) = host.projects_tasks();
@@ -1099,6 +1102,20 @@ fn handle_new(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Re
         }
         Some(_) => {}
     }
+
+    // `-P` resolves against the LIVE prompt library AFTER the cheap
+    // local validations (the handle_tab ordering: a doomed request must
+    // not pay a webview round-trip, and error precedence should not
+    // diverge between the verbs) and BEFORE the task is created (fail
+    // fast: a bad selector must not leave a task behind).
+    let prompt: Option<String> = match prompt_ref.as_deref() {
+        Some(sel) => match resolve_prompt_ref(host, sel, prompt.map(String::as_str)) {
+            Ok(p) => Some(p),
+            Err(e) => return Reply { id: id.clone(), ok: false, data: None, error: Some(e) },
+        },
+        None => prompt.cloned(),
+    };
+    let prompt = prompt.as_ref();
 
     // Register delivery interest BEFORE the webview learns the id, so a
     // fast report can never race past us.
@@ -1719,13 +1736,14 @@ fn parse_send_error(e: &str) -> (ErrorCode, String) {
 }
 
 fn handle_send(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Reply {
-    let Command::Send { task, project, prompt, resume, fresh, wait, timeout_ms, tab, cwd } =
-        &req.cmd
+    let Command::Send {
+        task, project, prompt, prompt_ref, resume, fresh, wait, timeout_ms, tab, cwd,
+    } = &req.cmd
     else {
         unreachable!("handle_send called with a non-send command")
     };
     let id = &req.id;
-    if prompt.trim().is_empty() {
+    if prompt.trim().is_empty() && prompt_ref.is_none() {
         return Reply::err(id, ErrorCode::BadRequest, "the prompt is empty");
     }
     // clap guards this in the shipped CLI; the wire guard keeps a
@@ -1754,6 +1772,18 @@ fn handle_send(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> R
     let target = match tab.as_deref().map(|sel| resolve_tab_selector(host, &t, sel)).transpose() {
         Ok(rt) => rt,
         Err(e) => return Reply { id: id.clone(), ok: false, data: None, error: Some(e) },
+    };
+
+    // `-P` resolves against the live prompt library BEFORE anything is
+    // delivered or respawned (the handle_new fail-fast rule).
+    let prompt: String = match prompt_ref.as_deref() {
+        Some(sel) => {
+            match resolve_prompt_ref(host, sel, Some(prompt.as_str())) {
+                Ok(p) => p,
+                Err(e) => return Reply { id: id.clone(), ok: false, data: None, error: Some(e) },
+            }
+        }
+        None => prompt.clone(),
     };
 
     // Register delivery interest BEFORE the webview learns the id (the
@@ -2184,6 +2214,227 @@ fn handle_agents(req: &Request, host: &dyn CliHost) -> Reply {
     Reply::ok(id, ReplyData::Agents(proto::AgentsData { agents }))
 }
 
+// ───────────────────────── prompt library (Phase 4) ──────────────────
+
+/// One prompt as the webview's `list_prompts` RPC reports it: the live
+/// store's computed view (overrides applied, deleted builtins absent,
+/// disabled ones present with `enabled: false`).
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PromptInfo {
+    id: String,
+    title: String,
+    /// Empty when the RPC was asked for `bodies: false` (the list path,
+    /// which discards them anyway); never resolve `-P` against such a
+    /// fetch.
+    body: String,
+    builtin: bool,
+    enabled: bool,
+    modified: bool,
+}
+
+/// The `list_prompts` reply envelope. Deserializing the whole value
+/// (rather than cloning a sub-array out of it) also makes a missing
+/// `prompts` key fail loudly via serde, never read as an empty library.
+#[derive(serde::Deserialize)]
+struct ListPromptsReply {
+    prompts: Vec<PromptInfo>,
+}
+
+/// The live prompt library, read from the webview AT REQUEST TIME. This
+/// is the design, not a convenience: resolving against the store means
+/// user overrides/renames/deletions are always current and unedited
+/// builtins keep tracking shipped defaults (docs/plans/cli.md, Phase 4).
+/// `bodies: false` skips the body payload (~16 KB of builtins alone)
+/// for the list path, which never uses it.
+fn fetch_prompts(host: &dyn CliHost, bodies: bool) -> Result<Vec<PromptInfo>, String> {
+    let value = host.rpc("list_prompts", serde_json::json!({ "bodies": bodies }), OPEN_TIMEOUT)?;
+    serde_json::from_value::<ListPromptsReply>(value)
+        .map(|r| r.prompts)
+        .map_err(|e| format!("bad list_prompts reply: {e}"))
+}
+
+/// Titles are user-authored with NO length cap in Settings, and reply
+/// lines cap at MAX_LINE_BYTES post-escape: clip them for the wire so
+/// one pasted-document title (or a large library of them) cannot break
+/// the connection. Rows are otherwise bounded (ids are builtin slugs or
+/// UUIDs, flags are fixed).
+fn clip_title(s: &str) -> String {
+    const TITLE_BUDGET: usize = 2 * 1024;
+    let (kept, cut) = proto::json_budget_prefix(s, TITLE_BUDGET);
+    if cut { format!("{kept}...") } else { s.to_string() }
+}
+
+/// Resolve a `-P/--library` selector, mirroring resolve_tab_selector's
+/// identity philosophy: the stable id is the identity (`builtin:review`,
+/// a custom prompt's UUID), the title a case-insensitive convenience.
+/// Deleted builtins are simply absent from the list; DISABLED prompts
+/// resolve (disabled = hidden from the dropdown, not dead). Documented
+/// contract: pin ids in scripts, use titles interactively.
+fn resolve_prompt_selector<'a>(
+    prompts: &'a [PromptInfo],
+    selector: &str,
+) -> Result<&'a PromptInfo, proto::ErrorBody> {
+    let err = |code: ErrorCode, message: String| proto::ErrorBody { code, message, data: None };
+    // Trim once and match on the trimmed form: shell quoting and
+    // copy-paste routinely add stray whitespace, and matching the raw
+    // string would turn `-P "builtin:review "` into a NotFound for a
+    // prompt that exists.
+    let selector = selector.trim();
+    // The shipped CLI pre-rejects an empty selector, but the wire is a
+    // public surface of its own (handle_send's rule): without this, ""
+    // title-matches the unnamed placeholder prompts the GUI's "New
+    // prompt" button persists.
+    if selector.is_empty() {
+        return Err(err(ErrorCode::BadRequest, "the prompt selector is empty".into()));
+    }
+    // 1. The identity itself.
+    if let Some(p) = prompts.iter().find(|p| p.id == selector) {
+        return Ok(p);
+    }
+    // 2. Exact title, case-insensitive.
+    let sel = selector.to_lowercase();
+    let matches: Vec<&PromptInfo> =
+        prompts.iter().filter(|p| p.title.to_lowercase() == sel).collect();
+    match matches.as_slice() {
+        [] => Err(err(
+            ErrorCode::NotFound,
+            format!("no prompt matches \"{selector}\"; see `termic prompts` for the library"),
+        )),
+        [one] => Ok(one),
+        many => Err(err(
+            ErrorCode::Ambiguous,
+            format!(
+                "\"{}\" matches more than one prompt: {}; use the id",
+                clip_title(selector),
+                many.iter()
+                    .map(|p| format!("{} (id {})", clip_title(&p.title), p.id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )),
+    }
+}
+
+/// Fold a resolved library body and the literal `-p` text into one
+/// prompt: the body, one blank line, then the text. The blank line is
+/// contract (documented composition), so BOTH edges of the seam are
+/// normalized: all trailing whitespace on the body (a body ending in a
+/// whitespace-only line is trivially produced by the Settings
+/// textarea), and all leading whitespace on the text (piped stdin
+/// often opens with blank lines, and `-p -` is the flagship handoff
+/// input).
+fn compose_prompt(body: &str, literal: Option<&str>) -> String {
+    let body = body.trim_end();
+    match literal {
+        Some(text) if !text.trim().is_empty() => format!("{body}\n\n{}", text.trim_start()),
+        _ => body.to_string(),
+    }
+}
+
+/// Resolve `prompt_ref` into the effective prompt for new/send/tab.
+/// Called BEFORE any task or tab is created (fail fast: a bad selector
+/// must not leave a task behind, docs/plans/cli.md Phase 4).
+fn resolve_prompt_ref(
+    host: &dyn CliHost,
+    selector: &str,
+    literal: Option<&str>,
+) -> Result<String, proto::ErrorBody> {
+    let prompts = fetch_prompts(host, true)
+        .map_err(|e| proto::ErrorBody { code: ErrorCode::Internal, message: e, data: None })?;
+    let p = resolve_prompt_selector(&prompts, selector)?;
+    // Refuse an empty BODY outright, even when `-p` text would survive
+    // composition: firing an empty library prompt is a mistake worth
+    // naming, and silently delivering just the text (with a junk
+    // leading blank line) would hide it. Alone, an empty prompt would
+    // also mint a delivery id nothing ever reports on (the `-p` rule).
+    if p.body.trim().is_empty() {
+        return Err(proto::ErrorBody {
+            code: ErrorCode::Unsupported,
+            message: format!("prompt \"{}\" ({}) has an empty body", clip_title(&p.title), p.id),
+            data: None,
+        });
+    }
+    let composed = compose_prompt(&p.body, literal);
+    // Mirror the CLI's PROMPT_MAX_BYTES gate: `-P` substitutes the body
+    // server-side AFTER that gate ran on the literal alone, so routing
+    // text through the library must not become a bypass of the limit.
+    const COMPOSED_PROMPT_MAX_BYTES: usize = 900 * 1024;
+    if proto::json_escaped_len(&composed) > COMPOSED_PROMPT_MAX_BYTES {
+        return Err(proto::ErrorBody {
+            code: ErrorCode::Unsupported,
+            message: format!(
+                "the composed prompt is too large (limit {} KB once encoded; control characters count sixfold)",
+                COMPOSED_PROMPT_MAX_BYTES / 1024
+            ),
+            data: None,
+        });
+    }
+    Ok(composed)
+}
+
+/// `termic prompts [show <sel>]`: list the library, or resolve one
+/// selector and include its body. Read-only; the sandbox posture is
+/// unchanged (caged agents get no CLI surface, listing included).
+fn handle_prompts(req: &Request, host: &dyn CliHost) -> Reply {
+    let Command::Prompts { selector } = &req.cmd else {
+        unreachable!("handle_prompts called with a non-prompts command")
+    };
+    let id = &req.id;
+    // The list form never uses bodies, so it does not fetch them.
+    let prompts = match fetch_prompts(host, selector.is_some()) {
+        Ok(p) => p,
+        Err(e) => return Reply::err(id, ErrorCode::Internal, &e),
+    };
+    let entry = |p: &PromptInfo, with_body: bool| {
+        // Reply lines cap at MAX_LINE_BYTES post-escape (the logs/diff
+        // rule), so a pasted-a-whole-spec body is trimmed. NO marker
+        // text inside the body: `show` pipes into agents, and a marker
+        // would arrive as instructions. The `truncated` flag carries
+        // the fact; the CLI warns on stderr.
+        let (body, truncated) = if with_body {
+            const BODY_BUDGET: usize = 850 * 1024;
+            let (kept, cut) = proto::json_budget_prefix(&p.body, BODY_BUDGET);
+            (Some(kept.to_string()), cut)
+        } else {
+            (None, false)
+        };
+        proto::PromptEntry {
+            id: p.id.clone(),
+            title: clip_title(&p.title),
+            builtin: p.builtin,
+            enabled: p.enabled,
+            modified: p.modified,
+            body,
+            truncated,
+        }
+    };
+    match selector {
+        None => Reply::ok(
+            id,
+            ReplyData::Prompts(proto::PromptsData {
+                prompts: prompts.iter().map(|p| entry(p, false)).collect(),
+            }),
+        ),
+        Some(sel) => match resolve_prompt_selector(&prompts, sel) {
+            // An empty body refuses HERE too, not just under `-P`: the
+            // documented `show <sel> | send -p -` pipe would otherwise
+            // print nothing, exit 0, and fail downstream with a
+            // misleading stdin error. Empty prompts genuinely exist
+            // (the GUI's "New prompt" persists {title:"", body:""}).
+            Ok(p) if p.body.trim().is_empty() => Reply::err(
+                id,
+                ErrorCode::Unsupported,
+                format!("prompt \"{}\" ({}) has an empty body", clip_title(&p.title), p.id),
+            ),
+            Ok(p) => Reply::ok(
+                id,
+                ReplyData::Prompts(proto::PromptsData { prompts: vec![entry(p, true)] }),
+            ),
+            Err(e) => Reply { id: id.clone(), ok: false, data: None, error: Some(e) },
+        },
+    }
+}
+
 /// `termic tab` (GH #138). Tab creation lives in the webview (the store owns
 /// the tab list and TerminalPane spawns the PTY from it), so this resolves the
 /// task here and hands the rest to `new_tab`, which owns registry validation:
@@ -2195,10 +2446,15 @@ fn handle_agents(req: &Request, host: &dyn CliHost) -> Reply {
 /// the spawn-pending rule, i.e. exactly what `send` to a respawned agent
 /// does, so delivery stays confirmed (docs/plans/cli.md, Phase 1).
 fn handle_tab(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Reply {
-    let Command::Tab { task, project, kind, prompt, wait, timeout_ms, resume, cwd } = &req.cmd
+    let Command::Tab { task, project, kind, prompt, prompt_ref, wait, timeout_ms, resume, cwd } =
+        &req.cmd
     else {
         unreachable!("handle_tab called with a non-tab command")
     };
+    // Everything below treats "-p or -P present" as "a prompt rides
+    // this tab"; the composed text is resolved right before the tab is
+    // opened, after the cheap validations.
+    let has_prompt = prompt.is_some() || prompt_ref.is_some();
     let id = &req.id;
     if resume.is_some() {
         // A session id only means something to a NAMED agent tab: shell /
@@ -2231,9 +2487,11 @@ fn handle_tab(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Re
         }
     }
     if let Some(p) = prompt {
-        if p.trim().is_empty() {
+        if p.trim().is_empty() && prompt_ref.is_none() {
             return Reply::err(id, ErrorCode::BadRequest, "the prompt is empty");
         }
+    }
+    if has_prompt {
         // A prompt needs an agent on the other end. Shell and terminal
         // kinds provably are not; Default is checked below once the task
         // is known (its cli decides), and the webview still has the
@@ -2246,7 +2504,7 @@ fn handle_tab(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Re
             );
         }
     }
-    if *wait && prompt.is_none() {
+    if *wait && !has_prompt {
         return Reply::err(id, ErrorCode::BadRequest, "--wait needs a prompt to wait on");
     }
     let (projects, tasks) = host.projects_tasks();
@@ -2260,7 +2518,7 @@ fn handle_tab(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Re
         Ok(t) => t.clone(),
         Err(e) => return Reply::err(id, e.code, &e.message),
     };
-    if prompt.is_some() && matches!(kind, proto::TabKind::Default) {
+    if has_prompt && matches!(kind, proto::TabKind::Default) {
         let non_agent = t.cli == "shell"
             || t.cli == "custom"
             || host.agents().iter().any(|a| a.id == t.cli && a.kind == "terminal");
@@ -2272,6 +2530,16 @@ fn handle_tab(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Re
             );
         }
     }
+
+    // `-P` resolves BEFORE the tab is opened (fail fast: a bad selector
+    // must not leave an empty tab behind, the handle_new rule).
+    let prompt: Option<String> = match prompt_ref.as_deref() {
+        Some(sel) => match resolve_prompt_ref(host, sel, prompt.as_deref()) {
+            Ok(p) => Some(p),
+            Err(e) => return Reply { id: id.clone(), ok: false, data: None, error: Some(e) },
+        },
+        None => prompt.clone(),
+    };
 
     let (kind_str, agent_id) = match kind {
         proto::TabKind::Agent { id } => ("agent", Some(id.clone())),
@@ -4626,6 +4894,7 @@ mod tests {
         Command::New {
             name: name.into(),
             prompt: None,
+            prompt_ref: None,
             agent: None,
             mode: None,
             base: None,
@@ -4943,6 +5212,7 @@ mod tests {
             project: None,
             kind,
             prompt: None,
+            prompt_ref: None,
             wait: false,
             timeout_ms: None,
             resume: None,
@@ -6561,6 +6831,7 @@ mod tests {
             project: None,
             kind: proto::TabKind::Agent { id: "claude".into() },
             prompt: Some("run the tests".into()),
+            prompt_ref: None,
             wait: false,
             timeout_ms: None,
             resume: None,
@@ -6594,6 +6865,7 @@ mod tests {
             project: None,
             kind,
             prompt: prompt.map(str::to_string),
+            prompt_ref: None,
             wait,
             timeout_ms: None,
             resume: None,
@@ -6683,6 +6955,7 @@ mod tests {
             project: None,
             kind: proto::TabKind::Agent { id: "claude".into() },
             prompt: Some("run".into()),
+            prompt_ref: None,
             wait: false,
             timeout_ms: None,
             resume: None,
@@ -6694,6 +6967,358 @@ mod tests {
         assert!(err.message.contains("was opened"), "{}", err.message);
     }
 
+    // ── prompt library (Phase 4) ─────────────────────────────────────
+
+    /// A scripted `list_prompts` reply: the shapes the resolver has to
+    /// disambiguate (id vs title, case, disabled, duplicate titles,
+    /// empty body).
+    fn prompt_lib() -> serde_json::Value {
+        serde_json::json!({ "prompts": [
+            { "id": "builtin:review", "title": "Review", "body": "Review the diff.",
+              "builtin": true, "enabled": true, "modified": false },
+            { "id": "builtin:commit", "title": "Commit", "body": "Commit the work.\n",
+              "builtin": true, "enabled": false, "modified": true },
+            { "id": "cst-1", "title": "review", "body": "Custom review body.",
+              "builtin": false, "enabled": true, "modified": false },
+            { "id": "cst-2", "title": "Ship it", "body": "a",
+              "builtin": false, "enabled": true, "modified": false },
+            { "id": "cst-3", "title": "ship IT", "body": "b",
+              "builtin": false, "enabled": true, "modified": false },
+            { "id": "cst-4", "title": "Empty", "body": "   ",
+              "builtin": false, "enabled": true, "modified": false },
+        ]})
+    }
+
+    #[test]
+    fn prompts_lists_the_library_without_bodies() {
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        let reply = handle(&req(Command::Prompts { selector: None }, Some("tok")), &host);
+        let Some(ReplyData::Prompts(p)) = reply.data else { panic!("expected prompts, got {reply:?}") };
+        assert_eq!(p.prompts.len(), 6);
+        assert_eq!(p.prompts[0].id, "builtin:review");
+        assert!(p.prompts[0].builtin && p.prompts[0].enabled && !p.prompts[0].modified);
+        // Disabled prompts are LISTED (fireable by explicit selector);
+        // the flag is what changes, not the row's existence.
+        assert!(!p.prompts[1].enabled && p.prompts[1].modified);
+        // The list carries no bodies; `show` is the body surface. The
+        // fetch itself skips them too (the ~16 KB of builtin bodies
+        // never cross the IPC just to be dropped).
+        assert!(p.prompts.iter().all(|e| e.body.is_none()));
+        let calls = host.rpc_calls.lock().unwrap();
+        assert_eq!(calls[0].1["bodies"], false, "the list path must not fetch bodies");
+    }
+
+    #[test]
+    fn prompts_show_resolves_id_first_then_title() {
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        let show = |sel: &str| {
+            handle(&req(Command::Prompts { selector: Some(sel.into()) }, Some("tok")), &host)
+        };
+        // Exact id wins even though a custom prompt is TITLED "review"
+        // (the identity philosophy: id is the identity, title a
+        // convenience).
+        let Some(ReplyData::Prompts(p)) = show("builtin:review").data else { panic!("no data") };
+        assert_eq!(p.prompts.len(), 1);
+        assert_eq!(p.prompts[0].id, "builtin:review");
+        assert_eq!(p.prompts[0].body.as_deref(), Some("Review the diff."));
+        // Stray whitespace from shell quoting / copy-paste must not turn
+        // an existing prompt into a NotFound: selectors match trimmed.
+        let Some(ReplyData::Prompts(p)) = show(" builtin:review ").data else { panic!("no data") };
+        assert_eq!(p.prompts[0].id, "builtin:review");
+        // Case-insensitive exact title; a DISABLED prompt still resolves
+        // (disabled = hidden from the dropdown, not dead).
+        let Some(ReplyData::Prompts(p)) = show("commit").data else { panic!("no data") };
+        assert_eq!(p.prompts[0].id, "builtin:commit");
+        assert!(!p.prompts[0].enabled);
+    }
+
+    #[test]
+    fn prompts_selector_ambiguity_and_miss_are_typed() {
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        let show = |sel: &str| {
+            handle(&req(Command::Prompts { selector: Some(sel.into()) }, Some("tok")), &host)
+                .error
+                .expect("refused")
+        };
+        // Two prompts titled "Ship it"/"ship IT": ambiguous, candidates
+        // listed WITH ids (the fix is to pin the id).
+        let err = show("ship it");
+        assert_eq!(err.code, ErrorCode::Ambiguous);
+        assert!(err.message.contains("cst-2") && err.message.contains("cst-3"), "{}", err.message);
+        // "review" title-matches both the builtin and the custom prompt.
+        assert_eq!(show("Review").code, ErrorCode::Ambiguous);
+        // A miss points at the discovery verb.
+        let err = show("nope");
+        assert_eq!(err.code, ErrorCode::NotFound);
+        assert!(err.message.contains("termic prompts"), "{}", err.message);
+    }
+
+    #[test]
+    fn new_with_prompt_ref_composes_and_fails_fast() {
+        // Bad selector: the error lands BEFORE any task exists.
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        let mut cmd = new_cmd("shiny", Some("web"));
+        if let Command::New { prompt_ref, .. } = &mut cmd {
+            *prompt_ref = Some("nope".into());
+        }
+        let err = handle(&req(cmd, Some("tok")), &host).error.expect("refused");
+        assert_eq!(err.code, ErrorCode::NotFound);
+        {
+            let calls = host.rpc_calls.lock().unwrap();
+            assert_eq!(
+                calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(),
+                vec!["list_prompts"],
+                "a bad -P must never reach new_task"
+            );
+        }
+
+        // Good selector + literal text: the webview receives ONE composed
+        // prompt (body, blank line, text); prompt_ref never crosses the RPC.
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        host.script_rpc("new_task", Ok(serde_json::json!({ "taskId": "nw1", "spawned": true })));
+        let mut cmd = new_cmd("shiny", Some("web"));
+        if let Command::New { prompt, prompt_ref, .. } = &mut cmd {
+            *prompt = Some("extra context".into());
+            *prompt_ref = Some("builtin:review".into());
+        }
+        let reply = handle(&req(cmd, Some("tok")), &host);
+        assert!(reply.ok, "{reply:?}");
+        let calls = host.rpc_calls.lock().unwrap();
+        let (_, params) = calls.iter().find(|(m, _)| m == "new_task").expect("new_task ran");
+        assert_eq!(params["prompt"], "Review the diff.\n\nextra context");
+        assert!(params.get("prompt_ref").is_none_or(|v| v.is_null()));
+    }
+
+    #[test]
+    fn send_with_prompt_ref_alone_delivers_the_body() {
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        host.script_rpc(
+            "send_prompt",
+            Ok(serde_json::json!({ "mode": "delivered", "capable": true })),
+        );
+        let mut cmd = send_cmd("solo", false);
+        if let Command::Send { prompt, prompt_ref, .. } = &mut cmd {
+            *prompt = String::new();
+            *prompt_ref = Some("Commit".into());
+        }
+        let reply = handle(&req(cmd, Some("tok")), &host);
+        assert!(reply.ok, "{reply:?}");
+        let calls = host.rpc_calls.lock().unwrap();
+        let (_, params) = calls.iter().find(|(m, _)| m == "send_prompt").expect("send ran");
+        // The body's trailing newline is normalized away; no literal
+        // text, so no blank-line seam either.
+        assert_eq!(params["prompt"], "Commit the work.");
+    }
+
+    #[test]
+    fn prompt_ref_with_an_empty_body_is_refused() {
+        // With AND without -p text: an empty body must refuse by name,
+        // never deliver a junk-prefixed "\n\ntext" composition.
+        for literal in ["", "do it anyway"] {
+            let host = StubHost::default();
+            host.script_rpc("list_prompts", Ok(prompt_lib()));
+            let mut cmd = send_cmd("solo", false);
+            if let Command::Send { prompt, prompt_ref, .. } = &mut cmd {
+                *prompt = literal.into();
+                *prompt_ref = Some("Empty".into());
+            }
+            let err = handle(&req(cmd, Some("tok")), &host).error.expect("refused");
+            assert_eq!(err.code, ErrorCode::Unsupported);
+            assert!(err.message.contains("empty body"), "{}", err.message);
+        }
+    }
+
+    #[test]
+    fn tab_prompt_ref_fails_before_the_tab_opens() {
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        let mut cmd = tab_cmd("solo", proto::TabKind::Agent { id: "claude".into() });
+        if let Command::Tab { prompt_ref, .. } = &mut cmd {
+            *prompt_ref = Some("nope".into());
+        }
+        let err = handle(&req(cmd, Some("tok")), &host).error.expect("refused");
+        assert_eq!(err.code, ErrorCode::NotFound);
+        {
+            let calls = host.rpc_calls.lock().unwrap();
+            assert_eq!(
+                calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(),
+                vec!["list_prompts"],
+                "a bad -P must never open a tab"
+            );
+        }
+
+        // -P alone counts as "a prompt rides this tab": refused on the
+        // promptless kinds before any RPC, exactly like -p.
+        let host = StubHost::default();
+        let mut cmd = tab_cmd("solo", proto::TabKind::Shell);
+        if let Command::Tab { prompt_ref, .. } = &mut cmd {
+            *prompt_ref = Some("builtin:review".into());
+        }
+        let err = handle(&req(cmd, Some("tok")), &host).error.expect("refused");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert!(host.rpc_calls.lock().unwrap().is_empty());
+        // And -P satisfies `--wait needs a prompt`.
+        let mut cmd = tab_cmd("solo", proto::TabKind::Agent { id: "claude".into() });
+        if let Command::Tab { prompt_ref, wait, .. } = &mut cmd {
+            *prompt_ref = Some("nope".into());
+            *wait = true;
+        }
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        let err = handle(&req(cmd, Some("tok")), &host).error.expect("refused");
+        // Reaches resolution (not the --wait guard), which then misses.
+        assert_eq!(err.code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn compose_prompt_contract() {
+        // Body, ONE blank line, text: the documented composition.
+        assert_eq!(compose_prompt("body", Some("text")), "body\n\ntext");
+        // ALL trailing body whitespace is normalized so the seam is
+        // exactly one blank line regardless of how the prompt was
+        // authored, including a trailing whitespace-only line (the
+        // Settings-textarea shape).
+        assert_eq!(compose_prompt("body\n\n", Some("text")), "body\n\ntext");
+        assert_eq!(compose_prompt("body\n \n", Some("text")), "body\n\ntext");
+        // ...and leading whitespace on the TEXT side: piped stdin often
+        // opens with blank lines (the `-p -` handoff shape).
+        assert_eq!(compose_prompt("body", Some("\n\ntext")), "body\n\ntext");
+        assert_eq!(compose_prompt("body\n", Some(" \ntext")), "body\n\ntext");
+        // No literal text (or blank): the body stands alone.
+        assert_eq!(compose_prompt("body\n", None), "body");
+        assert_eq!(compose_prompt("body", Some("   ")), "body");
+    }
+
+    #[test]
+    fn empty_prompt_selectors_are_refused_on_the_wire() {
+        // The shipped CLI pre-rejects `-P ""`, but the wire is a public
+        // surface (handle_send's rule): without the server guard, ""
+        // would title-match the unnamed placeholder prompts the GUI's
+        // "New prompt" button persists.
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        let err = handle(&req(Command::Prompts { selector: Some("  ".into()) }, Some("tok")), &host)
+            .error
+            .expect("refused");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        let mut cmd = send_cmd("solo", false);
+        if let Command::Send { prompt_ref, .. } = &mut cmd {
+            *prompt_ref = Some(String::new());
+        }
+        let err = handle(&req(cmd, Some("tok")), &host).error.expect("refused");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+    }
+
+    #[test]
+    fn send_prompt_ref_failures_never_reach_delivery() {
+        // The send-side fail-fast twin of the new/tab assertions: a bad
+        // selector must resolve (and fail) before send_prompt runs or a
+        // delivery id is registered.
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        let mut cmd = send_cmd("solo", false);
+        if let Command::Send { prompt_ref, .. } = &mut cmd {
+            *prompt_ref = Some("nope".into());
+        }
+        let err = handle(&req(cmd, Some("tok")), &host).error.expect("refused");
+        assert_eq!(err.code, ErrorCode::NotFound);
+        let calls = host.rpc_calls.lock().unwrap();
+        assert_eq!(
+            calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(),
+            vec!["list_prompts"],
+            "a bad -P must never reach send_prompt"
+        );
+    }
+
+    #[test]
+    fn prompts_show_budgets_an_oversized_body() {
+        // Reply lines cap at MAX_LINE_BYTES post-escape; a pasted-spec
+        // body must arrive trimmed with a marker, never break the
+        // connection (the logs/diff rule).
+        let big = "x".repeat(1024 * 1024);
+        let host = StubHost::default();
+        host.script_rpc(
+            "list_prompts",
+            Ok(serde_json::json!({ "prompts": [
+                { "id": "cst-big", "title": "Big", "body": big,
+                  "builtin": false, "enabled": true, "modified": false },
+            ]})),
+        );
+        let reply =
+            handle(&req(Command::Prompts { selector: Some("cst-big".into()) }, Some("tok")), &host);
+        // The whole REPLY line fits the wire cap.
+        assert!(serde_json::to_string(&reply).unwrap().len() as u64 <= proto::MAX_LINE_BYTES);
+        let Some(ReplyData::Prompts(p)) = reply.data else { panic!("expected prompts") };
+        let body = p.prompts[0].body.as_deref().expect("body present");
+        assert!(body.len() < 900 * 1024, "body was not trimmed: {} bytes", body.len());
+        // The FLAG carries the truncation; the body itself gets no
+        // marker text (a marker would pipe into an agent as
+        // instructions via `show | send -p -`).
+        assert!(p.prompts[0].truncated);
+        assert!(body.chars().all(|c| c == 'x'), "marker text leaked into the body");
+    }
+
+    #[test]
+    fn prompts_show_refuses_an_empty_body_and_clips_runaway_titles() {
+        // `show` refuses like `-P` does: printing nothing with exit 0
+        // would make the documented `show | send -p -` pipe fail later
+        // with a misleading stdin error. And a pasted-document TITLE
+        // must not blow the reply line (Settings has no length cap).
+        let big_title = "t".repeat(64 * 1024);
+        let host = StubHost::default();
+        host.script_rpc(
+            "list_prompts",
+            Ok(serde_json::json!({ "prompts": [
+                { "id": "cst-4", "title": "Empty", "body": " ",
+                  "builtin": false, "enabled": true, "modified": false },
+                { "id": "cst-long", "title": big_title, "body": "b",
+                  "builtin": false, "enabled": true, "modified": false },
+            ]})),
+        );
+        let err = handle(&req(Command::Prompts { selector: Some("Empty".into()) }, Some("tok")), &host)
+            .error
+            .expect("refused");
+        assert_eq!(err.code, ErrorCode::Unsupported);
+        assert!(err.message.contains("empty body"), "{}", err.message);
+        let reply = handle(&req(Command::Prompts { selector: None }, Some("tok")), &host);
+        assert!(serde_json::to_string(&reply).unwrap().len() as u64 <= proto::MAX_LINE_BYTES);
+        let Some(ReplyData::Prompts(p)) = reply.data else { panic!("expected prompts") };
+        let long = p.prompts.iter().find(|e| e.id == "cst-long").expect("listed");
+        assert!(long.title.len() < 3 * 1024, "title not clipped: {} bytes", long.title.len());
+        assert!(long.title.ends_with("..."));
+    }
+
+    #[test]
+    fn prompt_ref_cannot_bypass_the_prompt_size_gate() {
+        // The CLI's 900 KB gate ran on the literal alone; the body
+        // substitutes server-side, so the COMPOSED prompt re-checks.
+        let big = "y".repeat(950 * 1024);
+        let host = StubHost::default();
+        host.script_rpc(
+            "list_prompts",
+            Ok(serde_json::json!({ "prompts": [
+                { "id": "cst-huge", "title": "Huge", "body": big,
+                  "builtin": false, "enabled": true, "modified": false },
+            ]})),
+        );
+        let mut cmd = send_cmd("solo", false);
+        if let Command::Send { prompt_ref, .. } = &mut cmd {
+            *prompt_ref = Some("cst-huge".into());
+        }
+        let err = handle(&req(cmd, Some("tok")), &host).error.expect("refused");
+        assert_eq!(err.code, ErrorCode::Unsupported);
+        assert!(err.message.contains("too large"), "{}", err.message);
+        // Refused before any delivery machinery ran.
+        let calls = host.rpc_calls.lock().unwrap();
+        assert_eq!(calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(), vec!["list_prompts"]);
+    }
+
     // ── send ─────────────────────────────────────────────────────────
 
     fn send_cmd(task: &str, wait: bool) -> Command {
@@ -6701,6 +7326,7 @@ mod tests {
             task: Some(task.into()),
             project: None,
             prompt: "run the tests".into(),
+            prompt_ref: None,
             resume: false,
             fresh: false,
             wait,

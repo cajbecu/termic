@@ -421,3 +421,134 @@ describe("termic new --from: adopt an existing worktree (GH #169)", () => {
     expect(viaTab.error.message).toContain("cannot resume a session by id");
   });
 });
+
+// Phase 4: the prompt library over the REAL socket. The whole chain runs
+// in one thread no unit suite sees end to end: auth -> the list_prompts
+// webview RPC (the LIVE store, so edits made moments ago count) -> the
+// Rust selector resolver -> body substitution into the confirmed
+// delivery path -> the fake agent's PTY. The unit suites stub the
+// webview on one side and the store on the other; this is where a
+// broken registration or a shape drift between them surfaces.
+describe("termic prompts + -P: prompt library access (Phase 4)", () => {
+  let taskId: string;
+  let customId: string;
+
+  after(async () => {
+    // Leave the profile as found (the settings reorder spec's rule):
+    // delete exactly the prompt THIS spec minted, never a sweep of
+    // every custom prompt (a seeded or sibling-spec prompt is not ours
+    // to destroy).
+    if (customId) {
+      await browser.execute(
+        (id: string) => window.__termic!.usePromptLibrary.getState().deletePrompt(id),
+        customId,
+      );
+    }
+    if (taskId) await archiveTask(taskId);
+    // If the fail-fast case ever regresses, `new` creates the doomed
+    // task BEFORE rejecting the selector; archive it so one red test
+    // does not become cross-spec pollution. A miss is a harmless
+    // ok:false reply.
+    await rpc({ cmd: "archive", task: "cli-prompts-doomed" });
+  });
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+  });
+
+  it("prompts lists the shipped library: ids and flags, no bodies", async () => {
+    const r = await rpc({ cmd: "prompts" });
+    expect(r.ok).toBe(true);
+    const review = r.data.prompts.find((p: any) => p.id === "builtin:review");
+    expect(review).toBeTruthy();
+    expect(review.builtin).toBe(true);
+    expect(review.enabled).toBe(true);
+    // The list omits bodies; `show` is the body surface.
+    expect(review.body).toBeUndefined();
+  });
+
+  it("show resolves ids and live titles, including disabled prompts", async () => {
+    // Mint a custom prompt through the store's own action: the CLI must
+    // see it immediately (fire-time resolution against the live store).
+    customId = (await browser.execute(() =>
+      window.__termic!.usePromptLibrary.getState().addPrompt({
+        title: "E2E handoff", body: "E2E-BODY-LINE",
+      }),
+    )) as string;
+    const byId = await rpc({ cmd: "prompts", selector: customId });
+    expect(byId.ok).toBe(true);
+    expect(byId.data.prompts[0].body).toBe("E2E-BODY-LINE");
+    // Case-insensitive exact title resolves to the same identity.
+    const byTitle = await rpc({ cmd: "prompts", selector: "e2e HANDOFF" });
+    expect(byTitle.ok).toBe(true);
+    expect(byTitle.data.prompts[0].id).toBe(customId);
+    // Disabled = hidden from the dropdown, not dead: still resolvable.
+    await browser.execute(
+      (id: string) => window.__termic!.usePromptLibrary.getState().toggleEnabled(id),
+      customId,
+    );
+    const disabled = await rpc({ cmd: "prompts", selector: customId });
+    expect(disabled.ok).toBe(true);
+    expect(disabled.data.prompts[0].enabled).toBe(false);
+    // A miss is a typed error pointing at discovery.
+    const miss = await rpc({ cmd: "prompts", selector: "no-such-prompt" });
+    expect(miss.ok).toBe(false);
+    expect(miss.error.code).toBe("not_found");
+    expect(miss.error.message).toContain("termic prompts");
+  });
+
+  it("send -P composes the library body with the -p text into the agent", async () => {
+    // Guard the cross-`it` dependency: if the show case failed before
+    // minting the prompt, prompt_ref: undefined would be DROPPED by
+    // JSON.stringify and this would degrade into a passing plain send
+    // that then dies on the wrong assertion 20s later.
+    expect(customId).toBeTruthy();
+    taskId = await openTask("cli-prompts");
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          tid =>
+            (window.__termic!.useApp.getState().tabs[tid] ?? []).some(
+              (t: any) => t.ptyId,
+            ),
+          taskId,
+        ),
+      { timeout: 20_000, timeoutMsg: "default agent PTY never spawned" },
+    );
+    await browser.waitUntil(
+      async () => (await rpc({ cmd: "logs", task: "cli-prompts" })).ok === true,
+      { timeout: 20_000, interval: 250, timeoutMsg: "the CLI never resolved the default tab" },
+    );
+    const marker = `MARKER-LIB-${Date.now()}`;
+    const r = await rpc({
+      cmd: "send", task: "cli-prompts", prompt: marker, prompt_ref: customId,
+    });
+    expect(r.ok).toBe(true);
+    // Both halves of the composition reach the SAME agent: the library
+    // body line and the literal text behind it.
+    await browser.waitUntil(
+      async () => {
+        const logs = await rpc({ cmd: "logs", task: "cli-prompts" });
+        return (
+          logs.ok
+          && logs.data.data.includes("E2E-BODY-LINE")
+          && logs.data.data.includes(marker)
+        );
+      },
+      { timeout: 20_000, timeoutMsg: "the composed prompt never reached the agent" },
+    );
+  });
+
+  it("a bad -P fails fast: typed error, no task created", async () => {
+    const r = await rpc({
+      cmd: "new", name: "cli-prompts-doomed", project: "fixture-repo",
+      prompt_ref: "no-such-prompt",
+    });
+    expect(r.ok).toBe(false);
+    expect(r.error.code).toBe("not_found");
+    const list = await rpc({ cmd: "list" });
+    expect(list.ok).toBe(true);
+    expect(list.data.tasks.some((t: any) => t.name === "cli-prompts-doomed")).toBe(false);
+  });
+});

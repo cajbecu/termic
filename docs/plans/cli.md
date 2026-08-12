@@ -16,13 +16,16 @@ tab management (GH #138) landed in full: part 1 (`termic tab` + stable
 tab ids) and part 2 (`--tab <n|id|title>` targeting on
 send/wait/attach/logs, tabs listed in `status`, `tab -p`), protocol v6.
 `rename` (GH #153, label only; branch + dir keep their names) lands on
-top, protocol v7.
+top, protocol v7; `--from`/`--resume` (GH #169) on top of that,
+protocol v8. Phase 4 implemented - prompt library access (`termic
+prompts [show]`, `-P/--library` on new/send/tab, the `list_prompts`
+webview RPC + Rust-side `resolve_prompt_selector`), protocol v9 (see
+Phasing).
 Homebrew
 is settled, not pending: the cask ships, a CLI-only formula is a non-goal
 (see Distribution). `termic events --json` is SEQUENCED BEHIND hooks, not
 merely deferred: see Phasing.
-`termic mcp` stays parked under discussion and NOT approved (see
-Phasing). Sections below note where the implementation refined the
+Sections below note where the implementation refined the
 original design.
 
 A `termic` command that creates tasks, lists them with live agent state, focuses
@@ -219,13 +222,14 @@ scope until the surface stabilizes. Completions (`termic completions zsh`,
 clap-generated) complete task names dynamically over the socket.
 
 ```
-termic new [name] [-p|--prompt <text>] [--agent claude|gemini|codex|<custom>]
+termic new [name] [-p|--prompt <text>] [-P|--library <sel>]
+           [--agent claude|gemini|codex|<custom>]
            [--worktree|--main] [--base <branch>] [--sandbox off|monitor|enforce|enforce-fs]
            [--yolo] [--project <name>] [--open] [--wait]   # a new --attach flag stayed unbuilt:
            [--from <path>] [--resume <session-id>]         # `termic new x && termic attach x`
                                                            # composes, so the flag is deferred
                                                            # until someone misses it
-                                                           # --from (GH #169, protocol v7) ADOPTS an
+                                                           # --from (GH #169, protocol v8) ADOPTS an
                                                            # existing registered worktree instead of
                                                            # creating one (name optional: defaults to
                                                            # its branch; excludes mode/--base; no setup
@@ -240,7 +244,8 @@ termic list [--project <name>] [-q]           # tasks + workState + diff stat (a
 termic open [<task>]                          # raise window, select task (cwd-aware)
 termic status <task>                          # one task in depth: agent state, branch,
                                               # dirty file count, session count
-termic send <task>|--here -p <text> [--wait]  # prompt the RUNNING agent; --tab <n|id|title>
+termic send <task>|--here [-p <text>]         # prompt the RUNNING agent; --tab <n|id|title>
+           [-P|--library <sel>] [--wait]      # (-p and/or -P, Phase 4 composition)
            [--tab <sel>]                      # targets one strip tab (agent tabs only);
                                               # if the target is mid-turn
                                               # this QUEUES (runPrompt.ts:42 already queues
@@ -327,8 +332,14 @@ termic agents                                 # what --agent / --terminal accept
                                               # id, kind, enabled, installed, usable.
                                               # The registry is per-user and editable,
                                               # so static help cannot carry it
+termic prompts [show <sel>] [--json]          # Phase 4: what -P/--library accepts
+                                              # (id, title, builtin/custom, enabled,
+                                              # modified; the library is per-user and
+                                              # editable, the agents argument again).
+                                              # `show` prints one prompt's body and
+                                              # nothing else, so it pipes
 termic tab <task> [--agent <id>|--terminal <id>|--shell]      # GH #138. A tab INSIDE a
-           [-p <text> [--wait]]               # running task: the "+" menu as a verb, and
+           [-p <text>|-P <sel> [--wait]]      # running task: the "+" menu as a verb, and
                                               # like that menu it distinguishes agent /
                                               # custom-terminal / aux-shell kinds, because
                                               # they differ in sandbox, resume and YOLO.
@@ -545,13 +556,10 @@ tool it can discover. Two pieces, cheap because the mechanisms exist:
   parsing prose; under future scoped tokens it reflects the caller's
   effective scope, so a scoped agent learns exactly what it may do.
 
-This is the path to #59's workflow with no MCP required: the agent sees
+This is the path to #59's workflow: the agent sees
 `TERMIC_CLI` in its env, runs `termic help`, and calls
-`termic new fix-auth -p "..."` directly. That is the whole of #59, which is
-why the `termic mcp` shim it was written against is now parked under
-discussion rather than scheduled (see Phasing): it was the MCP-native upgrade
-for orchestrators that want tools instead of a shell, and no such orchestrator
-exists here yet. Env advertisement and the help conventions land with Phase 1,
+`termic new fix-auth -p "..."` directly. That is the whole of #59, and it
+was closed on that basis. Env advertisement and the help conventions land with Phase 1,
 when the verbs an agent needs exist.
 
 Two conventions field testing settled (Phase 1):
@@ -580,9 +588,8 @@ Two conventions field testing settled (Phase 1):
   `CLAUDE.md`, or any agent's instruction channel. A vendor-specific
   skill wrapper was considered and rejected: Claude-only distribution
   is not worth maintaining a second copy. Phase 2 adds an install
-  action for the block. `termic mcp` would supersede all of it for
-  MCP-native orchestrators, but it is parked under discussion (see
-  Phasing), so the instructions block is the distribution story.
+  action for the block; the instructions block is the distribution
+  story.
 
 ## Security: the socket is a sandbox boundary
 
@@ -975,32 +982,72 @@ client whose server is missing.
     user has seen one, the dock icon persists for the process lifetime,
     matching Mail/Messages.
 
-### `termic mcp`: under discussion, NOT approved
+### Phase 4: prompt library
 
-A stdio<->socket shim (~a day) that would make termic drivable by any MCP
-client - an outer Claude Code session orchestrating termic tasks - with the
-same auth and policy, no new surface. The converged pattern in the space
-(vibe-kanban, container-use).
+Implemented; protocol v9. The prompt library (builtins + custom
+prompts) was GUI-only; Phase 4 puts it on the CLI so scripts and
+agents can fire curated prompts without pasting bodies around.
 
-Parked 2026-07-24, the day 0.24.0 shipped the CLI. Not rejected on the merits:
-it is an overcomplication for the users that exist today. #59 is the use case
-it was meant to serve, and Phase 1's CLI closes that issue on its own (the
-agent reads `$TERMIC_CLI` from its env and runs `termic new`), so building it
-now means maintaining a second surface for nobody. #59 was closed saying as
-much.
+- **`termic prompts [--json]`** (plural, matching `agents`) lists id,
+  title, builtin/custom, enabled, modified. `termic prompts show <sel>`
+  prints the body, pipe-friendly.
+- **`-P/--library <sel>` on `new`, `send`, and `tab`**; `-p/--prompt`
+  stays literal text. The two COMPOSE: `-P` + `-p` delivers the library
+  body, a blank line, then the text, and `-p -` still reads stdin. That
+  composition is the cross-agent handoff enabler:
+  `termic result plan | termic new review --agent codex -P
+  builtin:review -p -`.
+- **Selectors mirror `resolve_tab_selector`'s identity philosophy**
+  (the stable id is the identity, the title is a convenience): exact id
+  first (`builtin:review`, custom UUID), then case-insensitive exact
+  title; ambiguity errors listing the candidates with ids, no match
+  errors pointing at `termic prompts`. Deleted builtins do not exist.
+  DISABLED prompts are fireable by explicit selector: disabled means
+  hidden from the dropdown, not dead. Documented contract: pin ids in
+  scripts, use titles interactively.
+- **Resolution happens in the webview at fire time** against the live
+  prompt store (`computePrompts`, src/store/prompts.ts), so user
+  overrides/renames/deletions are always current and unedited builtins
+  keep tracking shipped defaults.
+- **Plumbing**: a new read-only webview RPC `list_prompts` (the
+  cliRpc.ts registry); a Rust-side `resolve_prompt_selector` in
+  cli_server.rs substitutes the body into the existing confirmed
+  `prompt` path; the proto gains a `Prompts` command and an optional
+  `prompt_ref` on `New`/`Send`/`Tab`. `-P` errors resolve BEFORE task
+  creation or spawn (fail fast). Windowless mode works (the webview
+  runs). Sandbox posture unchanged: caged agents get no CLI surface,
+  listing included.
+- Phase 4 stays clear of `events --json`, which stays sequenced behind
+  hooks.
 
-What would reopen it: an MCP client with NO shell tool that someone actually
-wants to orchestrate termic from (Claude Desktop, an IDE plugin without a
-terminal). Nothing running inside Termic qualifies - every agent there has a
-PTY, which is the whole point of the app - so the case has to come from
-outside. The context-window objection that killed it the first time (an MCP
-tool definition costs tokens in every session; a CLI costs nothing until it
-runs, @MHohlios on #59) applies to that client too, so "someone asked" is not
-sufficient on its own.
+Implementation notes, where reality refined the sketch:
 
-If it is ever built, the design constraint stands: keep the tool count minimal
-and GENERATE the tool definitions from the same `help --json` metadata, so the
-CLI and MCP surfaces cannot drift.
+- `prompts show` is not a second wire verb: one `Prompts { selector }`
+  command either lists (no bodies) or resolves one entry (body
+  included), so the two CLI forms cannot drift.
+- `send.prompt` became optional on the wire (serde default) so `-P`
+  stands alone; the server rejects a request where both are empty.
+- Composition normalizes the body's trailing newlines, so the seam is
+  exactly one blank line however the prompt was authored. A prompt
+  with an EMPTY body is refused by name (the empty `-p` rule: an empty
+  prompt would mint a delivery id nothing ever reports on).
+- `help --json` renders a parent verb with an OPTIONAL subcommand
+  (`prompts` beside `prompts show`); the old loop emitted nested
+  entries only, which would have hidden the bare list form from the
+  machine surface.
+- With `-P`, `-p -` tolerates EMPTY stdin (it means "no extra text"):
+  the handoff pipe must not die when the upstream produced nothing.
+  Without `-P`, empty stdin stays a hard error, since there would be
+  nothing to send at all.
+- The list form fetches no bodies over the webview RPC (`bodies:
+  false`; the builtins alone are ~16 KB per call). Wire budgets follow
+  the logs/diff rule but with a twist: `prompts show` trims an
+  oversized body and flags it `truncated` plus a stderr warning, never
+  marker text inside the body, because `show` pipes into agents and a
+  marker would arrive as instructions. Titles (user-authored, no length
+  cap in Settings) are clipped for the wire, and the COMPOSED prompt
+  re-checks the CLI's 900 KB gate server-side, since `-P` substitutes
+  the body after that gate ran on the literal alone.
 
 ## Testing
 

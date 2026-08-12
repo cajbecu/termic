@@ -22,6 +22,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useApp } from "@/store/app";
 import { usePrefs } from "@/store/prefs";
+import { usePromptLibrary } from "@/store/prompts";
 import {
   onPtyData,
   projectAdd,
@@ -806,6 +807,40 @@ async function listAgentsHandler(): Promise<{ agents: RegistryEntry[] }> {
   return { agents: registryView() };
 }
 
+// ─────────────────────────── prompt library (Phase 4) ────────────────
+
+/** The prompt library, live: what `-P/--library` and `termic prompts`
+ *  resolve against. Bodies ride along so the server's selector resolver
+ *  can substitute them without a second round-trip; the LIST path asks
+ *  for `bodies: false` (it discards them, and the builtins alone are
+ *  ~16 KB per call) and gets empty strings in the field, keeping the
+ *  shape stable. Reading the store at request time is the whole design:
+ *  user overrides/renames/deletions are always current, deleted
+ *  builtins do not exist, and unedited builtins keep tracking the
+ *  shipped defaults (docs/plans/cli.md, Phase 4). The store hydrates
+ *  from localStorage at module import, so there is no cold-launch race
+ *  to guard. */
+// Exported for the vitest spec: the shape below is what the Rust
+// resolver deserializes, so a drift here must go red in a test.
+export function listPromptsHandler(params?: unknown): {
+  prompts: {
+    id: string; title: string; body: string;
+    builtin: boolean; enabled: boolean; modified: boolean;
+  }[];
+} {
+  const bodies = (params as { bodies?: unknown })?.bodies !== false;
+  return {
+    prompts: usePromptLibrary.getState().prompts.map(p => ({
+      id: p.id,
+      title: p.title,
+      body: bodies ? p.body : "",
+      builtin: p.builtin,
+      enabled: p.enabled,
+      modified: p.modified,
+    })),
+  };
+}
+
 // ─────────────────────────── new_tab (GH #138) ───────────────────────
 
 interface NewTabParams {
@@ -993,6 +1028,7 @@ const handlers: Record<string, Handler> = {
   new_task: newTaskHandler,
   new_tab: newTabHandler,
   list_agents: listAgentsHandler,
+  list_prompts: listPromptsHandler,
   send_prompt: sendPromptHandler,
   archive_task: archiveTaskHandler,
   rename_task: renameTaskHandler,

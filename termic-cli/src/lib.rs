@@ -193,6 +193,13 @@ sandbox to the project seeds. Streams setup-script \
 output to stdout until the agent spawns, then prints the task (name, branch, \
 path, agent). -p - reads the prompt from stdin.
 
+-P/--library delivers a prompt from the prompt library (see `termic \
+prompts`); with -p too, the body arrives first, then a blank line, then the \
+text, and a bad selector fails BEFORE the task is created. That composition \
+is the cross-agent handoff: `termic result plan | termic new review --agent \
+codex -P builtin:review -p -` starts a second agent on the first one's \
+output under a curated prompt.
+
 With --from <PATH> the task ADOPTS an existing worktree instead of creating \
 one: the path must already be a git worktree of the project's repo, the \
 branch comes from its HEAD, the name defaults to that branch, and no setup \
@@ -238,6 +245,12 @@ unknown project or agent, duplicate task), 3 agent stopped needing input, \
         /// Prompt to inject once the agent is ready. `-` reads stdin.
         #[arg(short, long)]
         prompt: Option<String>,
+        /// Prompt-library selector: a prompt id (builtin:review, a custom
+        /// prompt's UUID) or its exact title, case-insensitive. Delivers
+        /// that prompt's body; with -p too, the body, a blank line, then
+        /// the text. See `termic prompts`.
+        #[arg(short = 'P', long = "library", value_name = "SEL")]
+        library: Option<String>,
         /// Agent CLI id (claude, codex, ...). Default: the project's default agent.
         #[arg(long)]
         agent: Option<String>,
@@ -338,7 +351,9 @@ a new agent without context; without either flag that case is an error \
 naming both. If a stored session no longer resolves, --resume falls back to \
 a fresh agent and the prompt still delivers there (the app's own recovery \
 path). -p - reads the prompt from stdin, so `git diff | termic send \
-foo -p -` works. --here targets the surrounding task ($TERMIC_TASK_ID); \
+foo -p -` works. -P/--library delivers a prompt from the prompt library \
+(see `termic prompts`); with -p too, the body arrives first, then a blank \
+line, then the text. --here targets the surrounding task ($TERMIC_TASK_ID); \
 without <TASK> or --here the task resolves from the current directory.
 
 Without --wait the command returns once the prompt is delivered (queued and \
@@ -369,9 +384,16 @@ stopped needing input, 4 app not running, 5 CLI disabled, 6 refused, \
         /// Target the task this shell runs inside ($TERMIC_TASK_ID).
         #[arg(long, conflicts_with = "task")]
         here: bool,
-        /// The prompt. `-` reads stdin.
-        #[arg(short, long)]
-        prompt: String,
+        /// The prompt. `-` reads stdin. At least one of -p / -P is
+        /// required.
+        #[arg(short, long, required_unless_present = "library")]
+        prompt: Option<String>,
+        /// Prompt-library selector: a prompt id (builtin:review, a custom
+        /// prompt's UUID) or its exact title, case-insensitive. Delivers
+        /// that prompt's body; with -p too, the body, a blank line, then
+        /// the text. See `termic prompts`.
+        #[arg(short = 'P', long = "library", value_name = "SEL")]
+        library: Option<String>,
         /// No agent running: restore the last session, then deliver.
         #[arg(long)]
         resume: bool,
@@ -599,6 +621,28 @@ Exit codes: 0 listed, 1 error, 4 app not running, 5 CLI disabled, \
 6 refused, 8 connection lost."
     )]
     Agents,
+
+    /// List the prompt library: what -P/--library accepts.
+    #[command(
+        after_help = "Answers \"what can I pass to -P?\". The library is per-user and editable \
+in Settings (built-ins plus custom prompts), so it cannot live in static \
+help. One row per prompt: id, title, builtin or custom, enabled, modified.
+The ID is the stable identity (builtin:review, or a custom prompt's UUID); \
+titles are user-editable conveniences. Pin ids in scripts, use titles \
+interactively. A prompt disabled in Settings is hidden from the GUI \
+dropdown but still listed here and still fireable by explicit selector; \
+deleted built-ins are not listed and do not resolve.
+
+Prints a table on stdout. With --output-format json, one object: \
+{\"prompts\": [{\"id\", \"title\", \"builtin\", \"enabled\", \"modified\"}]}.
+
+Exit codes: 0 listed, 1 error, 4 app not running, 5 CLI disabled, \
+6 refused, 8 connection lost."
+    )]
+    Prompts {
+        #[command(subcommand)]
+        cmd: Option<PromptsCmd>,
+    },
     /// Open a tab inside a running task: the "+" tab menu as a command.
     #[command(
         after_help = "Opens an agent, custom-terminal or shell tab in a task that is already \
@@ -625,7 +669,9 @@ new tab's id is the target, so a second tab opening meanwhile cannot \
 steal it. Without --wait the command returns once the injection is \
 underway (mode \"spawned\" stays unconfirmed, like send); with --wait it \
 blocks until the prompt is confirmed delivered AND that turn settles, the \
-send --wait contract. -p - reads the prompt from stdin.
+send --wait contract. -p - reads the prompt from stdin. -P/--library \
+delivers a prompt from the prompt library (agent kinds only; same \
+composition as new/send), and a bad selector fails before the tab opens.
 
 LIMITATION, --shell and --terminal only: those tabs are write-only from the \
 CLI. They open, and you can use them in the window, but `attach` and `logs` \
@@ -642,9 +688,10 @@ stream-json under -p, NDJSON events (queued, prompt_delivered, state, \
 heartbeat) ending in one result line.
 
 Exit codes: 0 opened (with --wait: settled done), 1 error (unknown or \
-ambiguous task, unusable agent id, prompt on a non-agent tab), 3 agent \
-stopped needing input, 4 app not running, 5 CLI disabled, 6 refused, \
-7 --timeout expired, 8 connection lost, 9 prompt never delivered."
+ambiguous task, unusable agent id, prompt on a non-agent tab, --wait \
+without -p/-P), 3 agent stopped needing input, 4 app not running, 5 CLI \
+disabled, 6 refused, 7 --timeout expired, 8 connection lost, 9 prompt \
+never delivered."
     )]
     Tab {
         /// Task name, task id, or qualified project/name.
@@ -665,6 +712,13 @@ stopped needing input, 4 app not running, 5 CLI disabled, 6 refused, \
         /// (agent kinds only). `-` reads stdin.
         #[arg(short, long, conflicts_with_all = ["shell", "terminal"])]
         prompt: Option<String>,
+        /// Prompt-library selector: a prompt id (builtin:review, a custom
+        /// prompt's UUID) or its exact title, case-insensitive. Delivers
+        /// that prompt's body; with -p too, the body, a blank line, then
+        /// the text. See `termic prompts`.
+        #[arg(short = 'P', long = "library", value_name = "SEL",
+              conflicts_with_all = ["shell", "terminal"])]
+        library: Option<String>,
         /// Session id the new tab's agent resumes (e.g. a claude session
         /// started outside Termic). Needs --agent, and one with id-resume
         /// support; the id is not validated, a wrong one surfaces as the
@@ -672,8 +726,8 @@ stopped needing input, 4 app not running, 5 CLI disabled, 6 refused, \
         #[arg(long, value_name = "SESSION_ID", requires = "agent")]
         resume: Option<String>,
         /// Block until the prompt is confirmed delivered and its turn
-        /// settles (or the agent asks for input).
-        #[arg(long, requires = "prompt")]
+        /// settles (or the agent asks for input). Needs -p or -P.
+        #[arg(long)]
         wait: bool,
         /// Give up waiting after this long (exit 7). E.g. 90, 30s, 5m, 1h.
         #[arg(long, requires = "wait", value_name = "DURATION")]
@@ -789,6 +843,34 @@ surface instead of parsing prose."
 }
 
 #[derive(Subcommand, Debug)]
+pub enum PromptsCmd {
+    /// Print one prompt's body on stdout (pipe-friendly).
+    #[command(
+        after_help = "Resolves the selector exactly as -P does: an exact prompt id first \
+(builtin:review, or a custom prompt's UUID), then a case-insensitive exact \
+title match. A title matching more than one prompt is an error listing the \
+candidates with their ids; a disabled prompt still resolves (disabled means \
+hidden from the GUI dropdown, not dead). Prints the body and nothing else, \
+so it pipes.
+
+A body too large for the reply line arrives trimmed: a warning goes to \
+stderr and the json carries \"truncated\": true (the body itself gets no \
+marker text, so piping it stays clean). An empty-bodied prompt is refused \
+by name, the same rule as -P.
+
+With --output-format json, one object: {\"id\", \"title\", \"builtin\", \
+\"enabled\", \"modified\", \"body\", \"truncated\" (only when trimmed)}.
+
+Exit codes: 0 printed, 1 error (unknown or ambiguous selector, empty \
+body), 4 app not running, 5 CLI disabled, 6 refused, 8 connection lost."
+    )]
+    Show {
+        /// Prompt id (builtin:review, a custom prompt's UUID) or title.
+        selector: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum ProjectCmd {
     /// Register a directory as a project (`termic project add .`).
     #[command(
@@ -864,6 +946,30 @@ pub fn cage_refused(sandbox: Option<&str>, mode: Option<&str>) -> bool {
     sandbox == Some("1") && mode != Some("monitor")
 }
 
+/// Usage guards that must fail BEFORE the socket is touched, and
+/// especially before auto-launch: a typo must never boot the app.
+/// Pure so that no-boot property is testable without an environment.
+fn pre_connect_guard(cmd: &Cmd) -> Result<(), CliError> {
+    // `-P` is a selector, never stdin; an empty one fails here rather
+    // than as a server lookup.
+    if let Cmd::New { library: Some(l), .. }
+    | Cmd::Send { library: Some(l), .. }
+    | Cmd::Tab { library: Some(l), .. } = cmd
+    {
+        if l.trim().is_empty() {
+            return Err(CliError::new(exit_code::ERROR, "the prompt selector is empty"));
+        }
+    }
+    // `tab --wait` without -p/-P: clap cannot express the -p OR -P
+    // requirement, so the guard is runtime (the server enforces it
+    // too). Note this deliberately exits 1, not clap's 2: the contract
+    // reserves 2 for clap itself, and this check runs after parsing.
+    if let Cmd::Tab { wait: true, prompt: None, library: None, .. } = cmd {
+        return Err(CliError::new(exit_code::ERROR, "--wait needs a prompt to wait on"));
+    }
+    Ok(())
+}
+
 fn effective_format(cli: &Cli) -> OutputFormat {
     if cli.json { OutputFormat::Json } else { cli.output_format }
 }
@@ -892,13 +998,20 @@ fn execute(cli: &Cli) -> Result<Output, CliError> {
         return help_output(command.as_deref(), format);
     }
 
+    pre_connect_guard(&cli.cmd)?;
     // Resolve `-p -` stdin BEFORE touching the socket: a generator
     // slower than the server's 30s idle timeout must not turn a
     // healthy pipe into "connection lost".
+    let has_library = matches!(
+        &cli.cmd,
+        Cmd::New { library: Some(_), .. }
+            | Cmd::Send { library: Some(_), .. }
+            | Cmd::Tab { library: Some(_), .. }
+    );
     let prompt = match &cli.cmd {
         Cmd::New { prompt: Some(p), .. }
-        | Cmd::Send { prompt: p, .. }
-        | Cmd::Tab { prompt: Some(p), .. } => Some(resolve_prompt(p)?),
+        | Cmd::Send { prompt: Some(p), .. }
+        | Cmd::Tab { prompt: Some(p), .. } => Some(resolve_prompt(p, has_library)?),
         _ => None,
     };
 
@@ -1038,7 +1151,40 @@ fn execute(cli: &Cli) -> Result<Output, CliError> {
             };
             Ok(Output::ok(final_stdout(format, &output::agents_text(&a), &a)))
         }
-        Cmd::Tab { task, project, agent, terminal, shell, prompt: _, resume, wait, timeout } => {
+        Cmd::Prompts { cmd } => {
+            let selector =
+                cmd.as_ref().map(|PromptsCmd::Show { selector }| selector.clone());
+            let data = client::request(
+                &mut conn,
+                proto::Command::Prompts { selector: selector.clone() },
+                &token,
+            )?;
+            let proto::ReplyData::Prompts(p) = data else {
+                return Err(CliError::new(exit_code::ERROR, "unexpected reply to prompts"));
+            };
+            if selector.is_some() {
+                // `show`: the body IS the stdout, so it pipes (`termic
+                // prompts show review | pbcopy`); json emits the entry.
+                let Some(one) = p.prompts.first() else {
+                    return Err(CliError::new(exit_code::ERROR, "unexpected reply to prompts show"));
+                };
+                // Truncation is a FLAG plus a stderr warning, never
+                // marker text inside the body: the body pipes into
+                // agents, and a marker would arrive as instructions.
+                if one.truncated && format == OutputFormat::Text {
+                    eprintln!(
+                        "termic: the body was truncated to fit the reply; edit the prompt in Termic for the rest"
+                    );
+                }
+                let body = one.body.clone().unwrap_or_default();
+                Ok(Output::ok(final_stdout(format, body.trim_end(), one)))
+            } else {
+                Ok(Output::ok(final_stdout(format, &output::prompts_text(&p.prompts), &p)))
+            }
+        }
+        Cmd::Tab {
+            task, project, agent, terminal, shell, prompt: _, library, resume, wait, timeout,
+        } => {
             let kind = if let Some(id) = agent {
                 proto::TabKind::Agent { id: id.clone() }
             } else if let Some(id) = terminal {
@@ -1049,16 +1195,19 @@ fn execute(cli: &Cli) -> Result<Output, CliError> {
                 proto::TabKind::Default
             };
             if let Some(p) = &prompt {
-                if p.trim().is_empty() {
+                if p.trim().is_empty() && library.is_none() {
                     return Err(CliError::new(exit_code::ERROR, "the prompt is empty"));
                 }
             }
+            // (--wait needs -p or -P; guarded pre-socket in execute so a
+            // usage typo never auto-launches the app.)
             let timeout_ms = timeout.as_deref().map(parse_duration_ms).transpose()?;
             let wire = proto::Command::Tab {
                 task: task.clone(),
                 project: project.clone(),
                 kind,
                 prompt: prompt.clone(),
+                prompt_ref: library.clone(),
                 wait: *wait,
                 timeout_ms,
                 resume: resume.clone(),
@@ -1066,7 +1215,7 @@ fn execute(cli: &Cli) -> Result<Output, CliError> {
             };
             // A prompt streams (queued/prompt_delivered/state events, the
             // send shape); a bare open stays one request/reply.
-            let streamed = prompt.is_some();
+            let streamed = prompt.is_some() || library.is_some();
             if *wait && format == OutputFormat::Text {
                 eprintln!(
                     "termic: watching the agent (Ctrl-C stops watching; the task keeps running)"
@@ -1168,6 +1317,7 @@ fn execute_new(
     let Cmd::New {
         name,
         prompt: _,
+        library,
         agent,
         worktree,
         main,
@@ -1184,7 +1334,7 @@ fn execute_new(
     else {
         unreachable!()
     };
-    if prompt.as_deref().is_some_and(|p| p.trim().is_empty()) {
+    if prompt.as_deref().is_some_and(|p| p.trim().is_empty()) && library.is_none() {
         return Err(CliError::new(exit_code::ERROR, "the prompt is empty"));
     }
     let timeout_ms = timeout.as_deref().map(parse_duration_ms).transpose()?;
@@ -1209,6 +1359,7 @@ fn execute_new(
     let wire = proto::Command::New {
         name: name.clone().unwrap_or_default(),
         prompt,
+        prompt_ref: library.clone(),
         agent: agent.clone(),
         mode,
         base: base.clone(),
@@ -1282,7 +1433,7 @@ fn prompt_size_ok(s: &str) -> Result<(), CliError> {
 /// stdin is read at most `PROMPT_MAX_BYTES` + 1 raw bytes, never
 /// buffered unboundedly; the escaped-size check then applies to both
 /// sources.
-fn resolve_prompt(p: &str) -> Result<String, CliError> {
+fn resolve_prompt(p: &str, library: bool) -> Result<String, CliError> {
     if p != "-" {
         prompt_size_ok(p)?;
         return Ok(p.to_string());
@@ -1293,14 +1444,28 @@ fn resolve_prompt(p: &str) -> Result<String, CliError> {
         .take(PROMPT_MAX_BYTES as u64 + 1)
         .read_to_end(&mut buf)
         .map_err(|e| CliError::new(exit_code::ERROR, format!("could not read the prompt from stdin ({e})")))?;
+    stdin_prompt(&buf, library)
+}
+
+/// The stdin half of `-p -`, split out so the empty-stdin rule is
+/// unit-testable. With `-P` alongside, the library body is a complete
+/// prompt on its own and empty stdin just means "no extra text": the
+/// flagship handoff pipe (`termic result plan | termic new review
+/// -P builtin:review -p -`) must not die when the upstream produced
+/// nothing. Without it, empty stdin stays a hard error (there would be
+/// nothing to send at all).
+fn stdin_prompt(buf: &[u8], library: bool) -> Result<String, CliError> {
     if buf.len() > PROMPT_MAX_BYTES {
         return Err(CliError::new(
             exit_code::ERROR,
             format!("the prompt is too large (limit {} KB)", PROMPT_MAX_BYTES / 1024),
         ));
     }
-    let trimmed = String::from_utf8_lossy(&buf).trim_end().to_string();
+    let trimmed = String::from_utf8_lossy(buf).trim_end().to_string();
     if trimmed.is_empty() {
+        if library {
+            return Ok(String::new());
+        }
         return Err(CliError::new(exit_code::ERROR, "the prompt from stdin is empty"));
     }
     prompt_size_ok(&trimmed)?;
@@ -1316,12 +1481,15 @@ fn execute_send(
     format: OutputFormat,
     prompt: Option<String>,
 ) -> Result<Output, CliError> {
-    let Cmd::Send { task, here, prompt: _, resume, fresh, wait, timeout, tab, project } = &cli.cmd
+    let Cmd::Send { task, here, prompt: _, library, resume, fresh, wait, timeout, tab, project } =
+        &cli.cmd
     else {
         unreachable!()
     };
-    let prompt = prompt.expect("send resolves its prompt before connecting");
-    if prompt.trim().is_empty() {
+    // clap guarantees -p or -P; an empty literal only passes with -P
+    // (the composition ignores it).
+    let prompt = prompt.unwrap_or_default();
+    if prompt.trim().is_empty() && library.is_none() {
         return Err(CliError::new(exit_code::ERROR, "the prompt is empty"));
     }
     let task = match (task, here) {
@@ -1343,6 +1511,7 @@ fn execute_send(
         task,
         project: project.clone(),
         prompt,
+        prompt_ref: library.clone(),
         resume: *resume,
         fresh: *fresh,
         wait: *wait,
@@ -1792,7 +1961,9 @@ fn verb_exit_codes(name: &str) -> Vec<i32> {
     const COMMON: &[i32] = &[0, 1, 4, 5, 6, 8];
     const WATCHED: &[i32] = &[0, 1, 3, 4, 5, 6, 7, 8];
     match name {
-        "new" | "send" => {
+        // tab included: -p/-P ride the send delivery + wait machinery,
+        // so it produces 3/7/9 exactly as send does.
+        "new" | "send" | "tab" => {
             let mut v = WATCHED.to_vec();
             v.push(9);
             v
@@ -1896,6 +2067,12 @@ pub fn machine_help() -> serde_json::Value {
             continue;
         }
         if sub.has_subcommands() {
+            // A parent whose subcommand is OPTIONAL (`prompts` lists on
+            // its own) is a verb in its own right, beside the nested
+            // ones; `project` (subcommand required) stays nested-only.
+            if !sub.is_subcommand_required_set() {
+                commands.push(command_entry(sub, sub.get_name()));
+            }
             for nested in sub.get_subcommands() {
                 let qualified = format!("{} {}", sub.get_name(), nested.get_name());
                 commands.push(command_entry(nested, &qualified));
@@ -2092,6 +2269,115 @@ mod tests {
     }
 
     #[test]
+    fn prompts_and_library_flag_rules() {
+        // The list form and the show form both parse; show needs a selector.
+        assert!(Cli::try_parse_from(["termic", "prompts"]).is_ok());
+        assert!(Cli::try_parse_from(["termic", "prompts", "show", "builtin:review"]).is_ok());
+        assert!(Cli::try_parse_from(["termic", "prompts", "show"]).is_err());
+
+        // -P rides new/send/tab, alone or beside -p.
+        assert!(Cli::try_parse_from(["termic", "new", "x", "-P", "builtin:review"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["termic", "new", "x", "-P", "builtin:review", "-p", "extra"])
+                .is_ok()
+        );
+        // send: -P satisfies the prompt requirement on its own.
+        assert!(Cli::try_parse_from(["termic", "send", "foo", "-P", "Review"]).is_ok());
+        assert!(Cli::try_parse_from(["termic", "send", "foo", "-P", "Review", "-p", "-"]).is_ok());
+        assert!(Cli::try_parse_from(["termic", "send", "foo"]).is_err(), "-p or -P is required");
+        // tab: -P conflicts with the promptless kinds, exactly like -p.
+        assert!(Cli::try_parse_from(["termic", "tab", "foo", "-P", "Review"]).is_ok());
+        assert!(Cli::try_parse_from(["termic", "tab", "foo", "--shell", "-P", "Review"]).is_err());
+        assert!(
+            Cli::try_parse_from(["termic", "tab", "foo", "--terminal", "lazygit", "-P", "x"])
+                .is_err()
+        );
+        // tab --wait needs -p or -P; the guard is runtime (clap cannot
+        // express the OR), so the flag itself still parses bare.
+        assert!(Cli::try_parse_from(["termic", "tab", "foo", "--wait", "-P", "Review"]).is_ok());
+    }
+
+    #[test]
+    fn empty_stdin_is_fine_with_a_library_prompt() {
+        // The flagship handoff (`termic result plan | termic new review
+        // -P builtin:review -p -`) must not die when the upstream
+        // produced nothing: with -P the body is the whole prompt.
+        assert_eq!(stdin_prompt(b"", true).unwrap(), "");
+        assert_eq!(stdin_prompt(b"  \n", true).unwrap(), "");
+        // Without -P, empty stdin stays a hard error.
+        assert!(stdin_prompt(b"", false).is_err());
+        assert!(stdin_prompt(b"  \n", false).is_err());
+        // Real text is unaffected either way.
+        assert_eq!(stdin_prompt(b"do it\n", true).unwrap(), "do it");
+        assert_eq!(stdin_prompt(b"do it\n", false).unwrap(), "do it");
+    }
+
+    #[test]
+    fn pre_connect_guards_fire_without_touching_anything() {
+        // These guards exist so a usage typo never auto-launches the
+        // app; testing the pure helper (not execute) means a regression
+        // fails the test instead of booting a real Termic on the dev
+        // machine.
+        let parse = |args: &[&str]| Cli::try_parse_from(args).expect("parses").cmd;
+        let err = pre_connect_guard(&parse(&["termic", "tab", "foo", "--wait"])).unwrap_err();
+        assert_eq!(err.code, exit_code::ERROR);
+        assert_eq!(err.message, "--wait needs a prompt to wait on");
+        let err =
+            pre_connect_guard(&parse(&["termic", "send", "foo", "-P", "  "])).unwrap_err();
+        assert_eq!(err.message, "the prompt selector is empty");
+        // The valid shapes pass through untouched.
+        for ok in [
+            &["termic", "tab", "foo", "--wait", "-P", "Review"][..],
+            &["termic", "tab", "foo", "--wait", "-p", "x"][..],
+            &["termic", "new", "x", "-P", "builtin:review"][..],
+        ] {
+            assert!(pre_connect_guard(&parse(ok)).is_ok(), "{ok:?}");
+        }
+    }
+
+    #[test]
+    fn prompts_render_contract() {
+        let entries = vec![
+            proto::PromptEntry {
+                id: "builtin:review".into(),
+                title: "Review".into(),
+                builtin: true,
+                enabled: true,
+                modified: true,
+                body: None,
+                truncated: false,
+            },
+            proto::PromptEntry {
+                id: "3f1c0d6e-aaaa-bbbb-cccc-1234567890ab".into(),
+                title: "Ship it".into(),
+                builtin: false,
+                enabled: false,
+                modified: false,
+                body: None,
+                truncated: false,
+            },
+        ];
+        let text = output::prompts_text(&entries);
+        // Ids lead (the stable selector a script pins); flags render as
+        // words, and a custom prompt's MODIFIED cell is a dash, not "no".
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].starts_with("ID"), "{text}");
+        assert!(lines[1].starts_with("builtin:review"), "{text}");
+        assert!(lines[1].contains("builtin") && lines[1].contains("yes"), "{text}");
+        assert!(lines[2].contains("custom") && lines[2].ends_with("-"), "{text}");
+        assert_eq!(output::prompts_text(&[]), "The prompt library is empty.");
+        // The wire's internal "kind" tag must not leak into --json output.
+        let v: serde_json::Value = serde_json::from_str(&output::json(
+            &proto::PromptsData { prompts: entries },
+        ))
+        .unwrap();
+        assert_eq!(v["prompts"][0]["id"], "builtin:review");
+        assert!(v.get("kind").is_none());
+        // The list omits bodies (additive contract: absent, not null).
+        assert!(v["prompts"][0].get("body").is_none());
+    }
+
+    #[test]
     fn rename_positional_rules() {
         // One positional is the NAME (task falls back to $TERMIC_TASK_ID
         // then cwd); two are TASK + NAME. allow_missing_positional does
@@ -2202,7 +2488,7 @@ mod tests {
             "list", "status", "open", "new", "send", "attach", "logs", "result", "diff",
             "apply", "path", "wait", "archive", "tab", "agents", "quit", "project add",
             "project list",
-            "project remove", "help",
+            "project remove", "help", "prompts", "prompts show",
         ] {
             assert!(names.contains(&expected), "missing {expected} in {names:?}");
         }
@@ -2213,6 +2499,7 @@ mod tests {
         let new_cmd = by_name("new");
         assert_eq!(new_cmd["exit_codes"]["9"], "prompt never delivered");
         assert_eq!(by_name("send")["exit_codes"]["9"], "prompt never delivered");
+        assert_eq!(by_name("tab")["exit_codes"]["9"], "prompt never delivered");
         assert!(by_name("apply")["exit_codes"]["10"]
             .as_str()
             .unwrap()
@@ -2240,7 +2527,7 @@ mod tests {
             .iter()
             .filter_map(|f| f["flag"].as_str())
             .collect();
-        for f in ["--prompt", "--agent", "--wait", "--sandbox", "--timeout"] {
+        for f in ["--prompt", "--library", "--agent", "--wait", "--sandbox", "--timeout"] {
             assert!(flags.contains(&f), "missing {f} in {flags:?}");
         }
         // And the whole machine surface obeys the copy rule.
