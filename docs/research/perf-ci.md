@@ -61,12 +61,39 @@ const BUDGETS = {
 ```
 
 A 75 ms median keystroke budget is not a "performance trumps polish"
-bar, it is a "not visibly broken" bar. And `terminal-perf.yml`, the only
-workflow in that area, runs on `workflow_dispatch` plus
-`schedule: cron '30 8 * * *'`, on `ubuntu-latest` under `xvfb`, uploads
-a JSON artifact with 14-day retention, and never invokes the budget
-checker. Its comment: exercise it daily "so terminal throughput
+bar, it is a "not visibly broken" bar. That looseness is the tell: it is
+what survives on a shared runner.
+
+**These budgets ARE enforced in CI, nightly.** `terminal-perf.yml` runs
+on `workflow_dispatch` plus `schedule: cron '30 8 * * *'`, on
+`ubuntu-latest` under `xvfb`, `timeout-minutes: 45`. Its build step is
+`npx electron-vite build --mode e2e`, and the run step is
+`xvfb-run --auto-servernum env SKIP_BUILD=1 pnpm run
+test:e2e:terminal-perf:scale:report` under `set -euo pipefail`.
+
+That script, `run-terminal-scale-perf-report-gate.mjs`, is a chain:
+
+1. `run-terminal-scale-perf-e2e.mjs --reporter=json`
+2. `summarize-terminal-perf-report.mjs`
+3. `check-terminal-perf-report-budgets.mjs` — **returns its exit code
+   immediately if nonzero**
+4. `generate-terminal-perf-html-report.mjs`
+
+So a budget violation fails the nightly job. The JSON report uploads on
+`always()` with 14-day retention; Playwright traces upload on `failure()`
+with 7 days. The workflow's own comment explains the placement: "keep the
+expensive scale run off PRs, but exercise it daily so terminal throughput
 regressions are caught before users report typing lag".
+
+The distinction that matters is therefore **nightly vs per-PR**, not
+gated vs ungated. Orca gates app-level timings; it just refuses to put
+them on the PR path, because the run is expensive and the signal needs
+medians over many samples rather than one observation.
+
+Everything above is parameterised through `workflow_dispatch` inputs
+(pane counts, frame counts, pressure chars, a Playwright `--grep`), so a
+human chasing a regression can re-run one arm at a chosen scale without
+editing the workflow. That is a large part of why it stays useful.
 
 **But `pr.yml` does gate, on a different class of metric entirely.**
 This is the part the first draft of this doc got wrong. Every PR runs,
@@ -96,15 +123,22 @@ Similarly `computer-e2e.yml` runs
 on PRs. A benchmark script used as a *behavioural* assertion, not a
 timing one.
 
-So the accurate statement is: **Orca gates PRs on counts, static facts
-and headless pure-JS microbenchmarks with order-of-magnitude time
-headroom. It gates nothing on app-level timings, CPU, or GPU, and its
-instruments for those run nightly and report-only.**
+So the accurate statement, split by *where* rather than by whether:
 
-That is a far more useful finding than "they gate nothing", and it is
-independent convergence on the tier split proposed below. Note in
-particular that their one runtime PR gate, Zustand selector fan-out, is
-*termic's bear trap 5*.
+- **On PRs:** counts, static facts, and headless pure-JS microbenchmarks
+  with order-of-magnitude time headroom. All on Linux.
+- **Nightly:** app-level latency budgets, enforced, on Linux under xvfb.
+- **Never in CI at all:** idle CPU, startup, main-thread jank, daemon
+  cold start, hang-watchdog memory. Verified by grepping all 28
+  workflows for those script names: no hits. They are local tools.
+
+The axis is not gated vs ungated. It is **what the metric is** (a count
+can gate a PR; a latency distribution needs a nightly with many samples)
+and **whether the platform can be Linux** (everything Orca gates, is).
+
+Note in particular that their one runtime PR gate, Zustand selector
+fan-out, is *termic's bear trap 5*, and that the metrics they never run
+in CI are exactly the four our roadmap item names.
 
 ## Finding: why termic cannot copy the runner strategy
 
@@ -221,17 +255,34 @@ noise-sensitive than CPU; a leak is a monotonic trend, not a percentage.
 iterations, never on absolute RSS, and start it report-only until real
 CI runs show the distribution.
 
-### Tier 2: nightly, report-only
+### Tier 2: nightly, off the PR path
 
-Same shape as Orca's `terminal-perf.yml`, for the same reason. Cron plus
-`workflow_dispatch` on `macos-14`, JSON artifact.
+Same shape as Orca's `terminal-perf.yml`. Cron plus `workflow_dispatch`
+on `macos-14`, JSON artifact on `always()`, traces on `failure()`.
 
 - Cold start to first paint. Needs a first-paint marker; none exists.
 - Main-thread jank as frame-gap counts, bucketed over 50 ms and 250 ms.
 - Absolute RSS at steady state.
 
-Trend lines a human reads. The value is that "feels slower lately"
-becomes a chart with a bisect range.
+**Start ungated, but do not assume it must stay that way.** Orca's
+nightly enforces its budgets and fails the job, which is the one thing
+this doc originally got wrong about them. The reasons that works for
+them are worth copying deliberately rather than by accident:
+
+- The thresholds are absolute and very loose (75 ms for a keystroke),
+  chosen so runner noise cannot reach them.
+- The metrics are medians and worst-cases over many synthetic samples,
+  not one observation.
+- It runs on Linux, where there is no GPU variance to speak of. Termic
+  cannot copy this part, which is the single biggest reason to hold the
+  gate until there is distribution data from real runs.
+- Everything is parameterised via `workflow_dispatch` inputs, so a human
+  chasing a regression re-runs one arm without editing the workflow.
+  Build this in from the start; it is most of what makes a nightly
+  worth reading instead of ignoring.
+
+The near-term value is a timestamped series, so "feels slower lately"
+becomes a chart with a bisect range. A gate can come later, from data.
 
 ### Tier 3: local only, real hardware
 
