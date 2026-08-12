@@ -303,6 +303,41 @@ describe("closeTab", () => {
     useApp.getState().closeTab(taskId, "ghost-id");
     expect(getTabsRef(taskId)).toBe(before);
   });
+
+  it("a close that matches nothing does not rewrite the durable set (GH #185)", () => {
+    // The no-op above is about the STORE; this is about DISK. closeTab used
+    // to re-sync persisted_tabs unconditionally, even after deciding there
+    // was nothing to close, and syncDurableTabs rebuilds that set from the
+    // store's tab list. On a task with no tabs loaded (never opened this
+    // session) the rebuild kept only the default tab and dropped every other
+    // agent's session_id, permanently, while closing nothing at all.
+    //
+    // Unreachable from the GUI, which never names a tab it is not rendering.
+    // `termic tab close` can name one on an unmounted task, which is how it
+    // surfaced; that verb refuses such tasks, and this pins the floor under
+    // it so the store is safe regardless of who calls.
+    const taskId = "ws1";
+    useApp.setState(s => ({
+      tabs: { ...s.tabs, [taskId]: [] },
+      tasks: [{
+        id: taskId, project_id: "p1", name: "fix-auth", branch: "main",
+        base_branch: "main", path: "/x/ws1", cli: "claude", port: 1420,
+        created: "2024-01-01", archived: false,
+        persisted_tabs: [
+          { id: "main", cli: "claude", is_default: true, session_id: "SESSION-A" },
+          { id: "second", cli: "codex", session_id: "SESSION-B" },
+        ],
+      }] as never,
+    }));
+    vi.mocked(ipc.taskSetTabs).mockClear();
+
+    useApp.getState().closeTab(taskId, "second");
+
+    expect(ipc.taskSetTabs).not.toHaveBeenCalled();
+    expect(
+      useApp.getState().tasks.find(t => t.id === taskId)?.persisted_tabs?.map(t => t.id),
+    ).toEqual(["main", "second"]);
+  });
 });
 
 // ── openPreviewTab ────────────────────────────────────────────────────

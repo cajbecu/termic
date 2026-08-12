@@ -50,7 +50,12 @@ use std::io::{self, BufRead, Read, Write};
 /// the live prompt store and composes the body with any literal prompt).
 /// `send.prompt` becomes optional on the wire (`prompt_ref` can stand
 /// alone).
-pub const PROTOCOL_VERSION: u32 = 9;
+///
+/// v10 (GH #185): the `tab_close` verb. Additive in shape, but a v9
+/// server rejects the new `cmd` value as a malformed request, which is
+/// exactly the skew the version gate turns into "Termic updated, rerun
+/// your command". `AttachData.reason` gains "closed".
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// serde default for `QuitData::running`.
 pub(crate) fn default_true() -> bool { true }
@@ -322,6 +327,30 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
+    /// Close ONE tab of a running task: the GUI's × as a verb (GH #185).
+    /// Anything that opens tabs programmatically needs a way to clean
+    /// them up; task-level `archive` is the wrong hammer, it takes every
+    /// tab including the caller's own session.
+    TabClose {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        /// Tab selector (id, 1-based strip index, or title/cli), resolved
+        /// by the same rules `send`/`wait`/`attach`/`logs` use. Required:
+        /// there is no "the obvious tab" to close by default, and
+        /// guessing one would be the destructive direction.
+        tab: String,
+        /// Permit closing the DEFAULT tab, the one every unqualified
+        /// `send`/`wait`/`attach` resolves to. Refused without this even
+        /// when its agent already exited, because the refusal is about
+        /// what other scripts are talking to, not about liveness.
+        #[serde(default)]
+        yes: bool,
+        /// The CLI's working directory, for worktree-first resolution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
     /// Shut the app down: every PTY, script process group, in-flight grep
     /// and spotlight session goes with it (the same teardown Cmd-Q does).
     /// Authenticated, because it is the most destructive thing the socket
@@ -577,6 +606,7 @@ pub enum ReplyData {
     Agents(AgentsData),
     Prompts(PromptsData),
     Tab(TabData),
+    TabClose(TabCloseData),
     Quit(QuitData),
     Archive(ArchiveData),
     Rename(RenameData),
@@ -745,6 +775,50 @@ pub struct PromptOutcome {
     /// Present under `wait`: how the watched turn ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<WaitResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TabCloseData {
+    pub task_id: String,
+    /// The tab that was closed, echoed back as its stable id: the caller
+    /// may have named it by index or title, and only the id identifies
+    /// what actually went.
+    pub tab_id: String,
+    /// Resolved cli id of the closed tab ("claude", "codex", "shell",
+    /// a custom terminal's id).
+    pub cli: String,
+    /// Display title the GUI had given it.
+    pub title: String,
+    /// "agent" | "shell" | "terminal" | "run". Unlike every other
+    /// tab-targeting verb, `tab close` reaches all of them: closing is
+    /// not driving, and the CLI can open shell tabs, so it has to be
+    /// able to clean them up.
+    ///
+    /// NOT named `kind`, which every sibling payload uses, because
+    /// `ReplyData` is an internally-tagged enum whose tag IS `kind`:
+    /// serde flattens the two into one key and the reply fails to parse
+    /// with "duplicate field `kind`". `roundtrip_every_reply` catches it.
+    #[serde(default)]
+    pub tab_kind: String,
+    /// True when this was the task's DEFAULT tab (closed under `yes`).
+    /// Load-bearing for the caller, because the default tab is DURABLE:
+    /// closing it ends the agent for now, and the task brings it back on
+    /// reopen. A secondary tab is forgotten instead, recoverable only
+    /// from the GUI's Resume menu.
+    #[serde(default)]
+    pub was_default: bool,
+    /// A live process was stopped by this close (false when the tab's
+    /// agent or shell had already exited).
+    ///
+    /// Named for the PTY, not the agent, because this verb closes shell
+    /// and custom-terminal tabs too. How it dies differs by kind, and
+    /// only agent tabs get the polite version: they carry a `PtyRole`,
+    /// so the server can find and SIGTERM them by tab id and let the
+    /// agent flush its transcript. Nothing else carries one, so those
+    /// die the way the GUI's close button kills them, which costs
+    /// nothing since they have no transcript to lose.
+    #[serde(default)]
+    pub killed_pty: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -993,8 +1067,9 @@ pub struct AttachData {
     pub task_id: String,
     /// Why the session ended: "detached" (client asked), "exited"
     /// (the PTY closed), "archived" (the task was archived under us),
-    /// "lagged" (the session fell too far behind the output stream and
-    /// was force-detached). Additive: skip unknown reasons.
+    /// "closed" (the tab was closed under us, `tab close`), "lagged"
+    /// (the session fell too far behind the output stream and was
+    /// force-detached). Additive: skip unknown reasons.
     pub reason: String,
 }
 
@@ -1502,6 +1577,21 @@ mod tests {
                 prompt: None, prompt_ref: None, wait: false, timeout_ms: None,
                 resume: None, cwd: None,
             },
+            // v10 (GH #185): close one tab, by every selector shape.
+            Command::TabClose {
+                task: Some("fix-auth".into()),
+                project: Some("web".into()),
+                tab: "2".into(),
+                yes: true,
+                cwd: None,
+            },
+            Command::TabClose {
+                task: None,
+                project: None,
+                tab: "a1b2c3".into(),
+                yes: false,
+                cwd: Some("/tasks/web/x".into()),
+            },
             Command::Agents,
             Command::Prompts { selector: None },
             Command::Prompts { selector: Some("builtin:review".into()) },
@@ -1736,6 +1826,36 @@ mod tests {
                         detail: None,
                     }),
                 }),
+            }),
+            // v10 (GH #185): a secondary tab (forgotten) and the default
+            // tab (durable), the distinction `was_default` exists for.
+            ReplyData::TabClose(TabCloseData {
+                task_id: "w1".into(),
+                tab_id: "tab-2".into(),
+                cli: "claude".into(),
+                title: "reviewing the diff".into(),
+                tab_kind: "agent".into(),
+                was_default: false,
+                killed_pty: true,
+            }),
+            ReplyData::TabClose(TabCloseData {
+                task_id: "w1".into(),
+                tab_id: "main".into(),
+                cli: "codex".into(),
+                title: "codex".into(),
+                tab_kind: "agent".into(),
+                was_default: true,
+                killed_pty: false,
+            }),
+            // A shell tab: reachable by `tab close` and nothing else.
+            ReplyData::TabClose(TabCloseData {
+                task_id: "w1".into(),
+                tab_id: "tab-sh".into(),
+                cli: "shell".into(),
+                title: "Terminal".into(),
+                tab_kind: "shell".into(),
+                was_default: false,
+                killed_pty: true,
             }),
             ReplyData::Quit(QuitData {
                 running: true,

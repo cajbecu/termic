@@ -195,6 +195,193 @@ describe("termic tab: ids are addressable end to end (GH #138 part 2)", () => {
   });
 });
 
+// `termic tab close` (GH #185) over the REAL socket. The thread no unit
+// suite can see whole: the selector resolves in Rust, the PTY is stopped
+// in Rust, and the tab is dropped by the WEBVIEW's store, and the reply
+// is only honest if all three agreed. The unit suites stub the webview on
+// one side and the PTY manager on the other, so a broken `close_tab`
+// handler registration, a `notify_tab_detach` wired to the wrong role
+// field, or a stop that misses the tab's PTY all pass there and fail here.
+describe("termic tab close: one tab, not the task (GH #185)", () => {
+  let taskId: string;
+  let secondTabId: string;
+  let defaultTabId: string;
+
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+  });
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask("cli-tab-close");
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          tid =>
+            (window.__termic!.useApp.getState().tabs[tid] ?? []).some((t: any) => t.ptyId),
+          taskId,
+        ),
+      { timeout: 20_000, timeoutMsg: "default agent PTY never spawned" },
+    );
+    defaultTabId = await browser.execute(
+      tid =>
+        (window.__termic!.useApp.getState().tabs[tid] ?? []).find((t: any) => t.is_default)?.id,
+      taskId,
+    );
+    expect(defaultTabId).toBeTruthy();
+    const r = await rpc({
+      cmd: "tab",
+      task: "cli-tab-close",
+      kind: { tab: "agent", id: "fakeagent" },
+    });
+    expect(r.ok).toBe(true);
+    secondTabId = r.data.tab_id;
+    await waitForTabPty(taskId, secondTabId, "cli-tab-close");
+  });
+
+  it("refuses the default tab without --yes, and closes nothing", async () => {
+    // The guard exists because the default tab is what an unqualified
+    // send/wait/attach resolves to. A refusal that had already killed the
+    // PTY on its way to saying no would be the worst of both.
+    const r = await rpc({ cmd: "tab_close", task: "cli-tab-close", tab: defaultTabId });
+    expect(r.ok).toBe(false);
+    expect(r.error.code).toBe("unsupported");
+    expect(r.error.message).toContain("--yes");
+    const alive = await rpc({ cmd: "logs", task: "cli-tab-close", tab: defaultTabId });
+    expect(alive.ok).toBe(true);
+  });
+
+  it("refuses a selector that matches no tab", async () => {
+    const r = await rpc({ cmd: "tab_close", task: "cli-tab-close", tab: "99" });
+    expect(r.ok).toBe(false);
+    expect(r.error.code).toBe("not_found");
+  });
+
+  it("closes a secondary tab and leaves the task and its other tabs running", async () => {
+    const r = await rpc({ cmd: "tab_close", task: "cli-tab-close", tab: secondTabId });
+    expect(r.ok).toBe(true);
+    expect(r.data.tab_id).toBe(secondTabId);
+    expect(r.data.was_default).toBe(false);
+    expect(r.data.killed_pty).toBe(true);
+
+    // Gone from the strip the GUI renders...
+    await browser.waitUntil(
+      async () =>
+        !(await browser.execute(
+          (tid, tab) =>
+            (window.__termic!.useApp.getState().tabs[tid] ?? []).some((t: any) => t.id === tab),
+          taskId,
+          secondTabId,
+        )),
+      { timeout: 10_000, timeoutMsg: "the closed tab is still in the store's strip" },
+    );
+    // ...and its id stops resolving, which is what proves the PTY went
+    // rather than the tab merely being hidden.
+    await browser.waitUntil(
+      async () => (await rpc({ cmd: "logs", task: "cli-tab-close", tab: secondTabId })).ok === false,
+      { timeout: 10_000, timeoutMsg: "the closed tab's id still resolves to a PTY" },
+    );
+    // The task itself is untouched. This is the entire difference from
+    // `archive`, which would have taken the orchestrator's own session.
+    const still = await rpc({ cmd: "logs", task: "cli-tab-close", tab: defaultTabId });
+    expect(still.ok).toBe(true);
+    const mounted = await browser.execute(
+      tid => window.__termic!.useApp.getState().mountedTasks.has(tid),
+      taskId,
+    );
+    expect(mounted).toBe(true);
+  });
+
+  it("closes a shell tab, which no other CLI verb can touch", async () => {
+    // Shell tabs are write-only from the CLI (driving an uncaged terminal
+    // remotely is the risk), but `tab --shell` can OPEN one, so close has
+    // to reach it or the litter is unsweepable. Only agent tabs carry a
+    // PtyRole, so this also exercises the path where the WEBVIEW is the
+    // only side that can report the process died.
+    const opened = await rpc({ cmd: "tab", task: "cli-tab-close", kind: { tab: "shell" } });
+    expect(opened.ok).toBe(true);
+    const shellTabId = opened.data.tab_id;
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          (tid, tab) =>
+            (window.__termic!.useApp.getState().tabs[tid] ?? []).some(
+              (t: any) => t.id === tab && t.ptyId,
+            ),
+          taskId,
+          shellTabId,
+        ),
+      { timeout: 20_000, timeoutMsg: "the shell tab never got a PTY" },
+    );
+
+    // It is genuinely unreachable by the driving verbs...
+    const driven = await rpc({ cmd: "logs", task: "cli-tab-close", tab: shellTabId });
+    expect(driven.ok).toBe(false);
+    expect(driven.error.code).toBe("unsupported");
+    // ...and still closable.
+    const r = await rpc({ cmd: "tab_close", task: "cli-tab-close", tab: shellTabId });
+    expect(r.ok).toBe(true);
+    expect(r.data.tab_kind).toBe("shell");
+    expect(r.data.killed_pty).toBe(true);
+    await browser.waitUntil(
+      async () =>
+        !(await browser.execute(
+          (tid, tab) =>
+            (window.__termic!.useApp.getState().tabs[tid] ?? []).some((t: any) => t.id === tab),
+          taskId,
+          shellTabId,
+        )),
+      { timeout: 10_000, timeoutMsg: "the closed shell tab is still in the strip" },
+    );
+  });
+
+  it("leaves a Resume entry, so a closed agent is not lost for good", async () => {
+    // syncDurableTabs has just forgotten the secondary tab; closedTabs is
+    // the only place its session id survives, and it is what the "+"
+    // menu's Resume section reads.
+    const entries = await browser.execute(
+      tid => window.__termic!.useApp.getState().closedTabs[tid] ?? [],
+      taskId,
+    );
+    expect(entries.length).toBeGreaterThan(0);
+    expect(entries[0].cli).toBe("fakeagent");
+  });
+
+  it("--yes takes the default tab, and says it comes back", async () => {
+    // Last, because closing the default tab is also the last main tab
+    // here, which puts the task to sleep.
+    const r = await rpc({
+      cmd: "tab_close",
+      task: "cli-tab-close",
+      tab: defaultTabId,
+      yes: true,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.data.was_default).toBe(true);
+    expect(r.data.killed_pty).toBe(true);
+    await browser.waitUntil(
+      async () =>
+        !(await browser.execute(
+          (tid, tab) =>
+            (window.__termic!.useApp.getState().tabs[tid] ?? []).some((t: any) => t.id === tab),
+          taskId,
+          defaultTabId,
+        )),
+      { timeout: 10_000, timeoutMsg: "the default tab is still in the store's strip" },
+    );
+    // Durable: closing the default tab ends the agent for now, not for
+    // good, so the task still carries it and will reopen it.
+    const durable = await browser.execute(
+      tid =>
+        (window.__termic!.useApp.getState().tasks.find((t: any) => t.id === tid)?.persisted_tabs
+          ?? []).map((t: any) => t.id),
+      taskId,
+    );
+    expect(durable).toContain(defaultTabId);
+  });
+});
+
 // `termic rename` (GH #153) over the REAL socket: the whole server path
 // (auth, resolve_task_arg, the conflict pre-check, the rename_task
 // webview RPC, the post-write disk re-read) in one thread. The unit

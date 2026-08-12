@@ -1762,10 +1762,20 @@ export const useApp = create<AppState>((set, get) => ({
 
   closeTab: (taskId, tabId) => {
    let focusId = "";
+   // Whether a tab was actually removed, gating the durable re-sync below
+   // (the reorderTab pattern). Without it, a close that matched NOTHING
+   // still rewrote persisted_tabs from the store's tab list — and on a
+   // task not opened this session that list is empty, so the rewrite kept
+   // only the default tab and dropped every other agent's session id from
+   // disk. No GUI path passes an id it is not rendering, so this never
+   // fired in the app; `termic tab close` can name a tab on an unmounted
+   // task, which is what surfaced it (GH #185).
+   let closed = false;
    set(s => {
     const list = s.tabs[taskId] || [];
     const idx = list.findIndex(t => t.id === tabId);
     if (idx < 0) return s;
+    closed = true;
     const closing = list[idx];
     // Best-effort PTY kill; ignore failures (already-dead PTYs etc.).
     if (closing.type === "terminal" && closing.ptyId) ipc.ptyKill(closing.ptyId).catch(() => {});
@@ -1836,8 +1846,8 @@ export const useApp = create<AppState>((set, get) => ({
    // Re-sync the durable set: a closed SECONDARY tab is dropped (X = forget
    // it), while a closed MAIN tab stays durable and auto-resumes when the
    // task wakes — see the merge rule in syncDurableTabs. No-op if
-   // nothing changed.
-   get().syncDurableTabs(taskId);
+   // nothing changed, and skipped entirely when nothing was closed.
+   if (closed) get().syncDurableTabs(taskId);
    if (focusId) {
      // Sync activePaneId to the main pane so the store agrees with where
      // focus is going. Without this, activePaneId still points to the split

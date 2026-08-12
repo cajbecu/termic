@@ -687,13 +687,21 @@ Prints the tab on stdout. With --output-format json, one object: \
 stream-json under -p, NDJSON events (queued, prompt_delivered, state, \
 heartbeat) ending in one result line.
 
+`termic tab close` is the other half: the tab strip's close button as a \
+verb, for cleaning up the tabs a script opened. See \
+`termic tab close --help`.
+
 Exit codes: 0 opened (with --wait: settled done), 1 error (unknown or \
 ambiguous task, unusable agent id, prompt on a non-agent tab, --wait \
 without -p/-P), 3 agent stopped needing input, 4 app not running, 5 CLI \
 disabled, 6 refused, 7 --timeout expired, 8 connection lost, 9 prompt \
 never delivered."
     )]
+    #[command(args_conflicts_with_subcommands = true)]
     Tab {
+        /// Close a tab instead of opening one.
+        #[command(subcommand)]
+        close: Option<TabCmd>,
         /// Task name, task id, or qualified project/name.
         task: Option<String>,
         /// Project name, to disambiguate.
@@ -871,6 +879,64 @@ body), 4 app not running, 5 CLI disabled, 6 refused, 8 connection lost."
 }
 
 #[derive(Subcommand, Debug)]
+pub enum TabCmd {
+    /// Close one tab of a running task: the tab strip's close button as a command.
+    #[command(
+        after_help = "Closes ONE tab and leaves the task and its other tabs alone, which is \
+what separates this from `archive`: an orchestrator cleaning up the tabs it \
+opened must not take down the session it is driving from.
+
+The tab is identified the same way `send`/`wait`/`attach`/`logs` identify \
+one: --tab takes the tab id, a 1-based strip index, or a title/cli name, \
+and ambiguity is an error listing the candidates rather than a guess.
+
+Unlike those verbs, this one reaches EVERY tab in the strip, shell and \
+custom-terminal tabs included. They are write-only from the CLI because \
+driving an uncaged terminal remotely is the thing that rule prevents, and \
+closing is not driving. `termic tab --shell` can open one, so it has to be \
+able to clean one up.
+
+There is no `/exit` negotiation and no prompt: the tab leaves the strip and \
+its process is killed, exactly as the window's own close button does it. The \
+server then sweeps that tab's PTY, so the command does not answer until \
+termination is certain rather than merely requested. A live `attach` session \
+on the tab is told why it is ending and exits 11.
+
+Closing the task's LAST tab puts the task to sleep, which also ends its aux \
+shell and any split-pane agent. Everything attached to the task is told.
+
+A SECONDARY tab is forgotten: it leaves the task's durable set, and the \
+only way back is the window's Resume menu. The DEFAULT tab is different, it \
+is durable and the task reopens it, so closing it ends the agent for now \
+rather than for good. Closing the default tab is REFUSED without --yes, \
+even when its agent has already exited: it is the tab every unqualified \
+`send`/`wait`/`attach` resolves to, so closing it silently changes what \
+the caller's other commands are talking to.
+
+Prints what was closed on stdout. With --output-format json, one object: \
+{\"task_id\", \"tab_id\", \"cli\", \"title\", \"tab_kind\", \"was_default\", \
+\"killed_pty\"}.
+
+Exit codes: 0 closed, 1 error (unknown or ambiguous task, no tab matches \
+the selector, the default tab without --yes), 4 app not running, \
+5 CLI disabled, 6 refused, 8 connection lost."
+    )]
+    Close {
+        /// Task name, task id, or qualified project/name.
+        task: Option<String>,
+        /// Project name, to disambiguate.
+        #[arg(long, requires = "task")]
+        project: Option<String>,
+        /// Which tab: its id, a 1-based strip index, or its title/cli.
+        #[arg(long, value_name = "SELECTOR")]
+        tab: String,
+        /// Permit closing the task's DEFAULT tab.
+        #[arg(short, long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum ProjectCmd {
     /// Register a directory as a project (`termic project add .`).
     #[command(
@@ -1018,9 +1084,17 @@ fn execute(cli: &Cli) -> Result<Output, CliError> {
     let paths = client::socket_paths();
     // `quit` never launches: starting Termic in order to stop it is absurd,
     // and a teardown script wants "already gone" to be SUCCESS, not an error
-    // it has to `|| true` away. Every other verb keeps auto-launch.
+    // it has to `|| true` away.
     let quitting = matches!(cli.cmd, Cmd::Quit { .. });
-    let mut conn = match client::connect_or_launch(&paths, cli.no_launch || quitting) {
+    // `tab close` never launches either, for the first of those reasons but
+    // not the second: booting the app to close a tab is absurd (a fresh app
+    // has no open tabs, so it could only ever answer "the task is not
+    // open"), yet a missing tab is not the same success "nothing to quit"
+    // is, so it stays exit 4 rather than inventing a second silent-success
+    // verb. Every other verb keeps auto-launch.
+    let closing_tab = matches!(cli.cmd, Cmd::Tab { close: Some(TabCmd::Close { .. }), .. });
+    let mut conn = match client::connect_or_launch(&paths, cli.no_launch || quitting || closing_tab)
+    {
         // "Nothing to quit" is success, so a teardown script does not need
         // `|| true`. But ONLY on the default socket: if the user pointed
         // TERMIC_SOCKET somewhere explicit, a socket that is not there is a
@@ -1182,7 +1256,28 @@ fn execute(cli: &Cli) -> Result<Output, CliError> {
                 Ok(Output::ok(final_stdout(format, &output::prompts_text(&p.prompts), &p)))
             }
         }
+        // `tab close` shares the verb but not the shape: it destroys a
+        // tab rather than making one, so it takes the subcommand branch
+        // before any of the open-a-tab argument handling below.
+        Cmd::Tab { close: Some(TabCmd::Close { task, project, tab, yes }), .. } => {
+            let data = client::request(
+                &mut conn,
+                proto::Command::TabClose {
+                    task: task.clone(),
+                    project: project.clone(),
+                    tab: tab.clone(),
+                    yes: *yes,
+                    cwd: std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()),
+                },
+                &token,
+            )?;
+            let proto::ReplyData::TabClose(c) = data else {
+                return Err(CliError::new(exit_code::ERROR, "unexpected reply to tab close"));
+            };
+            Ok(Output::ok(final_stdout(format, &output::tab_close_text(&c), &c)))
+        }
         Cmd::Tab {
+            close: None,
             task, project, agent, terminal, shell, prompt: _, library, resume, wait, timeout,
         } => {
             let kind = if let Some(id) = agent {
@@ -2067,9 +2162,12 @@ pub fn machine_help() -> serde_json::Value {
             continue;
         }
         if sub.has_subcommands() {
-            // A parent whose subcommand is OPTIONAL (`prompts` lists on
-            // its own) is a verb in its own right, beside the nested
-            // ones; `project` (subcommand required) stays nested-only.
+            // A parent whose subcommand is OPTIONAL is a verb in its own
+            // right, beside the nested ones: `prompts` lists on its own,
+            // `tab` opens a tab. Without this the surface would claim
+            // they do not exist. `project` (subcommand required) stays
+            // nested-only, since listing it would advertise a verb that
+            // takes nothing and does nothing.
             if !sub.is_subcommand_required_set() {
                 commands.push(command_entry(sub, sub.get_name()));
             }
@@ -2202,6 +2300,79 @@ mod tests {
         assert!(Cli::try_parse_from(["termic", "project", "list"]).is_ok());
         assert!(Cli::try_parse_from(["termic", "project", "remove", "web", "--yes"]).is_ok());
         assert!(Cli::try_parse_from(["termic", "project"]).is_err(), "a subcommand is required");
+    }
+
+    #[test]
+    fn tab_close_parses_without_shadowing_the_tab_verb() {
+        // `tab` gained a subcommand (GH #185) but is still a verb in its
+        // own right. Every open-a-tab form has to keep parsing, or the
+        // subcommand quietly broke the surface it was bolted onto.
+        for open in [
+            vec!["termic", "tab"],
+            vec!["termic", "tab", "fix-auth"],
+            vec!["termic", "tab", "fix-auth", "--agent", "claude"],
+            vec!["termic", "tab", "fix-auth", "--shell"],
+            vec!["termic", "tab", "fix-auth", "-p", "run the tests", "--wait"],
+            vec!["termic", "tab", "fix-auth", "--project", "web"],
+        ] {
+            let cli = Cli::try_parse_from(open.clone())
+                .unwrap_or_else(|e| panic!("{open:?} must parse: {e}"));
+            let Cmd::Tab { close, .. } = &cli.cmd else { panic!("not tab: {open:?}") };
+            assert!(close.is_none(), "{open:?} is an open, not a close");
+        }
+
+        let cli = Cli::try_parse_from(["termic", "tab", "close", "fix-auth", "--tab", "2"])
+            .expect("parses");
+        let Cmd::Tab { close: Some(TabCmd::Close { task, tab, yes, project }), .. } = &cli.cmd
+        else {
+            panic!("not tab close")
+        };
+        assert_eq!(task.as_deref(), Some("fix-auth"));
+        assert_eq!(tab, "2");
+        assert!(!yes);
+        assert_eq!(project.as_deref(), None);
+
+        // --tab IS the target; there is no "obvious tab" to close.
+        assert!(Cli::try_parse_from(["termic", "tab", "close", "fix-auth"]).is_err());
+        // The task falls back to the cwd, like the other tab-aware verbs.
+        assert!(Cli::try_parse_from(["termic", "tab", "close", "--tab", "claude"]).is_ok());
+        // ...but --project still needs a task to disambiguate.
+        assert!(
+            Cli::try_parse_from(["termic", "tab", "close", "--tab", "1", "--project", "web"])
+                .is_err()
+        );
+        // Both spellings of the default-tab override.
+        for flag in ["--yes", "-y"] {
+            let cli = Cli::try_parse_from(["termic", "tab", "close", "x", "--tab", "1", flag])
+                .expect("parses");
+            let Cmd::Tab { close: Some(TabCmd::Close { yes, .. }), .. } = &cli.cmd else {
+                panic!("not tab close")
+            };
+            assert!(yes, "{flag} must set yes");
+        }
+        // The open-a-tab flags are NOT close's; a caller reaching for
+        // them has misunderstood the verb and should hear so. -P/--library
+        // included: a prompt has nothing to say to a tab being destroyed.
+        for flag in [
+            vec!["--agent", "claude"],
+            vec!["-p", "hello"],
+            vec!["-P", "builtin:review"],
+            vec!["--shell"],
+        ] {
+            let mut argv = vec!["termic", "tab", "close", "x", "--tab", "1"];
+            argv.extend(flag.iter());
+            assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?} must not parse");
+        }
+
+        // The one cost of hanging a subcommand off `tab`: a task LITERALLY
+        // named "close" cannot be the bare first positional, because clap
+        // matches the subcommand first. Leading with a flag still reaches
+        // it, which is the documented escape hatch, so pin both halves.
+        let shadowed = Cli::try_parse_from(["termic", "tab", "--agent", "claude", "close"])
+            .expect("a flag first reaches a task named close");
+        let Cmd::Tab { close, task, .. } = &shadowed.cmd else { panic!("not tab") };
+        assert!(close.is_none());
+        assert_eq!(task.as_deref(), Some("close"));
     }
 
     #[test]

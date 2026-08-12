@@ -61,6 +61,10 @@ const ARCHIVE_TIMEOUT: Duration = Duration::from_secs(300);
 /// or a respawn (PTY spawn deadline 15s + margin); the injection into a
 /// respawned agent continues app-side after the RPC returns.
 const SEND_TIMEOUT: Duration = Duration::from_secs(60);
+/// `close_tab` is a store mutation plus a durable-set rewrite: no process
+/// spawn, no git, and the PTY is already stopped before it runs. Generous
+/// only against a webview busy with a repaint.
+const CLOSE_TAB_TIMEOUT: Duration = Duration::from_secs(10);
 thread_local! {
     /// Set by the `quit` handler, consumed by `serve_conn` once the reply has
     /// been written: a flag rather than a direct call so teardown cannot race
@@ -577,6 +581,16 @@ pub(crate) trait CliHost: Send + Sync {
     /// Tell live attach sessions on this task why they are ending,
     /// BEFORE the PTYs are killed.
     fn notify_detach(&self, task_id: &str, reason: &str);
+    /// The same, narrowed to ONE tab (`tab close`): the task's other
+    /// agents keep running, so their attach sessions must not be told
+    /// anything.
+    fn notify_tab_detach(&self, task_id: &str, tab_id: &str, reason: &str);
+    /// Stop one tab's agent PTY and guarantee it is gone: SIGTERM, a
+    /// short grace, then SIGKILL. Returns the victim count. Called AFTER
+    /// the webview drops the tab, as the termination guarantee over its
+    /// fire-and-forget kill; see `crate::stop_tab_ptys` for why running
+    /// it first is the wrong order.
+    fn stop_tab_ptys(&self, task_id: &str, tab_id: &str) -> u32;
     /// The user's home directory (session transcripts live under it).
     fn home_dir(&self) -> Option<PathBuf>;
 }
@@ -700,6 +714,15 @@ pub(crate) fn handle_request(req: &Request, host: &dyn CliHost, sink: &mut dyn E
         Command::Agents => handle_agents(req, host),
         Command::Prompts { .. } => handle_prompts(req, host),
         Command::Tab { .. } => handle_tab(req, host, sink),
+        Command::TabClose { task, project, tab, yes, cwd } => handle_tab_close(
+            &req.id,
+            host,
+            task.as_deref(),
+            project.as_deref(),
+            tab,
+            *yes,
+            cwd.as_deref(),
+        ),
         Command::Archive { task, project } => {
             handle_archive(&req.id, host, task, project.as_deref())
         }
@@ -2690,6 +2713,128 @@ fn handle_tab(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Re
     }
 }
 
+// ─────────────────────────── tab close ───────────────────────────────
+
+/// Domain failures from the `close_tab` webview handler, same sentinel
+/// scheme as `parse_send_error`. The webview owns the STORE's view of the
+/// strip, which can differ from the resolver's cache by a beat, so its
+/// refusals need real codes rather than a flattened Internal.
+fn parse_tab_close_error(e: &str) -> (ErrorCode, String) {
+    let Some(rest) = e.strip_prefix("cli_tab_close:") else {
+        return (ErrorCode::Internal, format!("could not close the tab ({e})"));
+    };
+    let (code, msg) = rest.split_once(':').unwrap_or(("", rest));
+    let code = match code {
+        // The store's strip no longer has it: the resolver's cache
+        // trailed a tab that closed underneath us.
+        "unknown_tab" => ErrorCode::NotFound,
+        "task_stopped" | "not_closable" => ErrorCode::Unsupported,
+        _ => ErrorCode::Internal,
+    };
+    (code, msg.trim().to_string())
+}
+
+/// `termic tab close`: the GUI's × as a verb (GH #185).
+///
+/// Ordered like `archive`, for the same reason: attached clients get the
+/// in-band reason BEFORE the signal turns their stream into a bare
+/// disconnect, and the PTY is gone before the webview drops the tab, so
+/// the store can never hand a live pty id to a tab that no longer exists.
+/// Unlike archive this is scoped to one tab, which is the entire point:
+/// an orchestrator cleaning up the tabs it opened must not take down the
+/// session it is driving from.
+fn handle_tab_close(
+    id: &str,
+    host: &dyn CliHost,
+    task: Option<&str>,
+    project: Option<&str>,
+    tab: &str,
+    yes: bool,
+    cwd: Option<&str>,
+) -> Reply {
+    let (projects, tasks) = host.projects_tasks();
+    let t = match resolve_task_arg(&projects, &tasks, task, project, cwd) {
+        Ok(t) => t.clone(),
+        Err(e) => return Reply { id: id.into(), ok: false, data: None, error: Some(e) },
+    };
+    // AnyStripTab, unlike every other tab-targeting verb: closing is not
+    // driving, and `termic tab --shell` can OPEN a shell tab, so refusing
+    // to close one would leave exactly the litter this verb is for.
+    let rt = match resolve_tab_selector_with(host, &t, tab, TabReach::AnyStripTab) {
+        Ok(rt) => rt,
+        Err(e) => return Reply { id: id.into(), ok: false, data: None, error: Some(e) },
+    };
+    // The default tab is what every UNQUALIFIED send/wait/attach/logs
+    // resolves to, so closing it silently changes what the caller's other
+    // commands are talking to. Guarded regardless of whether its agent is
+    // still live: an exited default tab is still the resolution target,
+    // and it is DURABLE (the task brings it back on reopen), so "it looked
+    // dead" is not evidence that closing it is free.
+    if rt.is_default && !yes {
+        return Reply::err(
+            id,
+            ErrorCode::Unsupported,
+            format!(
+                "tab {} is this task's default tab, the one an unqualified `send`/`wait`/`attach` resolves to; pass --yes to close it anyway",
+                rt.id
+            ),
+        );
+    }
+    host.notify_tab_detach(&t.id, &rt.id, "closed");
+    // Closing the LAST strip tab puts the whole task to sleep: the
+    // webview unmounts its TaskView, which takes the aux shell and any
+    // split-pane agent down with it. Those carry their own attach
+    // sessions and are NOT covered by the per-tab notify above, so they
+    // would get a bare disconnect. Tell the task at large in that one
+    // case, the same reason archive does it unconditionally.
+    if rt.strip_len == 1 {
+        host.notify_detach(&t.id, "closed");
+    }
+    // The webview drops the tab FIRST, and only then does anything die.
+    //
+    // The reverse (stop the PTY, then close) leaves TerminalPane MOUNTED
+    // over a dying agent, and its exit handler treats that as the agent
+    // quitting on its own: it raises an "agent exited" attention (a
+    // desktop notification, since a CLI caller is by definition not
+    // watching), and inside RESUME_FAILURE_MS of a resume it takes the
+    // failed-resume branch and clears the tab's session id on disk. That
+    // last one is perverse, it destroys exactly the session pointer a
+    // graceful stop is meant to protect. Dropping the tab first unmounts
+    // the pane, so the exit is nobody's business, which is precisely why
+    // the GUI's close button has never had the problem.
+    let value = match host.rpc(
+        "close_tab",
+        serde_json::json!({ "taskId": t.id, "tabId": rt.id }),
+        CLOSE_TAB_TIMEOUT,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            let (code, msg) = parse_tab_close_error(&e);
+            return Reply::err(id, code, msg);
+        }
+    };
+    // The webview's own kill is fire-and-forget, so sweep after it: this
+    // is what makes termination a GUARANTEE rather than a hope by the
+    // time we report success. Normally finds nothing (the pane's unmount
+    // already killed it), and only agent tabs carry the PtyRole it
+    // resolves, so for the rest the webview's report below is the only
+    // account of whether a process was running.
+    let killed = host.stop_tab_ptys(&t.id, &rt.id);
+    let webview_killed = value.get("killedPty").and_then(|v| v.as_bool()).unwrap_or(false);
+    Reply::ok(
+        id,
+        ReplyData::TabClose(proto::TabCloseData {
+            task_id: t.id,
+            tab_id: rt.id,
+            cli: rt.cli,
+            title: rt.title,
+            tab_kind: rt.kind,
+            was_default: rt.is_default,
+            killed_pty: killed > 0 || webview_killed,
+        }),
+    )
+}
+
 // ───────────────────────────── archive ───────────────────────────────
 
 fn handle_archive(id: &str, host: &dyn CliHost, task: &str, project: Option<&str>) -> Reply {
@@ -3354,6 +3499,12 @@ impl CliHost for TauriHost {
     fn notify_detach(&self, task_id: &str, reason: &str) {
         crate::notify_task_detach(&self.app.state::<crate::PtyManager>(), task_id, reason);
     }
+    fn notify_tab_detach(&self, task_id: &str, tab_id: &str, reason: &str) {
+        crate::notify_tab_detach(&self.app.state::<crate::PtyManager>(), task_id, tab_id, reason);
+    }
+    fn stop_tab_ptys(&self, task_id: &str, tab_id: &str) -> u32 {
+        crate::stop_tab_ptys(&self.app.state::<crate::PtyManager>(), task_id, tab_id) as u32
+    }
     fn home_dir(&self) -> Option<PathBuf> {
         dirs::home_dir()
     }
@@ -3585,10 +3736,43 @@ pub(crate) fn cached_tab_states(
 // ───────────────────── tab selectors (GH #138 part 2) ────────────────
 
 /// A `--tab` selector, resolved to a strip tab's stable id (what
-/// `PtyRole.tab_id` carries).
+/// `PtyRole.tab_id` carries), plus what the resolver already knew about
+/// it. The extra fields are captured HERE rather than re-read later so a
+/// caller acting on the tab (`tab close`) cannot have the snapshot shift
+/// underneath it between resolving and deciding.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedTab {
     pub id: String,
+    /// Resolved cli id ("claude", "codex", ...).
+    pub cli: String,
+    /// Display title the GUI gave it (agent-authored, mutable).
+    pub title: String,
+    /// The tab an unqualified `send`/`wait`/`attach`/`logs` resolves to.
+    pub is_default: bool,
+    /// "agent" | "shell" | "terminal" | "run". Only agent tabs carry a
+    /// `PtyRole`, so only they can be stopped by id from the Rust side.
+    pub kind: String,
+    /// How many tabs the strip held at resolve time, or 0 when there was
+    /// no live snapshot to count. `tab close` reads it to notice that it
+    /// is about to close the LAST one, which puts the whole task to
+    /// sleep and takes the aux shell and split panes with it.
+    pub strip_len: usize,
+}
+
+/// Which tabs a selector is allowed to reach.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum TabReach {
+    /// Agent tabs only: everything that DRIVES a tab (send / wait /
+    /// attach / logs) needs a `PtyRole` and a settle signal, and putting
+    /// an uncaged shell on the control socket where it can be driven
+    /// remotely is the thing the write-only rule exists to prevent.
+    AgentsOnly,
+    /// Any strip tab. For `tab close` (GH #185): closing is not driving.
+    /// Nothing goes into the PTY and nothing comes out of it, so the
+    /// write-only rule has nothing to say about it, and the CLI can open
+    /// shell and custom-terminal tabs (`termic tab --shell`), so refusing
+    /// to close them would leave exactly the litter #185 is about.
+    AnyStripTab,
 }
 
 /// Resolve `--tab <n|id|title>` against the task's strip, from the
@@ -3596,18 +3780,25 @@ pub(crate) struct ResolvedTab {
 /// (docs/plans/cli.md, GH #138): the tab id IS the identity, so an
 /// exact id match wins; a 1-based index and a case-insensitive
 /// title/cli match are human conveniences resolving to it. Ambiguity
-/// is an error listing the candidates, never a guess. Only AGENT tabs
-/// resolve: everything a selector feeds (send/wait/attach/logs) can
-/// only reach a tab with a PtyRole and a settle signal; shell and
-/// terminal tabs are write-only from the CLI by design.
+/// is an error listing the candidates, never a guess. `reach` decides
+/// whether non-agent tabs resolve; see `TabReach`.
 fn resolve_tab_selector(
     host: &dyn CliHost,
     task: &Task,
     selector: &str,
 ) -> Result<ResolvedTab, proto::ErrorBody> {
+    resolve_tab_selector_with(host, task, selector, TabReach::AgentsOnly)
+}
+
+fn resolve_tab_selector_with(
+    host: &dyn CliHost,
+    task: &Task,
+    selector: &str,
+    reach: TabReach,
+) -> Result<ResolvedTab, proto::ErrorBody> {
     let err = |code: ErrorCode, message: String| proto::ErrorBody { code, message, data: None };
-    let gate = |index: u32, t: &TabAgentState| -> Result<ResolvedTab, proto::ErrorBody> {
-        if t.kind != "agent" {
+    let gate = |index: u32, t: &TabAgentState, strip_len: usize| -> Result<ResolvedTab, proto::ErrorBody> {
+        if reach == TabReach::AgentsOnly && t.kind != "agent" {
             return Err(err(
                 ErrorCode::Unsupported,
                 format!(
@@ -3616,7 +3807,14 @@ fn resolve_tab_selector(
                 ),
             ));
         }
-        Ok(ResolvedTab { id: t.id.clone() })
+        Ok(ResolvedTab {
+            id: t.id.clone(),
+            cli: t.cli.clone(),
+            title: t.title.clone(),
+            is_default: t.is_default,
+            kind: t.kind.clone(),
+            strip_len,
+        })
     };
 
     let snap = host.agent_cache().snapshot();
@@ -3644,13 +3842,37 @@ fn resolve_tab_selector(
                 || pt.cli == "shell"
                 || pt.run_member.is_some()
                 || host.agents().iter().any(|a| a.id == pt.cli && a.kind == "terminal");
-            if terminal_kind {
+            if terminal_kind && reach == TabReach::AgentsOnly {
                 return Err(err(
                     ErrorCode::Unsupported,
                     "that tab is not an agent tab; only agent tabs are reachable, the rest are write-only from the CLI".into(),
                 ));
             }
-            return Ok(ResolvedTab { id: pt.id.clone() });
+            return Ok(ResolvedTab {
+                id: pt.id.clone(),
+                cli: pt.cli.clone(),
+                // The durable record's label, falling back to the cli id
+                // the way the strip does before an agent titles itself.
+                title: pt.title.clone().unwrap_or_else(|| pt.cli.clone()),
+                is_default: pt.is_default,
+                // The durable record has no kind field, so reconstruct
+                // the SAME four values the live snapshot reports
+                // (cliAgentState.ts computeTabState). Collapsing every
+                // non-agent to "terminal" would make the two resolution
+                // paths disagree about the same tab, and `tab_kind` is a
+                // documented four-value contract a script can branch on.
+                kind: if pt.run_member.is_some() {
+                    "run".into()
+                } else if pt.cli == "shell" {
+                    "shell".into()
+                } else if terminal_kind {
+                    "terminal".into()
+                } else {
+                    "agent".into()
+                },
+                // No live strip to count.
+                strip_len: 0,
+            });
         }
         return Err(err(
             ErrorCode::Internal,
@@ -3660,7 +3882,7 @@ fn resolve_tab_selector(
 
     // 1. The identity itself.
     if let Some((i, t)) = tabs.iter().enumerate().find(|(_, t)| t.id == selector) {
-        return gate(i as u32 + 1, t);
+        return gate(i as u32 + 1, t, tabs.len());
     }
     // 2. A 1-based strip index (`status` prints the same numbering).
     if let Ok(n) = selector.parse::<usize>() {
@@ -3674,7 +3896,7 @@ fn resolve_tab_selector(
                 ),
             ));
         }
-        return gate(n as u32, &tabs[n - 1]);
+        return gate(n as u32, &tabs[n - 1], tabs.len());
     }
     // 3. Title or cli id, case-insensitive. Titles are agent-authored
     // and drift mid-turn, so they are a convenience, not the identity.
@@ -3696,7 +3918,7 @@ fn resolve_tab_selector(
                     .join(", ")
             ),
         )),
-        [(i, t)] => gate(*i as u32 + 1, t),
+        [(i, t)] => gate(*i as u32 + 1, t, tabs.len()),
         many => Err(err(
             ErrorCode::Ambiguous,
             format!(
@@ -4507,6 +4729,22 @@ mod tests {
         }
         fn notify_detach(&self, task_id: &str, reason: &str) {
             self.ops.lock().unwrap().push(format!("detach:{task_id}:{reason}"));
+        }
+        fn notify_tab_detach(&self, task_id: &str, tab_id: &str, reason: &str) {
+            self.ops.lock().unwrap().push(format!("tab_detach:{task_id}:{tab_id}:{reason}"));
+        }
+        fn stop_tab_ptys(&self, task_id: &str, tab_id: &str) -> u32 {
+            self.ops.lock().unwrap().push(format!("stop_tab:{task_id}:{tab_id}"));
+            // Removing it models the PTY actually going away, so a second
+            // close of the same tab reports killed_pty: false the way
+            // the real host would.
+            let gone = self
+                .tab_ptys
+                .lock()
+                .unwrap()
+                .remove(&(task_id.to_string(), tab_id.to_string()))
+                .is_some();
+            u32::from(gone)
         }
         fn home_dir(&self) -> Option<PathBuf> {
             self.home.clone()
@@ -6399,6 +6637,325 @@ mod tests {
 
     fn w3(host: &StubHost) -> Task {
         host.tasks.iter().find(|t| t.id == "w3").unwrap().clone()
+    }
+
+    // ── tab close (GH #185) ──────────────────────────────────────────
+
+    fn close_req(tab: &str, yes: bool) -> Request {
+        req(
+            Command::TabClose {
+                task: Some("w3".into()),
+                project: None,
+                tab: tab.into(),
+                yes,
+                cwd: None,
+            },
+            Some("tok"),
+        )
+    }
+
+    /// A strip whose close RPC succeeds, with a live PTY on the secondary
+    /// agent tab so `killed_pty` has something to report.
+    fn close_host() -> StubHost {
+        let host = StubHost::default();
+        seed_strip(&host);
+        host.rpc_results
+            .lock()
+            .unwrap()
+            .insert("close_tab".into(), Ok(serde_json::json!({})));
+        host.tab_ptys
+            .lock()
+            .unwrap()
+            .insert(("w3".into(), "tab-b".into()), "pty-b".into());
+        host
+    }
+
+    #[test]
+    fn tab_close_drops_the_tab_then_stops_the_pty() {
+        let host = close_host();
+        let reply = handle(&close_req("2", false), &host);
+        assert!(reply.ok, "{:?}", reply.error);
+        match reply.data {
+            Some(ReplyData::TabClose(c)) => {
+                assert_eq!(c.tab_id, "tab-b");
+                assert_eq!(c.cli, "codex");
+                // The label comes from the resolver's snapshot, so the
+                // reply names the tab as the GUI showed it.
+                assert_eq!(c.title, "fixing tests");
+                assert!(!c.was_default);
+                assert!(c.killed_pty);
+            }
+            other => panic!("expected tab_close, got {other:?}"),
+        }
+        // ORDER is the contract. Detach first, the archive rule: an
+        // attached client learns why before its stream goes quiet.
+        //
+        // Then CLOSE, and only then stop. The reverse leaves TerminalPane
+        // mounted over a dying agent, and its exit handler reads that as
+        // the agent quitting by itself: it raises an "agent exited"
+        // desktop notification at a caller who is by definition not
+        // watching, and within RESUME_FAILURE_MS of a resume it clears
+        // the tab's session id on disk, destroying the very pointer the
+        // graceful stop exists to protect. The sweep still runs last so
+        // termination is guaranteed by the time we answer.
+        assert_eq!(
+            *host.ops.lock().unwrap(),
+            vec!["tab_detach:w3:tab-b:closed", "rpc:close_tab", "stop_tab:w3:tab-b"],
+        );
+        let calls = host.rpc_calls.lock().unwrap();
+        let (_, params) = calls.iter().find(|(m, _)| m == "close_tab").expect("close_tab called");
+        assert_eq!(params["taskId"], "w3");
+        assert_eq!(params["tabId"], "tab-b");
+    }
+
+    #[test]
+    fn tab_close_reaches_a_tab_by_every_selector_shape() {
+        // Same resolution as send/wait/attach/logs; a caller must not
+        // have to learn a second addressing scheme to clean up.
+        for sel in ["tab-b", "2", "fixing tests", "CODEX"] {
+            let host = close_host();
+            let reply = handle(&close_req(sel, false), &host);
+            assert!(reply.ok, "selector {sel:?}: {:?}", reply.error);
+            match reply.data {
+                Some(ReplyData::TabClose(c)) => assert_eq!(c.tab_id, "tab-b", "selector {sel:?}"),
+                other => panic!("selector {sel:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn tab_close_refuses_the_default_tab_without_yes() {
+        let host = close_host();
+        let reply = handle(&close_req("1", false), &host);
+        assert!(!reply.ok);
+        let e = reply.error.expect("refused");
+        assert_eq!(e.code, ErrorCode::Unsupported);
+        assert!(e.message.contains("default tab"), "{}", e.message);
+        assert!(e.message.contains("--yes"), "{}", e.message);
+        // A refusal must not have killed anything on the way to saying no.
+        assert!(host.ops.lock().unwrap().is_empty(), "{:?}", host.ops.lock().unwrap());
+    }
+
+    #[test]
+    fn tab_close_yes_takes_the_default_tab_and_says_it_comes_back() {
+        let host = close_host();
+        let reply = handle(&close_req("1", true), &host);
+        assert!(reply.ok, "{:?}", reply.error);
+        match reply.data {
+            Some(ReplyData::TabClose(c)) => {
+                assert_eq!(c.tab_id, "tab-a");
+                assert!(c.was_default, "the caller has to know this one is durable");
+                // No PTY was seeded for tab-a: an agent that was not
+                // running must not be reported as stopped.
+                assert!(!c.killed_pty);
+            }
+            other => panic!("expected tab_close, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tab_close_guards_the_default_tab_whose_agent_already_exited() {
+        // The guard is about what unqualified verbs RESOLVE to, not about
+        // liveness: an exited default tab is still the resolution target,
+        // and it is still durable.
+        let host = StubHost::default();
+        push_tabs(
+            &host,
+            "w3",
+            "idle",
+            vec![tab_state("tab-a", "agent", "claude", "claude", Some("idle"), false, true)],
+        );
+        host.rpc_results
+            .lock()
+            .unwrap()
+            .insert("close_tab".into(), Ok(serde_json::json!({})));
+        let reply = handle(&close_req("1", false), &host);
+        assert!(!reply.ok, "a dead default tab is still guarded");
+        assert_eq!(reply.error.unwrap().code, ErrorCode::Unsupported);
+    }
+
+    #[test]
+    fn tab_close_reaches_a_shell_tab_that_no_other_verb_can() {
+        // The one verb that is NOT bound by the write-only rule: closing
+        // is not driving, and `termic tab --shell` can open one of these,
+        // so refusing to close it would leave the litter #185 is about.
+        let host = close_host();
+        // No PtyRole on a shell tab, so the server finds no victim and
+        // the WEBVIEW is the only side that knows a process died.
+        host.rpc_results
+            .lock()
+            .unwrap()
+            .insert("close_tab".into(), Ok(serde_json::json!({ "killedPty": true })));
+        let reply = handle(&close_req("3", false), &host);
+        assert!(reply.ok, "{:?}", reply.error);
+        match reply.data {
+            Some(ReplyData::TabClose(c)) => {
+                assert_eq!(c.tab_id, "tab-c");
+                assert_eq!(c.tab_kind, "shell");
+                assert!(c.killed_pty, "the webview's kill has to count");
+            }
+            other => panic!("expected tab_close, got {other:?}"),
+        }
+        // Every OTHER tab-targeting verb still refuses it.
+        let e = resolve_tab_selector(&host, &w3(&host), "3").unwrap_err();
+        assert_eq!(e.code, ErrorCode::Unsupported);
+        assert!(e.message.contains("write-only"), "{}", e.message);
+    }
+
+    #[test]
+    fn tab_close_refuses_a_selector_that_matches_nothing() {
+        let host = close_host();
+        let reply = handle(&close_req("9", false), &host);
+        assert_eq!(reply.error.expect("refused").code, ErrorCode::NotFound);
+        // Nothing was signalled on the way to saying no.
+        assert!(host.ops.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn tab_close_reports_a_webview_refusal_with_its_own_code() {
+        // The store is the authority on the strip and can disagree with
+        // the resolver's cache by a beat; its refusals keep real codes.
+        for (sentinel, want) in [
+            ("cli_tab_close:unknown_tab: that tab no longer exists", ErrorCode::NotFound),
+            ("cli_tab_close:task_stopped: task x is not open in Termic", ErrorCode::Unsupported),
+            ("cli_tab_close:not_closable: that tab lives in a split pane", ErrorCode::Unsupported),
+            ("the webview went away", ErrorCode::Internal),
+        ] {
+            let host = close_host();
+            host.rpc_results
+                .lock()
+                .unwrap()
+                .insert("close_tab".into(), Err(sentinel.into()));
+            let reply = handle(&close_req("2", false), &host);
+            let e = reply.error.expect("refused");
+            assert_eq!(e.code, want, "{sentinel}");
+            // The webview's own message passes through: it is the side
+            // that knows why, and the refusal lands BEFORE anything is
+            // stopped, so there is no half-done state to explain away.
+            assert!(!e.message.contains("stopped but"), "{}", e.message);
+            // Refused means refused, with the agent still running.
+            assert!(
+                !host.ops.lock().unwrap().iter().any(|o| o.starts_with("stop_tab")),
+                "a failed close must not have killed the agent: {:?}",
+                host.ops.lock().unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn tab_close_warns_the_whole_task_when_it_takes_the_last_tab() {
+        // Closing the last strip tab puts the TASK to sleep: the webview
+        // unmounts its TaskView and the aux shell and any split-pane
+        // agent die with it. Those carry their own attach sessions that
+        // no per-tab notify covers, so they would get a bare disconnect.
+        let host = StubHost::default();
+        push_tabs(
+            &host,
+            "w3",
+            "idle",
+            vec![tab_state("tab-a", "agent", "claude", "claude", Some("idle"), true, true)],
+        );
+        host.rpc_results
+            .lock()
+            .unwrap()
+            .insert("close_tab".into(), Ok(serde_json::json!({})));
+        let reply = handle(&close_req("1", true), &host);
+        assert!(reply.ok, "{:?}", reply.error);
+        let ops = host.ops.lock().unwrap().clone();
+        assert!(ops.contains(&"tab_detach:w3:tab-a:closed".to_string()), "{ops:?}");
+        assert!(ops.contains(&"detach:w3:closed".to_string()), "{ops:?}");
+
+        // With siblings left on the strip the task keeps running, so the
+        // task-wide notify must NOT fire: telling every attached sibling
+        // its session is ending is the blast radius this verb avoids.
+        let host = close_host();
+        let reply = handle(&close_req("2", false), &host);
+        assert!(reply.ok, "{:?}", reply.error);
+        assert!(
+            !host.ops.lock().unwrap().iter().any(|o| o.starts_with("detach:")),
+            "{:?}",
+            host.ops.lock().unwrap(),
+        );
+    }
+
+    #[test]
+    fn tab_close_degraded_path_reports_the_real_kind() {
+        // The two resolution paths must agree about tab_kind: it is a
+        // documented four-value contract, and a script branching on
+        // "shell" must not read "terminal" merely because resolution went
+        // through the persisted fallback.
+        let host = StubHost::default();
+        host.rpc_results
+            .lock()
+            .unwrap()
+            .insert("close_tab".into(), Ok(serde_json::json!({ "killedPty": true })));
+        let persisted = |id: &str, cli: &str, run: Option<&str>| crate::PersistedTab {
+            id: id.into(),
+            cli: cli.into(),
+            title: None,
+            custom_title: false,
+            is_default: false,
+            command: None,
+            session_id: None,
+            previous_session_id: None,
+            pane_leaf_id: None,
+            run_member: run.map(str::to_string),
+        };
+        let mut host = host;
+        host.tasks.iter_mut().find(|t| t.id == "w3").unwrap().persisted_tabs = vec![
+            persisted("tab-sh", "shell", None),
+            persisted("tab-run", "claude", Some("")),
+            persisted("tab-ag", "claude", None),
+        ];
+        for (sel, want) in [("tab-sh", "shell"), ("tab-run", "run"), ("tab-ag", "agent")] {
+            let reply = handle(&close_req(sel, false), &host);
+            assert!(reply.ok, "{sel}: {:?}", reply.error);
+            match reply.data {
+                Some(ReplyData::TabClose(c)) => assert_eq!(c.tab_kind, want, "{sel}"),
+                other => panic!("{sel}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn tab_close_degrades_to_an_exact_persisted_id_and_still_guards() {
+        // No snapshot: the same degraded path the selector already has,
+        // and the durable record is what answers "is this the default?".
+        let host = StubHost::default();
+        host.rpc_results
+            .lock()
+            .unwrap()
+            .insert("close_tab".into(), Ok(serde_json::json!({})));
+        let persisted = |id: &str, is_default: bool| crate::PersistedTab {
+            id: id.into(),
+            cli: "claude".into(),
+            title: None,
+            custom_title: false,
+            is_default,
+            command: None,
+            session_id: None,
+            previous_session_id: None,
+            pane_leaf_id: None,
+            run_member: None,
+        };
+        let mut host = host;
+        host.tasks.iter_mut().find(|t| t.id == "w3").unwrap().persisted_tabs =
+            vec![persisted("tab-a", true), persisted("tab-b", false)];
+
+        // The default tab is guarded even with no live snapshot at all.
+        let reply = handle(&close_req("tab-a", false), &host);
+        assert_eq!(reply.error.expect("refused").code, ErrorCode::Unsupported);
+        // A secondary one closes, labelled from the durable record.
+        let reply = handle(&close_req("tab-b", false), &host);
+        assert!(reply.ok, "{:?}", reply.error);
+        match reply.data {
+            Some(ReplyData::TabClose(c)) => {
+                assert_eq!(c.tab_id, "tab-b");
+                assert_eq!(c.title, "claude", "no stored title falls back to the cli id");
+                assert!(!c.was_default);
+            }
+            other => panic!("expected tab_close, got {other:?}"),
+        }
     }
 
     #[test]
