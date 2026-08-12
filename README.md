@@ -405,16 +405,7 @@ Open an issue to push something up the list or pick one off.
     and let people pick from the library they already collected. Borrowed
     from [Orca](https://github.com/stablyai/orca), which does the import
     well and, unlike termic, has no native theme format underneath it.
-13. **Search every session you have ever run.** The agent CLIs already
-    write full transcripts to disk (`~/.claude/projects/**`, Codex's
-    rollout files), and termic already knows which task produced which
-    session. A streaming keyword scan over those files answers "what did
-    we already try, and where" with no index, no embeddings, no server
-    and nothing leaving the machine. Spotify's Xirp ships exactly this
-    shape and pairs it with upload to their hosted portal; the local
-    half is the interesting half. Notes in
-    [docs/research/agent-orchestration.md](docs/research/agent-orchestration.md).
-14. **On-device dictation for agent prompts.** Prompts to a coding agent
+13. **On-device dictation for agent prompts.** Prompts to a coding agent
     are prose, not code: a paragraph of intent, constraints and a bit of
     context. That is the kind of text people speak faster than they
     type, and it is worth more here than in a normal editor because one
