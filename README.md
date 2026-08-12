@@ -468,6 +468,8 @@ Termic is free, AGPL-3.0, and built by its author and a growing group of dedicat
 | [![DontPayFull](https://static.dontpayfull.com/static/images/logo/logo.png)](https://www.dontpayfull.com) |
 |---|
 
+Also sponsoring: [Vyttle](https://vyttle.com), [Sage Haven](https://sagehaven.ai).
+
 [![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?style=flat&logo=github)](https://github.com/sponsors/simion)
 
 ---
