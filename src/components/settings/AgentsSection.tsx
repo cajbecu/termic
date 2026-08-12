@@ -1048,7 +1048,7 @@ function signalPlaceholder(cli: string, key: "busy" | "idle" | "attention" | "pe
  *  agent that ships heuristics, examples for one that doesn't. */
 function signalGroupHint(cli: string): string {
   return BUILTIN_TITLE_SIGNALS[cli]
-    ? "How termic reads this agent's state from its terminal title. One regex per line. The greyed patterns are what it uses today; type into ANY of the three fields and they replace all three. When several match, attention wins over busy, and busy over done."
+    ? "How termic reads this agent's state from its terminal title. One regex per line. The greyed patterns are what it uses today. Filling in one field replaces only that field, the other two keep the patterns shown. To switch a field off entirely, give it a pattern that never matches, such as (?!). When several match, attention wins over busy, and busy over done."
     : "How termic reads this agent's state from its terminal title. One regex per line. The greyed patterns are examples (this agent ships no title heuristics of its own). When several match, attention wins over busy, and busy over done.";
 }
 
