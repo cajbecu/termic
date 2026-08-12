@@ -29,11 +29,20 @@ cannot.**
 - **CI-gateable (counts, invariants, static facts).** Runs in `npm test` /
   `cargo test` / the e2e job. `selectorFanout.test.ts` is the worked example.
   Machine-independent, so a 3-core CI VM gives the same answer as an M1 Max.
+- **Nightly, ungated (startup, memory).** [`perf/`](../perf/README.md), run by
+  `.github/workflows/perf.yml` at 03:30 UTC and never on a PR. Durations and
+  RSS: measurable on a runner, too noisy there to gate a merge. Reports to the
+  run's step summary and a 90-day JSON artifact.
 - **Local only (CPU, GPU, compositor).** [`bench/`](../bench/README.md).
   Requires a real GPU, a real display and an undisturbed desktop. Read
   `bench/README.md` before trusting any number it prints: seven documented
   traps, every one of which produces a plausible wrong number rather than an
   error.
 
-Why there is no nightly CPU benchmark, and what it would take to add one:
-[docs/research/perf-ci.md](research/perf-ci.md).
+```sh
+make perf       # nightly suite, then the local-only bench, reported separately
+make perf-ci    # nightly suite only
+```
+
+Idle CPU is deliberately absent from CI. Why, and what it would take to gate
+any of this: [docs/research/perf-ci.md](research/perf-ci.md).

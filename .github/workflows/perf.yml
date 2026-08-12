@@ -1,0 +1,94 @@
+name: Performance (nightly)
+
+# NOT on pull_request, and that is the point.
+#
+# The metrics here are durations and memory. macos-14 is a 3-core virtualised
+# runner and Apple's Virtualization Framework does not expose Metal Performance
+# Shaders to the guest, so the spread between two runs of identical code is
+# wider than most regressions we would want to catch. Gating a merge on that
+# would fail honest PRs and teach everyone to re-run until green.
+#
+# What DOES gate a PR lives in the normal test job: counts and static facts,
+# which are machine-independent (src/store/selectorFanout.test.ts is the worked
+# example). The full argument, including why Orca can gate its nightly and we
+# cannot, is in docs/research/perf-ci.md.
+#
+# So this job reports. It writes a step summary you can read without
+# downloading anything, and uploads the JSON so a series can be assembled
+# later. A metric earns a threshold only after its real spread is known.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Ref to check out (defaults to the workflow ref)
+        required: false
+        type: string
+      memory_cycles:
+        description: View-churn cycles for the memory spec (default 12)
+        required: false
+        type: string
+      grep:
+        description: Mocha grep, to run one spec while chasing a regression
+        required: false
+        type: string
+  schedule:
+    # 03:30 UTC. Off the PR path entirely; nothing waits on this.
+    - cron: '30 3 * * *'
+
+# A slow nightly must never pile up behind itself.
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  perf:
+    name: startup + memory (macos-14)
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Seed fixture profile
+        run: node scripts/e2e-seed.mjs
+
+      - name: Build perf binary
+        run: npm run perf:build
+
+      - name: Run perf suite
+        env:
+          TERMIC_PERF_CYCLES: ${{ inputs.memory_cycles }}
+          TERMIC_PERF_GREP: ${{ inputs.grep }}
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -n "${TERMIC_PERF_GREP:-}" ]; then
+            args+=(--mochaOpts.grep "$TERMIC_PERF_GREP")
+          fi
+          npm run test:perf -- "${args[@]}"
+
+      - name: Upload perf report
+        # always(): a partial report from a run that lost one spec is still a
+        # data point, and the WebGL renderer fact in particular is worth having
+        # even when a later spec fell over.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-report
+          path: .perf/
+          retention-days: 90
+          if-no-files-found: warn

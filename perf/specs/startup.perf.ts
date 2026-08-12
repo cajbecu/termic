@@ -14,18 +14,24 @@ interface PerfMarks {
   timeOrigin: number;
   webviewToFirstPaintMs: number | null;
   bootToFirstPaintMs: number | null;
+  firstContentfulPaintMs: number | null;
+  bootToFirstContentfulPaintMs: number | null;
   webglRenderer: string | null;
+  firstPaintVia: "raf" | "timeout" | null;
 }
 
 describe("startup", () => {
   it("records first paint and the WebGL renderer", async () => {
-    // The session is already up by the time a spec runs, so the marks were
-    // taken during the launch the service performed. Poll rather than assume:
-    // bootToFirstPaintMs lands one IPC round-trip after the paint marks.
+    // Wait for the marks to be PUBLISHED, not for a paint time to be present.
+    // A WebdriverIO-driven window is usually occluded, and WKWebView freezes
+    // rAF for an occluded window (docs/automation.md), so the paint timings
+    // are legitimately null on that path while the WebGL fact is still valid.
+    // Waiting on `webviewToFirstPaintMs` instead made this spec fail outright
+    // and threw away the renderer string with it.
     await browser.waitUntil(
       async () =>
-        (await browser.execute(() => !!(window as any).__termicPerf?.webviewToFirstPaintMs)) === true,
-      { timeout: 30_000, timeoutMsg: "app never recorded a first-paint mark" },
+        (await browser.execute(() => !!(window as any).__termicPerf?.firstPaintVia)) === true,
+      { timeout: 30_000, timeoutMsg: "app never published perf marks at all" },
     );
 
     // One extra beat for the async Rust round-trip to land. Its absence is not
@@ -35,19 +41,42 @@ describe("startup", () => {
 
     const marks = (await browser.execute(() => (window as any).__termicPerf)) as PerfMarks;
 
+    const viaRaf = marks.firstPaintVia === "raf";
+    fact("firstPaintVia", marks.firstPaintVia ?? "unknown");
+
+    // The PRIMARY startup rows. Engine-recorded paint timing, so these survive
+    // the occluded window that freezes rAF under WebdriverIO. The two rAF rows
+    // below are kept as corroboration and are simply null when it never fired.
+    record({
+      metric: "startup.firstContentfulPaintMs",
+      value: marks.firstContentfulPaintMs,
+      unit: "ms",
+      note: "Paint Timing API, relative to timeOrigin; rAF-independent",
+    });
+    record({
+      metric: "startup.bootToFirstContentfulPaintMs",
+      value: marks.bootToFirstContentfulPaintMs,
+      unit: "ms",
+      note: "process spawn to first contentful paint; the number a user waits through",
+    });
+
     record({
       metric: "startup.webviewToFirstPaintMs",
       value: marks.webviewToFirstPaintMs,
       unit: "ms",
-      note: "performance.timeOrigin to first painted frame; the half termic owns",
+      note: viaRaf
+        ? "performance.timeOrigin to first painted frame; the half termic owns"
+        : "not measured: rAF frozen for an occluded window",
     });
     record({
       metric: "startup.bootToFirstPaintMs",
       value: marks.bootToFirstPaintMs,
       unit: "ms",
-      note: marks.bootToFirstPaintMs === null
-        ? "Rust boot command unavailable in this build"
-        : "process spawn to first painted frame; includes Tauri/WKWebView fixed cost",
+      note: !viaRaf
+        ? "not measured: rAF frozen for an occluded window"
+        : marks.bootToFirstPaintMs === null
+          ? "Rust boot command unavailable in this build"
+          : "process spawn to first painted frame; includes Tauri/WKWebView fixed cost",
     });
 
     fact("webglRenderer", marks.webglRenderer ?? "none (no WebGL context)");

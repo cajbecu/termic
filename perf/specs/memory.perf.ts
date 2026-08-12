@@ -12,11 +12,13 @@
 
 import { clickByText, requireTermicApi, waitForAppShell, waitForText, waitForTextGone } from "../../e2e/helpers";
 import { fact, record } from "../report.js";
-import { findAppPid, sampleRss } from "../proc.js";
+import { findAppPid, sampleRss, waitForStableRss } from "../proc.js";
 
 /** View-churn cycles. Enough that a per-iteration leak clears the noise floor,
- *  few enough to stay well inside the spec timeout on a slow runner. */
-const CYCLES = 12;
+ *  few enough to stay well inside the spec timeout on a slow runner. Raise it
+ *  via the workflow's `memory_cycles` input when chasing a suspected leak: a
+ *  slow drip only separates from noise over more iterations. */
+const CYCLES = Number.parseInt(process.env.TERMIC_PERF_CYCLES ?? "", 10) || 12;
 
 describe("memory", () => {
   it("reports steady-state RSS and growth across view churn", async () => {
@@ -26,17 +28,19 @@ describe("memory", () => {
     const pid = findAppPid();
     fact("appPid", pid === null ? "not found" : String(pid));
 
-    // Let startup work drain. Measuring immediately catches bundle parse and
-    // store hydration still in flight, which is the "startup noise" trap from
-    // the GH #140 harness in a different costume.
-    await browser.pause(5_000);
-
-    const baseline = sampleRss(pid);
+    // Poll until RSS stops moving. A fixed pause here caught the startup peak
+    // and made "growth" read -355 MiB, which measured startup decay rather
+    // than the cycles. See waitForStableRss.
+    const settleBaseline = await waitForStableRss(pid);
+    const baseline = settleBaseline.snapshot;
+    fact("baselineSettled", settleBaseline.settled
+      ? `yes, after ${Math.round(settleBaseline.waitedMs / 1000)}s`
+      : `NO — gave up after ${Math.round(settleBaseline.waitedMs / 1000)}s, still moving; growth below is unreliable`);
     record({
       metric: "memory.baseline.appMiB",
       value: baseline.appMiB,
       unit: "MiB",
-      note: "Tauri process, 5s after shell",
+      note: "Tauri process, once RSS stopped moving",
     });
     record({
       metric: "memory.baseline.helpersMiB",
@@ -65,9 +69,14 @@ describe("memory", () => {
       if (s.totalMiB !== null) perCycle.push(s.totalMiB);
     }
 
-    // Settle again so the final read is not catching transient churn.
-    await browser.pause(5_000);
-    const after = sampleRss(pid);
+    // Settle again, the same way, so baseline and after are measured on
+    // comparable footing. Comparing a settled baseline against a mid-churn
+    // final read would manufacture growth that is really just transient.
+    const settleAfter = await waitForStableRss(pid);
+    const after = settleAfter.snapshot;
+    fact("afterSettled", settleAfter.settled
+      ? `yes, after ${Math.round(settleAfter.waitedMs / 1000)}s`
+      : `NO — gave up after ${Math.round(settleAfter.waitedMs / 1000)}s`);
 
     record({
       metric: "memory.after.totalMiB",

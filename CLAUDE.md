@@ -37,6 +37,8 @@ npm run build        # tsc -b && vite build
 
 Unit/Rust: `npm test` (vitest) + `cargo test`. UI flows: the written e2e suite (`make e2e`, WebdriverIO on the real window). The e2e suite also runs in CI on `macos-14` (`.github/workflows/test.yml`), deliberately NOT a required check yet, it is there to surface flakiness before it gates merges. Run it locally anyway; do not treat the CI job as your test pass.
 
+Performance: `make perf` runs the nightly suite (startup, memory) and the local-only bench (idle CPU, GPU) and reports them separately. Neither gates. What DOES gate a PR is the count-and-invariant class (`src/store/selectorFanout.test.ts`) because counts survive a 3-core CI runner and timings do not. Read [docs/research/perf-ci.md](docs/research/perf-ci.md) before adding a perf check, especially before adding a threshold.
+
 **When you implement or modify ANY functionality that could regress, run the relevant tests before committing and keep them green** — not just UI. Logic/Rust: `npm test` + `cargo test`. Behavior/flows: `make e2e` (rebuilds the `--features e2e` binary + runs the suite). Add or update the spec/test that covers what you changed — a change and its test land in the same commit. The suite is a maintained asset: authoring rules live in the **`e2e` skill**, the coverage map + roadmap in [docs/plans/e2e-coverage.md](docs/plans/e2e-coverage.md). Each spec should cover a feature with several cases (happy path + edge/negative + state transitions), not just one, so it actually catches regressions.
 
 ## Scratchpad
@@ -75,7 +77,8 @@ Deeper references — read when working in that area:
 - [docs/ipc.md](docs/ipc.md) — Tauri commands, critical payload shapes, long-running IPC discipline
 - [docs/data-model.md](docs/data-model.md) — data dirs, Project/Task/Settings/Tab entities
 - [docs/tech-debt.md](docs/tech-debt.md) — index of temporary/removable scaffolding (e.g. the workspace→task migration) + purge checklists
-- [docs/performance.md](docs/performance.md) — perf traps, sub-pixel/rendering hardening
+- [docs/performance.md](docs/performance.md) — perf traps, sub-pixel/rendering hardening, what is measured where (`make perf`)
+- [docs/research/perf-ci.md](docs/research/perf-ci.md) — why counts gate PRs and timings only run nightly; what Orca actually does
 - [docs/sandbox.md](docs/sandbox.md) — sandbox-exec + CONNECT proxy, YOLO interaction, deny debugging
 - [docs/shortcuts.md](docs/shortcuts.md) — shortcut system architecture, adding shortcuts, glyph rendering
 - [docs/themes.md](docs/themes.md) — custom theme file format (`~/.config/termic/themes/*.json`), ui/terminal key reference

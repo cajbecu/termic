@@ -1,9 +1,23 @@
 # Performance benchmarks in CI (investigation)
 
-**Status: research, not a build order.** Nothing here is approved for
-implementation. This doc answers one question, README roadmap item 12:
-can "performance trumps polish" be enforced by CI instead of by review
-and habit, and if so, which parts of it.
+**Status: research, now partly built.** This doc answers one question,
+README roadmap item 12: can "performance trumps polish" be enforced by
+CI instead of by review and habit, and if so, which parts of it. It was
+written before any of it existed and is kept as the reasoning behind
+what shipped, so a future reader can tell which parts were argued for
+and which were only assumed.
+
+What exists now, and where the argument for each lives below:
+
+| Tier | Built | Where |
+|---|---|---|
+| 0 — counts, PR-gating | yes | `src/store/selectorFanout.test.ts` |
+| 1 — e2e invariants, PR-gating | no | still proposal |
+| 2 — nightly, ungated | yes | `perf/`, `.github/workflows/perf.yml` |
+| 3 — local only | yes | `bench/`, section 2 of `make perf` |
+
+Idle CPU was deliberately left out of the nightly, per the Tier 3
+argument below and Orca's own practice of never running theirs in CI.
 
 Sections marked **Finding** are things I read in a file and can point at.
 Sections marked **Proposal** are a strawman for the findings to knock
