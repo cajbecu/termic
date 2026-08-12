@@ -355,6 +355,7 @@ pub fn run_attach(
                             (exit_code::OK, "detached (the task keeps running in Termic)".into())
                         }
                         "archived" => (exit_code::ATTACH_CLOSED, "the task was archived".into()),
+                        "closed" => (exit_code::ATTACH_CLOSED, "this tab was closed".into()),
                         "lagged" => (
                             exit_code::ATTACH_CLOSED,
                             "this session fell too far behind the output stream and was disconnected; reattach for the live screen".into(),

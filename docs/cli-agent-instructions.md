@@ -72,6 +72,13 @@ Rules that matter:
   printed tab id and pass `--tab <id>` to `send`/`wait`/`logs` to keep
   addressing that tab (ids are stable; indexes and titles shift).
   `status --json` lists every tab with its id, state and queue.
+- `"$TERMIC_CLI" tab close <task> --tab <id>` - close a tab you opened,
+  so the strip does not fill up with finished ones. Kills that tab's
+  agent (no `/exit` negotiation needed) and leaves the task and its
+  other tabs running. This is the one tab verb that also reaches shell
+  and custom-terminal tabs, so anything `tab` opens, it can close.
+  Closing the task's DEFAULT tab needs `--yes`, because it is what an
+  unqualified `send`/`wait`/`attach` resolves to.
 - `"$TERMIC_CLI" result <task>` - the agent's last message from its
   session transcript (claude only; other agents error and you fall back
   to the file convention).

@@ -345,6 +345,15 @@ termic tab <task> [--agent <id>|--terminal <id>|--shell]      # GH #138. A tab I
                                               # they differ in sandbox, resume and YOLO.
                                               # -p injects into the NEW tab (agent kinds
                                               # only) via send_prompt targeted at its id
+termic tab close [<task>] --tab <sel> [--yes]  # GH #185. The strip's close button as a
+                                              # verb: kill THIS tab's PTY, drop the tab,
+                                              # leave the task and its other tabs alone.
+                                              # Same selectors as send/wait/attach, but
+                                              # reaches EVERY strip tab, shells included
+                                              # (closing is not driving). --yes is
+                                              # required for the DEFAULT tab, live or
+                                              # not: it is what an unqualified verb
+                                              # resolves to
 ```
 
 Two structural rules the surface depends on. First, task creation
@@ -526,7 +535,9 @@ Decisions, settled and shipped:
 - **Resuming a closed tab.** The `+` menu offers it (`closedTabs`), and the
   CLI has no equivalent at any level. Out of scope here, but it is the obvious
   next ask once tabs are addressable, and `--tab` selectors are what it would
-  hang off.
+  hang off. `tab close` (below) made it the NEXT ask rather than a
+  hypothetical one: the CLI can now produce `closedTabs` entries it cannot
+  reopen.
 - **`tab -p` landed WITH targeting, not before.** `send_prompt` is the
   confirmed delivery route, and it used to pick only from a task's sendable
   agent tabs; `-p` is `new_tab` followed by `send_prompt` targeted at the id
@@ -535,6 +546,124 @@ Decisions, settled and shipped:
 
 Protocol impact was additive (optional fields end to end), landing as the
 v5 -> v6 bump, not a breaking change.
+
+### Closing a tab (GH #185, protocol v10)
+
+Part 1 and 2 made tabs creatable and addressable but not removable, so
+anything opening tabs programmatically littered the strip. The reported case:
+an agent orchestrating reviews opened two claude tabs and had no way to clean
+up. `send --tab -p "/exit"` is a request, not a close (claude answered with
+its exit-confirm menu, and the result was two EXITED tabs still in the strip);
+task-level `archive` is the wrong hammer, it takes every tab including the
+orchestrator's own session.
+
+`termic tab close [<task>] --tab <sel> [--yes]`. Shaped as a subcommand of
+`tab` rather than a flat verb so the strip's operations stay together and the
+sibling resume verb has somewhere to land. The one cost: a task literally
+named `close` cannot be `tab`'s bare first positional, because clap matches
+the subcommand first. Leading with a flag (`termic tab --agent claude close`)
+still reaches it; pinned in `tab_close_parses_without_shadowing_the_tab_verb`.
+
+Decisions worth keeping:
+
+- **Selectors are `resolve_tab_selector`, with the agent gate lifted.** Same
+  id / index / title precedence and the same ambiguity error, but `tab close`
+  passes `TabReach::AnyStripTab` where every other verb passes `AgentsOnly`.
+  The write-only rule exists because driving an uncaged PTY remotely is a
+  real risk, and closing is not driving: nothing goes in, nothing comes out.
+  `termic tab --shell` can OPEN a shell tab, so refusing to close one would
+  leave litter with no way to sweep it, which is the whole complaint in #185.
+  Pane-split tabs stay unreachable (both resolver paths filter them) and the
+  webview refuses one anyway, because `closePaneTab` is the correct action
+  for those and `closeTab` is not.
+- **The tab is dropped BEFORE anything dies**, and this ordering is the whole
+  ballgame. The first cut did the reverse (SIGTERM the agent, wait out a
+  1.5s grace so it could flush its session transcript, then close the tab),
+  reasoning that a closed tab is the one most likely to be resumed. Review
+  killed it, correctly: that window leaves `TerminalPane` MOUNTED over a
+  dying agent, and its exit handler cannot tell an induced death from a
+  voluntary one. It raises an "agent exited" attention, which becomes a
+  desktop notification because `isUserWatching` is false for a CLI caller by
+  definition; and within `RESUME_FAILURE_MS` of a resume it takes the
+  failed-resume branch and clears the tab's `session_id` in memory AND on
+  disk, so `closeTab` then snapshots `sessionId: ""` into `closedTabs`. The
+  grace meant to protect the session pointer was destroying it. Dropping the
+  tab first unmounts the pane and the exit becomes nobody's business, which
+  is exactly why the window's close button never had either problem. Net
+  effect: identical to that button, which is what GH #185 asked for.
+- **The server still sweeps the tab's PTY afterwards.** The webview's kill is
+  fire-and-forget (`ipc.ptyKill(...).catch(() => {})`), so the sweep is what
+  makes termination a guarantee by the time the verb answers rather than a
+  hope. It normally finds nothing, and only agent tabs carry the `PtyRole` it
+  resolves, so `killed_pty` is OR-ed with a `killedPty` flag the webview
+  returns: for a roleless tab the store is the only side that knows a process
+  was running.
+- **Closing the LAST strip tab notifies the whole task.** That close puts the
+  task to sleep, unmounting its `TaskView` and taking the aux shell and any
+  split-pane agent with it. Those carry their own attach sessions that no
+  per-tab notify reaches, so they would get a bare disconnect; one tab left
+  on the strip means `notify_detach` fires too. With siblings still open it
+  deliberately does NOT, since telling every attached sibling its session is
+  ending is the blast radius this verb exists to avoid.
+- **The resolver now returns what it already knew** (cli, title, defaultness)
+  instead of just the id. Re-reading the snapshot to answer "is this the
+  default?" would let it shift between resolving and deciding.
+- **The default tab needs `--yes`, live or not.** It is what every
+  unqualified `send`/`wait`/`attach` resolves to, so closing it silently
+  changes what the caller's other commands talk to. Deliberately NOT relaxed
+  for an exited default tab: liveness is not the question, and the default tab
+  is durable, so "it looked dead" is not evidence that closing it is free. A
+  hard refusal, not a TTY prompt: unlike `archive`, the common case (a
+  secondary tab) needs no confirmation at all, and the audience is scripts.
+- **SIGTERM then SIGKILL, not the GUI's outright kill.** The `×` does a bare
+  `pty_kill`; the CLI path takes the `stop_task_ptys` grace instead (GH #185
+  reuses the reasoning from the archive fix). An agent killed on the first
+  signal never flushes its session transcript, and a closed tab is precisely
+  the one someone plans to come back to: the `closedTabs` entry stores its
+  session id, and only a flushed transcript makes that id resumable. Still no
+  `/exit` negotiation, and termination is still guaranteed. **The GUI's `×`
+  keeps the abrupt kill** and should probably adopt the grace too; out of
+  scope here.
+- **Attached clients get the in-band reason first**, the archive precedent,
+  via a per-TAB `notify_tab_detach` (reason `"closed"`, exit 11). Task-scoped
+  `notify_task_detach` would have told every attached sibling that its
+  session was ending, which is exactly the blast radius `tab close` exists to
+  avoid.
+- **The webview refuses a task that is not mounted**, symmetric with `termic
+  tab`, which refuses a stopped task because mounting it would respawn every
+  agent. Measured behaviour behind that, since the reasoning is easy to get
+  wrong: `closeTab` always ends in `syncDurableTabs`, which rebuilds
+  `persisted_tabs` from whatever tabs the STORE holds. Three cases, checked
+  against the real store rather than argued from the code:
+  - Task never opened this session (store holds no tabs): it writes back the
+    default tab ALONE, so every secondary agent's session id is gone from
+    disk, and nothing was closed. Real loss.
+  - Stopped task (GH #119 evicts it from `mountedTasks` but KEEPS its tabs):
+    closes correctly and forgets exactly the tab asked for.
+  - Mounted task, unknown tab id: durable set untouched.
+
+  So the hazard is the first case only, and it is **fixed at the source**:
+  `closeTab` now re-syncs the durable set only when a tab actually went (the
+  `reorderTab` pattern, three lines), so the store cannot be talked into that
+  write by any caller. `app.test.ts` pins it. The two refusals in the handler
+  stay as layers over it: unknown-tab is what a bad id hits, and the mounted
+  check exists for the MESSAGE, so a caller hears "the task is not open"
+  instead of a baffling "that tab no longer exists" about a tab `termic
+  status` is listing. The mounted check is deliberately stricter than the
+  hazard, refusing the stopped case too, which would have worked; it keeps
+  open and close symmetric, since `termic tab` refuses a stopped task as well.
+
+  Worth stating plainly: no GUI path ever passed `closeTab` an id it was not
+  rendering, so this was a hazard the CLI would have INTRODUCED, not a bug
+  main was carrying. It is the one thing this feature changed outside its own
+  surface.
+- **`close_tab` calls the store's `closeTab`, not `requestCloseTab`.** The
+  latter is the confirm gate, and a modal in a windowless app driven by a
+  script would hang the socket until the read timeout.
+
+Protocol went v9 -> v10. Additive in shape, but a new `cmd` value is what a v9
+server rejects as malformed, which is the skew the version gate exists to turn
+into "Termic updated, rerun your command".
 
 ## Agents as users (discoverability)
 

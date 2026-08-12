@@ -1671,6 +1671,33 @@ pub(crate) fn notify_task_detach(manager: &PtyManager, task_id: &str, reason: &s
     }
 }
 
+/// Per-TAB counterpart of `notify_task_detach` (`tab close`, GH #185).
+/// Same contract, narrower blast radius: only sessions attached to THIS
+/// tab are told, because only this tab's PTY is about to go. The task's
+/// other agents, and anyone attached to them, are untouched, which is
+/// the whole reason `tab close` exists next to `archive`.
+pub(crate) fn notify_tab_detach(
+    manager: &PtyManager,
+    task_id: &str,
+    tab_id: &str,
+    reason: &str,
+) {
+    let feeds: Vec<Arc<PtyFeed>> = {
+        let map = manager.inner.lock();
+        map.values()
+            .filter(|s| {
+                s.role
+                    .as_ref()
+                    .is_some_and(|r| r.task_id == task_id && r.tab_id.as_deref() == Some(tab_id))
+            })
+            .filter_map(|s| s.feed.clone())
+            .collect()
+    };
+    for feed in feeds {
+        feed.send_detach(reason);
+    }
+}
+
 /// Write into a PTY by id, shared by the Tauri command and the CLI
 /// attach path (which runs on the socket thread, no State handle).
 /// The writer handle is cloned out and the MAP lock released before
@@ -4851,6 +4878,42 @@ pub(crate) fn stop_task_role_ptys(manager: &PtyManager, task_id: &str) -> usize 
     count
 }
 
+/// Stop ONE tab's agent PTY, same SIGTERM-then-SIGKILL contract as the
+/// task-wide sweeps (`tab close`, GH #185).
+///
+/// Runs AFTER the webview has dropped the tab, as the termination
+/// guarantee: the pane's own kill on unmount is fire-and-forget
+/// (`ipc.ptyKill(...).catch(...)`), so without this sweep the verb would
+/// answer "closed" while the agent might still be up. It normally finds
+/// nothing left to signal.
+///
+/// It deliberately does NOT run first. Stopping the PTY while the pane is
+/// still mounted makes TerminalPane's exit handler treat an induced death
+/// as a voluntary one: a spurious "agent exited" notification, and inside
+/// RESUME_FAILURE_MS of a resume, the failed-resume branch wiping the tab's
+/// session id from disk. See the ordering note in `handle_tab_close`.
+///
+/// Matches EVERY slot carrying this tab's role, not just the newest the way
+/// `find_tab_pty` does: a respawn briefly leaves the killed slot beside its
+/// replacement, and signalling an already-reaped pid is a harmless ESRCH.
+///
+/// Returns how many PTYs were live when we started.
+pub(crate) fn stop_tab_ptys(manager: &PtyManager, task_id: &str, tab_id: &str) -> usize {
+    let victims: Vec<Option<u32>> = {
+        let map = manager.inner.lock();
+        map.values()
+            .filter(|slot| {
+                slot.role.as_ref().is_some_and(|r| {
+                    r.task_id == task_id && r.tab_id.as_deref() == Some(tab_id)
+                })
+            })
+            .map(|slot| slot.child_pid)
+            .collect()
+    };
+    let count = victims.len();
+    graceful_then_kill(&victims.into_iter().flatten().collect::<Vec<_>>());
+    count
+}
 
 /// Set the per-task YOLO flag and persist. No PTY kill — it only
 /// affects how the NEXT agent is launched (the frontend separately
