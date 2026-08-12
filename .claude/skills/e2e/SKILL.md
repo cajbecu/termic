@@ -125,6 +125,17 @@ old/non-e2e binary).
    hand: that encodes how arming works into the spec and hides a broken submit
    path. For pure OSC-title checks, assert `liveTitle` — see the task-spawn
    case in `e2e/specs/task.e2e.ts`.
+   **ALWAYS `await waitForAgentReady(taskId)` before the first
+   `submitToAgent`, never `waitForAgentPty`.** `waitForAgentPty` returns as
+   soon as Rust reports a `ptyId`, which means a process was spawned and
+   nothing else. Submitting into that window dispatches input at an xterm that
+   may not have wired its handler yet: the keystrokes vanish, the submit still
+   reports success, and the spec fails much later on an unrelated badge
+   assertion showing `[null, null]`. That was one bug presenting as a
+   different flaky spec on nearly every CI run. `waitForAgentReady` waits for
+   the fixture's OSC title to reach the store, which proves the whole chain
+   (process, script, xterm, store) is live. See the postmortem in
+   [docs/e2e-tests.md](../../../docs/e2e-tests.md).
 4. **Semantic selectors.** Match by role / visible text (`clickByText`). Add a
    `data-testid` only where text is ambiguous or localized. Never depend on
    generated class names.

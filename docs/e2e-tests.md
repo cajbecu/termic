@@ -114,6 +114,39 @@ fuzzy):
    where text is ambiguous or localized. Never depend on generated class names.
 5. **Deterministic fixtures.** Reset/seed via the isolated profile; don't rely
    on state left by a previous test.
+6. **Wait for READY, not for EXISTS.** A resource existing is not the same as
+   it being able to do its job, and the gap between the two is where flake
+   lives. Before submitting to an agent use `waitForAgentReady()`, not
+   `waitForAgentPty()`: the latter resolves the moment Rust reports a `ptyId`,
+   which says a process was spawned and nothing more.
+7. **Verify the action landed.** An input event that dispatches without
+   throwing has not necessarily been handled. `submitToAgent()` now checks
+   that `lastInputAt` advanced, so a dropped submit fails at the submit with
+   the real reason rather than 15s later at an unrelated assertion.
+
+### The badge flake, and what it taught us
+
+For a while the CI run failed almost every time, on a *different* badge spec
+each run, always with `[null, null]`. That pattern reads as randomness and is
+why it went unfixed: a real regression fails the same spec every time.
+
+One bug, not many. `waitForAgentPty` returned as soon as the PTY existed, so a
+spec could dispatch keystrokes at an xterm that had not yet wired its
+`_inputEvent` handler. The events went nowhere, `submitToAgent` still reported
+success, the fixture never emitted its OSC, and the badge assertion timed out
+15s later blaming the app. On a laptop the window between "PTY exists" and
+"xterm accepts input" is invisible. On a loaded 3-core CI runner it is wide
+enough to lose regularly, and *which* spec lost was luck.
+
+The fix is rules 6 and 7. `waitForAgentReady` waits for the fixture's OSC title
+to reach the store, which proves process spawned + script running + xterm
+parsing + store wired in one condition. An xterm parsing OSC will deliver
+input.
+
+Generalise it: when a spec fails intermittently and the failure moves around,
+suspect a readiness precondition shared by all of them rather than N separate
+timing bugs. And prefer a condition that proves the whole chain over one that
+proves the first link.
 
 Skeleton:
 
