@@ -91,6 +91,7 @@ until `make e2e` is green and this file reflects it.
 | ✅ Code editor | Open a .py file → CodeMirror renders with highlight tokens | `editor.e2e.ts` |
 | ✅ Editor h-scroll gutter | A long line scrolled fully right keeps the sticky gutter painting the host's surface, so code never shows through it (GH #161) | `editor.e2e.ts` |
 | ✅ Commit & push | Commit with push to a bare remote; remote receives it | `git.e2e.ts` |
+| ✅ Multi-repo Git panel | Two member repos: the panel opens on a CHANGED repo (never the clean host) with its files listed and no click; a second dirty repo adds its pill without stealing the selection; picking a pill swaps the list and stages into that repo only | `git.e2e.ts` |
 | ✅ Discover repos | Scan a folder → returns its git repos | `projects.e2e.ts` |
 | ✅ Import worktree | Lists importable (unopened) worktrees for a project | `projects.e2e.ts` |
 | ✅ Project reorder | Reorder projects | `projects.e2e.ts` |
@@ -125,7 +126,7 @@ the real app; e2e specs to add:
 
 Lower-value or high-setup items left for later; the patterns to do them are all in place.
 
-- **Second live agent in one task / quick-create / multi-member project** — heavy fixture setup (agent-tab construction, multi-repo members) for low marginal coverage. Resume (`resume-tab`) covers the reopen path.
+- **Second live agent in one task / quick-create** — heavy fixture setup (agent-tab construction) for low marginal coverage. Resume (`resume-tab`) covers the reopen path. Multi-member projects came off this list: `git.e2e.ts` builds one (a non-git wrapper host + two throwaway repos in a tmp dir) for the multi-repo Git panel, so the fixture pattern exists to copy.
 - **Run-at-repo-root (spotlight)** — needs spotlight state; the run-tab mechanism is covered (`run`, `run-scripts` via proxy).
 - **Configured `.termic.yaml` run scripts via the Run button** — covered by proxy: `setup-script` (configured-script launch) + `run` (run-tab mechanism) + `repo-config` (config persistence). The live Run-button path has a config-cache nuance not worth the flake.
 - **File create/rename/delete via context menu, file-tree reveal** — need Radix context-menu driving (flaky, no clean IPC). Binary previews are no longer on this list: image preview is covered by `files.e2e.ts`, PDF preview by `editor.e2e.ts` (which builds a tiny valid PDF inline rather than committing a fixture).
