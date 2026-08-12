@@ -28,7 +28,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
@@ -10673,7 +10673,26 @@ pub(crate) fn leave_windowless(app: &AppHandle) {
     }
 }
 
+// ─── startup timing ──────────────────────────────────────────────────────
+// Stamped as early as `run()` can manage. The webview reads it back at first
+// paint (`src/lib/perfMarks.ts`) so the nightly perf job can report
+// spawn → first paint as ONE number, instead of only the webview-relative
+// half that `performance.timeOrigin` gives you. Process spawn → webview
+// creation is real cost a user feels and is invisible from JS.
+//
+// Deliberately NOT behind `--features e2e`: it is one `Instant` and an integer
+// read, and `make perf` wants it available on an ordinary build.
+static BOOT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Milliseconds since process start. 0 if called before `run()` stamped it,
+/// which cannot happen from the webview (it does not exist yet).
+#[tauri::command]
+fn perf_boot_elapsed_ms() -> u64 {
+    BOOT.get().map(|t| t.elapsed().as_millis() as u64).unwrap_or(0)
+}
+
 pub fn run() {
+    let _ = BOOT.set(Instant::now());
     // WebKitGTK 2.42+ defaults to its DMA-BUF renderer. It's the FAST path on
     // AMD/Intel (X11 and Wayland) and MUST stay on there: disabling it drops
     // the whole webview onto a slow copy/software compositing path and makes
@@ -11029,6 +11048,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            perf_boot_elapsed_ms,
             projects_list, project_add, project_add_multi, project_set_members, project_update, project_remove, project_reorder, project_set_group,
             tasks_list, task_create, task_create_multi, task_open_repo, task_importable_worktrees, task_import_worktree, task_archive, task_set_cli, task_set_custom_command, task_set_resume_override, task_set_sandbox, task_set_yolo,
             sandbox_available, sandbox_deny_counts, sandbox_recent_denied_hosts, sandbox_recent_denied_paths, sandbox_access_counts, sandbox_recent_access_hosts, sandbox_recent_access_paths, sandbox_set_monitor_filters, task_sandbox_add_allowed_host, task_sandbox_add_allowed_path, task_sandbox_remove_allowed_path, agent_sandbox_add_allowed_path, agent_sandbox_add_allowed_host, task_recent_denials,

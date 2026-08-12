@@ -2266,15 +2266,27 @@ export const useApp = create<AppState>((set, get) => ({
 // Convenience selectors. CRITICAL: never create a new array/object literal
 // inside the selector — Zustand 5 / React 19 will warn (or worse, loop) on
 // non-cached snapshots. We use a shared EMPTY constant for the "no tabs" case.
-const EMPTY_TABS: Tab[] = Object.freeze([]) as unknown as Tab[];
+export const EMPTY_TABS: Tab[] = Object.freeze([]) as unknown as Tab[];
 
-export const useActiveTask = () => useApp(s => {
+// The selector BODIES are exported separately from the hooks that wrap them so
+// `selectorFanout.test.ts` can measure the real selectors instead of a copy
+// that silently drifts. Passing a fresh arrow to `useApp` on every render is
+// fine and is what these did inline: `useSyncExternalStore` compares the
+// returned snapshot with Object.is, never the selector's identity.
+
+export const selectActiveTask = (s: AppState) => {
   const id = s.activeTaskId;
   if (!id) return null;
   return s.tasks.find(w => w.id === id) ?? null;
-});
+};
 /** All tabs for a task (main pane + split panes). */
+export const selectTaskTabs = (taskId: string | null | undefined) =>
+  (s: AppState): Tab[] => (taskId ? (s.tabs[taskId] ?? EMPTY_TABS) : EMPTY_TABS);
+export const selectActiveTabId = (taskId: string | null | undefined) =>
+  (s: AppState) => (taskId ? s.activeTab[taskId] : undefined);
+
+export const useActiveTask = () => useApp(selectActiveTask);
 export const useTaskTabs = (taskId: string | null | undefined) =>
-  useApp(s => (taskId ? (s.tabs[taskId] ?? EMPTY_TABS) : EMPTY_TABS));
+  useApp(selectTaskTabs(taskId));
 export const useActiveTabId = (taskId: string | null | undefined) =>
-  useApp(s => (taskId ? s.activeTab[taskId] : undefined));
+  useApp(selectActiveTabId(taskId));

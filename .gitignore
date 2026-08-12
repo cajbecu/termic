@@ -157,3 +157,6 @@ PLAN-*.md
 
 # e2e persistent profile + fixture repo (scripts/.claude/skills/e2e)
 .e2e/
+
+# Nightly perf run output (report.json + the workers NDJSON handoff).
+.perf/

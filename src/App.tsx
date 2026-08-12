@@ -29,6 +29,7 @@ import { useIsFullscreen } from "@/hooks/useIsFullscreen";
 import { useUpdate } from "@/store/update";
 import { usePrefs } from "@/store/prefs";
 import { focusMainTab } from "@/lib/tabFocus";
+import { recordFirstPaint } from "@/lib/perfMarks";
 
 export function App() {
   const loadAll = useApp(s => s.loadAll);
@@ -60,6 +61,10 @@ export function App() {
   useAttentionNotifier();
 
   useEffect(() => {
+    // Before loadAll(): this marks when the shell is on screen, which is what
+    // the user perceives as "started". Waiting for loadAll would measure disk
+    // IO for projects/tasks, a different metric with a different owner.
+    recordFirstPaint();
     installPointerEventsGuard();
     loadAll();
     // CLI install detection runs at startup + when Settings → Agent CLIs

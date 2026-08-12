@@ -487,6 +487,56 @@ export async function waitForAgentPty(taskId: string, timeout = 20_000): Promise
 }
 
 /**
+ * Wait until the agent is actually able to RECEIVE a prompt.
+ *
+ * {@link waitForAgentPty} is not enough and was the cause of a long-running CI
+ * flake: it resolves as soon as Rust reports a `ptyId`, which says the process
+ * was spawned and nothing else. Submitting then dispatches input events at an
+ * xterm that may not have wired its `_inputEvent` handler yet, so the
+ * keystrokes are dropped silently, `submitToAgent` still returns "ok", the
+ * agent never emits its OSC, and the spec fails 15s later with
+ * `[null, null]` badges. On a laptop the gap is invisible; on a loaded 3-core
+ * CI runner it is wide enough to lose the race regularly. It failed a
+ * different badge spec on nearly every run, which is exactly why it read as
+ * random rather than as one bug.
+ *
+ * The condition is `lastOutputAt`: the fixture prints its banner before the
+ * read loop, and that field is only stamped by TerminalPane's PTY data
+ * handler, which is wired in the same effect that calls `term.open()`. So
+ * output having reached the store proves the whole chain is live: process
+ * spawned, script running, xterm attached, store wired. A terminal that is
+ * delivering output is a terminal that will deliver input.
+ *
+ * Deliberately NOT `liveTitle`, which was the first attempt and is wrong:
+ * `setTabLiveTitle` drops the agent's title outright when a tab has
+ * `customTitle` set, so a legitimately-ready agent can sit at `liveTitle:
+ * null` forever. It is still accepted as an alternative signal for the case
+ * where a title arrives before the first output patch (the store coalesces
+ * `lastOutputAt` to one write per 500ms, so a fast title can win the race).
+ */
+export async function waitForAgentReady(taskId: string, timeout = 30_000): Promise<void> {
+  await waitForAgentPty(taskId, timeout);
+  let last: { out: number | null; title: string | null } = { out: null, title: null };
+  await browser
+    .waitUntil(
+      async () => {
+        last = await browser.execute((id) => {
+          const t = (window.__termic!.useApp.getState().tabs[id] ?? [])[0];
+          return { out: t?.lastOutputAt ?? null, title: t?.liveTitle ?? null };
+        }, taskId);
+        return (last.out ?? 0) > 0 || !!last.title?.trim();
+      },
+      { timeout, interval: 100 },
+    )
+    .catch(() => {
+      throw new Error(
+        `agent in ${taskId} never produced output, so it was never ready for input ` +
+          `— last {lastOutputAt, liveTitle} = ${JSON.stringify(last)}`,
+      );
+    });
+}
+
+/**
  * Send a prompt to a task's on-screen agent terminal the way a user does:
  * through xterm's own input path, not by writing to the PTY behind its back.
  *
@@ -502,6 +552,16 @@ export async function waitForAgentPty(taskId: string, timeout = 20_000): Promise
  * breaks, these tests fail instead of quietly compensating for it.
  */
 export async function submitToAgent(taskId: string, text: string): Promise<void> {
+  // What `lastInputAt` was before this submit. TerminalPane stamps it from
+  // xterm's `onData` for a CR, so it advancing is PROOF the keystrokes went
+  // through xterm and reached the PTY. Without this check a dropped submit is
+  // indistinguishable from a working one until some unrelated assertion times
+  // out much later with a useless message.
+  const before = await browser.execute(
+    (id) => (window.__termic!.useApp.getState().tabs[id] ?? [])[0]?.lastInputAt ?? 0,
+    taskId,
+  );
+
   const result = await browser.execute(
     (id, line) => {
       const host = document.querySelector(`[data-task-id="${id}"]`);
@@ -542,6 +602,26 @@ export async function submitToAgent(taskId: string, text: string): Promise<void>
     text,
   );
   if (result !== "ok") throw new Error(`could not submit to agent in ${taskId}: ${result}`);
+
+  // "ok" only means the events were dispatched, not that xterm forwarded them.
+  // Fail HERE, naming the real cause, instead of letting a badge assertion
+  // time out 15s later reporting [null, null] as though the app misbehaved.
+  await browser
+    .waitUntil(
+      async () =>
+        (await browser.execute(
+          (id) => (window.__termic!.useApp.getState().tabs[id] ?? [])[0]?.lastInputAt ?? 0,
+          taskId,
+        )) > before,
+      { timeout: 10_000, interval: 100 },
+    )
+    .catch(() => {
+      throw new Error(
+        `submit to ${taskId} was dispatched but xterm never forwarded it ` +
+          `(lastInputAt did not advance past ${before}). The terminal was not ` +
+          `ready for input — call waitForAgentReady() before submitting.`,
+      );
+    });
 }
 
 /**

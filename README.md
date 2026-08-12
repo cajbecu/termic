@@ -410,6 +410,7 @@ Open an issue to push something up the list or pick one off.
     cautionary tale as much as a model: Orca measures and still carries
     open reports of 23-33% idle renderer CPU and memory that climbs over a
     session. Measuring is not sufficient. Not measuring is worse.
+    Feasibility study in [docs/research/perf-ci.md](docs/research/perf-ci.md).
 13. **Import Warp and Ghostty themes.** Termic has a native JSON theme
     format, so a custom theme is a file drop away, but two large theme
     ecosystems already exist and neither is ours. Scan `~/.warp/themes`
