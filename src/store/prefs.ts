@@ -50,6 +50,8 @@ const LS_TASK_EXPAND_MODE = "taskExpandMode";
 const LS_HIDE_INACTIVE_PROJECTS = "hideInactiveProjects";
 const LS_MD_VIEW       = "markdownDefaultView";
 const LS_LOAD_REMOTE_IMAGES = "loadRemoteImages";
+const LS_FIND_IN_FILES_REGEX = "findInFilesRegex";
+const LS_FIND_IN_FILES_MATCH_CASE = "findInFilesMatchCase";
 const LS_BRANCH_PREFIX = "branchPrefix";
 const LS_QUEUE_MIN_INTERVAL = "queueMinIntervalMs";
 const LS_SHORTCUTS     = "shortcutBindings";
@@ -481,6 +483,13 @@ interface PrefsState {
    *  webview is outside the cage". A per-document affordance in the
    *  preview can unblock a single file without flipping this pref. */
   loadRemoteImages: boolean;
+  /** Find in files (⇧⌘F) treats the query as a POSIX ERE instead of a
+   *  literal string. Toggled from the search bar itself, persisted so it
+   *  survives a relaunch. */
+  findInFilesRegex: boolean;
+  /** Find in files matches the query's case. OFF by default, which is the
+   *  case-insensitive search the dialog has always done. */
+  findInFilesMatchCase: boolean;
   /** Default for the NewTaskDialog's Sandbox toggle when neither
    *  the project's `default_sandbox` nor an explicit user pick is in
    *  effect. Lets a single-keystroke toggle apply across all projects
@@ -648,6 +657,8 @@ interface PrefsState {
   setConfirmBeforeCloseAgentTab: (v: boolean) => void;
   setWorkingIndicator: (v: boolean) => void;
   setLoadRemoteImages: (v: boolean) => void;
+  setFindInFilesRegex: (v: boolean) => void;
+  setFindInFilesMatchCase: (v: boolean) => void;
   setGlobalDefaultSandbox: (v: boolean) => void;
   setSandboxBypassPermissions: (v: boolean) => void;
   setAllowScope: (s: "agent" | "project" | "repo") => void;
@@ -770,6 +781,8 @@ const initialWorkingIndicator = lsGetBool(LS_WORKING_INDICATOR, true);
 // OFF by default (issue #69): closing the remote-image sandbox gap must not
 // silently start firing image requests for existing users.
 const initialLoadRemoteImages = lsGetBool(LS_LOAD_REMOTE_IMAGES, false);
+const initialFindInFilesRegex = lsGetBool(LS_FIND_IN_FILES_REGEX, false);
+const initialFindInFilesMatchCase = lsGetBool(LS_FIND_IN_FILES_MATCH_CASE, false);
 const initialDefaultSandbox = lsGetBool(LS_DEFAULT_SANDBOX, false);
 // ON by default — sandboxed agents bypass their own permission prompts
 // because the seatbelt is the real boundary. Users can opt out.
@@ -803,6 +816,8 @@ export const usePrefs = create<PrefsState>(set => ({
   confirmBeforeCloseAgentTab: initialConfirmCloseAgentTab,
   workingIndicator: initialWorkingIndicator,
   loadRemoteImages: initialLoadRemoteImages,
+  findInFilesRegex: initialFindInFilesRegex,
+  findInFilesMatchCase: initialFindInFilesMatchCase,
   globalDefaultSandbox: initialDefaultSandbox,
   sandboxBypassPermissions: initialSandboxBypass,
   allowScope: initialAllowScope,
@@ -997,6 +1012,14 @@ export const usePrefs = create<PrefsState>(set => ({
   setLoadRemoteImages: (v) => {
     try { localStorage.setItem(LS_LOAD_REMOTE_IMAGES, v ? "1" : "0"); } catch {}
     set({ loadRemoteImages: v });
+  },
+  setFindInFilesRegex: (v) => {
+    try { localStorage.setItem(LS_FIND_IN_FILES_REGEX, v ? "1" : "0"); } catch {}
+    set({ findInFilesRegex: v });
+  },
+  setFindInFilesMatchCase: (v) => {
+    try { localStorage.setItem(LS_FIND_IN_FILES_MATCH_CASE, v ? "1" : "0"); } catch {}
+    set({ findInFilesMatchCase: v });
   },
   setGlobalDefaultSandbox: (v) => {
     try { localStorage.setItem(LS_DEFAULT_SANDBOX, v ? "1" : "0"); } catch {}
