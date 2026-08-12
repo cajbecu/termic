@@ -426,10 +426,37 @@ Open an issue to push something up the list or pick one off.
     shape and pairs it with upload to their hosted portal; the local
     half is the interesting half. Notes in
     [docs/research/agent-orchestration.md](docs/research/agent-orchestration.md).
-15. ~~**First-class git surface.** Commit / push / pull / branch switch from inside the app instead of dropping to the aux terminal.~~ (Done)
-16. ~~**More coding agents.** First-class opencode, pi.dev, and cline support, plus exploring other CLI coding agents as they land. Launch presets for local models via ollama so an agent can run fully on-device.~~ (Done)
-17. ~~**Flexible terminal splits.** iTerm-style pane splitting in any direction — horizontal, vertical, and nested — so multiple terminals, agents, or aux sessions can live side by side in the same workspace view without switching tabs.~~ (Done)
-18. ~~**Quick-jump to next waiting agent.** A keyboard shortcut to instantly focus the next agent that is waiting for input, so you can cycle through a multi-agent session without hunting for the right tab by eye.~~ (Done)
+15. **On-device dictation for agent prompts.** Prompts to a coding agent
+    are prose, not code: a paragraph of intent, constraints and a bit of
+    context. That is the kind of text people speak faster than they
+    type, and it is worth more here than in a normal editor because one
+    dictated prompt can be broadcast to four agents at once. macOS 26
+    (Tahoe) ships `SpeechAnalyzer` and `SpeechTranscriber` in the Speech
+    framework, which run entirely on device against the Apple Silicon
+    Neural Engine, no network and no vendor key, which is the only way a
+    feature like this belongs in an app that is otherwise wholly
+    on-device. Early third-party measurements put it well ahead of
+    Whisper on speed (a 34-minute file transcribed in about 45 seconds,
+    roughly 55% faster than MacWhisper's Large V3 Turbo), though those
+    are other people's numbers on other people's hardware and the
+    interesting figure for us is streaming latency for a 20-second
+    utterance, not bulk throughput. Hard constraints: **macOS 26+ and
+    Apple Silicon only**, so this is strictly additive, hidden rather
+    than degraded everywhere else (Intel, older macOS, Linux, Windows),
+    and never on the critical path of typing a prompt. Open questions
+    before any of it is worth building: whether the speech models arrive
+    as downloadable assets on first use and what that means for a first
+    run offline, what streaming partial-result latency actually feels
+    like inside a terminal-focused UI, how a Swift bridge is best shaped
+    from the Rust side, how microphone TCC interacts with the sandbox,
+    and whether `DictationTranscriber` is a good enough fallback for
+    unsupported languages to bother with. Research first: the question
+    is whether it earns a permission prompt and a platform-specific code
+    path, not how to build it.
+16. ~~**First-class git surface.** Commit / push / pull / branch switch from inside the app instead of dropping to the aux terminal.~~ (Done)
+17. ~~**More coding agents.** First-class opencode, pi.dev, and cline support, plus exploring other CLI coding agents as they land. Launch presets for local models via ollama so an agent can run fully on-device.~~ (Done)
+18. ~~**Flexible terminal splits.** iTerm-style pane splitting in any direction — horizontal, vertical, and nested — so multiple terminals, agents, or aux sessions can live side by side in the same workspace view without switching tabs.~~ (Done)
+19. ~~**Quick-jump to next waiting agent.** A keyboard shortcut to instantly focus the next agent that is waiting for input, so you can cycle through a multi-agent session without hunting for the right tab by eye.~~ (Done)
 
 ---
 
