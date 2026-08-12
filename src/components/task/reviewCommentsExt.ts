@@ -347,17 +347,7 @@ function commentTooltips(state: EditorState): readonly Tooltip[] {
       // before we read it.
       btn.addEventListener("mousedown", (e) => {
         e.preventDefault();
-        // Re-clamp against the live doc: the selection that produced this
-        // tooltip could in principle reference a line past the doc end.
-        const last = view.state.doc.lines;
-        const s = Math.max(1, Math.min(startLine, last));
-        const en = Math.max(s, Math.min(endLine, last));
-        const quote = view.state.sliceDoc(view.state.doc.line(s).from, view.state.doc.line(en).to);
-        view.dispatch({
-          // Collapse selection so this tooltip dismisses, then open composer.
-          selection: { anchor: view.state.doc.line(s).from },
-          effects: openComposer.of({ mode: "new", startLine: s, endLine: en, quote, initialBody: "" }),
-        });
+        dispatchSelectionComment(view);
       });
       dom.appendChild(btn);
       return { dom };
@@ -535,6 +525,29 @@ export function reviewCommentsExtension(taskId: string, file: string) {
     storeSyncPlugin(ctx),
     baseTheme,
   ];
+}
+
+/**
+ * Open the composer on the current selection — the tooltip button's action,
+ * also reachable from the keyboard (EditorPane's "add selection to agent"
+ * shortcut). Returns false when nothing is selected, so a key binding can fall
+ * through instead of swallowing the chord.
+ */
+export function dispatchSelectionComment(view: EditorView): boolean {
+  const range = view.state.selection.main;
+  if (range.empty) return false;
+  // Clamp against the LIVE doc: the selection may reference a line the file no
+  // longer has (an agent rewrote it under an open editor).
+  const last = view.state.doc.lines;
+  const s = Math.max(1, Math.min(view.state.doc.lineAt(range.from).number, last));
+  const en = Math.max(s, Math.min(view.state.doc.lineAt(range.to).number, last));
+  const quote = view.state.sliceDoc(view.state.doc.line(s).from, view.state.doc.line(en).to);
+  view.dispatch({
+    // Collapse the selection so the tooltip dismisses, then open the composer.
+    selection: { anchor: view.state.doc.line(s).from },
+    effects: openComposer.of({ mode: "new", startLine: s, endLine: en, quote, initialBody: "" }),
+  });
+  return true;
 }
 
 /** Open a whole-file comment composer programmatically (DiffPane header). */

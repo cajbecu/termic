@@ -1,7 +1,7 @@
 import { execSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { archiveTask, cliRpc, ensureActiveTask, openTask, requireTermicApi, snap, waitForAgentReady, waitForAppShell, waitForText } from "../helpers";
+import { archiveTask, cliRpc, ensureActiveTask, openTask, requireTermicApi, snap, waitForAgentReady, waitForAppShell } from "../helpers";
 
 declare global {
   interface Window {
@@ -2089,12 +2089,13 @@ describe("⌘F ownership across previews", () => {
   });
 });
 
-// Roadmap item 8 / GH #174: select code in the editor, push it at the agent as
-// an `@file:12-40` reference. The value is that the reference is TYPED and left
-// uncommitted, so the user finishes the sentence — which is why the delivery
-// assertion below reads the agent's PTY ring rather than a store flag: only the
-// ring can show that the exact reference text (and nothing else) arrived.
-describe("send selection to agent", () => {
+// Roadmap item 8 / GH #174: mark up code in the EDITOR for the agent. The
+// surface is the review-comment component the diff pane already uses (GH #28),
+// on purpose — the point is to queue several remarks and ship them as one
+// instruction, not to fire a reference at the agent per selection. Cases cover
+// both entry points (selection tooltip, ⇧⌘L), the queue accumulating across
+// lines, and the batch actually landing in the agent's PTY.
+describe("comment on an editor selection for the agent", () => {
   let taskId: string | undefined;
   let editTabId: string | undefined;
   let agentTabId: string | undefined;
@@ -2104,15 +2105,30 @@ describe("send selection to agent", () => {
     if (taskId) await archiveTask(taskId);
   });
 
-  /** The selection tooltip's button, or null when no selection is standing. */
-  const sendButton = () =>
-    browser.execute(() => {
-      const el = document.querySelector('[data-testid="send-selection-to-agent"]');
-      return el ? (el as HTMLElement).textContent : null;
-    }) as Promise<string | null>;
+  /** The queued comments as the user sees them: one card pinned under each
+   *  commented range, inside this task's editor.
+   *
+   *  textContent, not innerText, and presence rather than isDisplayed()
+   *  throughout this spec: an occluded window freezes rAF, so CodeMirror never
+   *  measures and its tooltip + widgets report a 0x0 box while being perfectly
+   *  mounted and clickable. Layout is not what these cases are about. */
+  const cards = () =>
+    browser.execute((id) =>
+      [...document.querySelectorAll(`[data-task-id="${id}"] .tc-comment-card`)]
+        .map(el => el.textContent ?? ""),
+      taskId!) as Promise<string[]>;
 
-  /** Select whole lines `a`..`b` (1-based) through CodeMirror's own API and
-   *  focus the view, exactly as a drag-select would leave it. */
+  /** Wait for `selector` to exist (see the note above about visibility). */
+  const waitFor = (selector: string, msg: string) =>
+    browser.waitUntil(() => browser.execute((s) => !!document.querySelector(s), selector),
+      { timeout: 8_000, timeoutMsg: msg });
+
+  const waitForGone = (selector: string, msg: string) =>
+    browser.waitUntil(() => browser.execute((s) => !document.querySelector(s), selector),
+      { timeout: 8_000, timeoutMsg: msg });
+
+  /** Select whole lines `a`..`b` (1-based) and focus the editor, as a
+   *  drag-select would leave it. */
   const selectLines = (a: number, b: number) =>
     browser.execute((id, from, to) => {
       const host = document.querySelector(`[data-task-id="${id}"] .cm-editor`) as HTMLElement | null;
@@ -2121,9 +2137,21 @@ describe("send selection to agent", () => {
       const doc = view.state.doc;
       view.dispatch({ selection: { anchor: doc.line(from).from, head: doc.line(to).to } });
       // Focus the contentDOM, not view.focus(): the latter does not take in
-      // this webview (see the find-vs-editor cases above, same trick).
+      // this webview (same trick as the find-vs-editor cases above).
       (host!.querySelector(".cm-content") as HTMLElement).focus();
     }, taskId!, a, b);
+
+  /** Fill the open composer and save it. */
+  const writeComment = async (body: string) => {
+    await waitFor(".tc-comment-textarea", "the comment composer never opened");
+    await browser.execute((text) => {
+      const ta = document.querySelector(".tc-comment-textarea") as HTMLTextAreaElement;
+      ta.value = text;
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+      (document.querySelector(".tc-comment-composer .tc-btn-primary") as HTMLElement).click();
+    }, body);
+    await waitForGone(".tc-comment-textarea", "the composer never closed after saving");
+  };
 
   const activeTabId = () =>
     browser.execute((id) => window.__termic!.useApp.getState().activeTab[id], taskId!);
@@ -2132,8 +2160,8 @@ describe("send selection to agent", () => {
     await waitForAppShell();
     await requireTermicApi();
     taskId = await openTask(TASK);
-    // The reference has to land in a REAL agent PTY, so wait for the fixture
-    // agent to be up rather than for a ptyId to merely exist.
+    // The batch has to land in a REAL agent PTY, so wait for the fixture agent
+    // to come up rather than for a ptyId to merely exist.
     await waitForAgentReady(taskId);
     agentTabId = await activeTabId();
 
@@ -2143,6 +2171,7 @@ describe("send selection to agent", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const tab = app.tabs[id].find((t: any) => t.type === "edit" && t.path === "README.md");
       app.persistTab(id, tab.id);
+      app.setActiveTabId(id, tab.id);
       return tab.id as string;
     }, taskId);
 
@@ -2151,93 +2180,104 @@ describe("send selection to agent", () => {
         !!document.querySelector(`[data-task-id="${id}"] .cm-content`), taskId),
       { timeout: 10_000, timeoutMsg: "the editor never mounted" },
     );
+    expect(await cards()).toEqual([]);
   });
 
-  it("offers the button only while lines are selected", async () => {
-    expect(await sendButton()).toBe(null);
+  it("offers the diff pane's own comment button over a selection", async () => {
+    expect(await browser.execute(() => !!document.querySelector(".tc-add-comment-btn"))).toBe(false);
 
-    await selectLines(1, 2);
-    await browser.waitUntil(async () => (await sendButton()) !== null,
-      { timeout: 5_000, timeoutMsg: "the send button never appeared for a selection" });
-    expect(await sendButton()).toBe("Send lines 1-2 to agent");
-
-    // Collapsing the selection retracts it — the action only makes sense with
-    // something selected.
-    await browser.execute((id) => {
-      const host = document.querySelector(`[data-task-id="${id}"] .cm-editor`) as unknown as
-        { __cmView?: any };
-      host.__cmView.dispatch({ selection: { anchor: 0 } });
-    }, taskId);
-    await browser.waitUntil(async () => (await sendButton()) === null,
-      { timeout: 5_000, timeoutMsg: "the send button outlived the selection" });
-  });
-
-  it("labels a single-line selection in the singular", async () => {
     await selectLines(1, 1);
-    await browser.waitUntil(async () => (await sendButton()) !== null,
-      { timeout: 5_000, timeoutMsg: "no button for a one-line selection" });
-    expect(await sendButton()).toBe("Send line 1 to agent");
+    await waitFor(".tc-add-comment-btn", "the comment button never appeared for a selection");
+    // Exactly the affordance the diff pane raises, same class, same wording.
+    expect(await browser.execute(() =>
+      document.querySelector(".tc-add-comment-btn")!.textContent)).toContain("Comment on line 1");
   });
 
-  it("types the reference into the agent and hands focus over", async () => {
-    await selectLines(1, 2);
-    await browser.waitUntil(async () => (await sendButton()) !== null,
-      { timeout: 5_000, timeoutMsg: "the send button never appeared" });
-    // mousedown, not click: the button acts on mousedown so the editor can't
-    // clear the selection first.
+  it("queues the comment instead of sending it", async () => {
     await browser.execute(() => {
-      const el = document.querySelector('[data-testid="send-selection-to-agent"]') as HTMLElement;
-      el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+      // The button commits on mousedown so the editor can't clear the
+      // selection first; .click() alone does nothing.
+      document.querySelector(".tc-add-comment-btn")!
+        .dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    });
+    await writeComment("rename this heading");
+
+    const queued = await cards();
+    expect(queued.length).toBe(1);
+    expect(queued[0]).toContain("rename this heading");
+    // Nothing was sent, and the editor keeps the stage: queueing must not
+    // yank the user to the terminal.
+    expect(await activeTabId()).toBe(editTabId);
+  });
+
+  it("stacks a second comment from the keyboard route", async () => {
+    await selectLines(1, 2);
+    await browser.execute(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "l", metaKey: true, shiftKey: true, bubbles: true,
+      }));
+    });
+    await writeComment("and mention the fixture");
+
+    // Both are held — the whole point of the queue.
+    const queued = await cards();
+    expect(queued.length).toBe(2);
+    expect(queued.join("\n")).toContain("and mention the fixture");
+    expect(queued.join("\n")).toContain("rename this heading");
+  });
+
+  it("ignores the shortcut when nothing is selected", async () => {
+    await browser.execute((id) => {
+      const host = document.querySelector(`[data-task-id="${id}"] .cm-editor`) as HTMLElement;
+      (host as unknown as { __cmView: any }).__cmView.dispatch({ selection: { anchor: 0 } });
+      (host.querySelector(".cm-content") as HTMLElement).focus();
+    }, taskId!);
+    await browser.execute(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "l", metaKey: true, shiftKey: true, bubbles: true,
+      }));
+    });
+    expect(await browser.execute(() => !!document.querySelector(".tc-comment-textarea"))).toBe(false);
+    expect((await cards()).length).toBe(2);
+  });
+
+  it("sends the whole batch to the agent in one message", async () => {
+    // The pending-comments bar lives on the terminal footer strip, so switch
+    // to the agent the way a user would before sending.
+    await browser.execute((id, tab) =>
+      window.__termic!.useApp.getState().setActiveTabId(id, tab), taskId!, agentTabId);
+    // The pill carries the count; opening it reveals the batch + Send.
+    await waitFor('[data-testid="review-comments-pill"]', "the pending-comments pill never appeared");
+    expect(await browser.execute(() =>
+      document.querySelector('[data-testid="review-comments-pill"]')!.textContent))
+      .toContain("2 pending comments");
+    await browser.execute(() => {
+      (document.querySelector('[data-testid="review-comments-pill"]') as HTMLElement).click();
+    });
+    await waitFor('[data-testid="review-comments-send"]', "the Send button never appeared");
+    await browser.execute(() => {
+      (document.querySelector('[data-testid="review-comments-send"]') as HTMLElement).click();
     });
 
-    // The user is put in front of the agent they just fed.
-    await browser.waitUntil(async () => (await activeTabId()) === agentTabId,
-      { timeout: 8_000, timeoutMsg: "the agent tab never became active" });
-    await waitForText("Sent @README.md:1-2");
-
-    // Delivery, from the PTY's own ring: submit the line the user was left
-    // holding, and the fixture agent echoes back exactly what it read.
-    await browser.execute((id, tab) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const t = (window.__termic!.useApp.getState().tabs[id] ?? []).find((x: any) => x.id === tab);
-      return window.__termic!.ipc.ptyWrite(t.ptyId, [13]);
-    }, taskId!, agentTabId);
+    // One message carrying BOTH comments, read from the agent's own PTY ring
+    // (xterm renders to a canvas, so this is the only place the bytes show).
     await browser.waitUntil(
       async () => {
         const logs = await cliRpc({ cmd: "logs", task: TASK });
-        return logs.ok && logs.data.data.includes("FAKE-AGENT echo: @README.md:1-2");
+        if (!logs.ok) return false;
+        const out = logs.data.data as string;
+        // Both bodies AND both line attributions, in ONE message.
+        return out.includes("rename this heading") && out.includes("and mention the fixture")
+          && out.includes("README.md:1") && out.includes("README.md:1-2")
+          && out.includes("2 inline comments");
       },
-      { timeout: 30_000, timeoutMsg: "the reference never reached the agent's PTY" },
+      { timeout: 30_000, timeoutMsg: "the batch never reached the agent's PTY" },
     );
-    await snap("send-selection-to-agent.png");
-  });
-
-  it("does nothing on the shortcut with no selection, sends with one", async () => {
-    // Back to the editor, cursor collapsed.
-    await browser.execute((id, tab) =>
-      window.__termic!.useApp.getState().setActiveTabId(id, tab), taskId, editTabId);
-    await browser.execute((id) => {
-      const host = document.querySelector(`[data-task-id="${id}"] .cm-editor`) as unknown as
-        { __cmView?: any };
-      host.__cmView.dispatch({ selection: { anchor: 0 } });
-      host.__cmView.focus();
-    }, taskId);
-
-    const press = () => browser.execute(() => {
-      window.dispatchEvent(new KeyboardEvent("keydown", {
-        key: "a", metaKey: true, altKey: true, bubbles: true,
-      }));
-    });
-
-    // No selection: the key falls through, nothing is sent, the editor keeps
-    // the stage.
-    await press();
-    expect(await activeTabId()).toBe(editTabId);
-
-    await selectLines(1, 1);
-    await press();
-    await browser.waitUntil(async () => (await activeTabId()) === agentTabId,
-      { timeout: 8_000, timeoutMsg: "the shortcut never sent the selection" });
-    await waitForText("Sent @README.md:1");
+    // Sent means drained: the cards and the pill are gone.
+    await browser.waitUntil(async () => (await cards()).length === 0,
+      { timeout: 8_000, timeoutMsg: "the queue was never cleared after sending" });
+    expect(await browser.execute(() =>
+      !!document.querySelector('[data-testid="review-comments-pill"]'))).toBe(false);
+    await snap("editor-selection-comments.png");
   });
 });

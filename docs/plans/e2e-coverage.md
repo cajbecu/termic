@@ -91,7 +91,7 @@ until `make e2e` is green and this file reflects it.
 | ✅ Code editor | Open a .py file → CodeMirror renders with highlight tokens | `editor.e2e.ts` |
 | ✅ Editor h-scroll gutter | A long line scrolled fully right keeps the sticky gutter painting the host's surface, so code never shows through it (GH #161) | `editor.e2e.ts` |
 | ✅ Commit & push | Commit with push to a bare remote; remote receives it | `git.e2e.ts` |
-| ✅ Send selection to agent | Editor selection offers the button only while lines are selected (singular label for one line); clicking types `@README.md:1-2` into the agent PTY (asserted from its own output ring), switches to it, and toasts; ⌥⌘A does nothing with no selection and sends with one | `editor.e2e.ts` |
+| ✅ Editor selection → agent | An editor selection raises the diff pane's own comment button; commenting QUEUES (card in place, editor keeps the stage, nothing sent); ⇧⌘L stacks a second one and no-ops with no selection; the batch sends as one message carrying both bodies + both line attributions (asserted from the agent's PTY ring) and drains the queue | `editor.e2e.ts` |
 | ✅ Multi-repo Git panel | Two member repos: the panel opens on a CHANGED repo (never the clean host) with its files listed and no click; a second dirty repo adds its pill without stealing the selection; picking a pill swaps the list and stages into that repo only | `git.e2e.ts` |
 | ✅ Discover repos | Scan a folder → returns its git repos | `projects.e2e.ts` |
 | ✅ Import worktree | Lists importable (unopened) worktrees for a project | `projects.e2e.ts` |

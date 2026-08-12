@@ -125,6 +125,7 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
           <PopoverTrigger asChild>
             <button
               type="button"
+              data-testid="review-comments-pill"
               className={cn(
                 "flex shrink-0 items-center gap-1.5 rounded-md whitespace-nowrap font-medium text-[12.5px] transition-colors",
                 compact ? "h-7 px-2.5" : "px-2.5 py-1",
@@ -225,7 +226,8 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
               ? <>Sends to <span className="text-[var(--color-fg-dim)]">{tabLabel(target)}</span></>
               : "No running agent in this task"}
           </span>
-          <Button variant="primary" size="sm" className="gap-1.5" disabled={!target || sending} onClick={send}>
+          <Button variant="primary" size="sm" className="gap-1.5" data-testid="review-comments-send"
+                  disabled={!target || sending} onClick={send}>
             <Send className="h-3.5 w-3.5" /> {sending ? "Sending…" : "Send"}
           </Button>
         </div>
