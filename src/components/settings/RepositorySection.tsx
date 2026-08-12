@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
-import { projectUpdate, projectRemove, projectSetMembers, pathIsGitRepo, repoConfigLoad, repoConfigSave } from "@/lib/ipc";
+import { projectUpdate, projectRemove, projectSetMembers, pathIsGitRepo, projectTasksPathDefault, repoConfigLoad, repoConfigSave } from "@/lib/ipc";
 import { stopSpotlight } from "@/lib/spotlight";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type { Project, ProjectMember, RepoConfig } from "@/lib/types";
@@ -130,6 +130,20 @@ export function RepositorySection({ projectId }: { projectId: string }) {
     if (!id) return null;
     return s.tasks.find(w => w.id === id)?.name ?? null;
   });
+
+  // Where this project's worktrees land with NO override below, i.e. straight
+  // from Settings → Tasks → Default tasks path. Shown as the "Tasks path"
+  // placeholder so the field can stay empty and still say where tasks go.
+  // Re-read per project mount, which is also how an edit to the global setting
+  // reaches here (switching rails remounts this page).
+  const [tasksPathDefault, setTasksPathDefault] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    projectTasksPathDefault(projectId)
+      .then(p => { if (!cancelled) setTasksPathDefault(p); })
+      .catch(() => { if (!cancelled) setTasksPathDefault(""); });
+    return () => { cancelled = true; };
+  }, [projectId]);
 
   if (!project || !draft) return <div className="text-[13.5px] text-[var(--color-fg-faint)]">Project not found.</div>;
 
@@ -356,6 +370,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
           <button
             key={t.id}
             type="button"
+            data-repo-tab={t.id}
             onClick={() => setSubTab(t.id)}
             className={cn(
               "relative -mb-px flex items-center gap-1.5 px-3 py-2 text-[13px] font-medium transition-colors",
@@ -715,8 +730,16 @@ export function RepositorySection({ projectId }: { projectId: string }) {
           />
           <Field
             label="Tasks path"
-            hint="Where each new worktree lives. Don't move or delete subdirectories; archive tasks in Termic instead."
-            control={<Input value={draft.tasks_path} onChange={(e) => patch("tasks_path", e.target.value)} className={cn("font-mono", flashRing("tasks_path"))} />}
+            hint="Where this repo's new worktrees live. Leave it empty to follow the default tasks path (Settings, Tasks), which is the greyed-out path in the field. A value here overrides that for this repo only: a full path (starting with / or ~) becomes the worktree root as-is, a relative one resolves inside the repo. Don't move or delete subdirectories; archive tasks in Termic instead."
+            control={
+              <Input
+                value={draft.tasks_path}
+                onChange={(e) => patch("tasks_path", e.target.value)}
+                placeholder={tasksPathDefault}
+                className={cn("font-mono", flashRing("tasks_path"))}
+                data-testid="project-tasks-path-input"
+              />
+            }
           />
           {/* The same field the project `+` menu's "Branch from" row writes,
               so the two can't disagree. */}

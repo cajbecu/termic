@@ -34,6 +34,11 @@ export interface Project {
   id: string;
   name: string;
   root_path: string;
+  /** Per-project OVERRIDE of the global `Settings.default_tasks_path`. Empty
+   *  (the normal case) means "follow the global setting", which the Repository
+   *  page surfaces as the field's placeholder. Absolute values are the
+   *  project's worktree root verbatim; relative ones resolve against
+   *  `root_path`. */
   tasks_path: string;
   /** The ref new worktree tasks are branched from. Written by both the project
    *  `+` menu's "Branch from" picker and Settings → Repository. */
@@ -484,6 +489,15 @@ export interface Settings {
    *  omits it). Pre-filled with the common agent dirs; an empty list disables
    *  the linking. Absent = the pre-filled defaults, not off. */
   worktree_symlink_paths?: string[];
+  /** Where new task worktrees are created, for every project that doesn't
+   *  override it in Settings → Repository → Tasks path. An absolute value
+   *  (`/vol/work`, `~/code/worktrees`) collects every project under it, one
+   *  subdir per project folder name; a relative value (`worktrees`,
+   *  `../tasks`) resolves against each project's own directory instead.
+   *  Required: seeded with `~/termic/tasks` rather than left blank, so the
+   *  field shows a real value. Optional here only because older profiles
+   *  predate it; the backend fills it in on load. */
+  default_tasks_path?: string;
 }
 
 /** Install state of the bundled CLI on PATH (cli_install_status). */

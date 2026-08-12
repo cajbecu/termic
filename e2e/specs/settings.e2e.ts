@@ -1,3 +1,7 @@
+import { execSync } from "node:child_process";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { archiveTask, dismissOverlays, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitVisible } from "../helpers";
 
 /** Click the [role="switch"] in the settings row whose label matches exactly.
@@ -996,6 +1000,251 @@ describe("agent signal inspector", () => {
     // permanently working. A silently missing suggestion reads as a bug.
     expect(text).toContain("Skipped");
     await snap("signal-inspector.png");
+  });
+});
+
+// P1: default tasks path — Settings → Tasks decides where every project's task
+// worktrees are created, and a project's own "Tasks path" overrides it. One
+// rule at both levels: a FULL path (`/…`, `~/…`) is a fixed root that holds a
+// folder per project, a RELATIVE path resolves inside each project's own
+// directory. Cases assert where a created worktree actually LANDS on disk,
+// plus the placeholder that tells the user before they create anything.
+//
+// Everything runs against a throwaway repo + throwaway roots under $TMPDIR, so
+// the shared fixture-repo and the profile's real tasks tree are never touched.
+describe("default tasks path", () => {
+  let repoDir = "";        // throwaway git repo, added as a project
+  let absRoot = "";        // throwaway absolute tasks root
+  let projectId = "";
+  let projectRoot = "";    // canonical: projectAdd resolves symlinks
+  let projectDirName = "";
+  let seededPath = "";     // whatever the profile carried in, restored in after()
+  const createdTasks: string[] = [];
+
+  /** Write the global default tasks path, preserving the rest of Settings
+   *  (settings_save round-trips the whole object). */
+  const setDefaultPath = (p: string) =>
+    browser.execute(async (v) => {
+      const t = window.__termic!;
+      const s = await t.ipc.settingsLoad();
+      await t.ipc.settingsSave({ ...s, default_tasks_path: v });
+    }, p);
+
+  /** Write the project's own override through the same command the Repository
+   *  page debounces into. */
+  const setProjectTasksPath = (value: string) =>
+    browser.execute(async (id, v) => {
+      const t = window.__termic!;
+      const p = t.useApp.getState().projects.find((x: any) => x.id === id);
+      await t.ipc.projectUpdate({ ...p, tasks_path: v });
+      await t.useApp.getState().loadAll();
+    }, projectId, value);
+
+  /** Create a shell (token-free) worktree task and remember it for teardown. */
+  const createTask = async (name: string) => {
+    const task = await browser.execute(async (pid, n) => {
+      const t = await window.__termic!.ipc.taskCreate({
+        project_id: pid, name: n, cli: "shell", base_branch: "main",
+      });
+      await window.__termic!.useApp.getState().loadAll();
+      return t;
+    }, projectId, name);
+    createdTasks.push((task as any).id);
+    return task as any;
+  };
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    await dismissOverlays();
+    repoDir = mkdtempSync(path.join(os.tmpdir(), "e2e-wtloc-"));
+    absRoot = mkdtempSync(path.join(os.tmpdir(), "e2e-wtroot-"));
+    // `-b main` explicitly: the create calls below branch from "main", and a
+    // host whose git defaults to `master` would otherwise fail the base ref.
+    execSync(
+      `git -C "${repoDir}" init -q -b main && git -C "${repoDir}" ` +
+      `-c user.email=e2e@termic.dev -c user.name=e2e commit -q --allow-empty -m init`,
+    );
+    const snapshot = await browser.execute(async (d) => {
+      const t = window.__termic!;
+      const s = await t.ipc.settingsLoad();
+      const project = await t.ipc.projectAdd(d);
+      await t.useApp.getState().loadAll();
+      return { project, defaultPath: s.default_tasks_path ?? "" };
+    }, repoDir);
+    projectId = (snapshot as any).project.id;
+    projectRoot = (snapshot as any).project.root_path;
+    projectDirName = path.basename(projectRoot);
+    seededPath = (snapshot as any).defaultPath;
+  });
+
+  after(async () => {
+    for (const id of createdTasks) {
+      await browser.execute(async (i) => {
+        await window.__termic!.ipc.taskArchive(i, true); // deleteBranch
+        await window.__termic!.useApp.getState().loadAll();
+      }, id);
+    }
+    await setDefaultPath(seededPath);
+    if (projectId) {
+      await browser.execute(async (id) => {
+        await window.__termic!.ipc.projectRemove(id);
+        await window.__termic!.useApp.getState().loadAll();
+      }, projectId);
+    }
+    await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
+    rmSync(repoDir, { recursive: true, force: true });
+    rmSync(absRoot, { recursive: true, force: true });
+  });
+
+  // The setting is REQUIRED, so a loaded profile always carries a real value
+  // rather than an empty "unset" the UI would have to paper over. Shape, not
+  // an exact string: the app dir differs between the dev and release builds.
+  it("ships a real default tasks path rather than an empty setting", () => {
+    expect(seededPath).toMatch(/^~\/[^/]+\/tasks$/);
+  });
+
+  // Adding a project used to bake the resolved default into `tasks_path`,
+  // which would pin every new project and make the global setting a no-op for
+  // it. The field is an override now, so it starts empty and the project's
+  // effective root is composed from the global value at read time.
+  it("leaves a new project's tasks path empty so the global setting applies", async () => {
+    const stored = await browser.execute(
+      (id) => window.__termic!.useApp.getState().projects.find((p: any) => p.id === id)?.tasks_path,
+      projectId,
+    );
+    expect(stored).toBe("");
+    await setDefaultPath(absRoot);
+    const derived = await browser.execute(
+      (id) => window.__termic!.ipc.projectTasksPathDefault(id), projectId,
+    );
+    expect(derived).toBe(path.join(absRoot, projectDirName));
+  });
+
+  it("puts tasks under a full path, one folder per project", async () => {
+    await setDefaultPath(absRoot);
+    const task = await createTask("wtloc-abs");
+    expect(task.path).toBe(path.join(absRoot, projectDirName, "wtloc-abs"));
+    expect(existsSync(task.path)).toBe(true);
+  });
+
+  // The relative half of the rule: the path hangs off the repo itself and does
+  // NOT get the project name appended (that would nest it twice).
+  it("puts tasks inside the project directory for a relative path", async () => {
+    await setDefaultPath("worktrees");
+    const task = await createTask("wtloc-rel");
+    expect(task.path).toBe(path.join(projectRoot, "worktrees", "wtloc-rel"));
+    expect(existsSync(task.path)).toBe(true);
+  });
+
+  it("lets a project's own tasks path override the default", async () => {
+    await setDefaultPath(absRoot);
+    await setProjectTasksPath("mywt");
+    const task = await createTask("wtloc-override");
+    expect(task.path).toBe(path.join(projectRoot, "mywt", "wtloc-override"));
+    expect(existsSync(task.path)).toBe(true);
+    await setProjectTasksPath("");
+  });
+
+  // The per-project half: the field is EMPTY and shows the global-derived path
+  // greyed out, so "no value here" still tells the user where tasks go.
+  it("shows the default tasks path as the project field's placeholder", async () => {
+    await setDefaultPath(absRoot);
+    await setProjectTasksPath("");
+    await browser.execute(
+      (id) => window.__termic!.useApp.getState().openSettings("repositories", id), projectId,
+    );
+    await waitVisible('[data-repo-tab="advanced"]');
+    await browser.execute(() =>
+      (document.querySelector('[data-repo-tab="advanced"]') as HTMLElement).click(),
+    );
+    await waitVisible('[data-testid="project-tasks-path-input"]');
+    // Poll: the placeholder arrives from an async IPC after the field mounts.
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          (want) =>
+            (document.querySelector(
+              '[data-testid="project-tasks-path-input"]',
+            ) as HTMLInputElement).placeholder === want,
+          path.join(absRoot, projectDirName),
+        ),
+      { timeout: 8_000, timeoutMsg: "tasks path placeholder never showed the default" },
+    );
+    const value = await browser.execute(
+      () => (document.querySelector(
+        '[data-testid="project-tasks-path-input"]',
+      ) as HTMLInputElement).value,
+    );
+    expect(value).toBe("");
+    await snap("default-tasks-path-placeholder.png");
+  });
+
+  // The global field itself: it carries a REAL value (not a placeholder), and
+  // the preview under it flips between the two halves of the rule as you type.
+  // Emptying it is a validation error, since the setting is required.
+  it("previews where tasks go as the default tasks path is typed", async () => {
+    await setDefaultPath(absRoot);
+    await browser.execute(() => window.__termic!.useApp.getState().openSettings("tasks"));
+    await waitVisible('[data-testid="default-tasks-path-input"]');
+
+    const field = () =>
+      browser.execute(() => {
+        const el = document.querySelector(
+          '[data-testid="default-tasks-path-input"]',
+        ) as HTMLInputElement;
+        return { value: el.value, placeholder: el.placeholder };
+      });
+    const type = (value: string) =>
+      browser.execute((v) => {
+        const input = document.querySelector(
+          '[data-testid="default-tasks-path-input"]',
+        ) as HTMLInputElement;
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, "value",
+        )!.set!;
+        setter.call(input, v);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }, value);
+    const preview = () =>
+      browser.execute(
+        () => (document.querySelector(
+          '[data-testid="default-tasks-path-preview"]',
+        ) as HTMLElement | null)?.textContent ?? "",
+      );
+    /** The section's own save button, found by text so it can't collide with
+     *  the other Save buttons on this page (symlink paths). */
+    const saveDisabled = () =>
+      browser.execute(() => {
+        const btn = [...document.querySelectorAll("button")].find(
+          (b) => b.textContent?.trim() === "Save tasks path",
+        ) as HTMLButtonElement | undefined;
+        if (!btn) throw new Error("no 'Save tasks path' button");
+        return btn.disabled;
+      });
+
+    // The saved path is the field's VALUE. Nothing is hidden in a placeholder.
+    const initial = (await field()) as { value: string; placeholder: string };
+    expect(initial.value).toBe(absRoot);
+    expect(initial.placeholder).toBe("");
+
+    await type("/vol/work");
+    await browser.waitUntil(async () => (await preview()) === "/vol/work/<project>/<task>", {
+      timeout: 5_000, timeoutMsg: "absolute path preview never updated",
+    });
+
+    await type("worktrees");
+    await browser.waitUntil(async () => (await preview()) === "<project>/worktrees/<task>", {
+      timeout: 5_000, timeoutMsg: "relative path preview never updated",
+    });
+
+    // Required: emptying it drops the preview and blocks the save.
+    await type("");
+    await browser.waitUntil(
+      async () => (await preview()) === "" && (await saveDisabled()),
+      { timeout: 5_000, timeoutMsg: "an empty required path was still saveable" },
+    );
+    await snap("default-tasks-path-settings.png");
   });
 });
 

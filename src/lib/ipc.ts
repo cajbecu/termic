@@ -516,6 +516,10 @@ export function onPtyExit(ptyId: string, cb: (code: number | null) => void): Pro
 // ───────────────────────────── settings & discovery ─────────────────────────────
 
 export const settingsLoad  = () => invoke<Settings>("settings_load");
+/** Where a project's worktrees land with no per-project override, i.e. purely
+ *  from the global default tasks path. Placeholder for Repository → Tasks path. */
+export const projectTasksPathDefault = (projectId: string) =>
+  invoke<string>("project_tasks_path_default", { projectId });
 /** Raw custom theme files from `~/.config/termic/themes/*.json`. Unvalidated —
  *  run each through customTheme.ts's sanitizeTheme before use. */
 export const themesList = () => invoke<CustomThemeFile[]>("themes_list");
