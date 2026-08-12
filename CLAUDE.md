@@ -62,7 +62,7 @@ No em dashes (—) anywhere in user-visible text: dialogs, tooltips, buttons, `C
 - Make IO-heavy Tauri commands synchronous (freezes the Mac via WKWebView event loop).
 - Sandbox AuxTerminal, setup, run, or archive scripts (only agent CLI PTY is the threat model).
 - Expose `task_set_sandbox` without SIGKILLing live PTYs by default.
-- Widen the CSP in `tauri.conf.json`. One policy covers the whole webview, and the webview sits outside the sandbox ("Known gap" in [docs/sandbox.md](docs/sandbox.md)). `img-src https:` is an accepted exception; `connect-src` / `script-src` would be far worse.
+- Widen the CSP in `tauri.conf.json`. One policy covers the whole webview, and the webview sits outside the sandbox ("Known gap" in [docs/sandbox.md](docs/sandbox.md)). `img-src https:` is an accepted exception; `connect-src` / `script-src` would be far worse. `src/lib/cspGuard.test.ts` pins both, because [termic.dev/local](https://termic.dev/local/) publishes `connect-src` as proof the app only ever talks to termic.dev; if that test fails, the website is now wrong too.
 - Force subpixel font smoothing (colored fringing on dark backgrounds).
 - Hard-code hex colors outside `@theme` in `index.css`.
 - Hide panes with `visibility: hidden` (must be `display: none`). xterm's renderer only pauses on zero geometry; visibility-hidden terminals keep running WebGL draws for background TUI repaints and pin the GPU. See docs/performance.md bear trap 2.
