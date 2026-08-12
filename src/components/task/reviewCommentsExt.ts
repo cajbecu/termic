@@ -19,6 +19,9 @@ import {
 } from "@codemirror/view";
 import { StateField, StateEffect, type EditorState, RangeSet, type Range } from "@codemirror/state";
 import { useReviewComments, type ReviewComment } from "@/store/reviewComments";
+import {
+  anchorForLines, anchorStateChanged, linesForAnchor, mapAnchor, stateForAnchor, type Anchor,
+} from "@/lib/commentAnchors";
 
 /** A comment-in-progress (range + quote captured, body being typed). */
 interface Composer {
@@ -34,6 +37,11 @@ interface CommentData {
   /** Committed comments for THIS file, line-sorted. Synced from the store. */
   comments: ReviewComment[];
   composer: Composer | null;
+  /** The live selection each comment was made on, by comment id, mapped
+   *  through every edit (see lib/commentAnchors.ts). This — not the stored
+   *  line number — is where a comment actually points while the buffer is
+   *  being edited under it. File-level comments (null lines) have no anchor. */
+  anchors: Map<string, Anchor>;
 }
 
 interface Ctx {
@@ -41,27 +49,68 @@ interface Ctx {
   file: string;
 }
 
+/**
+ * How loudly the surface offers to take a comment. The diff pane is a review
+ * screen — commenting IS the job there, so it keeps the labelled pill over a
+ * selection and a hover button on every line. A code editor is not: you are
+ * mostly reading and typing, and a "＋ Comment on lines 12-40" banner following
+ * your selection (plus an icon chasing the mouse down the gutter) is a second
+ * cursor you did not ask for. There it shrinks to one icon in the gutter,
+ * shown only while a selection is standing.
+ */
+export interface ReviewSurface {
+  /** "pill" = labelled button over the selection (diff). "gutter" = a bare
+   *  icon on the selection's first line (editor). */
+  selection: "pill" | "gutter";
+  /** Per-line "＋ comment" button that follows the mouse. Diff only. */
+  hoverGutter: boolean;
+}
+
+const DIFF_SURFACE: ReviewSurface = { selection: "pill", hoverGutter: true };
+
 const setComments = StateEffect.define<ReviewComment[]>();
 const openComposer = StateEffect.define<Composer>();
 const closeComposer = StateEffect.define<void>();
 
 const dataField = StateField.define<CommentData>({
-  create: () => ({ comments: [], composer: null }),
+  create: () => ({ comments: [], composer: null, anchors: new Map() }),
   update(value, tr) {
-    let { comments, composer } = value;
+    let { comments, composer, anchors } = value;
+    // 1. Edits move every held selection. Do this FIRST, so an anchor seeded
+    //    in the same transaction (below) is not mapped through changes it was
+    //    already built against.
+    if (tr.docChanged && anchors.size) {
+      const mapped = new Map<string, Anchor>();
+      for (const [id, a] of anchors) mapped.set(id, mapAnchor(a, tr.changes));
+      anchors = mapped;
+    }
     for (const e of tr.effects) {
       if (e.is(setComments)) {
         comments = e.value;
         // The edited comment was deleted out from under us → drop the composer.
         if (composer?.mode === "edit" && !comments.some(c => c.id === composer!.id)) composer = null;
+        // Seed an anchor for each comment we have not met yet, and forget the
+        // ones whose comment is gone. An id we already track keeps its live
+        // anchor: it has been mapped through edits the stored lines predate.
+        const next = new Map<string, Anchor>();
+        for (const c of comments) {
+          if (c.startLine == null) continue;               // file-level: nothing to anchor
+          const held = anchors.get(c.id);
+          // tr.newDoc, never tr.state: the new state is still being computed
+          // inside a field update, and reading it here is re-entrant.
+          next.set(c.id, held ?? anchorForLines(tr.newDoc, c.startLine, c.endLine ?? c.startLine));
+        }
+        anchors = next;
       } else if (e.is(openComposer)) {
         composer = e.value;
       } else if (e.is(closeComposer)) {
         composer = null;
       }
     }
-    if (comments === value.comments && composer === value.composer) return value;
-    return { comments, composer };
+    if (comments === value.comments && composer === value.composer && anchors === value.anchors) {
+      return value;
+    }
+    return { comments, composer, anchors };
   },
 });
 
@@ -127,7 +176,7 @@ class ComposerWidget extends WidgetType {
 
     const ta = document.createElement("textarea");
     ta.className = "tc-comment-textarea";
-    ta.placeholder = "Leave a comment for the agent…";
+    ta.placeholder = "Add a comment";
     ta.value = this.c.initialBody;
     // Rough starting height (no layout yet, so `scrollHeight` is 0 here) to
     // keep an edit composer from mounting at one line and popping open a frame
@@ -224,7 +273,14 @@ class CommentCardWidget extends WidgetType {
   constructor(readonly comment: ReviewComment, readonly ctx: Ctx) { super(); }
 
   eq(other: CommentCardWidget) {
-    return other.comment.id === this.comment.id && other.comment.body === this.comment.body;
+    // The RANGE is part of what the card renders (its "· line 12" label), and
+    // ranges move now that comments are anchored to their code rather than to
+    // a line number. Comparing id + body alone kept a stale label on screen
+    // after an edit shifted the comment.
+    return other.comment.id === this.comment.id
+      && other.comment.body === this.comment.body
+      && other.comment.startLine === this.comment.startLine
+      && other.comment.endLine === this.comment.endLine;
   }
 
   toDOM(view: EditorView) {
@@ -289,22 +345,31 @@ class CommentCardWidget extends WidgetType {
 // ── Decorations ─────────────────────────────────────────────────────────────
 
 function buildDeco(state: EditorState, ctx: Ctx): DecorationSet {
-  const { comments, composer } = state.field(dataField);
+  const { comments, composer, anchors } = state.field(dataField);
   const ranges: Range<Decoration>[] = [];
+  // Where a comment sits RIGHT NOW: its mapped anchor while we hold one (the
+  // store's line numbers lag by a keystroke), else the stored lines.
+  const linesOf = (c: ReviewComment): { start: number; end: number } | null => {
+    if (c.startLine == null || c.endLine == null) return null;
+    const a = anchors.get(c.id);
+    if (!a) return { start: clampLine(state, c.startLine), end: clampLine(state, c.endLine) };
+    const { startLine, endLine } = linesForAnchor(state.doc, a);
+    return { start: startLine, end: endLine };
+  };
 
   // Accent stripe on every committed-comment line.
   for (const c of comments) {
-    if (c.startLine == null || c.endLine == null) continue;
-    const a = clampLine(state, c.startLine), b = clampLine(state, c.endLine);
-    for (let ln = a; ln <= b; ln++) {
-      ranges.push(Decoration.line({ class: "tc-commented-line" }).range(state.doc.line(ln).from));
+    const ln = linesOf(c);
+    if (!ln) continue;
+    for (let i = ln.start; i <= ln.end; i++) {
+      ranges.push(Decoration.line({ class: "tc-commented-line" }).range(state.doc.line(i).from));
     }
   }
 
   // Committed comment cards (skip the one currently being edited).
   for (const c of comments) {
     if (composer?.mode === "edit" && composer.id === c.id) continue;
-    const anchor = c.endLine == null ? null : clampLine(state, c.endLine);
+    const anchor = linesOf(c)?.end ?? null;
     const pos = anchor == null ? 0 : state.doc.line(anchor).to;
     ranges.push(
       Decoration.widget({ widget: new CommentCardWidget(c, ctx), block: true, side: anchor == null ? -1 : 1 }).range(pos),
@@ -325,7 +390,8 @@ function buildDeco(state: EditorState, ctx: Ctx): DecorationSet {
 
 // ── Selection tooltip: "Add comment" ────────────────────────────────────────
 
-function commentTooltips(state: EditorState): readonly Tooltip[] {
+function commentTooltips(state: EditorState, surface: ReviewSurface): readonly Tooltip[] {
+  if (surface.selection !== "pill") return [];
   const range = state.selection.main;
   if (range.empty) return [];
   const startLine = state.doc.lineAt(range.from).number;
@@ -400,6 +466,54 @@ function storeSyncPlugin(ctx: Ctx) {
   });
 }
 
+/**
+ * Push the mapped anchors back onto the stored comments.
+ *
+ * The editor holds the truth while it is open, but the two things that consume
+ * a comment — the pending-comments bar and the message the batch sends — read
+ * the store, and one of them runs with no editor mounted at all. So after the
+ * doc settles, re-derive each comment's line range + quote from its anchor and
+ * write back the ones that actually moved.
+ *
+ * Debounced rather than per-keystroke: mapping is cheap, a store write is not
+ * (it re-renders the bar and rebuilds this view's decorations through
+ * storeSyncPlugin). Typing inside a commented range would otherwise churn both
+ * on every character.
+ */
+const REANCHOR_DEBOUNCE_MS = 300;
+
+function anchorSyncPlugin(ctx: Ctx) {
+  return ViewPlugin.define((view): PluginValue => {
+    let timer = 0;
+    let destroyed = false;
+    const flush = () => {
+      const { comments, anchors } = view.state.field(dataField);
+      const store = useReviewComments.getState();
+      for (const c of comments) {
+        const a = anchors.get(c.id);
+        if (!a) continue;
+        const next = stateForAnchor(view.state.doc, a);
+        if (anchorStateChanged(c, next)) store.reanchor(ctx.taskId, c.id, next);
+      }
+    };
+    return {
+      update(u) {
+        if (!u.docChanged) return;
+        window.clearTimeout(timer);
+        timer = window.setTimeout(() => { if (!destroyed) flush(); }, REANCHOR_DEBOUNCE_MS);
+      },
+      destroy() {
+        destroyed = true;
+        window.clearTimeout(timer);
+        // Leaving the file (tab switch, task switch, a rebuild on theme change)
+        // must not drop what the debounce was still holding: flush on the way
+        // out, while `view.state` is still readable.
+        flush();
+      },
+    };
+  });
+}
+
 // ── Per-line hover gutter: "＋ comment on this line" ─────────────────────────
 
 // lucide `message-square-plus`, inlined (widgets are framework-free DOM).
@@ -409,20 +523,28 @@ const COMMENT_ICON_SVG =
   `<path d="M12 8v6"/><path d="M9 11h6"/></svg>`;
 
 class AddCommentGutterMarker extends GutterMarker {
-  constructor(readonly ctx: Ctx, readonly lineNo: number) { super(); }
+  constructor(readonly ctx: Ctx, readonly lineNo: number, readonly wholeSelection = false) { super(); }
 
-  eq(other: AddCommentGutterMarker) { return other.lineNo === this.lineNo; }
+  eq(other: AddCommentGutterMarker) {
+    return other.lineNo === this.lineNo && other.wholeSelection === this.wholeSelection;
+  }
 
   toDOM(view: EditorView) {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "tc-line-add-btn";
-    btn.title = "Comment on this line";
+    // Quiet variant in the editor: same icon, no accent chip. It sits beside
+    // code the user is reading, so it announces itself only on hover.
+    btn.className = this.wholeSelection ? "tc-line-add-btn tc-line-add-btn-quiet" : "tc-line-add-btn";
+    // The editor's icon is the entry point to "mark this code up for the
+    // agent", so it says what the gesture is FOR, not what it mechanically
+    // does. The diff's per-line button keeps its own wording.
+    btn.title = this.wholeSelection ? "Send selection to agent" : "Comment on this line";
     btn.innerHTML = COMMENT_ICON_SVG;
     // mousedown + preventDefault so the click doesn't move the editor
     // selection (and dismiss us) before we read the line.
     btn.addEventListener("mousedown", (e) => {
       e.preventDefault();
+      if (this.wholeSelection && dispatchSelectionComment(view)) return;
       const s = clampLine(view.state, this.lineNo);
       const line = view.state.doc.line(s);
       view.dispatch({
@@ -434,20 +556,39 @@ class AddCommentGutterMarker extends GutterMarker {
   }
 }
 
-/** Gutter that shows a comment button on the single hovered line. */
-function commentGutter(ctx: Ctx) {
+/** The line the gutter button belongs on: the hovered one where hovering is
+ *  offered, otherwise the first line of a standing selection. Null when there
+ *  is nothing to offer. */
+function gutterLine(state: EditorState, surface: ReviewSurface): number | null {
+  if (surface.hoverGutter) {
+    const hovered = state.field(hoverLineField);
+    if (hovered != null) return hovered;
+  }
+  if (surface.selection !== "gutter") return null;
+  const range = state.selection.main;
+  return range.empty ? null : state.doc.lineAt(range.from).number;
+}
+
+/** Gutter that shows a comment button on one line (see `gutterLine`). */
+function commentGutter(ctx: Ctx, surface: ReviewSurface) {
   return gutter({
     class: "tc-comment-gutter",
     lineMarker(view, block) {
-      const hovered = view.state.field(hoverLineField);
-      if (hovered == null) return null;
+      const target = gutterLine(view.state, surface);
+      if (target == null) return null;
       const lineNo = view.state.doc.lineAt(block.from).number;
-      return lineNo === hovered ? new AddCommentGutterMarker(ctx, lineNo) : null;
+      // In selection mode the button commits the WHOLE selection, not just the
+      // line it sits on — it is an affordance for what is already highlighted.
+      return lineNo === target
+        ? new AddCommentGutterMarker(ctx, lineNo, surface.selection === "gutter")
+        : null;
     },
-    // Only recompute markers when the hovered line changes — not on every
-    // selection/scroll transaction.
+    // Only recompute markers when what drives them changes, not on every
+    // scroll or doc transaction.
     lineMarkerChange(update) {
-      return update.startState.field(hoverLineField) !== update.state.field(hoverLineField);
+      if (surface.hoverGutter
+        && update.startState.field(hoverLineField) !== update.state.field(hoverLineField)) return true;
+      return surface.selection === "gutter" && !!update.selectionSet;
     },
   });
 }
@@ -491,8 +632,9 @@ function hoverTrackPlugin() {
 
 // ── Public extension factory ─────────────────────────────────────────────────
 
-/** Build the review-comments extension for one file in one task. */
-export function reviewCommentsExtension(taskId: string, file: string) {
+/** Build the review-comments extension for one file in one task. `surface`
+ *  defaults to the diff pane's loud affordances; editors pass the quiet set. */
+export function reviewCommentsExtension(taskId: string, file: string, surface: ReviewSurface = DIFF_SURFACE) {
   const ctx: Ctx = { taskId, file };
 
   const decoField = StateField.define<DecorationSet>({
@@ -507,10 +649,10 @@ export function reviewCommentsExtension(taskId: string, file: string) {
   });
 
   const tooltipField = StateField.define<readonly Tooltip[]>({
-    create: (state) => commentTooltips(state),
+    create: (state) => commentTooltips(state, surface),
     update(tips, tr) {
       if (!tr.docChanged && !tr.selection) return tips;
-      return commentTooltips(tr.state);
+      return commentTooltips(tr.state, surface);
     },
     provide: (f) => showTooltip.computeN([f], (state) => state.field(f)),
   });
@@ -520,9 +662,10 @@ export function reviewCommentsExtension(taskId: string, file: string) {
     hoverLineField,
     decoField,
     tooltipField,
-    commentGutter(ctx),
-    hoverTrackPlugin(),
+    commentGutter(ctx, surface),
+    ...(surface.hoverGutter ? [hoverTrackPlugin()] : []),
     storeSyncPlugin(ctx),
+    anchorSyncPlugin(ctx),
     baseTheme,
   ];
 }
@@ -702,5 +845,11 @@ const baseTheme = EditorView.baseTheme({
     boxShadow: "0 1px 2px rgba(0,0,0,0.3)",
   },
   ".tc-line-add-btn:hover": { background: "var(--color-accent-deep)", color: "#fff" },
+  ".tc-line-add-btn-quiet": {
+    background: "transparent",
+    boxShadow: "none",
+    color: "var(--color-fg-faint)",
+  },
+  ".tc-line-add-btn-quiet:hover": { background: "transparent", color: "var(--color-accent)" },
   ".tc-line-add-btn svg": { width: "12px", height: "12px" },
 });

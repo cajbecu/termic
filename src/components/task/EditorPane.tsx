@@ -269,7 +269,11 @@ export function EditorPane({ task, tab, active, onContent }: {
               // heavy typing above it can end up quoting the wrong lines. It
               // is bounded (comments are transient, sent then cleared) and
               // clampLine keeps a stale range in bounds.
-              reviewCommentsExtension(task.id, tab.path),
+              reviewCommentsExtension(task.id, tab.path,
+                // Quiet surface: no icon chasing the mouse down the gutter, no
+                // labelled pill over the selection. One gutter icon, only
+                // while something is selected. The diff pane keeps both.
+                { selection: "gutter", hoverGutter: false }),
               indentUnit.of("  "),
               EditorState.tabSize.of(2),
               EditorView.updateListener.of(u => {

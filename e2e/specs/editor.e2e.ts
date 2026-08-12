@@ -2144,6 +2144,9 @@ describe("comment on an editor selection for the agent", () => {
   /** Fill the open composer and save it. */
   const writeComment = async (body: string) => {
     await waitFor(".tc-comment-textarea", "the comment composer never opened");
+    expect(await browser.execute(() =>
+      (document.querySelector(".tc-comment-textarea") as HTMLTextAreaElement).placeholder))
+      .toBe("Add a comment");
     await browser.execute((text) => {
       const ta = document.querySelector(".tc-comment-textarea") as HTMLTextAreaElement;
       ta.value = text;
@@ -2183,21 +2186,36 @@ describe("comment on an editor selection for the agent", () => {
     expect(await cards()).toEqual([]);
   });
 
-  it("offers the diff pane's own comment button over a selection", async () => {
-    expect(await browser.execute(() => !!document.querySelector(".tc-add-comment-btn"))).toBe(false);
+  it("offers one quiet gutter icon on a selection, never the diff pill", async () => {
+    expect(await browser.execute(() => !!document.querySelector(".tc-line-add-btn"))).toBe(false);
 
     await selectLines(1, 1);
-    await waitFor(".tc-add-comment-btn", "the comment button never appeared for a selection");
-    // Exactly the affordance the diff pane raises, same class, same wording.
+    await waitFor(".tc-line-add-btn", "the gutter comment icon never appeared for a selection");
+    // The editor is a reading/typing surface: no labelled pill following the
+    // selection, and no hover button chasing the mouse down the gutter (that
+    // pair stays on the diff, where reviewing IS the job).
+    expect(await browser.execute(() => !!document.querySelector(".tc-add-comment-btn"))).toBe(false);
     expect(await browser.execute(() =>
-      document.querySelector(".tc-add-comment-btn")!.textContent)).toContain("Comment on line 1");
+      [...document.querySelectorAll(".tc-line-add-btn")].map(b => ({
+        title: b.getAttribute("title"), quiet: b.classList.contains("tc-line-add-btn-quiet"),
+      })))).toEqual([{ title: "Send selection to agent", quiet: true }]);
+  });
+
+  it("retracts the icon when the selection goes away", async () => {
+    await browser.execute((id) => {
+      const host = document.querySelector(`[data-task-id="${id}"] .cm-editor`) as HTMLElement;
+      (host as unknown as { __cmView: any }).__cmView.dispatch({ selection: { anchor: 0 } });
+    }, taskId!);
+    await waitForGone(".tc-line-add-btn", "the gutter icon outlived the selection");
   });
 
   it("queues the comment instead of sending it", async () => {
+    await selectLines(1, 1);
+    await waitFor(".tc-line-add-btn", "the gutter comment icon never appeared");
     await browser.execute(() => {
       // The button commits on mousedown so the editor can't clear the
       // selection first; .click() alone does nothing.
-      document.querySelector(".tc-add-comment-btn")!
+      document.querySelector(".tc-line-add-btn")!
         .dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
     });
     await writeComment("rename this heading");
@@ -2241,6 +2259,28 @@ describe("comment on an editor selection for the agent", () => {
     expect((await cards()).length).toBe(2);
   });
 
+  it("keeps queued comments on their code when lines are inserted above", async () => {
+    // Two lines at the very top. The comments were made on line 1 and lines
+    // 1-2, so their code is now on 3 and 3-4 — the stored line numbers have to
+    // follow it, or the batch points the agent at the wrong place.
+    await browser.execute((id) => {
+      const host = document.querySelector(`[data-task-id="${id}"] .cm-editor`) as HTMLElement;
+      (host as unknown as { __cmView: any }).__cmView.dispatch({
+        changes: { from: 0, insert: "inserted A\ninserted B\n" },
+      });
+    }, taskId!);
+
+    // The cards label themselves from the STORED range, so this also proves
+    // the mapped anchors made it back to the store (debounced, hence waitUntil).
+    await browser.waitUntil(
+      async () => {
+        const text = (await cards()).join("\n");
+        return text.includes("line 3") && text.includes("lines 3");
+      },
+      { timeout: 8_000, timeoutMsg: "the queued comments never followed their code" },
+    );
+  });
+
   it("sends the whole batch to the agent in one message", async () => {
     // The pending-comments bar lives on the terminal footer strip, so switch
     // to the agent the way a user would before sending.
@@ -2266,9 +2306,10 @@ describe("comment on an editor selection for the agent", () => {
         const logs = await cliRpc({ cmd: "logs", task: TASK });
         if (!logs.ok) return false;
         const out = logs.data.data as string;
-        // Both bodies AND both line attributions, in ONE message.
+        // Both bodies, both SHIFTED line attributions (the comments were made
+        // on 1 and 1-2 before two lines were inserted above them), one message.
         return out.includes("rename this heading") && out.includes("and mention the fixture")
-          && out.includes("README.md:1") && out.includes("README.md:1-2")
+          && out.includes("README.md:3") && out.includes("README.md:3-4")
           && out.includes("2 inline comments");
       },
       { timeout: 30_000, timeoutMsg: "the batch never reached the agent's PTY" },

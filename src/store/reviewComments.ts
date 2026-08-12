@@ -47,6 +47,11 @@ interface ReviewCommentsState {
 
   add: (c: Omit<ReviewComment, "id">) => string;
   update: (taskId: string, id: string, body: string) => void;
+  /** Re-point a comment at where its code ended up. Called by the editor as
+   *  it maps the original selection through edits (lib/commentAnchors.ts), so
+   *  a comment made on line 12 still says 12 after three lines are typed above
+   *  it — and quotes what is there now, not what used to be. */
+  reanchor: (taskId: string, id: string, at: { startLine: number; endLine: number; quote: string }) => void;
   remove: (taskId: string, id: string) => void;
   clear: (taskId: string) => void;
 }
@@ -69,6 +74,21 @@ export const useReviewComments = create<ReviewCommentsState>((set) => ({
         [taskId]: (s.byTask[taskId] ?? []).map((c) => (c.id === id ? { ...c, body } : c)),
       },
     })),
+
+  reanchor: (taskId, id, at) =>
+    set((s) => {
+      const list = s.byTask[taskId];
+      if (!list?.some((c) => c.id === id)) return s;
+      return {
+        byTask: {
+          ...s.byTask,
+          [taskId]: list.map((c) =>
+            c.id === id
+              ? { ...c, startLine: at.startLine, endLine: at.endLine, quote: at.quote }
+              : c),
+        },
+      };
+    }),
 
   remove: (taskId, id) =>
     set((s) => ({
