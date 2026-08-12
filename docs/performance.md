@@ -7,7 +7,7 @@
 2b. **Hiding the WINDOW does not pause the renderers.** Same trap as 2, one level up, and the reason windowless mode has a webview half at all. `win.hide()` (plus `ActivationPolicy::Accessory`) takes the window off screen but leaves the DOM fully laid out — measured: `document.visibilityState === "hidden"` while `.xterm-screen` still reported **1368×1190 with 7 live canvases**. xterm keys its pause on ZERO GEOMETRY, which only `display:none` produces, so a windowless Termic would keep running WebGL draws for a window nobody can see. Rust emits `termic://windowless` on every windowless edge and `MainArea` drops the ACTIVE pane's display exemption (`src/lib/windowlessMode.ts`), which is what actually stops the draws. Deliberately NOT keyed on `visibilitychange`: that also fires for an occluded window or a Space switch, and collapsing panes on every Space switch would churn layout and xterm viewport state for a window still one gesture away. Measured cost, 3 tasks idle, WITH the collapse in place: hidden 0.23% CPU vs visible 0.33%. Both are near zero, so treat that delta as directional, not as a headline saving - and memory is not reclaimed at all (every mounted task keeps its scrollback and React tree). Windowless mode is about keeping agents alive, not about getting cheaper. Under load the comparison was confounded by the measurement harness and no reliable figure was obtained. THE 1 Hz CLAMP IS NOW LOAD-BEARING: `--wait`, `termic list` and the work-done indicator all ride the settle signal, and there is exactly one timer behind every settle path (the `setInterval` in TerminalPane's settle effect, period `SAMPLE_MS`). A knob tuned under the clamp stops being observable the moment Termic has no window, and nothing else catches it. The four knobs live in `src/lib/settleTiming.ts` with the floor asserted in `settleTiming.test.ts` — tune them freely above the floor; going below should mean deleting a test that says why.
 3. **WebGL non-negotiable.** Load AFTER `term.open(host)`. Dispose `webglAddon` BEFORE `term.dispose()` — render loop fires on half-disposed terminal otherwise (`_isDisposed` crash). Same fix in TerminalPane AND AuxTerminal.
 4. **`lineHeight: 1.0` in xterm.** Anything else inflates cells; TUIs show ribbons between rows.
-5. **Tight Zustand selectors.** Never destructure the whole store. Use frozen empty constants (`EMPTY_TABS`) for referential stability — React 19 warns "getSnapshot should be cached".
+5. **Tight Zustand selectors.** Never destructure the whole store. Use frozen empty constants (`EMPTY_TABS`) for referential stability — React 19 warns "getSnapshot should be cached". GUARDED: `src/store/selectorFanout.test.ts` mounts 500 `useTaskTabs` subscribers, runs 1000 `setSidebarWidth` writes (a sidebar drag) and asserts **zero** snapshot invalidations. Selector bodies are exported from `app.ts` (`selectTaskTabs`, `selectActiveTabId`) so the test measures the real thing. Making a selector derive a fresh array turns that 0 into 500,000 and fails the build — verified by injecting the regression, not assumed.
 6. **`Math.round` every dimension.** Sub-pixel widths blur glyphs in WKWebView. All sidebar/right-panel/footer/split setters round on write AND on `localStorage` read.
 7. **Disable transitions during drag.** `App.tsx` grid uses `transition: var(--cols-transition, …)` and `ResizeHandle` sets `--cols-transition: none` on `<html>` while dragging.
 8. **PTY firehose.** Coalesced in Rust: the flusher batches reader output into ≤1 event per 8ms. The flusher and exit-waiter BLOCK on a condvar the reader signals — no sleep-loop polling. A quiet PTY must cost zero timer wakeups; the old `loop { sleep(8ms) }` flusher burned 125 wakeups/s per PTY forever, and the old `sleep(1ms)` exit-drain spun at ~1000/s (forever, if an orphan held the PTY slave open). On the JS side, the per-chunk `lastOutputAt` store patch is coalesced to one per 500ms so streaming doesn't re-render tabs/sidebar at chunk rate. KNOWN COST (CLI Phase 2): role-tagged PTYs (agent tabs, aux shell) additionally append each read into a 256 KiB `PtyRing` under a mutex on the reader thread (`termic logs` / attach backlog) — one uncontended lock + a bounded VecDeque extend per ≤64 KiB read, off the UI path, zero wakeups when quiet; attach taps only cost when a session is live and are bounded (force-detach on overflow). If profiling ever fingers it, gating the ring on "CLI enabled" is the lever.
@@ -20,3 +20,20 @@
 - `ResizeHandle` is 1px wide (`-ml-px`/`-mt-px`) with 4px invisible hit area each side.
 - Terminal text lighter than native: WebGL atlas rasterizes via Canvas 2D. Mitigation: `terminalFontWeight` pref, Medium (500) closes most of the gap.
 - `document.fonts.check()` lies in WKWebView — use canvas measurement against two baselines (monospace + serif) instead.
+
+## Measuring
+
+Two places, and the split is deliberate: **counts can gate a PR, timings
+cannot.**
+
+- **CI-gateable (counts, invariants, static facts).** Runs in `npm test` /
+  `cargo test` / the e2e job. `selectorFanout.test.ts` is the worked example.
+  Machine-independent, so a 3-core CI VM gives the same answer as an M1 Max.
+- **Local only (CPU, GPU, compositor).** [`bench/`](../bench/README.md).
+  Requires a real GPU, a real display and an undisturbed desktop. Read
+  `bench/README.md` before trusting any number it prints: seven documented
+  traps, every one of which produces a plausible wrong number rather than an
+  error.
+
+Why there is no nightly CPU benchmark, and what it would take to add one:
+[docs/research/perf-ci.md](research/perf-ci.md).
