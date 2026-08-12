@@ -1144,9 +1144,10 @@ fn git_bytes(args: &[&str], cwd: &Path) -> Result<Vec<u8>> {
     // git hooks (pre-commit, etc.) can't find node/bun/python/etc. and exported
     // vars (direnv, tokens) the user's rc sets are missing — so a commit that
     // works in the embedded terminal would fail from the Git panel. The
-    // resolved env is cached (OnceLock), so this is cheap per call.
-    cmd.env("PATH", shell_env::resolved_path());
-    for (k, v) in shell_env::login_env() {
+    // resolved env is cached once the probe lands, so this is cheap per call.
+    let (path, inject) = shell_env::spawn_env();
+    cmd.env("PATH", path);
+    for (k, v) in inject {
         cmd.env(k, v);
     }
     let out = cmd.output().with_context(|| format!("git {:?}", args))?;
@@ -1191,8 +1192,9 @@ fn fetch_ref(repo: &Path, remote_ref: &str) -> std::result::Result<(), String> {
     cmd.args(["fetch", "--no-tags", remote, refname]).current_dir(repo);
     // Same login-shell env as git() so credential helpers / SSH config resolve
     // from a GUI-launched .app (bare launchd PATH otherwise).
-    cmd.env("PATH", shell_env::resolved_path());
-    for (k, v) in shell_env::login_env() {
+    let (path, inject) = shell_env::spawn_env();
+    cmd.env("PATH", path);
+    for (k, v) in inject {
         cmd.env(k, v);
     }
     // Fail fast rather than block on a credential/passphrase prompt or a dead
@@ -1969,7 +1971,8 @@ fn pty_spawn(
     // this, `claude` / `codex` / `gemini` installed in ~/.local/bin,
     // ~/.bun/bin, /opt/homebrew/bin, or under nvm aren't found. See
     // shell_env.rs.
-    cmd.env("PATH", shell_env::resolved_path());
+    let (resolved_path, login_inject) = shell_env::spawn_env();
+    cmd.env("PATH", resolved_path);
     // Inject the rest of the user's login-shell environment (EDITOR, VISUAL,
     // LANG, GPG_TTY, ...) — but ONLY for UNSANDBOXED spawns. The sandboxed
     // agent is the threat model (CLAUDE.md), and this rc delta can carry
@@ -1982,7 +1985,7 @@ fn pty_spawn(
     // this it would miss $EDITOR etc. (#17). The per-spawn overlay below
     // still wins, so explicit overrides hold.
     if sandbox_bundle.is_none() {
-        for (k, v) in shell_env::login_env() {
+        for (k, v) in login_inject {
             cmd.env(k, v);
         }
     }
@@ -3823,16 +3826,17 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
                 let _ = app2.emit(&format!("setup-output://{}", ws_id),
                     serde_json::json!({ "line": format!("[{label}] $ {script}") }));
                 let mut cmd = Command::new("bash");
+                // Real login-shell env so setup finds bun/nvm/etc. and
+                // sees the user's $EDITOR; `bash -l` alone misses what the
+                // user set in their actual shell (fish/zsh rc) (#16, #17).
+                let (path, inject) = shell_env::spawn_env();
                 cmd.arg("-lc").arg(script).current_dir(cwd)
-                    // Real login-shell env so setup finds bun/nvm/etc. and
-                    // sees the user's $EDITOR; `bash -l` alone misses what the
-                    // user set in their actual shell (fish/zsh rc) (#16, #17).
-                    .env("PATH", shell_env::resolved_path())
+                    .env("PATH", path)
                     .env("TERMIC_PORT", port.to_string())
                     .env("TERMIC_WORKSPACE_NAME", &name)
                     .env("TERMIC_TASK", &name)
                     .stdout(Stdio::piped()).stderr(Stdio::piped());
-                for (k, v) in shell_env::login_env() {
+                for (k, v) in inject {
                     cmd.env(k, v);
                 }
                 for (k, v) in &sibling_ports {
@@ -7504,12 +7508,13 @@ fn run_script(script: &str, cwd: &Path, port: u16, name: &str) -> Result<String>
     // `bun`/`nvm`/etc. are "command not found" in setup/run scripts even
     // though they work in a terminal (#16), and `$EDITOR` is wrong (#17).
     let mut cmd = Command::new("bash");
+    let (path, inject) = shell_env::spawn_env();
     cmd.arg("-lc").arg(script).current_dir(cwd)
-        .env("PATH", shell_env::resolved_path())
+        .env("PATH", path)
         .env("TERMIC_PORT", port.to_string())
         .env("TERMIC_WORKSPACE_NAME", name)
         .env("TERMIC_TASK", name);
-    for (k, v) in shell_env::login_env() {
+    for (k, v) in inject {
         cmd.env(k, v);
     }
     let out = cmd.output().with_context(|| "run script")?;
@@ -7542,13 +7547,14 @@ fn run_script_streaming(
     use std::process::Stdio;
     thread::spawn(move || {
         let mut cmd = Command::new("bash");
+        let (setup_path, setup_inject) = shell_env::spawn_env();
         cmd.arg("-lc")
             .arg(&script)
             .current_dir(&cwd)
             // Real login-shell env so setup finds bun/nvm/etc. and sees the
             // user's $EDITOR; `bash -l` alone misses what the user set in
             // their actual shell (fish/zsh rc) (#16, #17).
-            .env("PATH", shell_env::resolved_path())
+            .env("PATH", setup_path)
             .env("TERMIC_PORT", port.to_string())
             .env("TERMIC_WORKSPACE_NAME", &name)
             .env("TERMIC_TASK", &name)
@@ -7560,7 +7566,7 @@ fn run_script_streaming(
             .env("PYTHONIOENCODING", "UTF-8")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        for (k, v) in shell_env::login_env() {
+        for (k, v) in setup_inject {
             cmd.env(k, v);
         }
         let spawn_res = cmd.spawn();
@@ -8266,13 +8272,14 @@ fn task_run_script_stream(
         // `process_group(0)` puts the child in its own group so we can kill
         // the whole tree later via `kill(-pgid, SIGTERM)`.
         let mut cmd = Command::new("bash");
+        let (run_path, run_inject) = shell_env::spawn_env();
         cmd.arg("-lc").arg(&script)
             .current_dir(&cwd)
             // Real login-shell env so the Run script finds bun/nvm/etc. and
             // sees the user's $EDITOR; `bash -l` alone misses what the user
             // set in their actual shell (fish/zsh rc) (#16, #17). The
-            // login_env() loop below adds the non-PATH delta.
-            .env("PATH", shell_env::resolved_path())
+            // inject loop below adds the non-PATH delta.
+            .env("PATH", run_path)
             .env("TERMIC_PORT", port.to_string())
             .env("TERMIC_WORKSPACE_NAME", &name)
             .env("TERMIC_TASK", &name)
@@ -8292,7 +8299,7 @@ fn task_run_script_stream(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        for (k, v) in shell_env::login_env() {
+        for (k, v) in run_inject {
             cmd.env(k, v);
         }
         for (k, v) in &sibling_ports {

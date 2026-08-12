@@ -47,8 +47,8 @@ const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 /// launch-restored terminals get the real env instead of racing it.
 const FIRST_PROBE_WAIT: Duration = Duration::from_secs(1);
 
-/// Startup retry schedule: attempts left after the first failure, and
-/// the initial backoff (doubles per retry: 2s, 4s, 8s, 16s).
+/// Startup retry schedule: TOTAL probe attempts (the first try plus
+/// retries), with the backoff doubling between them (2s, 4s, 8s, 16s).
 const MAX_STARTUP_ATTEMPTS: u32 = 5;
 const FIRST_BACKOFF: Duration = Duration::from_secs(2);
 
@@ -56,6 +56,11 @@ const FIRST_BACKOFF: Duration = Duration::from_secs(2);
 /// more background attempt — but at most once per this cooldown, so
 /// frequent spawns against a genuinely broken shell don't fork-bomb it.
 const RETRY_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// Hard cap on read-kicked retries, so a permanently broken shell costs
+/// a BOUNDED number of probe spawns over the app's lifetime (startup
+/// attempts + this) instead of one every cooldown forever.
+const MAX_KICKED_RETRIES: u32 = 10;
 
 static STATE: OnceLock<State> = OnceLock::new();
 static PROBE_STARTED: Once = Once::new();
@@ -92,6 +97,9 @@ struct Inner {
     /// When the last attempt finished — cooldown anchor for read-kicked
     /// retries.
     last_attempt: Option<Instant>,
+    /// How many read-kicked retries have run, capped at
+    /// `MAX_KICKED_RETRIES` so probing is bounded over the app's life.
+    kicked_retries: u32,
 }
 
 struct State {
@@ -108,6 +116,7 @@ impl State {
                 succeeded: false,
                 probing: false,
                 last_attempt: None,
+                kicked_retries: 0,
             }),
             cvar: Condvar::new(),
         }
@@ -148,12 +157,17 @@ impl State {
     }
 
     /// Whether a read-kicked retry should run now: never after success,
-    /// never while one is in flight, and at most once per `cooldown`.
-    /// On `true` the probing flag is taken — the caller MUST run an
+    /// never while one is in flight, at most once per `cooldown`, and
+    /// at most `max_kicks` times ever (so probing is bounded over the
+    /// app's lifetime, not a shell spawn every cooldown forever). On
+    /// `true` the probing flag is taken — the caller MUST run an
     /// attempt and report it via `attempt_finished`.
-    fn try_begin_retry(&self, cooldown: Duration) -> bool {
+    fn try_begin_retry(&self, cooldown: Duration, max_kicks: u32) -> bool {
         let mut guard = self.inner.lock().unwrap();
         if guard.succeeded || guard.probing || !guard.first_attempt_done {
+            return false;
+        }
+        if guard.kicked_retries >= max_kicks {
             return false;
         }
         if let Some(t) = guard.last_attempt {
@@ -161,8 +175,24 @@ impl State {
                 return false;
             }
         }
+        guard.kicked_retries += 1;
         guard.probing = true;
         true
+    }
+
+    /// Report a probe attempt that never ran (the probe thread died or
+    /// could not be spawned). Poison-tolerant: this is called from a
+    /// panic path, and a poisoned lock must not turn into a double
+    /// panic (abort). Readers stop waiting and the retry gate opens.
+    fn attempt_aborted(&self) {
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.first_attempt_done = true;
+        guard.last_attempt = Some(Instant::now());
+        guard.probing = false;
+        self.cvar.notify_all();
     }
 }
 
@@ -170,12 +200,43 @@ fn state() -> &'static State {
     STATE.get_or_init(|| State::new(bare_login_env()))
 }
 
+/// Marks the attempt aborted if the probe thread unwinds before
+/// reporting — otherwise a panic mid-probe would leave `probing` stuck
+/// and every read waiting out `FIRST_PROBE_WAIT` for the app's life.
+struct AbortGuard {
+    armed: bool,
+}
+
+impl Drop for AbortGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            state().attempt_aborted();
+        }
+    }
+}
+
+/// Run `probe` on a background thread, reporting an aborted attempt if
+/// the thread can't be spawned or dies before reporting, so readers
+/// never wait on a probe that will never finish.
+fn spawn_probe_thread(probe: impl FnOnce() + Send + 'static) {
+    let spawned = std::thread::Builder::new()
+        .name("shell-env-probe".into())
+        .spawn(move || {
+            let mut guard = AbortGuard { armed: true };
+            probe();
+            guard.armed = false;
+        });
+    if spawned.is_err() {
+        state().attempt_aborted();
+    }
+}
+
 /// Start the background probe (idempotent). Readers call this too, so
 /// the env resolves even if `warm()` was never reached.
 fn ensure_probe_started() {
     PROBE_STARTED.call_once(|| {
         state().inner.lock().unwrap().probing = true;
-        std::thread::spawn(|| {
+        spawn_probe_thread(|| {
             run_probe_loop(
                 state(),
                 probe_once,
@@ -198,13 +259,13 @@ fn current_env() -> LoginEnv {
     let st = state();
     let env = st.snapshot(FIRST_PROBE_WAIT);
     // Startup retries exhausted without success? Let actual usage kick
-    // one more background attempt (cooldown-limited) so a slow login
-    // eventually heals instead of pinning the fallback until restart.
-    if st.try_begin_retry(RETRY_COOLDOWN) {
-        std::thread::spawn(|| {
-            let st = state();
+    // one more background attempt (cooldown- and count-limited) so a
+    // slow login eventually heals instead of pinning the fallback until
+    // restart.
+    if st.try_begin_retry(RETRY_COOLDOWN, MAX_KICKED_RETRIES) {
+        spawn_probe_thread(|| {
             let resolved = probe_once();
-            st.attempt_finished(resolved, false);
+            state().attempt_finished(resolved, false);
         });
     }
     env
@@ -212,20 +273,26 @@ fn current_env() -> LoginEnv {
 
 /// Return a PATH suitable for spawning user-installed CLIs. Never
 /// blocks once the first probe attempt has finished; until a probe
-/// succeeds this is the static fallback.
+/// succeeds this is the static fallback. For a spawn that also injects
+/// the rc delta, use `spawn_env()` — two separate calls can straddle
+/// the probe landing and mix snapshots.
 pub fn resolved_path() -> String {
     current_env().path
 }
 
-/// The user's login-shell environment MINUS PATH and the vars we manage
-/// ourselves — i.e. EDITOR/VISUAL/LANG/GPG_TTY/tool-tokens/etc. that the
-/// rc exports but a GUI-launched `.app` never inherits. Inject these
-/// (alongside `resolved_path()`) into anything we spawn so the agent,
-/// scratch terminal, and scripts all see the same environment the user's
-/// own terminal would (#17, and the general class behind #13/#16).
-/// Empty until a probe succeeds.
-pub fn login_env() -> Vec<(String, String)> {
-    current_env().inject
+/// PATH plus the rc delta, from ONE snapshot. The delta is the user's
+/// login-shell environment MINUS PATH and the vars we manage ourselves
+/// — i.e. EDITOR/VISUAL/LANG/GPG_TTY/tool-tokens/etc. that the rc
+/// exports but a GUI-launched `.app` never inherits. Inject both into
+/// anything we spawn so the agent, scratch terminal, and scripts all
+/// see the same environment the user's own terminal would (#17, and
+/// the general class behind #13/#16). The single snapshot matters
+/// twice: the pair can't tear across the probe landing (fallback PATH
+/// with probed delta), and a spawn pays the bounded first-probe wait
+/// once, not per accessor. Delta is empty until a probe succeeds.
+pub fn spawn_env() -> (String, Vec<(String, String)>) {
+    let env = current_env();
+    (env.path, env.inject)
 }
 
 /// Absolute path to the user's preferred login shell, used to spawn
@@ -450,28 +517,44 @@ fn probe_login_shell() -> Option<Vec<(String, String)>> {
         .spawn()
         .ok()?;
 
-    // Bounded try_wait poll, not a condvar: Child has no waitable handle
-    // and this runs a handful of times at startup, not app-lifetime.
+    // Drain stdout CONCURRENTLY with the wait below. Waiting first and
+    // reading after deadlocks on any env dump bigger than the pipe
+    // buffer (~64KB): the child blocks writing, we block waiting, and
+    // the deadline kills a probe that was fine.
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf).ok();
+        buf
+    });
+
+    // Bounded try_wait poll, not a condvar: Child has no waitable
+    // handle. Total poll time over the app's life is bounded too —
+    // probing stops at MAX_STARTUP_ATTEMPTS + MAX_KICKED_RETRIES
+    // attempts (or the first success), so this never becomes the
+    // app-lifetime sleep-poll CLAUDE.md bans.
     let deadline = Instant::now() + PROBE_DEADLINE;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
-                // Reap the killed child so it doesn't linger as a zombie.
+                // Reap the killed child so it doesn't linger as a zombie
+                // (the kill also EOFs stdout, releasing the reader).
                 let _ = child.wait();
                 return None;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
             Err(_) => return None,
         }
-    }
-
-    let output = child.wait_with_output().ok()?;
-    if !output.status.success() {
+    };
+    if !status.success() {
         return None;
     }
-    Some(parse_env_output(&String::from_utf8_lossy(&output.stdout)))
+
+    let stdout = reader.join().ok()?;
+    Some(parse_env_output(&String::from_utf8_lossy(&stdout)))
 }
 
 /// Parse `env`'s `KEY=VALUE` lines into pairs. Split out so the line
@@ -803,18 +886,18 @@ mod tests {
     fn retry_gate_blocks_after_success_and_while_probing() {
         let st = State::new(fallback_env());
         // First attempt still pending → no read-kicked retry.
-        assert!(!st.try_begin_retry(Duration::ZERO));
+        assert!(!st.try_begin_retry(Duration::ZERO, 10));
         // Loop still active (probing) → blocked.
         st.attempt_finished(None, true);
-        assert!(!st.try_begin_retry(Duration::ZERO));
+        assert!(!st.try_begin_retry(Duration::ZERO, 10));
         // Loop over, cooldown elapsed (ZERO) → exactly one kick wins...
         st.attempt_finished(None, false);
-        assert!(st.try_begin_retry(Duration::ZERO));
+        assert!(st.try_begin_retry(Duration::ZERO, 10));
         // ...and holds the probing flag against a second concurrent kick.
-        assert!(!st.try_begin_retry(Duration::ZERO));
+        assert!(!st.try_begin_retry(Duration::ZERO, 10));
         // After success, retries stop forever.
         st.attempt_finished(Some(real_env()), false);
-        assert!(!st.try_begin_retry(Duration::ZERO));
+        assert!(!st.try_begin_retry(Duration::ZERO, 10));
     }
 
     #[test]
@@ -823,8 +906,35 @@ mod tests {
         st.attempt_finished(None, false);
         // last_attempt is "just now": a long cooldown blocks the kick, a
         // zero cooldown allows it.
-        assert!(!st.try_begin_retry(Duration::from_secs(3600)));
-        assert!(st.try_begin_retry(Duration::ZERO));
+        assert!(!st.try_begin_retry(Duration::from_secs(3600), 10));
+        assert!(st.try_begin_retry(Duration::ZERO, 10));
+    }
+
+    #[test]
+    fn retry_gate_caps_lifetime_kicks() {
+        // A permanently broken shell must cost a BOUNDED number of probes:
+        // after max_kicks read-kicked retries, the gate closes for good.
+        let st = State::new(fallback_env());
+        st.attempt_finished(None, false);
+        for _ in 0..2 {
+            assert!(st.try_begin_retry(Duration::ZERO, 2));
+            st.attempt_finished(None, false);
+        }
+        assert!(!st.try_begin_retry(Duration::ZERO, 2), "cap must close the gate");
+    }
+
+    #[test]
+    fn attempt_aborted_unblocks_readers_and_reopens_gate() {
+        // A probe thread that dies before reporting (panic, spawn failure)
+        // must not leave readers waiting out FIRST_PROBE_WAIT forever or
+        // the retry gate stuck on `probing`.
+        let st = State::new(fallback_env());
+        st.inner.lock().unwrap().probing = true;
+        st.attempt_aborted();
+        let t0 = Instant::now();
+        assert_eq!(st.snapshot(Duration::from_secs(5)), fallback_env());
+        assert!(t0.elapsed() < Duration::from_secs(2), "aborted attempt must not block reads");
+        assert!(st.try_begin_retry(Duration::ZERO, 10), "gate must reopen after abort");
     }
 
     #[test]
@@ -847,7 +957,7 @@ mod tests {
         assert_eq!(calls, 3, "loop must stop probing once it succeeds");
         assert_eq!(slept, vec![Duration::from_secs(2), Duration::from_secs(4)]);
         assert_eq!(st.snapshot(Duration::ZERO), real_env());
-        assert!(!st.try_begin_retry(Duration::ZERO), "no retries after success");
+        assert!(!st.try_begin_retry(Duration::ZERO, 10), "no retries after success");
     }
 
     #[test]
@@ -859,6 +969,6 @@ mod tests {
         run_probe_loop(&st, || { calls += 1; None }, |_| {}, 3, Duration::from_secs(2));
         assert_eq!(calls, 3, "must stop at max_attempts");
         assert_eq!(st.snapshot(Duration::ZERO), fallback_env());
-        assert!(st.try_begin_retry(Duration::ZERO), "reads may now kick a retry");
+        assert!(st.try_begin_retry(Duration::ZERO, 10), "reads may now kick a retry");
     }
 }
