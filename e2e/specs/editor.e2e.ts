@@ -2141,23 +2141,33 @@ describe("comment on an editor selection for the agent", () => {
       (host!.querySelector(".cm-content") as HTMLElement).focus();
     }, taskId!, a, b);
 
-  /** Fill the open composer and save it. */
-  const writeComment = async (body: string) => {
+  /** Type into the open composer and take one of its two exits. */
+  const writeComment = async (body: string, action: "pending" | "send" = "pending") => {
     await waitFor(".tc-comment-textarea", "the comment composer never opened");
     expect(await browser.execute(() =>
       (document.querySelector(".tc-comment-textarea") as HTMLTextAreaElement).placeholder))
       .toBe("Add a comment");
-    await browser.execute((text) => {
+    await browser.execute((text, sel) => {
       const ta = document.querySelector(".tc-comment-textarea") as HTMLTextAreaElement;
       ta.value = text;
       ta.dispatchEvent(new Event("input", { bubbles: true }));
-      (document.querySelector(".tc-comment-composer .tc-btn-primary") as HTMLElement).click();
-    }, body);
-    await waitForGone(".tc-comment-textarea", "the composer never closed after saving");
+      (document.querySelector(sel) as HTMLElement).click();
+    }, body, action === "send" ? ".tc-comment-composer .tc-btn-send"
+                               : ".tc-comment-composer .tc-btn-queue");
+    await waitForGone(".tc-comment-textarea", "the composer never closed");
   };
 
   const activeTabId = () =>
     browser.execute((id) => window.__termic!.useApp.getState().activeTab[id], taskId!);
+
+  /** Every agent terminal in the task. A send lands in one of these — which
+   *  one is the sender's business (default agent, active tab), not this
+   *  spec's, so cases assert membership rather than a captured id. */
+  const agentTabIds = () =>
+    browser.execute((id) =>
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (window.__termic!.useApp.getState().tabs[id] ?? []).filter((t: any) => t.type === "terminal")
+        .map((t: any) => t.id), taskId!) as Promise<string[]>;
 
   it("opens a file with a live agent alongside it", async () => {
     await waitForAppShell();
@@ -2195,10 +2205,12 @@ describe("comment on an editor selection for the agent", () => {
     // selection, and no hover button chasing the mouse down the gutter (that
     // pair stays on the diff, where reviewing IS the job).
     expect(await browser.execute(() => !!document.querySelector(".tc-add-comment-btn"))).toBe(false);
+    // Same control the diff pane puts on a line — identical class, so
+    // identical accent styling. Only the target and the wording differ.
     expect(await browser.execute(() =>
       [...document.querySelectorAll(".tc-line-add-btn")].map(b => ({
-        title: b.getAttribute("title"), quiet: b.classList.contains("tc-line-add-btn-quiet"),
-      })))).toEqual([{ title: "Send selection to agent", quiet: true }]);
+        title: b.getAttribute("title"), cls: b.className,
+      })))).toEqual([{ title: "Send selection to agent", cls: "tc-line-add-btn" }]);
   });
 
   it("retracts the icon when the selection goes away", async () => {
@@ -2226,6 +2238,47 @@ describe("comment on an editor selection for the agent", () => {
     // Nothing was sent, and the editor keeps the stage: queueing must not
     // yank the user to the terminal.
     expect(await activeTabId()).toBe(editTabId);
+  });
+
+  it("sends one comment straight out, without queueing it", async () => {
+    const before = (await cards()).length;
+    await selectLines(1, 1);
+    await waitFor(".tc-line-add-btn", "the gutter comment icon never appeared");
+    await browser.execute(() => {
+      document.querySelector(".tc-line-add-btn")!
+        .dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    });
+    // Both exits are offered, the accent one being Send.
+    await waitFor(".tc-comment-composer .tc-btn-send", "the composer has no Send button");
+    expect(await browser.execute(() => ({
+      send: document.querySelector(".tc-comment-composer .tc-btn-send")!.textContent,
+      queue: document.querySelector(".tc-comment-composer .tc-btn-queue")!.textContent,
+      icon: !!document.querySelector(".tc-comment-composer .tc-btn-send svg"),
+    }))).toEqual({ send: "Send", queue: "Add to pending", icon: true });
+
+    await writeComment("explain this heading", "send");
+
+    // Sending hands the stage to the agent, the way the pending bar does.
+    await browser.waitUntil(
+      async () => (await agentTabIds()).includes((await activeTabId()) as string),
+      { timeout: 8_000, timeoutMsg: "sending never switched to the agent" },
+    );
+
+    // It reached the agent with the CODE, not just a line reference...
+    await browser.waitUntil(
+      async () => {
+        const logs = await cliRpc({ cmd: "logs", task: TASK });
+        return logs.ok && logs.data.data.includes("explain this heading")
+          && logs.data.data.includes("# e2e fixture");
+      },
+      { timeout: 30_000, timeoutMsg: "the instant send never reached the agent's PTY" },
+    );
+    // ...and it never joined the queue.
+    expect((await cards()).length).toBe(before);
+
+    // The cases below carry on in the editor.
+    await browser.execute((id, tab) =>
+      window.__termic!.useApp.getState().setActiveTabId(id, tab), taskId!, editTabId);
   });
 
   it("stacks a second comment from the keyboard route", async () => {

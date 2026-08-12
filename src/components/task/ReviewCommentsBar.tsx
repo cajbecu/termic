@@ -11,13 +11,12 @@
 import { useMemo, useState } from "react";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
-import { useTaskComments, useReviewComments, composeCommentsMessage } from "@/store/reviewComments";
+import { useTaskComments, useReviewComments } from "@/store/reviewComments";
 import { PopoverRoot, PopoverTrigger, PopoverContent } from "@/components/ui/Popover";
 import { Button } from "@/components/ui/Button";
 import { Tip } from "@/components/ui/Tooltip";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
-import { deliverMessage } from "@/lib/agentSend";
-import { focusTerminalTab } from "@/lib/tabFocus";
+import { sendCommentsToAgent } from "@/lib/sendComments";
 import { isTerminalCli } from "@/lib/agents";
 import { cn } from "@/lib/utils";
 import { MessagesSquare, X, Send, Trash2 } from "lucide-react";
@@ -45,8 +44,6 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
   const tabsForTask = useApp(s => s.tabs[taskId]);
   const agents = useApp(s => s.agents);
   const activeTabId = useApp(s => s.activeTab[taskId]);
-  const patchTab = useApp(s => s.patchTab);
-  const setActiveTabId = useApp(s => s.setActiveTabId);
   const openPreviewTab = useApp(s => s.openPreviewTab);
   const pushToast = useUI(s => s.pushToast);
 
@@ -82,32 +79,16 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
 
   async function send() {
     if (!target?.ptyId || !comments.length || sending) return;
-    const ptyId = target.ptyId;
-    const label = tabLabel(target);
-    const n = comments.length;
-    const msg = composeCommentsMessage(comments);
     setSending(true);
-    try {
-      // Await the write so we only clear the user's comments once they've
-      // actually reached the PTY — a dead/exited agent rejects here and the
-      // batch is preserved.
-      await deliverMessage(ptyId, msg);
-    } catch {
-      setSending(false);
-      pushToast(`Could not reach ${label}. Your comments are kept.`, "error");
-      return;
-    }
-    // Arm work-done detection exactly as a keyboard Enter would (delivery
-    // writes straight to the PTY, bypassing term.onData).
-    patchTab(taskId, target.id, { lastInputAt: Date.now() });
-    clear(taskId);
+    // Shared with the composer's own Send button (lib/sendComments.ts): one
+    // delivery path, so target resolution, the lastInputAt stamp, the focus
+    // handover and the toast can't drift between the two entry points. Only
+    // clear once the bytes actually landed — a dead agent keeps the batch.
+    const ok = await sendCommentsToAgent(taskId, comments, { tabId: target.id });
     setSending(false);
+    if (!ok) return;
+    clear(taskId);
     setOpen(false);
-    // Surface the agent we just sent to: switch to its tab and drop keyboard
-    // focus into the terminal so the user can keep steering it immediately.
-    setActiveTabId(taskId, target.id);
-    focusTerminalTab(target.id);
-    pushToast(`Sent ${n} comment${n === 1 ? "" : "s"} to ${label}`);
   }
 
   // Group comments by file, preserving first-seen order.

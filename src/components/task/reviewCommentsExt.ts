@@ -19,6 +19,7 @@ import {
 } from "@codemirror/view";
 import { StateField, StateEffect, type EditorState, RangeSet, type Range } from "@codemirror/state";
 import { useReviewComments, type ReviewComment } from "@/store/reviewComments";
+import { sendCommentsToAgent } from "@/lib/sendComments";
 import {
   anchorForLines, anchorStateChanged, linesForAnchor, mapAnchor, stateForAnchor, type Anchor,
 } from "@/lib/commentAnchors";
@@ -151,6 +152,13 @@ function blockShell(inner: HTMLElement): HTMLElement {
   return shell;
 }
 
+// lucide `send` — the same glyph the pending-comments bar puts on its Send
+// button, so "this goes to the agent now" looks the same everywhere.
+const SEND_ICON_SVG =
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
+  `<path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/>` +
+  `<path d="m21.854 2.147-10.94 10.939"/></svg>`;
+
 // ── Widgets ───────────────────────────────────────────────────────────────
 
 class ComposerWidget extends WidgetType {
@@ -202,28 +210,54 @@ class ComposerWidget extends WidgetType {
 
     const hint = document.createElement("span");
     hint.className = "tc-comment-hint";
-    hint.textContent = "↵ to save · ⇧↵ for newline";
+    hint.textContent = "↵ to send · ⇧↵ for newline";
     row.appendChild(hint);
 
     const cancel = document.createElement("button");
     cancel.type = "button";
-    cancel.className = "tc-btn tc-btn-ghost";
+    cancel.className = "tc-btn tc-btn-ghost tc-btn-cancel";
     cancel.textContent = "Cancel";
     row.appendChild(cancel);
 
-    const save = document.createElement("button");
-    save.type = "button";
-    save.className = "tc-btn tc-btn-primary";
-    save.textContent = this.c.mode === "edit" ? "Update" : "Comment";
-    row.appendChild(save);
+    // Two ways out, because a remark on code is sometimes the whole thought
+    // and sometimes one of five. "Add to pending" queues it with the rest;
+    // "Send" (the accent CTA) ships this one immediately, and the comment body
+    // is OPTIONAL there — the selected code alone is a legitimate message.
+    // Editing an existing queued comment offers Update only: it is already in
+    // the queue, and the bar is where a queue gets sent.
+    const editing = this.c.mode === "edit" && !!this.c.id;
+
+    const queue = document.createElement("button");
+    queue.type = "button";
+    queue.className = "tc-btn tc-btn-ghost tc-btn-queue";
+    queue.textContent = editing ? "Update" : "Add to pending";
+    row.appendChild(queue);
+
+    const send = document.createElement("button");
+    send.type = "button";
+    send.className = "tc-btn tc-btn-primary tc-btn-send";
+    send.innerHTML = `${SEND_ICON_SVG}<span>Send</span>`;
+    send.title = "Send this selection to the agent now";
+    if (!editing) row.appendChild(send);
 
     wrap.appendChild(row);
+
+    /** The comment as it stands, whether or not it was ever queued. */
+    const draft = (body: string): ReviewComment => ({
+      id: this.c.id ?? "draft",
+      taskId: this.ctx.taskId,
+      file: this.ctx.file,
+      startLine: this.c.startLine,
+      endLine: this.c.endLine,
+      quote: this.c.quote,
+      body,
+    });
 
     const commit = () => {
       const body = ta.value.trim();
       if (!body) { ta.focus(); return; }
       const store = useReviewComments.getState();
-      if (this.c.mode === "edit" && this.c.id) {
+      if (editing && this.c.id) {
         store.update(this.ctx.taskId, this.c.id, body);
       } else {
         store.add({
@@ -238,17 +272,33 @@ class ComposerWidget extends WidgetType {
       view.dispatch({ effects: closeComposer.of() });
       view.focus();
     };
+
+    const sendNow = () => {
+      void sendCommentsToAgent(this.ctx.taskId, [draft(ta.value.trim())], {
+        label: locLabel(this.c.startLine, this.c.endLine, this.ctx.file),
+      });
+      // Close, but do NOT take focus back: the send hands the stage to the
+      // agent (switches to its tab, focuses its terminal), and an editor
+      // grabbing focus a beat before that lands would fight it.
+      view.dispatch({ effects: closeComposer.of() });
+    };
     const cancelFn = () => {
       view.dispatch({ effects: closeComposer.of() });
       view.focus();
     };
 
-    save.addEventListener("click", commit);
+    queue.addEventListener("click", commit);
+    send.addEventListener("click", sendNow);
     cancel.addEventListener("click", cancelFn);
     ta.addEventListener("keydown", (e) => {
-      // Enter submits; Shift+Enter inserts a newline (chat-composer muscle
-      // memory). ⌘/Ctrl+Enter still commits too — it just isn't required.
-      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commit(); }
+      // Enter takes the accent action (send now), Shift+Enter inserts a
+      // newline — chat-composer muscle memory, and the CTA is what Enter
+      // should mean. Editing a queued comment has no send button, so there
+      // Enter still updates it in place.
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        if (editing) commit(); else sendNow();
+      }
       else if (e.key === "Escape") { e.preventDefault(); cancelFn(); }
       e.stopPropagation(); // keep keystrokes out of CodeMirror's keymap
     });
@@ -532,9 +582,10 @@ class AddCommentGutterMarker extends GutterMarker {
   toDOM(view: EditorView) {
     const btn = document.createElement("button");
     btn.type = "button";
-    // Quiet variant in the editor: same icon, no accent chip. It sits beside
-    // code the user is reading, so it announces itself only on hover.
-    btn.className = this.wholeSelection ? "tc-line-add-btn tc-line-add-btn-quiet" : "tc-line-add-btn";
+    // One control, one look, both surfaces: the editor's selection button is
+    // the diff's line button (accent chip and all). Only what it targets and
+    // what it is called differ.
+    btn.className = "tc-line-add-btn";
     // The editor's icon is the entry point to "mark this code up for the
     // agent", so it says what the gesture is FOR, not what it mechanically
     // does. The diff's per-line button keeps its own wording.
@@ -664,6 +715,20 @@ export function reviewCommentsExtension(taskId: string, file: string, surface: R
     tooltipField,
     commentGutter(ctx, surface),
     ...(surface.hoverGutter ? [hoverTrackPlugin()] : []),
+    // A gutter costs its width on every line, forever, and an editor is read
+    // far more than it is commented on. Where the button is selection-driven
+    // (no hover to anticipate), collapse the column to nothing until there IS
+    // something to put in it — otherwise every file, markdown included, pays
+    // 20px of horizontal room and starts scrolling sideways sooner than it
+    // used to. The diff pane keeps a fixed column: it always shows a button on
+    // hover, so a width that appears and disappears under the mouse would be
+    // worse than the space.
+    ...(surface.hoverGutter ? [] : [
+      EditorView.editorAttributes.compute([dataField, "selection"], (state) => ({
+        class: gutterLine(state, surface) != null || state.field(dataField).comments.length
+          ? "tc-gutter-live" : "tc-gutter-idle",
+      })),
+    ]),
     storeSyncPlugin(ctx),
     anchorSyncPlugin(ctx),
     baseTheme,
@@ -822,6 +887,9 @@ const baseTheme = EditorView.baseTheme({
   // Per-line hover gutter. A slim fixed column so the diff doesn't reflow as
   // the button appears/disappears; the marker only renders on the hovered line.
   ".tc-comment-gutter": { width: "20px" },
+  // See the editorAttributes note in the factory: an idle selection-driven
+  // gutter takes no horizontal room at all.
+  "&.tc-gutter-idle .tc-comment-gutter": { width: "0px" },
   ".tc-comment-gutter .cm-gutterElement": {
     display: "flex",
     alignItems: "center",
@@ -845,11 +913,7 @@ const baseTheme = EditorView.baseTheme({
     boxShadow: "0 1px 2px rgba(0,0,0,0.3)",
   },
   ".tc-line-add-btn:hover": { background: "var(--color-accent-deep)", color: "#fff" },
-  ".tc-line-add-btn-quiet": {
-    background: "transparent",
-    boxShadow: "none",
-    color: "var(--color-fg-faint)",
-  },
-  ".tc-line-add-btn-quiet:hover": { background: "transparent", color: "var(--color-accent)" },
   ".tc-line-add-btn svg": { width: "12px", height: "12px" },
+  ".tc-btn-send": { display: "inline-flex", alignItems: "center", gap: "5px" },
+  ".tc-btn-send svg": { width: "12px", height: "12px" },
 });
