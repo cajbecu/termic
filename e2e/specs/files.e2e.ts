@@ -231,17 +231,50 @@ describe("file finder", () => {
 });
 
 // P1: find-in-files (⇧⌘F) streams git-grep results. Cases: opens with an
-// input; a query that matches the fixture README returns a result row.
+// input; a query that matches the fixture README returns a result row; the
+// regexp toggle switches git grep from -F to -E; the Aa toggle drops the -i.
 describe("find in files", () => {
   let taskId: string | undefined;
   after(async () => {
-    await browser.execute(() =>
-      window.__termic!.useUI.getState().closeFindInFiles(),
-    );
+    await browser.execute(() => {
+      window.__termic!.useUI.getState().closeFindInFiles();
+      // The e2e profile is shared across spec files: leave the prefs off.
+      window.__termic!.usePrefs.getState().setFindInFilesRegex(false);
+      window.__termic!.usePrefs.getState().setFindInFilesMatchCase(false);
+    });
     if (taskId) await archiveTask(taskId);
   });
 
   const inputSel = 'input[placeholder^="Find in"]';
+
+  const type = (text: string) =>
+    browser.execute((s, v) => {
+      const input = document.querySelector(s) as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      )!.set!;
+      setter.call(input, v);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, inputSel, text);
+
+  // Scoped to THIS dialog's list. The file finder, command palette, project
+  // picker and prompt palette all render `data-row` too, and a closed Radix
+  // dialog's content stays in the DOM (the file finder's README row survives
+  // `closeFileFinder()`), so a document-wide count silently satisfies the
+  // positive cases and defeats the negative ones.
+  const readmeRows = () =>
+    browser.execute(() =>
+      [...document.querySelectorAll('[data-testid="fif-results"] [data-row]')].filter((r) =>
+        r.textContent?.toLowerCase().includes("readme"),
+      ).length,
+    );
+
+  const clickToggle = (testId: string) =>
+    browser.execute(
+      (sel) => (document.querySelector(sel) as HTMLElement).click(),
+      `[data-testid="${testId}"]`,
+    );
 
   it("opens with a query input", async () => {
     await waitForAppShell();
@@ -259,26 +292,64 @@ describe("find in files", () => {
 
   it("returns a match for a query present in the repo", async () => {
     // "fixture" is in the committed README ("# e2e fixture").
-    await browser.execute((s) => {
-      const input = document.querySelector(s) as HTMLInputElement;
-      const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype,
-        "value",
-      )!.set!;
-      setter.call(input, "fixture");
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    }, inputSel);
+    await type("fixture");
 
-    await browser.waitUntil(
-      () =>
-        browser.execute(() =>
-          [...document.querySelectorAll("[data-row]")].some((r) =>
-            r.textContent?.toLowerCase().includes("readme"),
-          ),
-        ),
-      { timeout: 10_000, timeoutMsg: "no result row for the query" },
-    );
+    await browser.waitUntil(async () => (await readmeRows()) > 0, {
+      timeout: 10_000,
+      timeoutMsg: "no result row for the query",
+    });
     await snap("find-in-files.png");
+  });
+
+  // "^# e2e" only matches the committed README as a pattern; as a literal
+  // string (the default -F mode) it matches nothing.
+  it("finds nothing for a pattern while the regexp toggle is off", async () => {
+    await type("^# e2e");
+    await browser.waitUntil(async () => (await readmeRows()) === 0, {
+      timeout: 10_000,
+      timeoutMsg: "the literal search matched a pattern it should not",
+    });
+  });
+
+  it("matches the pattern once the regexp toggle is on", async () => {
+    await clickToggle("fif-regex");
+    expect(
+      await browser.execute(() =>
+        window.__termic!.usePrefs.getState().findInFilesRegex,
+      ),
+    ).toBe(true);
+
+    await browser.waitUntil(async () => (await readmeRows()) > 0, {
+      timeout: 10_000,
+      timeoutMsg: "no result row for the pattern in regexp mode",
+    });
+    await snap("find-in-files-regex.png");
+  });
+
+  // The README holds "# e2e fixture" in lower case, so "Fixture" is the
+  // query that separates the two case modes.
+  it("matches a differently-cased query while Aa is off", async () => {
+    await clickToggle("fif-regex");
+    await type("Fixture");
+    await browser.waitUntil(async () => (await readmeRows()) > 0, {
+      timeout: 10_000,
+      timeoutMsg: "case-insensitive search missed a differently-cased query",
+    });
+  });
+
+  it("drops the match once Aa is on", async () => {
+    await clickToggle("fif-case");
+    expect(
+      await browser.execute(() =>
+        window.__termic!.usePrefs.getState().findInFilesMatchCase,
+      ),
+    ).toBe(true);
+
+    await browser.waitUntil(async () => (await readmeRows()) === 0, {
+      timeout: 10_000,
+      timeoutMsg: "case-sensitive search still matched the wrong case",
+    });
+    await snap("find-in-files-case.png");
   });
 });
 

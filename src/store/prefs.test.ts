@@ -58,6 +58,83 @@ describe("prefs: loadRemoteImages", () => {
   });
 });
 
+describe("prefs: findInFilesRegex", () => {
+  const KEY = "findInFilesRegex";
+  beforeEach(() => {
+    vi.stubGlobal("localStorage", fakeLocalStorage());
+    vi.resetModules();
+  });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("defaults to false with nothing in localStorage", async () => {
+    const { usePrefs } = await import("./prefs");
+    expect(usePrefs.getState().findInFilesRegex).toBe(false);
+  });
+
+  it("picks up a persisted true value as the initial state on load", async () => {
+    localStorage.setItem(KEY, "1");
+    const { usePrefs } = await import("./prefs");
+    expect(usePrefs.getState().findInFilesRegex).toBe(true);
+  });
+
+  it("setFindInFilesRegex(true) updates state and persists it", async () => {
+    const { usePrefs } = await import("./prefs");
+    usePrefs.getState().setFindInFilesRegex(true);
+    expect(usePrefs.getState().findInFilesRegex).toBe(true);
+    expect(localStorage.getItem(KEY)).toBe("1");
+  });
+
+  it("setFindInFilesRegex(false) updates state and persists it", async () => {
+    localStorage.setItem(KEY, "1");
+    const { usePrefs } = await import("./prefs");
+    usePrefs.getState().setFindInFilesRegex(false);
+    expect(usePrefs.getState().findInFilesRegex).toBe(false);
+    expect(localStorage.getItem(KEY)).toBe("0");
+  });
+});
+
+describe("prefs: findInFilesMatchCase", () => {
+  const KEY = "findInFilesMatchCase";
+  beforeEach(() => {
+    vi.stubGlobal("localStorage", fakeLocalStorage());
+    vi.resetModules();
+  });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("defaults to false, so search stays case-insensitive", async () => {
+    const { usePrefs } = await import("./prefs");
+    expect(usePrefs.getState().findInFilesMatchCase).toBe(false);
+  });
+
+  it("picks up a persisted true value as the initial state on load", async () => {
+    localStorage.setItem(KEY, "1");
+    const { usePrefs } = await import("./prefs");
+    expect(usePrefs.getState().findInFilesMatchCase).toBe(true);
+  });
+
+  it("setFindInFilesMatchCase(true) updates state and persists it", async () => {
+    const { usePrefs } = await import("./prefs");
+    usePrefs.getState().setFindInFilesMatchCase(true);
+    expect(usePrefs.getState().findInFilesMatchCase).toBe(true);
+    expect(localStorage.getItem(KEY)).toBe("1");
+  });
+
+  it("setFindInFilesMatchCase(false) updates state and persists it", async () => {
+    localStorage.setItem(KEY, "1");
+    const { usePrefs } = await import("./prefs");
+    usePrefs.getState().setFindInFilesMatchCase(false);
+    expect(usePrefs.getState().findInFilesMatchCase).toBe(false);
+    expect(localStorage.getItem(KEY)).toBe("0");
+  });
+
+  it("is independent of the regexp toggle", async () => {
+    localStorage.setItem("findInFilesRegex", "1");
+    const { usePrefs } = await import("./prefs");
+    expect(usePrefs.getState().findInFilesRegex).toBe(true);
+    expect(usePrefs.getState().findInFilesMatchCase).toBe(false);
+  });
+});
+
 // The three-way renderer pref (GH #140 follow-up) has to coexist with the
 // boolean it supersedes: profiles in the wild only have terminalGpuEnabled,
 // and the Appearance toggle still writes it. Anything that lets the two drift

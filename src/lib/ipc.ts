@@ -134,13 +134,19 @@ export const taskMatchIgnoredFiles = (id: string, clicked: string) =>
 
 export interface GrepHit { path: string; line: number; col: number; preview: string }
 
+/** How the query is matched. `regex` is a POSIX ERE (git grep -E), NOT
+ *  PCRE — git is not always compiled with libpcre. Kept as one object so
+ *  the two flags can't be swapped at a call site, and so the search and
+ *  its result highlighting always read the same pair. */
+export interface GrepOpts { regex: boolean; case_sensitive: boolean }
+
 /** Start a streaming `git grep` in the task. Results arrive via
  *  `grep-result://<searchId>` events (see `onGrepResult`) and a final
  *  `grep-done://<searchId>` (`onGrepDone`). The caller generates a fresh
  *  `searchId` per keystroke so we can ignore late events from cancelled
  *  searches; Rust auto-SIGKILLs any prior grep for the same task. */
-export const taskGrepStart = (id: string, query: string, searchId: string) =>
-  invoke<void>("task_grep_start", { id, query, searchId });
+export const taskGrepStart = (id: string, query: string, searchId: string, opts: GrepOpts) =>
+  invoke<void>("task_grep_start", { id, query, searchId, opts });
 
 export const taskGrepCancel = (id: string) =>
   invoke<void>("task_grep_cancel", { id });

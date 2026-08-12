@@ -8376,11 +8376,21 @@ fn running_greps_swap(ws_id: &str, new_pid: Option<i32>) -> Option<i32> {
 /// the cap the child is SIGKILLed and `truncated: true` is reported.
 /// Re-entrant safety: any previous grep for the same task is killed
 /// before this one starts (typing fires a new search per keystroke).
+/// `regex` picks POSIX ERE (`-E`) over a literal match (`-F`). Not PCRE
+/// (`-P`) — git is not always compiled with libpcre, Apple's is not.
+/// `case_sensitive` drops the default `-i`.
+#[derive(Deserialize)]
+pub struct GrepOpts {
+    pub regex: bool,
+    pub case_sensitive: bool,
+}
+
 #[tauri::command]
 fn task_grep_start(
     id: String,
     query: String,
     search_id: String,
+    opts: GrepOpts,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
@@ -8418,13 +8428,15 @@ fn task_grep_start(
     let app_o = app.clone();
     let ws_id_o = id.clone();
     let search_id_o = search_id.clone();
+    // git grep flags: -n line numbers, --column column, -I skip binary,
+    // -F literal / -E POSIX ERE, -i / --no-ignore-case, --untracked
+    // --exclude-standard include new files but respect .gitignore.
+    let match_mode = if opts.regex { "-E" } else { "-F" };
+    let case_flag = if opts.case_sensitive { "--no-ignore-case" } else { "-i" };
 
     thread::spawn(move || {
-        // git grep flags: -n line numbers, --column column, -I skip binary,
-        // -F literal, -i case-insensitive, --untracked --exclude-standard
-        // include new files but respect .gitignore. process_group(0) to kill
-        // the tree. We run one child per repo, serially, sharing the result
-        // cap + batch across all of them.
+        // process_group(0) to kill the tree. We run one child per repo,
+        // serially, sharing the result cap + batch across all of them.
         const RESULT_CAP: usize = 500;
         const BATCH_MAX: usize = 50;
         const BATCH_MS: u128 = 30;
@@ -8455,7 +8467,7 @@ fn task_grep_start(
             let spawn = std::process::Command::new("git")
                 .args([
                     "grep",
-                    "-n", "--column", "-I", "-F", "-i",
+                    "-n", "--column", "-I", match_mode, case_flag,
                     "--untracked", "--exclude-standard",
                     "--no-color",
                     "-e", &query,
