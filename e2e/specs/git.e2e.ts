@@ -478,7 +478,9 @@ describe("review comment alignment", () => {
       const ta = document.querySelector(".tc-comment-textarea") as HTMLTextAreaElement;
       ta.value = text;
       ta.dispatchEvent(new Event("input", { bubbles: true })); // also runs autoGrow
-      (document.querySelector(".tc-comment-composer .tc-btn-primary") as HTMLElement).click();
+      // "Add to pending" queues the comment card; the primary CTA is now Send,
+      // which ships it to the agent instead of mounting a card.
+      (document.querySelector(".tc-comment-composer .tc-btn-queue") as HTMLElement).click();
     }, body);
     await waitGone(".tc-comment-textarea");
   }
