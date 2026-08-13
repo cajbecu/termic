@@ -730,7 +730,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
           />
           <Field
             label="Tasks path"
-            hint="Where this repo's new worktrees live. Leave it empty to follow the default tasks path (Settings, Tasks), which is the greyed-out path in the field. A value here overrides that for this repo only: a full path (starting with / or ~) becomes the worktree root as-is, a relative one resolves inside the repo. Don't move or delete subdirectories; archive tasks in Termic instead."
+            hint="Where this repo's new worktrees live. Leave it empty to follow the default tasks path. A value here overrides that for this repo only: a full path (starting with / or ~) becomes the worktree root as-is, a relative one resolves inside the repo. Don't move or delete subdirectories; archive tasks in Termic instead."
             control={
               <Input
                 value={draft.tasks_path}
