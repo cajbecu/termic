@@ -48,6 +48,7 @@ interface CommentData {
 interface Ctx {
   taskId: string;
   file: string;
+  source: "diff" | "editor";
 }
 
 /**
@@ -65,9 +66,12 @@ export interface ReviewSurface {
   selection: "pill" | "gutter";
   /** Per-line "＋ comment" button that follows the mouse. Diff only. */
   hoverGutter: boolean;
+  /** Tags every comment made here, which decides how the batch is worded to
+   *  the agent (see composeCommentsMessage). */
+  source: "diff" | "editor";
 }
 
-const DIFF_SURFACE: ReviewSurface = { selection: "pill", hoverGutter: true };
+const DIFF_SURFACE: ReviewSurface = { selection: "pill", hoverGutter: true, source: "diff" };
 
 const setComments = StateEffect.define<ReviewComment[]>();
 const openComposer = StateEffect.define<Composer>();
@@ -152,6 +156,35 @@ function blockShell(inner: HTMLElement): HTMLElement {
   return shell;
 }
 
+/** Half the pane, floored so a narrow split still gets a usable box, and
+ *  capped so the card never reaches past the pane's right edge. */
+const CARD_MIN_W = 340;
+/** Left + right margin on a card (see the `.tc-comment-card` rule). */
+const CARD_MARGIN = 28;
+
+/**
+ * Size a comment box against the PANE.
+ *
+ * A block widget is a child of `.cm-content`, whose width is the width of the
+ * LONGEST LINE, not of the pane. In a markdown file with a 300-column line
+ * that made the composer 300 columns wide: a comment box running off the side
+ * of the screen with its buttons somewhere past the right edge. A percentage
+ * can't fix it (it would resolve against that same content width), so the pane
+ * width has to be read here.
+ *
+ * Applied once, in `toDOM`, and never touched again — deliberately. Resizing a
+ * mounted card rewraps its text, which changes its height AFTER CodeMirror
+ * measured it, and that is exactly how the gutter drifts out of step with the
+ * code (GH #157). A pane resize leaves existing cards at their old width until
+ * the next decoration rebuild, which is invisible and cannot desync anything.
+ */
+function sizeToPane(el: HTMLElement, view: EditorView) {
+  const w = view.scrollDOM.clientWidth;
+  // Not laid out yet: leave it to fill the content column, as it always did.
+  if (!w) return;
+  el.style.width = `${Math.round(Math.max(Math.min(w - CARD_MARGIN, CARD_MIN_W), w * 0.5))}px`;
+}
+
 // lucide `send` — the same glyph the pending-comments bar puts on its Send
 // button, so "this goes to the agent now" looks the same everywhere.
 const SEND_ICON_SVG =
@@ -176,15 +209,31 @@ class ComposerWidget extends WidgetType {
   toDOM(view: EditorView) {
     const wrap = document.createElement("div");
     wrap.className = "tc-comment-composer";
+    sizeToPane(wrap, view);
 
     const head = document.createElement("div");
     head.className = "tc-comment-loc";
     head.textContent = locLabel(this.c.startLine, this.c.endLine, this.ctx.file);
     wrap.appendChild(head);
 
+    // The selected code, shown as the first "message" in the box. It always
+    // travelled with the comment (composeCommentsMessage fences it), but the
+    // composer only ever showed a line range, so the send looked like it was
+    // sending line numbers. Now the payload is on screen before you commit to
+    // it, and the comment below is plainly the second half of the message.
+    const quote = this.c.quote.replace(/\n+$/, "");
+    if (quote) {
+      const pre = document.createElement("pre");
+      pre.className = "tc-comment-quote";
+      pre.textContent = quote;
+      wrap.appendChild(pre);
+    }
+
     const ta = document.createElement("textarea");
     ta.className = "tc-comment-textarea";
-    ta.placeholder = "Add a comment";
+    // Send takes the selection with an empty body, so say so rather than
+    // implying a comment is required.
+    ta.placeholder = quote ? "Add a comment (optional)" : "Add a comment";
     ta.value = this.c.initialBody;
     // Rough starting height (no layout yet, so `scrollHeight` is 0 here) to
     // keep an edit composer from mounting at one line and popping open a frame
@@ -251,11 +300,16 @@ class ComposerWidget extends WidgetType {
       endLine: this.c.endLine,
       quote: this.c.quote,
       body,
+      source: this.ctx.source,
     });
 
     const commit = () => {
       const body = ta.value.trim();
-      if (!body) { ta.focus(); return; }
+      // The selection IS the message; a comment is something you may add to
+      // it. So only a comment with nothing in it at all — no quote either,
+      // i.e. an empty whole-file remark — has nothing to queue, and that is
+      // the one case worth bouncing back to the box.
+      if (!body && !quote) { ta.focus(); return; }
       const store = useReviewComments.getState();
       if (editing && this.c.id) {
         store.update(this.ctx.taskId, this.c.id, body);
@@ -267,6 +321,7 @@ class ComposerWidget extends WidgetType {
           endLine: this.c.endLine,
           quote: this.c.quote,
           body,
+          source: this.ctx.source,
         });
       }
       view.dispatch({ effects: closeComposer.of() });
@@ -336,6 +391,7 @@ class CommentCardWidget extends WidgetType {
   toDOM(view: EditorView) {
     const wrap = document.createElement("div");
     wrap.className = "tc-comment-card";
+    sizeToPane(wrap, view);
 
     const head = document.createElement("div");
     head.className = "tc-comment-card-head";
@@ -366,8 +422,11 @@ class CommentCardWidget extends WidgetType {
     wrap.appendChild(head);
 
     const body = document.createElement("div");
-    body.className = "tc-comment-body";
-    body.textContent = this.comment.body;
+    // A queued selection with no remark on it is legitimate (the code is the
+    // message), but an empty card looks broken. Say what it is instead; the
+    // quote itself is right above, in the file.
+    body.className = this.comment.body.trim() ? "tc-comment-body" : "tc-comment-body tc-comment-body-empty";
+    body.textContent = this.comment.body.trim() || "Selection only";
     wrap.appendChild(body);
 
     edit.addEventListener("click", () => {
@@ -572,11 +631,50 @@ const COMMENT_ICON_SVG =
   `<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>` +
   `<path d="M12 8v6"/><path d="M9 11h6"/></svg>`;
 
+/**
+ * Instant hover label for the gutter button.
+ *
+ * `title` is the browser's tooltip and the browser decides when to show it:
+ * roughly a second of stillness. The button only exists while a selection is
+ * standing, so a second is long enough that you have moved on, clicked, or
+ * lost the selection before the label arrives. This one appears on
+ * `mouseenter` with no delay, like the rest of the app's tooltips.
+ *
+ * Mounted on `view.dom` (the editor's positioned box) rather than beside the
+ * button: the button lives in a zero-width gutter cell, so a child would be
+ * laid out inside a column with no room to be in.
+ */
+function attachInstantTip(btn: HTMLElement, view: EditorView, text: string): () => void {
+  let tip: HTMLElement | null = null;
+  const hide = () => { tip?.remove(); tip = null; };
+  const show = () => {
+    if (tip) return;
+    tip = document.createElement("div");
+    tip.className = "tc-instant-tip";
+    tip.textContent = text;
+    view.dom.appendChild(tip);
+    const b = btn.getBoundingClientRect();
+    const host = view.dom.getBoundingClientRect();
+    tip.style.top = `${b.top - host.top + b.height / 2}px`;
+    tip.style.left = `${b.right - host.left + 7}px`;
+  };
+  btn.addEventListener("mouseenter", show);
+  btn.addEventListener("mouseleave", hide);
+  // The click takes the button away (the composer opens, the selection
+  // collapses); nothing would fire mouseleave on a node that no longer exists.
+  btn.addEventListener("mousedown", hide);
+  return hide;
+}
+
 class AddCommentGutterMarker extends GutterMarker {
   constructor(readonly ctx: Ctx, readonly lineNo: number, readonly wholeSelection = false) { super(); }
 
   eq(other: AddCommentGutterMarker) {
     return other.lineNo === this.lineNo && other.wholeSelection === this.wholeSelection;
+  }
+
+  destroy(dom: HTMLElement) {
+    (dom as HTMLElement & { __tcHideTip?: () => void }).__tcHideTip?.();
   }
 
   toDOM(view: EditorView) {
@@ -589,8 +687,12 @@ class AddCommentGutterMarker extends GutterMarker {
     // The editor's icon is the entry point to "mark this code up for the
     // agent", so it says what the gesture is FOR, not what it mechanically
     // does. The diff's per-line button keeps its own wording.
-    btn.title = this.wholeSelection ? "Send selection to agent" : "Comment on this line";
+    const label = this.wholeSelection ? "Send selection to agent" : "Comment on this line";
+    btn.setAttribute("aria-label", label);
     btn.innerHTML = COMMENT_ICON_SVG;
+    // Own tooltip, no `title`: the native one is both slow and would double up.
+    (btn as HTMLElement & { __tcHideTip?: () => void }).__tcHideTip =
+      attachInstantTip(btn, view, label);
     // mousedown + preventDefault so the click doesn't move the editor
     // selection (and dismiss us) before we read the line.
     btn.addEventListener("mousedown", (e) => {
@@ -623,7 +725,15 @@ function gutterLine(state: EditorState, surface: ReviewSurface): number | null {
 /** Gutter that shows a comment button on one line (see `gutterLine`). */
 function commentGutter(ctx: Ctx, surface: ReviewSurface) {
   return gutter({
-    class: "tc-comment-gutter",
+    // A gutter costs its width on every line, forever, and an editor is read
+    // far more than it is commented on. Where the button is selection-driven
+    // (no hover to anticipate), the column keeps zero width and the button is
+    // positioned out of it, over the line numbers: the code never reflows as a
+    // selection comes and goes, and no file pays horizontal room for a control
+    // it is not showing. The diff pane keeps a real column: it puts a button on
+    // every hovered line, so an overlay would sit on top of the numbers all the
+    // way down the file.
+    class: surface.hoverGutter ? "tc-comment-gutter" : "tc-comment-gutter tc-comment-gutter-float",
     lineMarker(view, block) {
       const target = gutterLine(view.state, surface);
       if (target == null) return null;
@@ -686,7 +796,7 @@ function hoverTrackPlugin() {
 /** Build the review-comments extension for one file in one task. `surface`
  *  defaults to the diff pane's loud affordances; editors pass the quiet set. */
 export function reviewCommentsExtension(taskId: string, file: string, surface: ReviewSurface = DIFF_SURFACE) {
-  const ctx: Ctx = { taskId, file };
+  const ctx: Ctx = { taskId, file, source: surface.source };
 
   const decoField = StateField.define<DecorationSet>({
     create: (state) => buildDeco(state, ctx),
@@ -715,20 +825,6 @@ export function reviewCommentsExtension(taskId: string, file: string, surface: R
     tooltipField,
     commentGutter(ctx, surface),
     ...(surface.hoverGutter ? [hoverTrackPlugin()] : []),
-    // A gutter costs its width on every line, forever, and an editor is read
-    // far more than it is commented on. Where the button is selection-driven
-    // (no hover to anticipate), collapse the column to nothing until there IS
-    // something to put in it — otherwise every file, markdown included, pays
-    // 20px of horizontal room and starts scrolling sideways sooner than it
-    // used to. The diff pane keeps a fixed column: it always shows a button on
-    // hover, so a width that appears and disappears under the mouse would be
-    // worse than the space.
-    ...(surface.hoverGutter ? [] : [
-      EditorView.editorAttributes.compute([dataField, "selection"], (state) => ({
-        class: gutterLine(state, surface) != null || state.field(dataField).comments.length
-          ? "tc-gutter-live" : "tc-gutter-idle",
-      })),
-    ]),
     storeSyncPlugin(ctx),
     anchorSyncPlugin(ctx),
     baseTheme,
@@ -749,7 +845,11 @@ export function dispatchSelectionComment(view: EditorView): boolean {
   const last = view.state.doc.lines;
   const s = Math.max(1, Math.min(view.state.doc.lineAt(range.from).number, last));
   const en = Math.max(s, Math.min(view.state.doc.lineAt(range.to).number, last));
-  const quote = view.state.sliceDoc(view.state.doc.line(s).from, view.state.doc.line(en).to);
+  // Exactly what is highlighted, partial lines and all — not the lines it
+  // touches. The user picked those characters; widening the quote to whole
+  // lines sends the agent code the user did not point at, and the composer
+  // would show a snippet that isn't the one they selected.
+  const quote = view.state.sliceDoc(range.from, range.to);
   view.dispatch({
     // Collapse the selection so the tooltip dismisses, then open the composer.
     selection: { anchor: view.state.doc.line(s).from },
@@ -804,6 +904,9 @@ const baseTheme = EditorView.baseTheme({
   // not floating over it. Vertical spacing belongs HERE, inside `blockShell`,
   // never on the shell itself (GH #157).
   ".tc-comment-card, .tc-comment-composer": {
+    // Width is set per widget in toDOM (see sizeToPane); border-box so the
+    // number it computes is the whole box.
+    boxSizing: "border-box",
     margin: "3px 14px 9px 14px",
     padding: "8px 11px 9px",
     borderRadius: "8px",
@@ -837,6 +940,24 @@ const baseTheme = EditorView.baseTheme({
     color: "var(--color-fg)",
     whiteSpace: "pre-wrap",
     wordBreak: "break-word",
+  },
+  ".tc-comment-body-empty": { color: "var(--color-fg-faint)", fontStyle: "italic" },
+  // The selected code, quoted above the box. Reads as the first message: the
+  // same fenced snippet the agent is about to receive.
+  ".tc-comment-quote": {
+    margin: "5px 0 0",
+    padding: "5px 8px",
+    maxHeight: "132px",
+    overflow: "auto",
+    borderRadius: "6px",
+    border: "1px solid var(--color-border-soft)",
+    background: "var(--color-bg)",
+    color: "var(--color-fg-dim)",
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+    fontSize: "11.5px",
+    lineHeight: "1.5",
+    whiteSpace: "pre",
+    tabSize: "2",
   },
   ".tc-comment-textarea": {
     display: "block",
@@ -887,14 +1008,38 @@ const baseTheme = EditorView.baseTheme({
   // Per-line hover gutter. A slim fixed column so the diff doesn't reflow as
   // the button appears/disappears; the marker only renders on the hovered line.
   ".tc-comment-gutter": { width: "20px" },
-  // See the editorAttributes note in the factory: an idle selection-driven
-  // gutter takes no horizontal room at all.
-  "&.tc-gutter-idle .tc-comment-gutter": { width: "0px" },
   ".tc-comment-gutter .cm-gutterElement": {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     padding: "0",
+  },
+  // Float mode: no column at all, the button hangs left out of the zero-width
+  // cell and sits over the line number for that one line. Nothing reflows when
+  // it appears (see the note in commentGutter).
+  ".tc-comment-gutter-float": { width: "0px", overflow: "visible" },
+  ".tc-comment-gutter-float .cm-gutterElement": { position: "relative", overflow: "visible" },
+  ".tc-comment-gutter-float .tc-line-add-btn": {
+    position: "absolute",
+    right: "2px",
+    top: "50%",
+    transform: "translateY(-50%)",
+  },
+  ".tc-instant-tip": {
+    position: "absolute",
+    zIndex: "30",
+    transform: "translateY(-50%)",
+    padding: "3px 7px",
+    borderRadius: "5px",
+    border: "1px solid var(--color-border)",
+    background: "var(--color-bg-3)",
+    color: "var(--color-fg)",
+    fontFamily: "system-ui, -apple-system, sans-serif",
+    fontSize: "11px",
+    lineHeight: "1.3",
+    whiteSpace: "nowrap",
+    pointerEvents: "none",
+    boxShadow: "0 4px 12px rgba(0,0,0,0.35)",
   },
   ".tc-line-add-btn": {
     display: "inline-flex",

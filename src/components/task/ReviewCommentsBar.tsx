@@ -158,8 +158,14 @@ export function ReviewCommentsBar({ taskId, compact = false, className }: {
                     <div className="font-mono text-[10.5px] text-[var(--color-fg-faint)]">
                       {locLabel(c.startLine, c.endLine)}
                     </div>
-                    <div className="mt-0.5 whitespace-pre-wrap break-words text-[12.5px] leading-snug text-[var(--color-fg)]">
-                      {c.body}
+                    {/* The body is optional when a selection was queued on its
+                        own, so fall back to naming that rather than showing an
+                        empty row. */}
+                    <div className={cn(
+                      "mt-0.5 whitespace-pre-wrap break-words text-[12.5px] leading-snug",
+                      c.body.trim() ? "text-[var(--color-fg)]" : "italic text-[var(--color-fg-faint)]",
+                    )}>
+                      {c.body.trim() || "Selection only"}
                     </div>
                   </div>
                   <button

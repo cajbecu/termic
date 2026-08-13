@@ -273,7 +273,10 @@ export function EditorPane({ task, tab, active, onContent }: {
                 // Quiet surface: no icon chasing the mouse down the gutter, no
                 // labelled pill over the selection. One gutter icon, only
                 // while something is selected. The diff pane keeps both.
-                { selection: "gutter", hoverGutter: false }),
+                // `source: "editor"` also drops the "I reviewed your changes"
+                // framing from the message: this is code the user is reading,
+                // not a review of the agent's work.
+                { selection: "gutter", hoverGutter: false, source: "editor" }),
               indentUnit.of("  "),
               EditorState.tabSize.of(2),
               EditorView.updateListener.of(u => {

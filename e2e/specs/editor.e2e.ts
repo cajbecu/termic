@@ -2144,9 +2144,11 @@ describe("comment on an editor selection for the agent", () => {
   /** Type into the open composer and take one of its two exits. */
   const writeComment = async (body: string, action: "pending" | "send" = "pending") => {
     await waitFor(".tc-comment-textarea", "the comment composer never opened");
+    // Every composer in this spec is opened on a selection, and the selection
+    // alone is a legitimate message, so the body advertises itself as optional.
     expect(await browser.execute(() =>
       (document.querySelector(".tc-comment-textarea") as HTMLTextAreaElement).placeholder))
-      .toBe("Add a comment");
+      .toBe("Add a comment (optional)");
     await browser.execute((text, sel) => {
       const ta = document.querySelector(".tc-comment-textarea") as HTMLTextAreaElement;
       ta.value = text;
@@ -2207,10 +2209,30 @@ describe("comment on an editor selection for the agent", () => {
     expect(await browser.execute(() => !!document.querySelector(".tc-add-comment-btn"))).toBe(false);
     // Same control the diff pane puts on a line — identical class, so
     // identical accent styling. Only the target and the wording differ.
+    // No `title`: the browser's tooltip waits about a second, by which point
+    // the selection this button belongs to is often gone. It carries its own,
+    // shown on hover with no delay.
     expect(await browser.execute(() =>
       [...document.querySelectorAll(".tc-line-add-btn")].map(b => ({
-        title: b.getAttribute("title"), cls: b.className,
-      })))).toEqual([{ title: "Send selection to agent", cls: "tc-line-add-btn" }]);
+        title: b.getAttribute("title"), label: b.getAttribute("aria-label"), cls: b.className,
+      })))).toEqual([{ title: null, label: "Send selection to agent", cls: "tc-line-add-btn" }]);
+
+    expect(await browser.execute(() => {
+      const btn = document.querySelector(".tc-line-add-btn")!;
+      btn.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false }));
+      const shown = document.querySelector(".tc-instant-tip")?.textContent ?? null;
+      btn.dispatchEvent(new MouseEvent("mouseleave", { bubbles: false }));
+      return { shown, after: !!document.querySelector(".tc-instant-tip") };
+    })).toEqual({ shown: "Send selection to agent", after: false });
+
+    // The icon floats over the line numbers rather than opening a column, so
+    // the code does not jump sideways the moment you select something.
+    expect(await browser.execute((id) => {
+      const host = document.querySelector(`[data-task-id="${id}"] .cm-editor`) as HTMLElement;
+      // Computed style, not a measured box: an occluded window reports 0x0 for
+      // everything, which would pass this vacuously.
+      return getComputedStyle(host.querySelector(".tc-comment-gutter")!).width;
+    }, taskId!)).toBe("0px");
   });
 
   it("retracts the icon when the selection goes away", async () => {
@@ -2238,6 +2260,37 @@ describe("comment on an editor selection for the agent", () => {
     // Nothing was sent, and the editor keeps the stage: queueing must not
     // yank the user to the terminal.
     expect(await activeTabId()).toBe(editTabId);
+  });
+
+  it("queues a selection with nothing written about it", async () => {
+    // The selection is the message. Requiring a body meant you had to invent
+    // something to say before "look at this" could be queued at all.
+    await selectLines(1, 2);
+    await waitFor(".tc-line-add-btn", "the gutter comment icon never appeared");
+    await browser.execute(() => {
+      document.querySelector(".tc-line-add-btn")!
+        .dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    });
+    await waitFor(".tc-comment-composer .tc-btn-queue", "the composer never opened");
+    // The code being sent is shown in the composer, so what lands in the agent
+    // is on screen before you commit to it.
+    expect(await browser.execute(() =>
+      !!document.querySelector(".tc-comment-quote")?.textContent)).toBe(true);
+    await browser.execute(() => {
+      (document.querySelector(".tc-comment-composer .tc-btn-queue") as HTMLElement).click();
+    });
+    await waitForGone(".tc-comment-textarea", "an empty comment was refused instead of queued");
+
+    expect((await cards()).join("\n")).toContain("Selection only");
+
+    // Put the queue back to one card so the batch cases below stay readable.
+    await browser.execute((id) => {
+      const card = [...document.querySelectorAll(`[data-task-id="${id}"] .tc-comment-card`)]
+        .find(el => (el.textContent ?? "").includes("Selection only"))!;
+      (card.querySelector(".tc-icon-btn-danger") as HTMLElement).click();
+    }, taskId!);
+    await browser.waitUntil(async () => (await cards()).length === 1,
+      { timeout: 8_000, timeoutMsg: "the bodyless comment was never removed" });
   });
 
   it("sends one comment straight out, without queueing it", async () => {
@@ -2362,11 +2415,15 @@ describe("comment on an editor selection for the agent", () => {
         // Both bodies, both SHIFTED line attributions (the comments were made
         // on 1 and 1-2 before two lines were inserted above them), one message.
         return out.includes("rename this heading") && out.includes("and mention the fixture")
-          && out.includes("README.md:3") && out.includes("README.md:3-4")
-          && out.includes("2 inline comments");
+          && out.includes("README.md:3") && out.includes("README.md:3-4");
       },
       { timeout: 30_000, timeoutMsg: "the batch never reached the agent's PTY" },
     );
+    // Nothing here is a review: these comments were made on a file the user
+    // was reading, not on the agent's diff. Telling the agent "I reviewed your
+    // changes" would credit it with code it may never have written.
+    const log = await cliRpc({ cmd: "logs", task: TASK });
+    expect(log.data.data as string).not.toContain("I reviewed your changes");
     // Sent means drained: the cards and the pill are gone.
     await browser.waitUntil(async () => (await cards()).length === 0,
       { timeout: 8_000, timeoutMsg: "the queue was never cleared after sending" });

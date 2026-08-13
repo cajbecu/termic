@@ -58,29 +58,27 @@ export function mapAnchor(a: Anchor, changes: ChangeDesc): Anchor {
   return { from, to: Math.max(from, to) };
 }
 
-/** The source text an anchor now covers, expanded to whole lines so the quote
- *  reads like the file does. Empty when the range was deleted away. */
-export function quoteForAnchor(doc: Text, a: Anchor): string {
-  const { startLine, endLine } = linesForAnchor(doc, a);
-  const from = doc.line(startLine).from;
-  const to = doc.line(endLine).to;
-  return from >= to ? "" : doc.sliceString(from, to);
-}
-
-/** What a comment should now say, given where its anchor ended up. */
-export interface AnchorState { startLine: number; endLine: number; quote: string }
+/**
+ * What a comment should now say, given where its anchor ended up.
+ *
+ * Lines only, deliberately. The QUOTE is frozen at the moment the user made
+ * the selection and is never re-derived: it is the text they pointed at, which
+ * may be half a line, and it is the evidence of what they meant. Re-reading
+ * the range after the agent rewrote the code would silently swap the snippet
+ * for whatever now occupies those lines, and the queued comment would arrive
+ * quoting code the user never saw.
+ */
+export interface AnchorState { startLine: number; endLine: number }
 
 export function stateForAnchor(doc: Text, a: Anchor): AnchorState {
-  return { ...linesForAnchor(doc, a), quote: quoteForAnchor(doc, a) };
+  return linesForAnchor(doc, a);
 }
 
 /** True when re-deriving would actually change the stored comment — the guard
  *  that keeps an edit far below a comment from churning the store. */
 export function anchorStateChanged(
-  stored: { startLine: number | null; endLine: number | null; quote: string },
+  stored: { startLine: number | null; endLine: number | null },
   next: AnchorState,
 ): boolean {
-  return stored.startLine !== next.startLine
-    || stored.endLine !== next.endLine
-    || stored.quote !== next.quote;
+  return stored.startLine !== next.startLine || stored.endLine !== next.endLine;
 }
