@@ -161,6 +161,10 @@ export function RepositorySection({ projectId }: { projectId: string }) {
   const tasksPathInvalid = useTasksPathConflicts(
     onMoreTab ? draftTasksPath : "", projectId,
   ).names.length > 0;
+  // The debounced save closes over the render that scheduled it, so it needs a
+  // ref to read the CURRENT verdict rather than the one from 500ms ago.
+  const tasksPathInvalidRef = useRef(false);
+  tasksPathInvalidRef.current = tasksPathInvalid;
 
   if (!project || !draft) return <div className="text-[13.5px] text-[var(--color-fg-faint)]">Project not found.</div>;
 
@@ -202,7 +206,18 @@ export function RepositorySection({ projectId }: { projectId: string }) {
       const next = { ...d, [k]: v };
       // Debounce the actual save — coalesces rapid keystrokes.
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
-      saveTimer.current = window.setTimeout(() => { void performSave(next); }, 500) as unknown as number;
+      saveTimer.current = window.setTimeout(() => {
+        // Don't persist a tasks path that resolves onto the repo. The field is
+        // already flagged; writing it would leave a broken value in
+        // projects.json whose only other signal is a failed task create.
+        // Skips the whole batch rather than substituting the last good value:
+        // performSave ends in loadAll(), which re-seeds `draft` from the store,
+        // so saving something other than what is on screen would silently
+        // revert the user's typing mid-edit. Fixing the path is itself a
+        // keystroke, which reschedules this.
+        if (tasksPathInvalidRef.current) { setStatus("idle"); return; }
+        void performSave(next);
+      }, 500) as unknown as number;
       return next;
     });
   }
@@ -768,8 +783,8 @@ export function RepositorySection({ projectId }: { projectId: string }) {
                     data-testid="project-tasks-path-conflict"
                   >
                     This lands inside the repo itself, so new tasks would be created on top
-                    of your working tree. Pick a directory outside the repo, or a
-                    subdirectory of it.
+                    of your working tree. Changes here are not being saved until you pick
+                    a directory outside the repo, or a subdirectory of it.
                   </div>
                 )}
               </>

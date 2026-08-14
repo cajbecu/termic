@@ -1180,6 +1180,57 @@ describe("default tasks path", () => {
     await snap("default-tasks-path-placeholder.png");
   });
 
+  // The per-project field autosaves (no Save button), so the guard has to be
+  // in the debounced write, not a disabled control: typing a repo-swallowing
+  // override must leave projects.json untouched, and recovering must resume
+  // saving. Drives the real input, since the whole point is the save path.
+  it("does not persist a repo-swallowing project override", async () => {
+    await setProjectTasksPath("");
+    await browser.execute(
+      (id) => window.__termic!.useApp.getState().openSettings("repositories", id), projectId,
+    );
+    await waitVisible('[data-repo-tab="advanced"]');
+    await browser.execute(() =>
+      (document.querySelector('[data-repo-tab="advanced"]') as HTMLElement).click(),
+    );
+    await waitVisible('[data-testid="project-tasks-path-input"]');
+
+    const typeOverride = (value: string) =>
+      browser.execute((v) => {
+        const input = document.querySelector(
+          '[data-testid="project-tasks-path-input"]',
+        ) as HTMLInputElement;
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, "value",
+        )!.set!;
+        setter.call(input, v);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }, value);
+    const stored = () =>
+      browser.execute(
+        (id) => window.__termic!.useApp.getState()
+          .projects.find((p: any) => p.id === id)?.tasks_path ?? null,
+        projectId,
+      );
+
+    await typeOverride(".");
+    await waitVisible('[data-testid="project-tasks-path-conflict"]');
+    // Inverted wait, not a sleep: the save debounce is 500ms, so if the guard
+    // were absent this would resolve well inside the window. Timing out IS the
+    // pass, and it stays bounded.
+    await expect(
+      browser.waitUntil(async () => (await stored()) === ".", { timeout: 2_500 }),
+    ).rejects.toThrow();
+    expect(await stored()).toBe("");
+
+    // Recovering resumes the autosave, so the guard skips writes, not the form.
+    await typeOverride("recovered-wt");
+    await browser.waitUntil(async () => (await stored()) === "recovered-wt", {
+      timeout: 8_000, timeoutMsg: "a valid override never resumed autosaving",
+    });
+    await setProjectTasksPath("");
+  });
+
   // The global field itself: it carries a REAL value (not a placeholder), and
   // the preview under it flips between the two halves of the rule as you type.
   // Emptying it is a validation error, since the setting is required.
