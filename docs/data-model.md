@@ -10,7 +10,7 @@ Three directories, different owners:
 ## Entities
 
 - **Project** (`projects.json`, single JSON array) — git repo path + scripts + `preview_url` template + `files_to_copy` globs + `default_cli` + optional `group` label (UI-only collapsible folder in the sidebar; no filesystem effect; a group exists iff ≥1 project carries the label. All group reads go through `groupOf()` in `src/lib/projectGroups.ts`, THE normalization point: trim + ALL-CAPS, so mixed-case labels on disk converge to one group. Collapse state + folder color live in `localStorage` keyed by normalized name, pruned when a group disappears).
-- **Task** (`tasks/<uuid>.json`) — git worktree branched from project's `base_branch`. Worktrees live at `~/termic/tasks/<project>/<name>/`. `is_main_checkout=true` tasks point at the project's live checkout (no worktree, archive skips `rm -rf`). Optional `order` holds the sidebar position within the project, written by drag-to-reorder (`task_reorder`). Projects get their order from the `projects.json` array; tasks are a file each, so they need the explicit key. `load_tasks` sorts on `(order, created)` with a missing `order` LAST, which is why a project nobody has dragged still reads oldest-first and a new task appends at the bottom of a reordered one.
+- **Task** (`tasks/<uuid>.json`) — git worktree branched from project's `base_branch`. Worktrees live at `~/termic/tasks/<project>/<name>/` by default (configurable per project and globally). `is_main_checkout=true` tasks point at the project's live checkout (no worktree, archive skips `rm -rf`). Optional `order` holds the sidebar position within the project, written by drag-to-reorder (`task_reorder`). Projects get their order from the `projects.json` array; tasks are a file each, so they need the explicit key. `load_tasks` sorts on `(order, created)` with a missing `order` LAST, which is why a project nobody has dragged still reads oldest-first and a new task appends at the bottom of a reordered one.
 - **Settings** (`settings.json`) — `repos_dir`, `welcomed`, `agents[]` (claude/gemini/codex defaults + customs; each has `command`/`args`/`yolo_args`/`runtime_yolo_command`). Defaults seeded if `agents` is empty. `schema_version` gates one-time on-disk migrations.
 - **Tab** (per task, in `useApp`) — `terminal` (PTY running a CLI), `edit` (CodeMirror), `diff` (vs HEAD). PTYs die with the app.
 
@@ -25,7 +25,7 @@ directories or rewrite each task's `path`. CWD-resume agents (Claude Code's
 `--continue`) resume the most recent session by working directory, so relocating a
 worktree would silently orphan its history. Existing worktrees stay under
 `~/termic/workspaces/…`; NEW worktrees are created under `~/termic/tasks/…`
-(`worktrees_base()`), and the two roots coexist while the old one empties out
+(`default_worktrees_base()`), and the two roots coexist while the old one empties out
 lazily as tasks are archived/recreated. The metadata rename is atomic (stage in
 `tasks.tmp/`, then one `rename` into place), guarded by a `tasks-migration.lock`,
 backs up to `backups/pre-tasks-<ts>/`, and prunes-on-corruption (an unparseable

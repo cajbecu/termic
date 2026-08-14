@@ -8,12 +8,20 @@
 
 import { useEffect, useRef, useState } from "react";
 import { settingsSave } from "@/lib/ipc";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type { Settings } from "@/lib/types";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { usePrefs } from "@/store/prefs";
-import { Block, ListField, SectionTitle, Toggle, useBackendSettings } from "./Controls";
+import { Block, ListField, SectionTitle, Toggle, useBackendSettings, useTasksPathConflicts } from "./Controls";
 import { cleanLines } from "@/lib/utils";
+
+/** Drop trailing slashes so the "where tasks go" preview never reads
+ *  `~/work//<project>`. Keeps a bare `/` intact. */
+function trimSlashes(p: string): string {
+  const t = p.replace(/\/+$/, "");
+  return t || p;
+}
 
 export function TasksSection() {
   const { settings, store, patch } = useBackendSettings();
@@ -26,6 +34,11 @@ export function TasksSection() {
   // agent-dir defaults.
   const [symlinkPaths, setSymlinkPaths] = useState("");
   const [symlinkPathsOriginal, setSymlinkPathsOriginal] = useState("");
+  // Global default tasks path. A REQUIRED field carrying a real value (the
+  // backend seeds `~/termic/tasks`), not a placeholder over an empty box, so
+  // the user can see and edit the default rather than guess at it.
+  const [tasksPath, setTasksPath] = useState("");
+  const [tasksPathOriginal, setTasksPathOriginal] = useState("");
 
   const branchPrefix = usePrefs(s => s.branchPrefix);
   const setBranchPrefix = usePrefs(s => s.setBranchPrefix);
@@ -42,9 +55,35 @@ export function TasksSection() {
     const links = (settings.worktree_symlink_paths ?? []).join("\n");
     setSymlinkPaths(links);
     setSymlinkPathsOriginal(links);
+    const p = settings.default_tasks_path ?? "";
+    setTasksPath(p);
+    setTasksPathOriginal(p);
   }, [settings]);
 
   const symlinkDirty = symlinkPaths !== symlinkPathsOriginal;
+  const trimmedTasksPath = tasksPath.trim();
+  const tasksPathDirty = trimmedTasksPath !== tasksPathOriginal;
+  // Which half of the setting's contract the typed value lands in. Relative
+  // paths behave completely differently (per-repo, not one shared root), so
+  // the preview below has to say which one is in play as the user types.
+  // Must mirror `is_absolute_location` in lib.rs exactly. `~work` is NOT
+  // absolute there (only `~` or a `~/` prefix is), so a looser test here
+  // would preview one layout while the backend built the other.
+  const tasksPathIsAbsolute = /^\/|^~$|^~\//.test(trimmedTasksPath);
+
+  // Only check what the user has actually typed: on mount the field holds the
+  // saved value, which was already validated when it was saved.
+  const { names: conflicts, checking } = useTasksPathConflicts(
+    tasksPathDirty ? trimmedTasksPath : "",
+  );
+  // One rule, one place — the save guard and the button's disabled state used
+  // to spell it out separately. `checking` keeps the button dead while the
+  // freshly-typed value is still being judged.
+  const canSaveTasksPath =
+    tasksPathDirty && !!trimmedTasksPath && !checking && conflicts.length === 0;
+  const conflictNames = conflicts.length > 3
+    ? `${conflicts.slice(0, 3).join(", ")}, and ${conflicts.length - 3} more`
+    : conflicts.join(", ");
 
   async function saveFetchBeforeCreate(v: boolean) {
     setFetchBeforeCreate(v);
@@ -64,6 +103,24 @@ export function TasksSection() {
     } finally { setBusy(false); }
   }
 
+  async function saveTasksPath() {
+    if (!settings || !canSaveTasksPath) return;
+    setBusy(true);
+    try {
+      // `patch` reads through useBackendSettings' ref and reverts on failure,
+      // so a second save in the same session can't resurrect a stale object.
+      if (await patch({ default_tasks_path: trimmedTasksPath })) {
+        setTasksPath(trimmedTasksPath);
+        setTasksPathOriginal(trimmedTasksPath);
+      }
+    } finally { setBusy(false); }
+  }
+
+  async function browseTasksPath() {
+    const sel = await openDialog({ directory: true, multiple: false });
+    if (typeof sel === "string") setTasksPath(sel);
+  }
+
   const prefixPreview = (() => {
     const p = branchPrefix.trim().replace(/^\/+|\/+$/g, "");
     return p ? `${p}/my-task` : "my-task";
@@ -73,7 +130,54 @@ export function TasksSection() {
     <div className="flex flex-col gap-7">
       <SectionTitle title="Tasks" />
 
+      {/* Global default tasks path. Absolute = one shared root holding every
+          project, a folder each (what Termic has always done). Relative = each
+          project keeps its worktrees inside its own directory. Required, and
+          seeded with the built-in default so the value is always visible. */}
       <Block first>
+        <div className="text-[14px] font-medium">Default tasks path</div>
+        <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+          Where new task worktrees are created. A full path (one starting with <code className="font-mono">/</code> or <code className="font-mono">~</code>) keeps every project's tasks under one root, in a folder named after the project. A relative path puts each project's tasks inside that project's own directory instead. Existing tasks never move; this applies to the next one you create.
+        </div>
+        <div className="mt-2 flex gap-2">
+          <Input
+            value={tasksPath}
+            onChange={(e) => setTasksPath(e.target.value)}
+            className="font-mono"
+            data-testid="default-tasks-path-input"
+          />
+          <Button variant="secondary" onClick={browseTasksPath}>Browse…</Button>
+        </div>
+        <div className="mt-1.5 text-[12.5px] text-[var(--color-fg-faint)]">
+          {!trimmedTasksPath && (
+            <span className="text-[var(--color-err)]">A tasks path is required.</span>
+          )}
+          {!!trimmedTasksPath && conflicts.length > 0 && (
+            <span className="text-[var(--color-err)]" data-testid="default-tasks-path-conflict">
+              {`This lands inside the repo itself for ${
+                conflicts.length === 1 ? conflictNames : `${conflicts.length} projects: ${conflictNames}`
+              }. New tasks there would be created on top of your working tree. Pick a directory outside the repo, or a subdirectory of it.`}
+            </span>
+          )}
+          {!!trimmedTasksPath && conflicts.length === 0 && (
+            <>
+              New tasks go to{" "}
+              <code className="font-mono" data-testid="default-tasks-path-preview">
+                {tasksPathIsAbsolute
+                  ? `${trimSlashes(trimmedTasksPath)}/<project>/<task>`
+                  : `<project>/${trimSlashes(trimmedTasksPath.replace(/^\.\//, ""))}/<task>`}
+              </code>
+            </>
+          )}
+        </div>
+        <div className="mt-3">
+          <Button variant="primary" disabled={!canSaveTasksPath || busy} onClick={saveTasksPath}>
+            {busy ? "Saving…" : "Save tasks path"}
+          </Button>
+        </div>
+      </Block>
+
+      <Block>
         <div className="text-[14px] font-medium">Branch prefix</div>
         <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
           Prepended to auto-generated branch names for new tasks (<code className="font-mono">{prefixPreview}</code>). Leave empty for no prefix. You can still edit the branch per task.

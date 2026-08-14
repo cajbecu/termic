@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
-import { projectUpdate, projectRemove, projectSetMembers, pathIsGitRepo, repoConfigLoad, repoConfigSave } from "@/lib/ipc";
+import { projectUpdate, projectRemove, projectSetMembers, pathIsGitRepo, projectTasksPathDefault, repoConfigLoad, repoConfigSave } from "@/lib/ipc";
 import { stopSpotlight } from "@/lib/spotlight";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type { Project, ProjectMember, RepoConfig } from "@/lib/types";
@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Checkbox } from "@/components/ui/Checkbox";
 import { Trash2, Check, Layers, X, AudioWaveform, SlidersHorizontal } from "lucide-react";
+import { useTasksPathConflicts } from "./Controls";
 import { ExcludeEditor } from "./ExcludeEditor";
 import { ScriptField } from "./ScriptField";
 import { cn, cleanLines } from "@/lib/utils";
@@ -131,6 +132,40 @@ export function RepositorySection({ projectId }: { projectId: string }) {
     return s.tasks.find(w => w.id === id)?.name ?? null;
   });
 
+  // Where this project's worktrees land with NO override below, i.e. straight
+  // from Settings → Tasks → Default tasks path. Shown as the "Tasks path"
+  // placeholder so the field can stay empty and still say where tasks go.
+  // Re-read per project mount, which is also how an edit to the global setting
+  // reaches here (switching rails remounts this page).
+  // Gated on the sub-tab: this field only renders under More, and the two IPC
+  // round trips below would otherwise fire on every project switch for a
+  // control nobody is looking at.
+  const onMoreTab = subTab === "advanced";
+  const [tasksPathDefault, setTasksPathDefault] = useState("");
+  useEffect(() => {
+    if (!onMoreTab) return;
+    let cancelled = false;
+    projectTasksPathDefault(projectId)
+      .then(p => { if (!cancelled) setTasksPathDefault(p); })
+      .catch(() => { if (!cancelled) setTasksPathDefault(""); });
+    return () => { cancelled = true; };
+  }, [projectId, onMoreTab]);
+
+  // Whether the typed override would resolve onto this repo itself, which
+  // task_create refuses. Surfaced here so the objection arrives while the
+  // value is being typed, not at the next task create. An empty value inherits
+  // the global, whose own validity is reported on the Tasks page.
+  // `draftTasksPath` is a primitive derived from `draft`, so this does not
+  // re-fire on every unrelated keystroke in the section.
+  const draftTasksPath = draft?.tasks_path.trim() ?? "";
+  const tasksPathInvalid = useTasksPathConflicts(
+    onMoreTab ? draftTasksPath : "", projectId,
+  ).names.length > 0;
+  // The debounced save closes over the render that scheduled it, so it needs a
+  // ref to read the CURRENT verdict rather than the one from 500ms ago.
+  const tasksPathInvalidRef = useRef(false);
+  tasksPathInvalidRef.current = tasksPathInvalid;
+
   if (!project || !draft) return <div className="text-[13.5px] text-[var(--color-fg-faint)]">Project not found.</div>;
 
   async function performSave(next: Project) {
@@ -171,7 +206,18 @@ export function RepositorySection({ projectId }: { projectId: string }) {
       const next = { ...d, [k]: v };
       // Debounce the actual save — coalesces rapid keystrokes.
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
-      saveTimer.current = window.setTimeout(() => { void performSave(next); }, 500) as unknown as number;
+      saveTimer.current = window.setTimeout(() => {
+        // Don't persist a tasks path that resolves onto the repo. The field is
+        // already flagged; writing it would leave a broken value in
+        // projects.json whose only other signal is a failed task create.
+        // Skips the whole batch rather than substituting the last good value:
+        // performSave ends in loadAll(), which re-seeds `draft` from the store,
+        // so saving something other than what is on screen would silently
+        // revert the user's typing mid-edit. Fixing the path is itself a
+        // keystroke, which reschedules this.
+        if (tasksPathInvalidRef.current) { setStatus("idle"); return; }
+        void performSave(next);
+      }, 500) as unknown as number;
       return next;
     });
   }
@@ -356,6 +402,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
           <button
             key={t.id}
             type="button"
+            data-repo-tab={t.id}
             onClick={() => setSubTab(t.id)}
             className={cn(
               "relative -mb-px flex items-center gap-1.5 px-3 py-2 text-[13px] font-medium transition-colors",
@@ -715,8 +762,33 @@ export function RepositorySection({ projectId }: { projectId: string }) {
           />
           <Field
             label="Tasks path"
-            hint="Where each new worktree lives. Don't move or delete subdirectories; archive tasks in Termic instead."
-            control={<Input value={draft.tasks_path} onChange={(e) => patch("tasks_path", e.target.value)} className={cn("font-mono", flashRing("tasks_path"))} />}
+            hint="Where this repo's new worktrees live. Leave it empty to follow the default tasks path. A value here overrides that for this repo only: a full path (starting with / or ~) becomes the worktree root as-is, a relative one resolves inside the repo. Don't move or delete subdirectories; archive tasks in Termic instead."
+            control={
+              <>
+                <Input
+                  value={draft.tasks_path}
+                  onChange={(e) => patch("tasks_path", e.target.value)}
+                  placeholder={tasksPathDefault}
+                  className={cn(
+                    "font-mono",
+                    tasksPathInvalid
+                      ? "!border-[var(--color-err)] focus:!border-[var(--color-err)]"
+                      : flashRing("tasks_path"),
+                  )}
+                  data-testid="project-tasks-path-input"
+                />
+                {tasksPathInvalid && (
+                  <div
+                    className="mt-1.5 text-[12.5px] text-[var(--color-err)]"
+                    data-testid="project-tasks-path-conflict"
+                  >
+                    This lands inside the repo itself, so new tasks would be created on top
+                    of your working tree. Changes here are not being saved until you pick
+                    a directory outside the repo, or a subdirectory of it.
+                  </div>
+                )}
+              </>
+            }
           />
           {/* The same field the project `+` menu's "Branch from" row writes,
               so the two can't disagree. */}

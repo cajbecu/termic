@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { TextareaHTMLAttributes } from "react";
-import { settingsLoad, settingsSave } from "@/lib/ipc";
+import { settingsLoad, settingsSave, tasksPathConflicts } from "@/lib/ipc";
 import type { Settings } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -48,6 +48,37 @@ export function useBackendSettings() {
   }, []);
 
   return { settings, store, patch };
+}
+
+/** Names of the projects `path` would break, debounced and race-safe.
+ *  Shared because the rule has two editors: the global default (Settings →
+ *  Tasks) and a project's own override (Settings → Repositories → More), and
+ *  two copies of the timing + cancellation would drift.
+ *
+ *  Pass an empty `path` to disable the check — callers use that to skip a
+ *  value the user has not touched, and to stay quiet while the field is not
+ *  even rendered. Omit `projectId` to validate as the global default. */
+export function useTasksPathConflicts(path: string, projectId?: string): {
+  names: string[]; checking: boolean;
+} {
+  // `null` = not judged yet, which is NOT the same as "no conflicts". Callers
+  // gate their save on `checking` so the debounce window can't hand them a
+  // stale all-clear for a value the backend has not seen: type a good path,
+  // then a bad one, and for ~300ms the previous verdict would otherwise still
+  // be on screen and the Save button still live.
+  const [names, setNames] = useState<string[] | null>([]);
+  useEffect(() => {
+    if (!path) { setNames([]); return; }
+    let cancelled = false;
+    setNames(null);            // drop the previous value's verdict immediately
+    const t = window.setTimeout(() => {
+      tasksPathConflicts(path, projectId)
+        .then(n => { if (!cancelled) setNames(n); })
+        .catch(() => { if (!cancelled) setNames([]); });
+    }, 300);
+    return () => { cancelled = true; window.clearTimeout(t); };
+  }, [path, projectId]);
+  return { names: names ?? [], checking: names === null };
 }
 
 export function Toggle({ label, hint, value, onChange }: {
