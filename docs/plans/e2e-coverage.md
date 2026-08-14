@@ -54,6 +54,7 @@ until `make e2e` is green and this file reflects it.
 | ✅ Select chrome | Every settings `<select>` computes `appearance: none` with the repainted chevron and reserves room for it, so WKWebView's native bevel cannot come back (one bare-element rule, all selects at once) | `settings.e2e.ts` |
 | ✅ Default tasks path | The global setting ships a real value (not an empty box); a new project's `tasks_path` starts empty so that setting applies; an absolute default lands worktrees at `<default>/<project>/<task>` and a relative one at `<repo>/<default>/<task>`, both verified on disk; a project's own tasks path overrides it; the project field shows the global-derived path as its placeholder while staying empty; the Settings → Tasks preview flips between the two halves of the rule as it is typed, and emptying the required field blocks the save | `settings.e2e.ts` |
 | ✅ Tabs | Add a terminal tab via the "+" menu; switch active tab | `tabs-layout.e2e.ts` |
+| ✅ Sidebar New submenu | The task row's menu offers the same entries as the tab strip's "+" (GH #197); picking one spawns into that row's task, wakes it, and keeps its seeded agent tab | `tabs-layout.e2e.ts` |
 | ✅ Tab rename | Double-click inline edit commits the new name | `tabs-layout.e2e.ts` |
 | ✅ Theme | Picker switches theme; palette class applied to `<html>` | `tabs-layout.e2e.ts` |
 | ✅ Editor persist | Single-click = preview tab; double-click persists it | `editor.e2e.ts` |

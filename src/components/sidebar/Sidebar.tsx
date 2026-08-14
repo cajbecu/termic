@@ -8,9 +8,10 @@ import { Button } from "@/components/ui/Button";
 import { Tip } from "@/components/ui/Tooltip";
 import { Spinner } from "@/components/ui/Spinner";
 import { LayoutGrid, History, FolderPlus, Settings, Plus, Archive, Layers, Moon, Cog, MoreVertical, GitBranch, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Bell, Bug, Mail, Zap, X, Pencil, Copy, ChevronsDownUp, ChevronsUpDown, Check, AudioWaveform, Radio, SquareChevronRight, CircleStop, Trash2, Folder, FolderMinus, FolderOpen, Megaphone, Keyboard } from "lucide-react";
-import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownSeparator, DropdownLabel } from "@/components/ui/Dropdown";
+import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownSeparator, DropdownLabel, DropdownSub, DropdownSubTrigger, DropdownSubContent } from "@/components/ui/Dropdown";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuLabel, ContextMenuSub, ContextMenuSubTrigger, ContextMenuSubContent } from "@/components/ui/ContextMenu";
 import { ProjectActionsMenuItems } from "./ProjectActionsMenuItems";
+import { NewTabMenuItems } from "@/components/task/NewTabMenuItems";
 import { UpdateCard } from "./UpdateCard";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { useUI } from "@/store/ui";
@@ -25,7 +26,8 @@ import { withCreateLock } from "@/lib/createLock";
 import { confirmAndArchive } from "@/lib/archiveTask";
 import { startSpotlight, stopSpotlight } from "@/lib/spotlight";
 import { ResizeHandle } from "@/components/ui/ResizeHandle";
-import type { Task, TerminalTab } from "@/lib/types";
+import type { Tab, Task, TerminalTab } from "@/lib/types";
+import { agentDisplayName } from "@/lib/agents";
 import { effectiveSandboxMode, isSandboxEnforced } from "@/lib/types";
 import { SandboxIcon, SANDBOX_VISUALS } from "@/components/SandboxIcon";
 import { TaskLocationIcon } from "@/components/TaskLocationIcon";
@@ -1979,6 +1981,9 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
   const setTaskCollapsed = useApp(s => s.setTaskCollapsed);
   const setTaskYolo = useApp(s => s.setTaskYolo);
   const ensureDefaultTab = useApp(s => s.ensureDefaultTab);
+  const addTab = useApp(s => s.addTab);
+  const resumeClosedTab = useApp(s => s.resumeClosedTab);
+  const setView = useApp(s => s.setView);
   const renameTab = useApp(s => s.renameTab);
   const clearTabCustomTitle = useApp(s => s.clearTabCustomTitle);
   const settledHighlight = usePrefs(s => s.settledHighlight);
@@ -2095,6 +2100,26 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
     // task_rename refuses duplicates within the project; without a toast
     // the input just snaps back to the old name with no explanation.
     catch (e) { useUI.getState().pushToast(String(e), "error"); }
+  }
+
+  // ─ New terminal / agent, from the row's own menu (GH #197) ─
+  // People kept right-clicking the sidebar row hunting for "add another agent
+  // to this task" and never found the tab strip's "+". Same menu, same rows
+  // (NewTabMenuItems), one difference: picking here also ACTIVATES the task,
+  // because an unmounted task has no TaskView and so nothing would spawn the
+  // PTY the user just asked for. `addTab` self-focuses the new terminal, and
+  // the menu's onCloseAutoFocus already declines Radix's focus-return, so the
+  // focus lands in the new tab rather than snapping back to the kebab.
+  //
+  // ensureDefaultTab FIRST, exactly like the row-click path: on a task that
+  // was never opened (or was stopped) the seed/restore is what brings its
+  // persisted agent tabs back, and it bails the moment a main tab exists — so
+  // adding ours first would silently cost the user their restored session.
+  function spawnIntoTask(tab: Tab) {
+    setActive(w.id);
+    ensureDefaultTab(w.id, w.cli || "claude");
+    addTab(w.id, tab);
+    setMenuOpen(false);
   }
 
   function commitTabRename() {
@@ -2334,6 +2359,44 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
               // the trigger highlighted with a focus ring is just noise.
               onCloseAutoFocus={(e) => e.preventDefault()}
             >
+              {/* Leads the menu: "what else can I put in this task" is the
+                  question people bring to a task row (GH #197). A submenu,
+                  not a flat section, so the row's own actions stay one
+                  glance tall. */}
+              <DropdownSub>
+                <DropdownSubTrigger className="justify-between">
+                  <span className="flex items-center gap-2">
+                    <Plus className="h-4 w-4" />
+                    <span>New</span>
+                  </span>
+                  <ChevronRight className="h-3.5 w-3.5 text-[var(--color-fg-faint)]" />
+                </DropdownSubTrigger>
+                <DropdownSubContent>
+                  <NewTabMenuItems
+                    taskId={w.id}
+                    onSpawnCli={(cli) => spawnIntoTask({
+                      id: crypto.randomUUID(),
+                      type: "terminal",
+                      title: agentDisplayName(cli, agents),
+                      cli,
+                    })}
+                    onSpawnShell={() => spawnIntoTask({
+                      id: crypto.randomUUID(),
+                      type: "terminal",
+                      title: "Terminal",
+                      cli: "shell",
+                    })}
+                    onResume={(entryId) => {
+                      setActive(w.id);
+                      ensureDefaultTab(w.id, w.cli || "claude");
+                      resumeClosedTab(w.id, entryId);
+                      setMenuOpen(false);
+                    }}
+                    onMore={() => { setMenuOpen(false); setView("history"); }}
+                  />
+                </DropdownSubContent>
+              </DropdownSub>
+              <DropdownSeparator />
               {spotlightAvailable && (
                 <DropdownItem
                   className="items-center [&>svg]:mt-0"

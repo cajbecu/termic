@@ -1,12 +1,13 @@
 // Tab strip with CLI brand icons / file glyphs and a "+" popover for new agents.
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { Task, Tab, TerminalTab, Agent } from "@/lib/types";
-import { useApp, useTaskTabs, useActiveTabId, type ClosedTabEntry } from "@/store/app";
+import { useEffect, useRef, useState } from "react";
+import type { Task, Tab, TerminalTab } from "@/lib/types";
+import { useApp, useTaskTabs, useActiveTabId } from "@/store/app";
 import { getAllLeaves } from "@/lib/splitTree";
 import { useTabStripDrag } from "./useTabStripDrag";
 import { Button } from "@/components/ui/Button";
-import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownLabel, DropdownSeparator } from "@/components/ui/Dropdown";
+import { DropdownRoot, DropdownTrigger, DropdownMenu } from "@/components/ui/Dropdown";
+import { NewTabMenuItems } from "./NewTabMenuItems";
 import { CliIcon, CLI_BRAND_COLOR, CLI_LABEL, resolveIconId } from "@/icons/cli";
 import { Plus, X, GitCompare, FileText, SquareSplitVertical, SquareSplitHorizontal, TerminalSquare, Bell, Megaphone, Repeat, RotateCw, Square, Play, AlertTriangle } from "lucide-react";
 import { Spinner } from "@/components/ui/Spinner";
@@ -23,82 +24,6 @@ import { fileIconUrl, folderIconUrl } from "@/lib/explorer/iconResolver";
 
 const CLIS = ["claude", "codex", "agy", "grok", "opencode"] as const;
 
-// Stable reference for the "no closed tabs yet" case. `s.closedTabs[task.id]
-// ?? []` would mint a NEW array on every selector call, which Zustand's
-// default Object.is comparison treats as "changed" — re-rendering TabBar on
-// every unrelated store write (PTY output ticks etc) and, worse, feeding a
-// runaway render loop. A shared empty array keeps the reference stable.
-const NO_CLOSED_TABS: ClosedTabEntry[] = [];
-
-/** Compact "10m" / "17h" / "2d" label for a closed-tab timestamp. Closed
- *  tabs are always recent (session-only list), so minute/hour granularity
- *  is enough — no need for History's day/week/month buckets. Terse on
- *  purpose: it sits inline before the row's title, one row per line. */
-function relativeTime(iso: string): string {
-  const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000);
-  if (mins < 1) return "now";
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h`;
-  return `${Math.floor(hours / 24)}d`;
-}
-
-/** "Resume" section rows — recently closed secondary agent tabs (see
- *  `ClosedTabEntry`). Icon uses the same resolveIconId/CLI_BRAND_COLOR
- *  pairing as TabPill so a resumed tab's row matches the tab it becomes. */
-function ResumeMenuItems({ entries, agents, onResume }: {
-  entries: ClosedTabEntry[]; agents: Agent[]; onResume: (entryId: string) => void;
-}) {
-  return (
-    <>
-      {entries.map(entry => {
-        const iconId = resolveIconId(entry.cli, agents);
-        return (
-          <DropdownItem key={entry.id} onSelect={() => onResume(entry.id)} className="items-center">
-            <span className={cn("shrink-0", CLI_BRAND_COLOR[iconId] || "text-[var(--color-fg-dim)]")}>
-              <CliIcon cli={iconId} className="h-4 w-4" />
-            </span>
-            <span className="shrink-0 text-[11px] tabular-nums text-[var(--color-fg-faint)]">
-              {relativeTime(entry.closedAt)}
-            </span>
-            <span className="min-w-0 flex-1 truncate">{entry.title}</span>
-          </DropdownItem>
-        );
-      })}
-    </>
-  );
-}
-
-/** Registry entries rendered as dropdown rows — shared by the main strip's
- *  and the right strip's + menus (both their "New terminal" custom entries
- *  and their "New agent" lists) so the two menus can't drift apart. */
-function CliMenuItems({ entries, onSpawn }: { entries: Agent[]; onSpawn: (cli: string) => void }) {
-  return (
-    <>
-      {entries.map(a => (
-        <DropdownItem key={a.id} onSelect={() => onSpawn(a.id)}>
-          <span className={cn("shrink-0", CLI_BRAND_COLOR[a.icon_id] || "text-[var(--color-fg-dim)]")}><CliIcon cli={a.icon_id} className="h-4 w-4" /></span>
-          {a.display_name}
-        </DropdownItem>
-      ))}
-    </>
-  );
-}
-
-/** The plain "Terminal" entry, shared by the main and right-split + menus.
- *  Terminals are ALWAYS uncaged now (only agents run inside the seatbelt —
- *  they're the threat model; a shell the user drives is not). There is no
- *  "Sandboxed" shell variant: a caged terminal you type into yourself made no
- *  sense (it just broke git/ssh + shell history). See issue #32. */
-function ShellTerminalItem({ onSelect }: { onSelect: () => void }) {
-  return (
-    <DropdownItem onSelect={onSelect}>
-      <span className="shrink-0 text-[var(--color-fg-dim)]"><CliIcon cli="shell" className="h-4 w-4" /></span>
-      Terminal
-    </DropdownItem>
-  );
-}
-
 export function TabBar({ task }: { task: Task }) {
   const allTabsRaw = useTaskTabs(task.id);
   // Main strip shows only non-pane tabs (split-pane tabs live in SplitView).
@@ -110,16 +35,10 @@ export function TabBar({ task }: { task: Task }) {
   const renameTab = useApp(s => s.renameTab);
   const stripRef = useRef<HTMLDivElement>(null);
 
-  // Hide disabled / not-installed agents from the + (new agent) menu.
+  // The + menu's own rows live in NewTabMenuItems (shared with the sidebar
+  // task menu, GH #197); the registry is still needed here for tab titles.
   const registry = useApp(s => s.agents);
-  const detectedClis = useApp(s => s.detectedClis);
-  const visibleClis = visibleCliIds(registry.map(a => a.id), registry, detectedClis);
-  const customTerminals = useMemo(
-    () => registry.filter(a => isTerminalEntry(a) && !a.disabled),
-    [registry],
-  );
   const openBroadcast = useUI(s => s.openBroadcast);
-  const closedTabs = useApp(s => s.closedTabs[task.id] ?? NO_CLOSED_TABS);
   const resumeClosedTab = useApp(s => s.resumeClosedTab);
   const setView = useApp(s => s.setView);
   const [open, setOpen] = useState(false);
@@ -258,22 +177,13 @@ export function TabBar({ task }: { task: Task }) {
               }
             }}
           >
-            <DropdownLabel>New terminal</DropdownLabel>
-            <ShellTerminalItem onSelect={() => spawnShellTab()} />
-            <CliMenuItems entries={customTerminals} onSpawn={spawnTab} />
-            <DropdownSeparator />
-            <DropdownLabel>New agent</DropdownLabel>
-            <CliMenuItems entries={registry.filter(a => visibleClis.has(a.id))} onSpawn={spawnTab} />
-            {closedTabs.length > 0 && (
-              <>
-                <DropdownSeparator />
-                <DropdownLabel>Resume</DropdownLabel>
-                <ResumeMenuItems entries={closedTabs} agents={registry} onResume={resumeAndFocus} />
-                <DropdownItem onSelect={() => { setOpen(false); setView("history"); }}>
-                  More…
-                </DropdownItem>
-              </>
-            )}
+            <NewTabMenuItems
+              taskId={task.id}
+              onSpawnCli={spawnTab}
+              onSpawnShell={spawnShellTab}
+              onResume={resumeAndFocus}
+              onMore={() => { setOpen(false); setView("history"); }}
+            />
           </DropdownMenu>
         </DropdownRoot>
       </div>

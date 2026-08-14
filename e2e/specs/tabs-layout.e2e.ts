@@ -1,4 +1,4 @@
-import { archiveTask, clickByText, clickMenuItem, dismissOverlays, ensureActiveTask, mouseDrag, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell } from "../helpers";
+import { archiveTask, clickByText, clickMenuItem, dismissOverlays, ensureActiveTask, mouseDrag, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitVisible } from "../helpers";
 
 // Tabs are how a task holds multiple terminals/agents/editors. Guards adding a
 // tab through the "+" menu and switching the active tab by clicking it.
@@ -90,6 +90,172 @@ describe("tab management", () => {
     });
 
     await snap("tabs.png");
+  });
+});
+
+// GH #197: the "+" menu is ALSO the sidebar task row's "New" submenu, because
+// that row (right-click or kebab) is where people look for "add another agent
+// to this task" and the tab strip's "+" was undiscoverable. Both render from
+// NewTabMenuItems, so these cases guard the wiring: the same entries, spawning
+// into the row's task (not whichever task happens to be on screen), and
+// waking that task rather than replacing its restore seed.
+describe("sidebar task menu: New submenu", () => {
+  let taskId: string | undefined;
+  let otherId: string | undefined;
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+    if (otherId) await archiveTask(otherId);
+  });
+
+  const tabsOf = (id: string) =>
+    browser.execute(
+      (i) =>
+        (window.__termic!.useApp.getState().tabs[i] ?? []).map((t: any) => t.cli),
+      id,
+    ) as Promise<string[]>;
+
+  /** The entries of the open Radix menu that holds the "Terminal" row. Scoped
+   *  to that one menu: the task menu stays open behind its submenu, so a bare
+   *  `[role='menuitem']` sweep would mix "Rename" / "Archive task" in. */
+  const entriesOfTerminalMenu = () =>
+    browser.execute(() => {
+      const menu = [...document.querySelectorAll("[role='menu']")].find((m) =>
+        [...m.querySelectorAll("[role='menuitem']")].some(
+          (i) => i.textContent?.trim() === "Terminal",
+        ),
+      );
+      if (!menu) throw new Error("no open menu contains a Terminal entry");
+      return [...menu.querySelectorAll("[role='menuitem']")].map(
+        (e) => e.textContent?.trim() ?? "",
+      );
+    }) as Promise<string[]>;
+
+  /** Right-click the row (the gesture from the issue) and wait for the menu. */
+  async function openTaskRowMenu(id: string) {
+    await browser.execute((i) => {
+      const row = document.querySelector(`[data-sidebar-task-id="${i}"]`);
+      if (!row) throw new Error(`no sidebar row for task ${i}`);
+      row.dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, button: 2 }),
+      );
+    }, id);
+    await browser.waitUntil(
+      () =>
+        browser.execute(() =>
+          [...document.querySelectorAll("[role='menuitem']")].some(
+            (e) => e.textContent?.trim() === "New",
+          ),
+        ),
+      { timeout: 5_000, timeoutMsg: "the task row menu never opened" },
+    );
+  }
+
+  /** Open the "New" submenu and return the entries it offers. */
+  async function openNewSubmenu(): Promise<string[]> {
+    // Radix opens a SubTrigger on hover OR click; click is the deterministic
+    // one under WebDriver (no pointer position involved).
+    await clickMenuItem("New");
+    await browser.waitUntil(
+      () =>
+        browser.execute(() =>
+          [...document.querySelectorAll("[role='menuitem']")].some(
+            (e) => e.textContent?.trim() === "Terminal",
+          ),
+        ),
+      { timeout: 5_000, timeoutMsg: "the New submenu never opened" },
+    );
+    return entriesOfTerminalMenu();
+  }
+
+  it("spawns a terminal into the row's task, waking it without dropping its agent", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    // Two tasks: one on screen, one never visited. The submenu must act on the
+    // row it was opened from, not on the active task.
+    otherId = await openTask("e2e-newmenu-other");
+    taskId = await openTask("e2e-newmenu", false);
+    await ensureActiveTask(otherId);
+    // The row has to be on screen to be right-clicked: a project an earlier
+    // spec collapsed renders no task rows at all.
+    await browser.execute(() => {
+      const app = window.__termic!.useApp.getState();
+      const proj = app.projects.find((p: any) => p.name === "fixture-repo");
+      app.setProjectCollapsed(proj.id, false);
+    });
+    await waitVisible(`[data-sidebar-task-id="${taskId}"]`);
+
+    await openTaskRowMenu(taskId);
+    await openNewSubmenu();
+    await clickMenuItem("Terminal");
+
+    // The row's task is now the active one and holds BOTH its seeded agent tab
+    // and the new shell — picking "Terminal" on a cold task must not cost the
+    // user the agent the task exists for.
+    await browser.waitUntil(
+      async () => (await tabsOf(taskId!)).includes("shell"),
+      { timeout: 10_000, timeoutMsg: "the shell tab never landed in the task" },
+    );
+    const clis = await tabsOf(taskId);
+    expect(clis).toEqual(["fakeagent", "shell"]);
+    expect(await tabsOf(otherId!)).not.toContain("shell");
+    expect(
+      await browser.execute(
+        () => window.__termic!.useApp.getState().activeTaskId,
+      ),
+    ).toBe(taskId);
+    // The new tab is the focused one (addTab self-focuses).
+    expect(
+      await browser.execute(
+        (id) => window.__termic!.useApp.getState().activeTab[id],
+        taskId,
+      ),
+    ).toBe(
+      await browser.execute(
+        (id) =>
+          (window.__termic!.useApp.getState().tabs[id] ?? []).find(
+            (t: any) => t.cli === "shell",
+          )?.id,
+        taskId,
+      ),
+    );
+    await snap("sidebar-new-submenu.png");
+  });
+
+  it("offers the same entries as the tab strip's + menu", async () => {
+    await dismissOverlays();
+    await ensureActiveTask(taskId!);
+
+    await openTaskRowMenu(taskId!);
+    const fromSidebar = await openNewSubmenu();
+    await dismissOverlays();
+
+    // Same list from the "+" button on the active task's strip. Radix opens on
+    // pointerdown, so a bare .click() is not enough.
+    await browser.execute(() => {
+      const strip = document.querySelector("[data-main-strip]");
+      const plus = [...(strip?.querySelectorAll("button") ?? [])].find((b) =>
+        b.querySelector("svg.lucide-plus"),
+      );
+      if (!plus) throw new Error("tab '+' button not found");
+      const opts = { bubbles: true, pointerType: "mouse", button: 0 } as any;
+      plus.dispatchEvent(new PointerEvent("pointerdown", opts));
+      plus.dispatchEvent(new PointerEvent("pointerup", opts));
+      (plus as HTMLElement).click();
+    });
+    await browser.waitUntil(
+      () =>
+        browser.execute(() =>
+          [...document.querySelectorAll("[role='menuitem']")].some(
+            (e) => e.textContent?.trim() === "Terminal",
+          ),
+        ),
+      { timeout: 5_000, timeoutMsg: "the + menu never opened" },
+    );
+    const fromTabStrip = await entriesOfTerminalMenu();
+    await dismissOverlays();
+
+    expect(fromSidebar.length).toBeGreaterThan(1);
+    expect(fromSidebar).toEqual(fromTabStrip);
   });
 });
 
