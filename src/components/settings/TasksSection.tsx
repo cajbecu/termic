@@ -13,7 +13,7 @@ import type { Settings } from "@/lib/types";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { usePrefs } from "@/store/prefs";
-import { Block, ListField, SectionTitle, Toggle, useBackendSettings } from "./Controls";
+import { Block, ListField, SectionTitle, Toggle, useBackendSettings, useTasksPathConflicts } from "./Controls";
 import { cleanLines } from "@/lib/utils";
 
 /** Drop trailing slashes so the "where tasks go" preview never reads
@@ -71,6 +71,20 @@ export function TasksSection() {
   // would preview one layout while the backend built the other.
   const tasksPathIsAbsolute = /^\/|^~$|^~\//.test(trimmedTasksPath);
 
+  // Only check what the user has actually typed: on mount the field holds the
+  // saved value, which was already validated when it was saved.
+  const { names: conflicts, checking } = useTasksPathConflicts(
+    tasksPathDirty ? trimmedTasksPath : "",
+  );
+  // One rule, one place — the save guard and the button's disabled state used
+  // to spell it out separately. `checking` keeps the button dead while the
+  // freshly-typed value is still being judged.
+  const canSaveTasksPath =
+    tasksPathDirty && !!trimmedTasksPath && !checking && conflicts.length === 0;
+  const conflictNames = conflicts.length > 3
+    ? `${conflicts.slice(0, 3).join(", ")}, and ${conflicts.length - 3} more`
+    : conflicts.join(", ");
+
   async function saveFetchBeforeCreate(v: boolean) {
     setFetchBeforeCreate(v);
     if (!(await patch({ fetch_before_create: v }))) setFetchBeforeCreate(!v);
@@ -90,14 +104,15 @@ export function TasksSection() {
   }
 
   async function saveTasksPath() {
-    if (!settings || !trimmedTasksPath) return;
+    if (!settings || !canSaveTasksPath) return;
     setBusy(true);
     try {
-      const next: Settings = { ...settings, default_tasks_path: trimmedTasksPath };
-      await settingsSave(next);
-      store(next);
-      setTasksPath(trimmedTasksPath);
-      setTasksPathOriginal(trimmedTasksPath);
+      // `patch` reads through useBackendSettings' ref and reverts on failure,
+      // so a second save in the same session can't resurrect a stale object.
+      if (await patch({ default_tasks_path: trimmedTasksPath })) {
+        setTasksPath(trimmedTasksPath);
+        setTasksPathOriginal(trimmedTasksPath);
+      }
     } finally { setBusy(false); }
   }
 
@@ -134,7 +149,17 @@ export function TasksSection() {
           <Button variant="secondary" onClick={browseTasksPath}>Browse…</Button>
         </div>
         <div className="mt-1.5 text-[12.5px] text-[var(--color-fg-faint)]">
-          {trimmedTasksPath ? (
+          {!trimmedTasksPath && (
+            <span className="text-[var(--color-err)]">A tasks path is required.</span>
+          )}
+          {!!trimmedTasksPath && conflicts.length > 0 && (
+            <span className="text-[var(--color-err)]" data-testid="default-tasks-path-conflict">
+              {`This lands inside the repo itself for ${
+                conflicts.length === 1 ? conflictNames : `${conflicts.length} projects: ${conflictNames}`
+              }. New tasks there would be created on top of your working tree. Pick a directory outside the repo, or a subdirectory of it.`}
+            </span>
+          )}
+          {!!trimmedTasksPath && conflicts.length === 0 && (
             <>
               New tasks go to{" "}
               <code className="font-mono" data-testid="default-tasks-path-preview">
@@ -143,12 +168,10 @@ export function TasksSection() {
                   : `<project>/${trimSlashes(trimmedTasksPath.replace(/^\.\//, ""))}/<task>`}
               </code>
             </>
-          ) : (
-            <span className="text-[var(--color-err)]">A tasks path is required.</span>
           )}
         </div>
         <div className="mt-3">
-          <Button variant="primary" disabled={!tasksPathDirty || !trimmedTasksPath || busy} onClick={saveTasksPath}>
+          <Button variant="primary" disabled={!canSaveTasksPath || busy} onClick={saveTasksPath}>
             {busy ? "Saving…" : "Save tasks path"}
           </Button>
         </div>

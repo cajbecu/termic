@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Checkbox } from "@/components/ui/Checkbox";
 import { Trash2, Check, Layers, X, AudioWaveform, SlidersHorizontal } from "lucide-react";
+import { useTasksPathConflicts } from "./Controls";
 import { ExcludeEditor } from "./ExcludeEditor";
 import { ScriptField } from "./ScriptField";
 import { cn, cleanLines } from "@/lib/utils";
@@ -136,14 +137,30 @@ export function RepositorySection({ projectId }: { projectId: string }) {
   // placeholder so the field can stay empty and still say where tasks go.
   // Re-read per project mount, which is also how an edit to the global setting
   // reaches here (switching rails remounts this page).
+  // Gated on the sub-tab: this field only renders under More, and the two IPC
+  // round trips below would otherwise fire on every project switch for a
+  // control nobody is looking at.
+  const onMoreTab = subTab === "advanced";
   const [tasksPathDefault, setTasksPathDefault] = useState("");
   useEffect(() => {
+    if (!onMoreTab) return;
     let cancelled = false;
     projectTasksPathDefault(projectId)
       .then(p => { if (!cancelled) setTasksPathDefault(p); })
       .catch(() => { if (!cancelled) setTasksPathDefault(""); });
     return () => { cancelled = true; };
-  }, [projectId]);
+  }, [projectId, onMoreTab]);
+
+  // Whether the typed override would resolve onto this repo itself, which
+  // task_create refuses. Surfaced here so the objection arrives while the
+  // value is being typed, not at the next task create. An empty value inherits
+  // the global, whose own validity is reported on the Tasks page.
+  // `draftTasksPath` is a primitive derived from `draft`, so this does not
+  // re-fire on every unrelated keystroke in the section.
+  const draftTasksPath = draft?.tasks_path.trim() ?? "";
+  const tasksPathInvalid = useTasksPathConflicts(
+    onMoreTab ? draftTasksPath : "", projectId,
+  ).names.length > 0;
 
   if (!project || !draft) return <div className="text-[13.5px] text-[var(--color-fg-faint)]">Project not found.</div>;
 
@@ -732,13 +749,30 @@ export function RepositorySection({ projectId }: { projectId: string }) {
             label="Tasks path"
             hint="Where this repo's new worktrees live. Leave it empty to follow the default tasks path. A value here overrides that for this repo only: a full path (starting with / or ~) becomes the worktree root as-is, a relative one resolves inside the repo. Don't move or delete subdirectories; archive tasks in Termic instead."
             control={
-              <Input
-                value={draft.tasks_path}
-                onChange={(e) => patch("tasks_path", e.target.value)}
-                placeholder={tasksPathDefault}
-                className={cn("font-mono", flashRing("tasks_path"))}
-                data-testid="project-tasks-path-input"
-              />
+              <>
+                <Input
+                  value={draft.tasks_path}
+                  onChange={(e) => patch("tasks_path", e.target.value)}
+                  placeholder={tasksPathDefault}
+                  className={cn(
+                    "font-mono",
+                    tasksPathInvalid
+                      ? "!border-[var(--color-err)] focus:!border-[var(--color-err)]"
+                      : flashRing("tasks_path"),
+                  )}
+                  data-testid="project-tasks-path-input"
+                />
+                {tasksPathInvalid && (
+                  <div
+                    className="mt-1.5 text-[12.5px] text-[var(--color-err)]"
+                    data-testid="project-tasks-path-conflict"
+                  >
+                    This lands inside the repo itself, so new tasks would be created on top
+                    of your working tree. Pick a directory outside the repo, or a
+                    subdirectory of it.
+                  </div>
+                )}
+              </>
             }
           />
           {/* The same field the project `+` menu's "Branch from" row writes,

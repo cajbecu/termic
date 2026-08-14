@@ -612,24 +612,7 @@ fn builtin_tasks_path() -> String {
 /// hand-edited settings.json must not break task creation). Infallible: a
 /// machine with no home dir would already be unusable.
 fn default_worktrees_base() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(APP_DIR).join("tasks")
-}
-
-/// Expand a leading `~` / `~/…` to the user's home dir, trimming surrounding
-/// whitespace. Anything else comes back unchanged.
-fn expand_home(s: &str) -> String {
-    let t = s.trim();
-    if t == "~" {
-        return dirs::home_dir()
-            .map(|h| h.to_string_lossy().into_owned())
-            .unwrap_or_else(|| t.to_string());
-    }
-    match t.strip_prefix("~/") {
-        Some(rest) => dirs::home_dir()
-            .map(|h| h.join(rest).to_string_lossy().into_owned())
-            .unwrap_or_else(|| t.to_string()),
-        None => t.to_string(),
-    }
+    PathBuf::from(expand_tilde(&builtin_tasks_path()))
 }
 
 /// Resolve `.` and `..` segments LEXICALLY, without touching the filesystem
@@ -648,14 +631,12 @@ fn lexically_normalize(p: &Path) -> PathBuf {
     for c in p.components() {
         match c {
             Component::CurDir => {}
-            Component::ParentDir => {
-                // Only a real segment can be popped; `..` above a root has
-                // nowhere to go, so keep it rather than silently escaping.
-                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
-                    out.pop();
-                } else {
-                    out.push("..");
-                }
+            // Only a real segment can be popped; a `..` above the root falls
+            // through to the push arm and is kept rather than escaping.
+            Component::ParentDir
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) =>
+            {
+                out.pop();
             }
             other => out.push(other.as_os_str()),
         }
@@ -673,13 +654,25 @@ fn lexically_normalize(p: &Path) -> PathBuf {
 fn check_tasks_root(root: &Path, repo: &Path) -> Result<(), String> {
     if repo.starts_with(root) {
         return Err(format!(
-            "tasks path {} contains the repository itself — new tasks would be created \
-             on top of your working tree. Pick a directory outside the repo, or a \
-             subdirectory of it.",
+            "tasks path {} contains the repository itself, so new tasks would be \
+             created on top of your working tree. Pick a directory outside the repo, \
+             or a subdirectory of it.",
             root.display(),
         ));
     }
     Ok(())
+}
+
+/// Does the repo track anything at `path`? `check_tasks_root` stops a tasks
+/// root that CONTAINS the repo, but a root nested INSIDE it (a relative
+/// default like `tasks`) can still collide with tracked content: a repo with
+/// a committed `tasks/migrate/` plus a task named "migrate" would hand
+/// `task_create`'s orphan cleanup a directory full of the user's source.
+/// Nothing outside the working tree is tracked, so a git error reads as
+/// "not tracked".
+fn git_tracks_path(repo: &Path, path: &Path) -> bool {
+    let arg = path.to_string_lossy().into_owned();
+    git(&["ls-files", "--", &arg], repo).map(|o| !o.trim().is_empty()).unwrap_or(false)
 }
 
 /// Does this tasks path name a fixed place on disk (`/…`, `~`, `~/…`), as
@@ -707,13 +700,12 @@ fn is_absolute_location(s: &str) -> bool {
 /// That predates this change (`project_add` had the same rule and no
 /// uniquing) and is left alone here.
 fn project_dir_name(p: &Project) -> String {
-    Path::new(&p.root_path)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(str::to_string)
-        .filter(|s| !s.is_empty())
-        .or_else(|| Some(slugify(&p.name)).filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| "project".to_string())
+    if let Some(name) = Path::new(&p.root_path).file_name().and_then(|s| s.to_str()) {
+        return name.to_string();
+    }
+    // Only a root-ish or empty root_path gets here.
+    let slug = slugify(&p.name);
+    if slug.is_empty() { "project".to_string() } else { slug }
 }
 
 /// Apply the GLOBAL "Default tasks path" rule to one project:
@@ -730,7 +722,7 @@ fn tasks_root_from_default(default_path: &str, p: &Project) -> PathBuf {
     let joined = if loc.is_empty() {
         default_worktrees_base().join(project_dir_name(p))
     } else if is_absolute_location(loc) {
-        PathBuf::from(expand_home(loc)).join(project_dir_name(p))
+        PathBuf::from(expand_tilde(loc)).join(project_dir_name(p))
     } else {
         PathBuf::from(&p.root_path).join(loc)
     };
@@ -748,7 +740,7 @@ fn project_tasks_root_with(default_path: &str, p: &Project) -> PathBuf {
         return tasks_root_from_default(default_path, p);
     }
     let joined = if is_absolute_location(over) {
-        PathBuf::from(expand_home(over))
+        PathBuf::from(expand_tilde(over))
     } else {
         PathBuf::from(&p.root_path).join(over)
     };
@@ -762,10 +754,16 @@ fn project_tasks_root_default(p: &Project) -> PathBuf {
     tasks_root_from_default(&load_settings_inner().default_tasks_path, p)
 }
 
-/// THE answer to "where do this project's worktree tasks go", against the
-/// stored settings. Every worktree-creating path goes through this.
-fn project_tasks_root(p: &Project) -> PathBuf {
-    project_tasks_root_with(&load_settings_inner().default_tasks_path, p)
+/// THE answer to "where do this project's worktree tasks go". Every
+/// worktree-creating path goes through this, and the safety check lives
+/// INSIDE it rather than at the call sites so a future third caller cannot
+/// obtain a root that swallows the repo and re-arm `task_create`'s
+/// `remove_dir_all` orphan branch. Takes the already-loaded global so a
+/// create doesn't re-read settings.json just for this.
+fn project_tasks_root(default_path: &str, p: &Project) -> Result<PathBuf, String> {
+    let root = project_tasks_root_with(default_path, p);
+    check_tasks_root(&root, Path::new(&p.root_path))?;
+    Ok(root)
 }
 
 // ───────────────────────────── projects IO ─────────────────────────────
@@ -806,7 +804,7 @@ fn repoint_task_bases(list: &mut [Project]) -> bool {
     let Some(home) = dirs::home_dir() else { return false };
     let sep = std::path::MAIN_SEPARATOR;
     let old_root = format!("{}{sep}", home.join(APP_DIR).join("workspaces").to_string_lossy());
-    let new_root = format!("{}{sep}", home.join(APP_DIR).join("tasks").to_string_lossy());
+    let new_root = format!("{}{sep}", default_worktrees_base().to_string_lossy());
     let mut changed = false;
     for p in list.iter_mut() {
         if let Some(rest) = p.tasks_path.strip_prefix(&old_root) {
@@ -835,6 +833,9 @@ fn repoint_task_bases(list: &mut [Project]) -> bool {
 fn normalize_default_task_paths(list: &mut [Project]) {
     let base = default_worktrees_base();
     for p in list.iter_mut() {
+        // Cheap skip, not a correctness guard: the compare below can never
+        // match an empty value, but this runs on nearly every IPC so it is
+        // worth dodging the per-project allocation.
         if p.tasks_path.is_empty() {
             continue;
         }
@@ -895,13 +896,16 @@ fn migrate_legacy_members(list: &mut [Project]) -> bool {
 /// Expand a leading `~/` to the user's home dir; otherwise return as-is.
 fn expand_tilde(path: &str) -> String {
     let trimmed = path.trim();
-    if let Some(rest) = trimmed.strip_prefix("~/") {
-        dirs::home_dir()
-            .map(|h| h.join(rest).to_string_lossy().into_owned())
-            .unwrap_or_else(|| trimmed.to_string())
-    } else {
-        trimmed.to_string()
-    }
+    // `~` and `~/…` only — NOT `~user` or `~work`, which name no home we can
+    // resolve. `is_absolute_location` draws the same line, and the tasks-path
+    // UI mirrors it, so all three must agree on what a tilde means.
+    let Some(rest) = trimmed.strip_prefix('~').filter(|r| r.is_empty() || r.starts_with('/'))
+    else {
+        return trimmed.to_string();
+    };
+    dirs::home_dir()
+        .map(|h| format!("{}{rest}", h.to_string_lossy()))
+        .unwrap_or_else(|| trimmed.to_string())
 }
 
 /// Normalize an inbound inline member: expand + canonicalize its path,
@@ -3351,11 +3355,10 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
     // git can branch off "origin/master" directly.
     let base_full = task_base_branch(&proj.base_branch, args.base_branch.as_deref());
 
-    let wt_root = project_tasks_root(&proj);
-    // Before any mkdir: a tasks root containing the repo would put worktrees
-    // on top of the working tree, and the orphan cleanup below would then
-    // rm -rf tracked directories that happen to match a task slug.
-    check_tasks_root(&wt_root, &repo)?;
+    // Personal settings, loaded ONCE here and reused for the tasks root and
+    // the sandbox defaults further down.
+    let globals = load_settings_inner();
+    let wt_root = project_tasks_root(&globals.default_tasks_path, &proj)?;
     fs::create_dir_all(&wt_root).map_err(|e| e.to_string())?;
     let wt_path = wt_root.join(&slug);
 
@@ -3376,6 +3379,15 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
             return Err(format!(
                 "a worktree already lives at {} — pick a different name.",
                 wt_path.display()
+            ));
+        }
+        // NEVER delete something git tracks. Reached when the tasks root sits
+        // inside the repo and a task slug collides with a committed directory.
+        if git_tracks_path(&repo, &wt_path) {
+            return Err(format!(
+                "{} holds files tracked by git, so it is not a leftover this can clear. \
+                 Pick a different task name, or move the tasks path outside the repo.",
+                wt_path.display(),
             ));
         }
         fs::remove_dir_all(&wt_path).map_err(|e|
@@ -3491,8 +3503,6 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
         copy_matching(&repo, &wt_path, pat);
     }
 
-    // Personal settings, loaded once and reused for the sandbox defaults below.
-    let globals = load_settings_inner();
     // Link the project's agent config dirs (`.claude/` and friends) into the
     // worktree so agents spawned here keep their project subagents / skills /
     // commands instead of failing to fan out. The list is user-configurable
@@ -3712,9 +3722,9 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
 
     // Wrapper dir = `<tasks_root>/<host-slug>/<wsname>/`. The host's
     // resolved tasks root already encodes the `<...>/<host-slug>` half.
-    let tasks_root = project_tasks_root(&host);
-    check_tasks_root(&tasks_root, Path::new(&host.root_path))?;
-    let wrapper = tasks_root.join(&slug);
+    // Settings loaded ONCE here, reused for the sandbox defaults further down.
+    let globals = load_settings_inner();
+    let wrapper = project_tasks_root(&globals.default_tasks_path, &host)?.join(&slug);
     if wrapper.exists() {
         return Err(format!("a task already exists at {}", wrapper.display()));
     }
@@ -3914,8 +3924,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
     }
 
     // Sandbox: same union/merge logic as single-repo create, but the
-    // base set unions across every member project too.
-    let globals = load_settings_inner();
+    // base set unions across every member project too (`globals` above).
     let sandbox_enabled = args.sandbox_enabled.unwrap_or(host.default_sandbox);
     let sandbox_mode = args.sandbox_mode.or(host.default_sandbox_mode)
         .unwrap_or(if sandbox_enabled { SandboxMode::Enforce } else { SandboxMode::Off });
@@ -5424,7 +5433,17 @@ fn task_restore_sync(app: AppHandle, id: String) -> Result<Task, String> {
                 if registered {
                     return Err(format!("a worktree already lives at {}", wt_path.display()));
                 }
-                // Orphan directory — remove before adding the worktree.
+                // Orphan directory — remove before adding the worktree. Same
+                // tracked-content guard as task_create_sync: a restored task
+                // whose stored path now overlaps committed files must not take
+                // them with it.
+                if git_tracks_path(&repo, &wt_path) {
+                    return Err(format!(
+                        "{} holds files tracked by git, so it is not a leftover this can \
+                         clear. Move or rename it, then restore again.",
+                        wt_path.display(),
+                    ));
+                }
                 fs::remove_dir_all(&wt_path)
                     .map_err(|e| format!("orphan dir at {}: {e}", wt_path.display()))?;
             }
@@ -8816,6 +8835,58 @@ fn home_dir() -> String {
     dirs::home_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
+/// Names of the projects a candidate tasks path would break, i.e. the ones
+/// `check_tasks_root` will refuse at create time because the path resolves
+/// onto or above their repo. Empty = the value is safe everywhere.
+///
+/// Exists so the complaint lands where the value is TYPED. The create-time
+/// guard is the real safety net, but on its own it defers the error until the
+/// user makes a task, by which point it reads as "task creation is broken"
+/// rather than "that path you set is wrong". Relative paths resolve per
+/// project, so a value can be fine for some repos and fatal for others, which
+/// is why this answers with a list of names instead of a bool.
+///
+/// `project_id` = None checks the value as the GLOBAL default across every
+/// project; Some(id) checks it as that one project's override.
+#[tauri::command]
+fn tasks_path_conflicts(path: String, project_id: Option<String>) -> Vec<String> {
+    // Neither mode normally needs settings.json: in global mode the CANDIDATE
+    // is the default, and in override mode a non-empty candidate short-circuits
+    // the default entirely. Only an EMPTY override (which means "inherit")
+    // has to read the stored value, so the load stays off the typing path.
+    let is_override = project_id.is_some();
+    let inherited = (is_override && path.trim().is_empty())
+        .then(|| load_settings_inner().default_tasks_path)
+        .unwrap_or_default();
+    load_projects()
+        .into_iter()
+        .filter(|p| match project_id.as_deref() {
+            Some(id) => p.id == id,
+            // Global mode judges only the projects that actually FOLLOW the
+            // default. One with its own override never consults it, so
+            // reporting it would block a save over an irrelevant project.
+            None => p.tasks_path.trim().is_empty(),
+        })
+        .filter(|p| {
+            // Both arms resolve the CANDIDATE `path`, never the stored value —
+            // the point is to judge what the user just typed.
+            let root = if is_override {
+                // The candidate is that project's worktree root verbatim,
+                // resolved exactly as task_create would.
+                project_tasks_root_with(&inherited, &Project {
+                    tasks_path: path.clone(),
+                    root_path: p.root_path.clone(),
+                    ..Default::default()
+                })
+            } else {
+                tasks_root_from_default(&path, p)
+            };
+            check_tasks_root(&root, Path::new(&p.root_path)).is_err()
+        })
+        .map(|p| p.name)
+        .collect()
+}
+
 /// Where `project_id`'s worktrees land with NO project-level override, i.e.
 /// purely from the global "Default tasks path". Powers the placeholder on
 /// Settings → Repository → Tasks path, so that field can be left empty and
@@ -11273,7 +11344,7 @@ pub fn run() {
             task_path_rename, task_path_delete, task_reveal_path,
             task_rename, project_rename,
             pty_spawn, pty_write, pty_resize, pty_kill,
-            notify, open_path, reveal_path, open_file_external, home_dir, project_tasks_path_default, default_shell, path_exists, path_is_git_repo, log_line, pty_debug_append, terminal_stage_file, install_notification_sound, play_completion_sound,
+            notify, open_path, reveal_path, open_file_external, home_dir, project_tasks_path_default, tasks_path_conflicts, default_shell, path_exists, path_is_git_repo, log_line, pty_debug_append, terminal_stage_file, install_notification_sound, play_completion_sound,
             settings_load, settings_save, discovery_dismiss, agents_save, agents_defaults, run_capture_command, discover_repos, detect_clis,
             automation::automation_result,
             automation::automation_armed,
@@ -13317,6 +13388,38 @@ mod tests {
             project_tasks_root_with("/Users/x/code/web", &p),
             PathBuf::from("/Users/x/code/web/web"),
         );
+    }
+
+    // The save-time check and the create-time guard must agree, or the UI
+    // would green-light a value that later refuses to create a task. Both go
+    // through check_tasks_root on an identically-resolved root; this pins the
+    // two resolution modes the command switches between.
+    #[test]
+    fn conflict_detection_matches_the_create_time_guard() {
+        let repo = Path::new("/Users/x/code/web");
+        let p = proj("/Users/x/code/web", "");
+
+        // Global mode: the value is resolved per project, with the project dir
+        // appended for absolute values.
+        for bad in [".", "..", "/Users/x/code"] {
+            let root = tasks_root_from_default(bad, &p);
+            assert!(check_tasks_root(&root, repo).is_err(), "global {bad:?} should conflict");
+        }
+        for ok in ["worktrees", "../wt", "/vol/work", "/Users/x/code/web"] {
+            let root = tasks_root_from_default(ok, &p);
+            assert!(check_tasks_root(&root, repo).is_ok(), "global {ok:?} should be clean");
+        }
+
+        // Override mode: an absolute value is the root verbatim, so naming the
+        // repo conflicts here even though it is fine as a global.
+        let over = proj("/Users/x/code/web", "/Users/x/code/web");
+        let root = project_tasks_root_with("/vol/work", &over);
+        assert!(check_tasks_root(&root, repo).is_err(), "override naming the repo should conflict");
+
+        // An empty override defers to the global, which decides validity.
+        let inherit = proj("/Users/x/code/web", "");
+        assert!(check_tasks_root(&project_tasks_root_with("/vol/work", &inherit), repo).is_ok());
+        assert!(check_tasks_root(&project_tasks_root_with(".", &inherit), repo).is_err());
     }
 
     #[test]

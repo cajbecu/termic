@@ -520,6 +520,12 @@ export const settingsLoad  = () => invoke<Settings>("settings_load");
  *  from the global default tasks path. Placeholder for Repository → Tasks path. */
 export const projectTasksPathDefault = (projectId: string) =>
   invoke<string>("project_tasks_path_default", { projectId });
+/** Names of the projects a candidate tasks path would break (it resolves onto
+ *  or above their repo, so task creation there would be refused). Empty = safe.
+ *  Omit `projectId` to check the value as the global default across every
+ *  project; pass one to check it as that project's override. */
+export const tasksPathConflicts = (path: string, projectId?: string) =>
+  invoke<string[]>("tasks_path_conflicts", { path, projectId: projectId ?? null });
 /** Raw custom theme files from `~/.config/termic/themes/*.json`. Unvalidated —
  *  run each through customTheme.ts's sanitizeTheme before use. */
 export const themesList = () => invoke<CustomThemeFile[]>("themes_list");

@@ -1212,6 +1212,12 @@ describe("default tasks path", () => {
           '[data-testid="default-tasks-path-preview"]',
         ) as HTMLElement | null)?.textContent ?? "",
       );
+    const conflict = () =>
+      browser.execute(
+        () => (document.querySelector(
+          '[data-testid="default-tasks-path-conflict"]',
+        ) as HTMLElement | null)?.textContent ?? "",
+      );
     /** The section's own save button, found by text so it can't collide with
      *  the other Save buttons on this page (symlink paths). */
     const saveDisabled = () =>
@@ -1236,6 +1242,23 @@ describe("default tasks path", () => {
     await type("worktrees");
     await browser.waitUntil(async () => (await preview()) === "<project>/worktrees/<task>", {
       timeout: 5_000, timeoutMsg: "relative path preview never updated",
+    });
+
+    // A path that would land on the repo itself is refused HERE, not deferred
+    // to the next task create: the error names the projects and the save is
+    // blocked. `.` resolves to every project's own root.
+    await type(".");
+    await browser.waitUntil(
+      async () =>
+        (await conflict()).includes("inside the repo itself") && (await saveDisabled()),
+      { timeout: 8_000, timeoutMsg: "a repo-swallowing tasks path was not rejected on save" },
+    );
+    // ...and a good value clears it again. Deliberately NOT `absRoot`: that is
+    // already the saved value, so the button would stay disabled for "nothing
+    // to save" and the assertion could not tell that apart from "still blocked".
+    await type(`${absRoot}/nested`);
+    await browser.waitUntil(async () => (await conflict()) === "" && !(await saveDisabled()), {
+      timeout: 8_000, timeoutMsg: "a valid tasks path stayed blocked",
     });
 
     // Required: emptying it drops the preview and blocks the save.
