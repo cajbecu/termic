@@ -38,7 +38,7 @@ logLine("[termic] boot build=resume-fix-v3-sidebar-bypass").catch(() => {});
 // release bundles: both flags are statically false there.
 if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
   void (async () => {
-    const [app, ui, prefs, race, ipc, core, runTabs, scriptRuns, prompts, agentRace, signalLog] =
+    const [app, ui, prefs, race, ipc, core, runTabs, scriptRuns, prompts, agentRace, signalLog, reviewComments] =
       await Promise.all([
         import("@/store/app"),
         import("@/store/ui"),
@@ -51,6 +51,7 @@ if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
         import("@/store/prompts"),
         import("@/lib/agentRace"),
         import("@/lib/agentSignalLog"),
+        import("@/store/reviewComments"),
       ]);
     (window as unknown as Record<string, unknown>).__termic = {
       useApp: app.useApp,
@@ -66,6 +67,10 @@ if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
       // profile must be left byte-identical (see the signal-inspector note).
       usePromptLibrary: prompts.usePromptLibrary,
       agentRace,
+      // Queued inline review comments: the e2e suite asserts what a selection
+      // actually queued (line range + quote), which no DOM surface spells out
+      // in full — the card shows a label, not the anchored text.
+      useReviewComments: reviewComments.useReviewComments,
       // The observed-title buffer behind Settings → Agents' signal inspector.
       // Exposed so specs can drive recordTitle/noteSubmit/noteDone directly —
       // the same functions TerminalPane calls — instead of racing a live

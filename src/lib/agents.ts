@@ -419,13 +419,31 @@ export function classifyAgentTitle(
   const t = title.trim();
   if (!t) return null;
   const user = agents.find(a => a.id === cli)?.capabilities?.signals;
-  const sig = user && (user.busy?.length || user.idle?.length || user.attention?.length)
-    ? user
-    : BUILTIN_TITLE_SIGNALS[cli];
-  if (!sig) return null;
-  if (compileSignals(sig.attention).some(re => re.test(t))) return "attention";
-  if (compileSignals(sig.busy).some(re => re.test(t))) return "busy";
-  if (compileSignals(sig.idle).some(re => re.test(t))) return "idle";
+  const builtin = BUILTIN_TITLE_SIGNALS[cli];
+  if (!user && !builtin) return null;
+
+  // PER-FIELD fallback, matching what hasPendingWork already does for
+  // `pending`. Setting one field used to swap out the whole built-in set, so
+  // an agent whose busy pattern you narrowed silently lost its idle pattern
+  // too — and since `goIdle` only fires on a busy→idle title transition, the
+  // fast done signal just stopped, quietly, with nothing in the UI saying so.
+  //
+  // Deliberately REPLACE per field rather than UNION the two. Union would make
+  // it impossible to narrow a built-in: claude's busy pattern is a catch-all
+  // ("any leading glyph that is not ✳"), so a user swapping it for a strict
+  // spinner whitelist needs their pattern to WIN, not to be or-ed with the
+  // catch-all it was written to escape. Narrowing is the main reason to touch
+  // these fields at all.
+  //
+  // Cost of the choice: "no patterns at all for this field" is no longer
+  // expressible by emptying it, because empty now means "inherit". A field
+  // that must match nothing needs an unmatchable pattern such as `(?!)`.
+  const pick = (k: keyof Required<SignalPatterns>): string[] =>
+    (user?.[k]?.length ? user[k] : builtin?.[k]) ?? [];
+
+  if (compileSignals(pick("attention")).some(re => re.test(t))) return "attention";
+  if (compileSignals(pick("busy")).some(re => re.test(t))) return "busy";
+  if (compileSignals(pick("idle")).some(re => re.test(t))) return "idle";
   return null;
 }
 

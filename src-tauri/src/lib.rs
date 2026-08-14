@@ -28,7 +28,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
@@ -1349,9 +1349,10 @@ fn git_bytes(args: &[&str], cwd: &Path) -> Result<Vec<u8>> {
     // git hooks (pre-commit, etc.) can't find node/bun/python/etc. and exported
     // vars (direnv, tokens) the user's rc sets are missing — so a commit that
     // works in the embedded terminal would fail from the Git panel. The
-    // resolved env is cached (OnceLock), so this is cheap per call.
-    cmd.env("PATH", shell_env::resolved_path());
-    for (k, v) in shell_env::login_env() {
+    // resolved env is cached once the probe lands, so this is cheap per call.
+    let (path, inject) = shell_env::spawn_env();
+    cmd.env("PATH", path);
+    for (k, v) in inject {
         cmd.env(k, v);
     }
     let out = cmd.output().with_context(|| format!("git {:?}", args))?;
@@ -1396,8 +1397,9 @@ fn fetch_ref(repo: &Path, remote_ref: &str) -> std::result::Result<(), String> {
     cmd.args(["fetch", "--no-tags", remote, refname]).current_dir(repo);
     // Same login-shell env as git() so credential helpers / SSH config resolve
     // from a GUI-launched .app (bare launchd PATH otherwise).
-    cmd.env("PATH", shell_env::resolved_path());
-    for (k, v) in shell_env::login_env() {
+    let (path, inject) = shell_env::spawn_env();
+    cmd.env("PATH", path);
+    for (k, v) in inject {
         cmd.env(k, v);
     }
     // Fail fast rather than block on a credential/passphrase prompt or a dead
@@ -1874,6 +1876,33 @@ pub(crate) fn notify_task_detach(manager: &PtyManager, task_id: &str, reason: &s
     }
 }
 
+/// Per-TAB counterpart of `notify_task_detach` (`tab close`, GH #185).
+/// Same contract, narrower blast radius: only sessions attached to THIS
+/// tab are told, because only this tab's PTY is about to go. The task's
+/// other agents, and anyone attached to them, are untouched, which is
+/// the whole reason `tab close` exists next to `archive`.
+pub(crate) fn notify_tab_detach(
+    manager: &PtyManager,
+    task_id: &str,
+    tab_id: &str,
+    reason: &str,
+) {
+    let feeds: Vec<Arc<PtyFeed>> = {
+        let map = manager.inner.lock();
+        map.values()
+            .filter(|s| {
+                s.role
+                    .as_ref()
+                    .is_some_and(|r| r.task_id == task_id && r.tab_id.as_deref() == Some(tab_id))
+            })
+            .filter_map(|s| s.feed.clone())
+            .collect()
+    };
+    for feed in feeds {
+        feed.send_detach(reason);
+    }
+}
+
 /// Write into a PTY by id, shared by the Tauri command and the CLI
 /// attach path (which runs on the socket thread, no State handle).
 /// The writer handle is cloned out and the MAP lock released before
@@ -2174,7 +2203,8 @@ fn pty_spawn(
     // this, `claude` / `codex` / `gemini` installed in ~/.local/bin,
     // ~/.bun/bin, /opt/homebrew/bin, or under nvm aren't found. See
     // shell_env.rs.
-    cmd.env("PATH", shell_env::resolved_path());
+    let (resolved_path, login_inject) = shell_env::spawn_env();
+    cmd.env("PATH", resolved_path);
     // Inject the rest of the user's login-shell environment (EDITOR, VISUAL,
     // LANG, GPG_TTY, ...) — but ONLY for UNSANDBOXED spawns. The sandboxed
     // agent is the threat model (CLAUDE.md), and this rc delta can carry
@@ -2187,7 +2217,7 @@ fn pty_spawn(
     // this it would miss $EDITOR etc. (#17). The per-spawn overlay below
     // still wins, so explicit overrides hold.
     if sandbox_bundle.is_none() {
-        for (k, v) in shell_env::login_env() {
+        for (k, v) in login_inject {
             cmd.env(k, v);
         }
     }
@@ -4040,16 +4070,17 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
                 let _ = app2.emit(&format!("setup-output://{}", ws_id),
                     serde_json::json!({ "line": format!("[{label}] $ {script}") }));
                 let mut cmd = Command::new("bash");
+                // Real login-shell env so setup finds bun/nvm/etc. and
+                // sees the user's $EDITOR; `bash -l` alone misses what the
+                // user set in their actual shell (fish/zsh rc) (#16, #17).
+                let (path, inject) = shell_env::spawn_env();
                 cmd.arg("-lc").arg(script).current_dir(cwd)
-                    // Real login-shell env so setup finds bun/nvm/etc. and
-                    // sees the user's $EDITOR; `bash -l` alone misses what the
-                    // user set in their actual shell (fish/zsh rc) (#16, #17).
-                    .env("PATH", shell_env::resolved_path())
+                    .env("PATH", path)
                     .env("TERMIC_PORT", port.to_string())
                     .env("TERMIC_WORKSPACE_NAME", &name)
                     .env("TERMIC_TASK", &name)
                     .stdout(Stdio::piped()).stderr(Stdio::piped());
-                for (k, v) in shell_env::login_env() {
+                for (k, v) in inject {
                     cmd.env(k, v);
                 }
                 for (k, v) in &sibling_ports {
@@ -5064,6 +5095,42 @@ pub(crate) fn stop_task_role_ptys(manager: &PtyManager, task_id: &str) -> usize 
     count
 }
 
+/// Stop ONE tab's agent PTY, same SIGTERM-then-SIGKILL contract as the
+/// task-wide sweeps (`tab close`, GH #185).
+///
+/// Runs AFTER the webview has dropped the tab, as the termination
+/// guarantee: the pane's own kill on unmount is fire-and-forget
+/// (`ipc.ptyKill(...).catch(...)`), so without this sweep the verb would
+/// answer "closed" while the agent might still be up. It normally finds
+/// nothing left to signal.
+///
+/// It deliberately does NOT run first. Stopping the PTY while the pane is
+/// still mounted makes TerminalPane's exit handler treat an induced death
+/// as a voluntary one: a spurious "agent exited" notification, and inside
+/// RESUME_FAILURE_MS of a resume, the failed-resume branch wiping the tab's
+/// session id from disk. See the ordering note in `handle_tab_close`.
+///
+/// Matches EVERY slot carrying this tab's role, not just the newest the way
+/// `find_tab_pty` does: a respawn briefly leaves the killed slot beside its
+/// replacement, and signalling an already-reaped pid is a harmless ESRCH.
+///
+/// Returns how many PTYs were live when we started.
+pub(crate) fn stop_tab_ptys(manager: &PtyManager, task_id: &str, tab_id: &str) -> usize {
+    let victims: Vec<Option<u32>> = {
+        let map = manager.inner.lock();
+        map.values()
+            .filter(|slot| {
+                slot.role.as_ref().is_some_and(|r| {
+                    r.task_id == task_id && r.tab_id.as_deref() == Some(tab_id)
+                })
+            })
+            .map(|slot| slot.child_pid)
+            .collect()
+    };
+    let count = victims.len();
+    graceful_then_kill(&victims.into_iter().flatten().collect::<Vec<_>>());
+    count
+}
 
 /// Set the per-task YOLO flag and persist. No PTY kill — it only
 /// affects how the NEXT agent is launched (the frontend separately
@@ -7731,12 +7798,13 @@ fn run_script(script: &str, cwd: &Path, port: u16, name: &str) -> Result<String>
     // `bun`/`nvm`/etc. are "command not found" in setup/run scripts even
     // though they work in a terminal (#16), and `$EDITOR` is wrong (#17).
     let mut cmd = Command::new("bash");
+    let (path, inject) = shell_env::spawn_env();
     cmd.arg("-lc").arg(script).current_dir(cwd)
-        .env("PATH", shell_env::resolved_path())
+        .env("PATH", path)
         .env("TERMIC_PORT", port.to_string())
         .env("TERMIC_WORKSPACE_NAME", name)
         .env("TERMIC_TASK", name);
-    for (k, v) in shell_env::login_env() {
+    for (k, v) in inject {
         cmd.env(k, v);
     }
     let out = cmd.output().with_context(|| "run script")?;
@@ -7769,13 +7837,14 @@ fn run_script_streaming(
     use std::process::Stdio;
     thread::spawn(move || {
         let mut cmd = Command::new("bash");
+        let (setup_path, setup_inject) = shell_env::spawn_env();
         cmd.arg("-lc")
             .arg(&script)
             .current_dir(&cwd)
             // Real login-shell env so setup finds bun/nvm/etc. and sees the
             // user's $EDITOR; `bash -l` alone misses what the user set in
             // their actual shell (fish/zsh rc) (#16, #17).
-            .env("PATH", shell_env::resolved_path())
+            .env("PATH", setup_path)
             .env("TERMIC_PORT", port.to_string())
             .env("TERMIC_WORKSPACE_NAME", &name)
             .env("TERMIC_TASK", &name)
@@ -7787,7 +7856,7 @@ fn run_script_streaming(
             .env("PYTHONIOENCODING", "UTF-8")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        for (k, v) in shell_env::login_env() {
+        for (k, v) in setup_inject {
             cmd.env(k, v);
         }
         let spawn_res = cmd.spawn();
@@ -8493,13 +8562,14 @@ fn task_run_script_stream(
         // `process_group(0)` puts the child in its own group so we can kill
         // the whole tree later via `kill(-pgid, SIGTERM)`.
         let mut cmd = Command::new("bash");
+        let (run_path, run_inject) = shell_env::spawn_env();
         cmd.arg("-lc").arg(&script)
             .current_dir(&cwd)
             // Real login-shell env so the Run script finds bun/nvm/etc. and
             // sees the user's $EDITOR; `bash -l` alone misses what the user
             // set in their actual shell (fish/zsh rc) (#16, #17). The
-            // login_env() loop below adds the non-PATH delta.
-            .env("PATH", shell_env::resolved_path())
+            // inject loop below adds the non-PATH delta.
+            .env("PATH", run_path)
             .env("TERMIC_PORT", port.to_string())
             .env("TERMIC_WORKSPACE_NAME", &name)
             .env("TERMIC_TASK", &name)
@@ -8519,7 +8589,7 @@ fn task_run_script_stream(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        for (k, v) in shell_env::login_env() {
+        for (k, v) in run_inject {
             cmd.env(k, v);
         }
         for (k, v) in &sibling_ports {
@@ -8603,11 +8673,21 @@ fn running_greps_swap(ws_id: &str, new_pid: Option<i32>) -> Option<i32> {
 /// the cap the child is SIGKILLed and `truncated: true` is reported.
 /// Re-entrant safety: any previous grep for the same task is killed
 /// before this one starts (typing fires a new search per keystroke).
+/// `regex` picks POSIX ERE (`-E`) over a literal match (`-F`). Not PCRE
+/// (`-P`) — git is not always compiled with libpcre, Apple's is not.
+/// `case_sensitive` drops the default `-i`.
+#[derive(Deserialize)]
+pub struct GrepOpts {
+    pub regex: bool,
+    pub case_sensitive: bool,
+}
+
 #[tauri::command]
 fn task_grep_start(
     id: String,
     query: String,
     search_id: String,
+    opts: GrepOpts,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     use std::io::{BufRead, BufReader};
@@ -8645,13 +8725,15 @@ fn task_grep_start(
     let app_o = app.clone();
     let ws_id_o = id.clone();
     let search_id_o = search_id.clone();
+    // git grep flags: -n line numbers, --column column, -I skip binary,
+    // -F literal / -E POSIX ERE, -i / --no-ignore-case, --untracked
+    // --exclude-standard include new files but respect .gitignore.
+    let match_mode = if opts.regex { "-E" } else { "-F" };
+    let case_flag = if opts.case_sensitive { "--no-ignore-case" } else { "-i" };
 
     thread::spawn(move || {
-        // git grep flags: -n line numbers, --column column, -I skip binary,
-        // -F literal, -i case-insensitive, --untracked --exclude-standard
-        // include new files but respect .gitignore. process_group(0) to kill
-        // the tree. We run one child per repo, serially, sharing the result
-        // cap + batch across all of them.
+        // process_group(0) to kill the tree. We run one child per repo,
+        // serially, sharing the result cap + batch across all of them.
         const RESULT_CAP: usize = 500;
         const BATCH_MAX: usize = 50;
         const BATCH_MS: u128 = 30;
@@ -8682,7 +8764,7 @@ fn task_grep_start(
             let spawn = std::process::Command::new("git")
                 .args([
                     "grep",
-                    "-n", "--column", "-I", "-F", "-i",
+                    "-n", "--column", "-I", match_mode, case_flag,
                     "--untracked", "--exclude-standard",
                     "--no-color",
                     "-e", &query,
@@ -10342,7 +10424,6 @@ async fn detect_clis() -> Vec<CliInfo> {
 }
 
 fn detect_clis_blocking() -> Vec<CliInfo> {
-    let home = dirs::home_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     let agents = load_settings_inner().agents;
     // Probe agents concurrently — each agent costs a login-shell spawn
     // (`sh -lc`, which sources the user's profile and can take hundreds
@@ -10353,7 +10434,6 @@ fn detect_clis_blocking() -> Vec<CliInfo> {
     let handles: Vec<_> = agents.iter().map(|agent| {
         let id = agent.id.clone();
         let bin = agent.command.trim().to_string();
-        let home = home.clone();
         thread::spawn(move || {
             let bin = bin.as_str();
             let mut found = false;
@@ -10383,15 +10463,13 @@ fn detect_clis_blocking() -> Vec<CliInfo> {
                         }
                     }
                 }
-                // Fallback: probe common macOS install locations directly.
+                // Fallback: probe common install locations directly. Same
+                // list the PATH fallback unions in, and for the same
+                // reason (the login shell that would have found these is
+                // exactly what just failed) — kept in one place so a dir
+                // added there is never missing from the install badge.
                 if !found {
-                    for c in [
-                        format!("{home}/.local/bin/{bin}"),
-                        format!("/opt/homebrew/bin/{bin}"),
-                        format!("/usr/local/bin/{bin}"),
-                        format!("{home}/.bun/bin/{bin}"),
-                        format!("{home}/.cargo/bin/{bin}"),
-                    ] {
+                    for c in shell_env::fallback_dirs().iter().map(|d| format!("{d}/{bin}")) {
                         if Path::new(&c).exists() {
                             found = true;
                             path = c;
@@ -10970,7 +11048,26 @@ pub(crate) fn leave_windowless(app: &AppHandle) {
     }
 }
 
+// ─── startup timing ──────────────────────────────────────────────────────
+// Stamped as early as `run()` can manage. The webview reads it back at first
+// paint (`src/lib/perfMarks.ts`) so the nightly perf job can report
+// spawn → first paint as ONE number, instead of only the webview-relative
+// half that `performance.timeOrigin` gives you. Process spawn → webview
+// creation is real cost a user feels and is invisible from JS.
+//
+// Deliberately NOT behind `--features e2e`: it is one `Instant` and an integer
+// read, and `make perf` wants it available on an ordinary build.
+static BOOT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Milliseconds since process start. 0 if called before `run()` stamped it,
+/// which cannot happen from the webview (it does not exist yet).
+#[tauri::command]
+fn perf_boot_elapsed_ms() -> u64 {
+    BOOT.get().map(|t| t.elapsed().as_millis() as u64).unwrap_or(0)
+}
+
 pub fn run() {
+    let _ = BOOT.set(Instant::now());
     // WebKitGTK 2.42+ defaults to its DMA-BUF renderer. It's the FAST path on
     // AMD/Intel (X11 and Wayland) and MUST stay on there: disabling it drops
     // the whole webview onto a slow copy/software compositing path and makes
@@ -11326,6 +11423,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            perf_boot_elapsed_ms,
             projects_list, project_add, project_add_multi, project_set_members, project_update, project_remove, project_reorder, project_set_group,
             tasks_list, task_create, task_create_multi, task_open_repo, task_importable_worktrees, task_import_worktree, task_archive, task_set_cli, task_set_custom_command, task_set_resume_override, task_set_sandbox, task_set_yolo,
             sandbox_available, sandbox_deny_counts, sandbox_recent_denied_hosts, sandbox_recent_denied_paths, sandbox_access_counts, sandbox_recent_access_hosts, sandbox_recent_access_paths, sandbox_set_monitor_filters, task_sandbox_add_allowed_host, task_sandbox_add_allowed_path, task_sandbox_remove_allowed_path, agent_sandbox_add_allowed_path, agent_sandbox_add_allowed_host, task_recent_denials,

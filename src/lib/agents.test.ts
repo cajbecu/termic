@@ -506,6 +506,81 @@ describe("classifyAgentTitle", () => {
     expect(classifyAgentTitle("claude", "   ", [])).toBe(null);
   });
 
+  // Claude's spinner alphabet is not fixed: Braille frames, "⠐ ⠂" pairs and the
+  // circle family (◐◑◒◓) have all been seen in the wild. The busy pattern is a
+  // catch-all ("any leading glyph that is not the ✳ brand mark") precisely so a
+  // new frame does not need a code change. These cases pin that promise for the
+  // circle frames specifically, so a future tightening of the pattern to an
+  // explicit glyph list cannot silently drop them and make a working agent read
+  // as idle.
+  it("treats circle spinner frames as busy for claude", () => {
+    for (const t of ["◐", "◑", "◒", "◓"]) {
+      expect(classifyAgentTitle("claude", t, [])).toBe("busy");
+      expect(classifyAgentTitle("claude", `${t} Working`, [])).toBe("busy");
+      expect(classifyAgentTitle("claude", `${t} Thinking… (5s · esc to interrupt)`, [])).toBe("busy");
+      expect(classifyAgentTitle("claude", `  ${t} indented`, [])).toBe("busy");
+    }
+    // Still idle when claude's own done glyph leads, even though ✳ is also
+    // non-alphanumeric. This is the precedence the busy pattern's ✳ exclusion
+    // exists to protect.
+    expect(classifyAgentTitle("claude", "✳ Ready", [])).toBe("idle");
+  });
+
+  // Per-field fallback. Setting one field used to replace the WHOLE built-in
+  // set, which is a quiet footgun: narrowing claude's busy pattern also deleted
+  // its `^\s*✳` idle pattern, and because goIdle only fires on a busy→idle
+  // title transition, the fast done signal stopped with nothing saying so.
+  // `hasPendingWork` already resolved `pending` per field; these lock the other
+  // three to the same rule.
+  describe("per-field fallback to the built-ins", () => {
+    const withSignals = (signals: NonNullable<Agent["capabilities"]>["signals"]) =>
+      [sigAgent("claude", signals)];
+
+    it("a custom busy pattern keeps the built-in idle pattern", () => {
+      const a = withSignals({ busy: ["^\\s*[\\u2800-\\u28FF◐◑◒◓]"] });
+      expect(classifyAgentTitle("claude", "⠋ thinking", a)).toBe("busy");
+      expect(classifyAgentTitle("claude", "◐ Working", a)).toBe("busy");
+      // The regression: this used to fall through to null.
+      expect(classifyAgentTitle("claude", "✳ Ready", a)).toBe("idle");
+    });
+
+    it("a custom idle pattern keeps the built-in busy pattern", () => {
+      const a = withSignals({ idle: ["^DONE$"] });
+      expect(classifyAgentTitle("claude", "DONE", a)).toBe("idle");
+      expect(classifyAgentTitle("claude", "⠋ thinking", a)).toBe("busy");
+    });
+
+    it("a custom field REPLACES rather than unions the built-in", () => {
+      // The whole point of narrowing: claude's built-in busy is a catch-all, so
+      // a strict whitelist must WIN over it or narrowing is impossible.
+      const a = withSignals({ busy: ["^\\s*[◐◑]"] });
+      expect(classifyAgentTitle("claude", "◐ Working", a)).toBe("busy");
+      // Would be "busy" under the built-in catch-all; the whitelist excludes it.
+      expect(classifyAgentTitle("claude", "~/repo", a)).toBe(null);
+      expect(classifyAgentTitle("claude", "[main] build", a)).toBe(null);
+    });
+
+    it("an unmatchable pattern is how you opt a field out entirely", () => {
+      // Empty now means "inherit", so opting out needs an explicit never-match.
+      const a = withSignals({ busy: ["(?!)"] });
+      expect(classifyAgentTitle("claude", "⠋ thinking", a)).toBe(null);
+      expect(classifyAgentTitle("claude", "✳ Ready", a)).toBe("idle");
+    });
+
+    it("attention still outranks busy when only attention is customised", () => {
+      const a = withSignals({ attention: ["NEEDS YOU"] });
+      expect(classifyAgentTitle("claude", "NEEDS YOU", a)).toBe("attention");
+      expect(classifyAgentTitle("claude", "⠋ thinking", a)).toBe("busy");
+      expect(classifyAgentTitle("claude", "✳ Ready", a)).toBe("idle");
+    });
+
+    it("an agent with no built-ins and one custom field still works", () => {
+      const a = [sigAgent("mycli", { busy: ["WORKING"] })];
+      expect(classifyAgentTitle("mycli", "WORKING", a)).toBe("busy");
+      expect(classifyAgentTitle("mycli", "anything else", a)).toBe(null);
+    });
+  });
+
   it("keeps the built-in codex classifier when no signals are set", () => {
     expect(classifyAgentTitle("codex", "Action Required", [])).toBe("attention");
     expect(classifyAgentTitle("codex", "Ready", [])).toBe("idle");

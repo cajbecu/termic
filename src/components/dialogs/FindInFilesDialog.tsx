@@ -2,18 +2,21 @@
 // fires a fresh search with a new searchId; Rust SIGKILLs the previous
 // in-flight grep automatically so we never fan out into zombies.
 //
-// No caching, no indexing, no regex. Literal case-insensitive match —
-// matches the MVP plan in the conversation. Add toggles only if used.
+// No caching, no indexing. Literal and case-insensitive by default; the `.*`
+// toggle switches the query to a POSIX ERE (git grep -E) and `Aa` drops the
+// `-i`. Both toggles persist in prefs.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Search, X } from "lucide-react";
 import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
+import { usePrefs } from "@/store/prefs";
 import {
   taskGrepStart, taskGrepCancel,
-  onGrepResult, onGrepDone, type GrepHit,
+  onGrepResult, onGrepDone, type GrepHit, type GrepOpts,
 } from "@/lib/ipc";
+import { findRanges } from "@/lib/findMatches";
 import { fileIconUrl } from "@/lib/explorer/iconResolver";
 import { cn } from "@/lib/utils";
 
@@ -38,24 +41,49 @@ type Row =
   | { kind: "header"; path: string }
   | { kind: "hit"; hit: GrepHit };
 
-function highlight(preview: string, needle: string): React.ReactNode {
-  if (!needle) return preview;
-  const lower = preview.toLowerCase();
-  const n = needle.toLowerCase();
+function FlagToggle(
+  { on, onToggle, glyph, title, testId }:
+  { on: boolean; onToggle: () => void; glyph: string; title: string; testId: string },
+) {
+  return (
+    <button
+      type="button"
+      // Keep the caret in the query input: the toggle re-runs the search,
+      // and Enter must still open the highlighted row.
+      onMouseDown={e => e.preventDefault()}
+      onClick={onToggle}
+      aria-pressed={on}
+      title={title}
+      data-testid={testId}
+      data-no-drag
+      className={cn(
+        "shrink-0 rounded px-1.5 py-0.5 font-mono text-[12px] leading-none",
+        on
+          ? "bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
+          : "text-[var(--color-fg-faint)] hover:bg-[var(--color-bg-2)] hover:text-[var(--color-fg)]",
+      )}
+    >
+      {glyph}
+    </button>
+  );
+}
+
+function highlight(preview: string, needle: string, opts: GrepOpts): React.ReactNode {
+  const ranges = findRanges(preview, needle, opts);
+  if (!ranges.length) return preview;
   const out: React.ReactNode[] = [];
   let i = 0;
   let key = 0;
-  while (i < preview.length) {
-    const idx = lower.indexOf(n, i);
-    if (idx === -1) { out.push(preview.slice(i)); break; }
-    if (idx > i) out.push(preview.slice(i, idx));
+  for (const [start, end] of ranges) {
+    if (start > i) out.push(preview.slice(i, start));
     out.push(
       <b key={key++} className="text-[var(--color-accent)] font-semibold">
-        {preview.slice(idx, idx + n.length)}
+        {preview.slice(start, end)}
       </b>,
     );
-    i = idx + n.length;
+    i = end;
   }
+  out.push(preview.slice(i));
   return <>{out}</>;
 }
 
@@ -71,6 +99,11 @@ export function FindInFilesDialog() {
     if (!task) return null;
     return s.projects.find(p => p.id === task.project_id)?.name ?? null;
   });
+
+  const regexMode = usePrefs(s => s.findInFilesRegex);
+  const setRegexMode = usePrefs(s => s.setFindInFilesRegex);
+  const matchCase = usePrefs(s => s.findInFilesMatchCase);
+  const setMatchCase = usePrefs(s => s.setFindInFilesMatchCase);
 
   const [query, setQuery] = useState("");
   const [groups, setGroups] = useState<FileGroup[]>([]);
@@ -193,7 +226,8 @@ export function FindInFilesDialog() {
         else unDone = u;
       });
 
-      taskGrepStart(taskId, trimmed, searchId).catch(() => setSearching(false));
+      taskGrepStart(taskId, trimmed, searchId, { regex: regexMode, case_sensitive: matchCase })
+        .catch(() => setSearching(false));
 
       // Hand teardown to the useEffect cleanup. A fresh keystroke / dialog
       // close supersedes this search: invalidate the ref to short-circuit
@@ -209,7 +243,9 @@ export function FindInFilesDialog() {
       clearTimeout(t);
       cleanupCurrent?.();
     };
-  }, [taskId, query]);
+    // Deps stay the primitive flags, never a freshly-built options object:
+    // a new identity each render would restart git grep on every render.
+  }, [taskId, query, regexMode, matchCase]);
 
   function cancelSearch() {
     if (!taskId) return;
@@ -281,6 +317,26 @@ export function FindInFilesDialog() {
 
   const totalHits = groups.reduce((n, g) => n + g.hits.length, 0);
 
+  function countText(): string {
+    const matches = `${totalHits} match${totalHits === 1 ? "" : "es"}`;
+    const files = `${groups.length} file${groups.length === 1 ? "" : "s"}`;
+    return `${matches} in ${files}${truncated ? " (truncated)" : ""}`;
+  }
+
+  function statusLeft(): React.ReactNode {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      return (
+        <>
+          Searching <span className="font-semibold text-[var(--color-fg)]">{projectName ?? "this task"}</span> via <code className="text-[12px]">git grep</code>. Respects <code className="text-[12px]">.gitignore</code>.
+        </>
+      );
+    }
+    if (trimmed.length < MIN_QUERY) return `Type at least ${MIN_QUERY} characters to search.`;
+    if (groups.length) return countText();
+    return searching ? "" : "No matches";
+  }
+
   return (
     <Dialog.Root open={!!taskId} onOpenChange={(v) => (v ? null : close())}>
       <Dialog.Portal>
@@ -303,49 +359,56 @@ export function FindInFilesDialog() {
               autoCorrect="off"
               autoCapitalize="off"
               autoComplete="off"
-              placeholder={projectName ? `Find in ${projectName} (literal, case-insensitive)` : "Find in files (literal, case-insensitive)"}
+              placeholder={`Find in ${projectName ?? "files"} (${regexMode ? "regexp" : "literal"}, ${matchCase ? "case-sensitive" : "case-insensitive"})`}
               className="w-full bg-transparent pl-1 text-[14px] text-[var(--color-fg)] placeholder:text-[var(--color-fg-faint)] focus:outline-none"
             />
-            {query && (
-              <span className="shrink-0 text-[11.5px] text-[var(--color-fg-faint)]">
-                {searching ? "searching…" : `${totalHits} match${totalHits === 1 ? "" : "es"} in ${groups.length} file${groups.length === 1 ? "" : "s"}${truncated ? " (truncated)" : ""}`}
-              </span>
+            <FlagToggle
+              on={matchCase} onToggle={() => setMatchCase(!matchCase)}
+              glyph="Aa" title="Match case" testId="fif-case"
+            />
+            <FlagToggle
+              on={regexMode} onToggle={() => setRegexMode(!regexMode)}
+              glyph=".*" title="Use a regular expression (POSIX ERE)" testId="fif-regex"
+            />
+          </div>
+          {/* ONE row for every state, always mounted at a fixed height:
+              message or count on the left, the search indicator pinned
+              right. Everything that changes while typing lives here, so
+              neither the toggles above nor the rows below ever shift. */}
+          <div
+            className={cn(
+              "flex min-h-5 items-center justify-between gap-3 px-3 py-3 text-[13px]",
+              query ? "text-[var(--color-fg-faint)]" : "text-[var(--color-fg-dim)]",
+              rows.length > 0 && "border-b border-[var(--color-border)]",
             )}
+          >
+            <span className="truncate">{statusLeft()}</span>
             {searching && (
-              <button
-                type="button"
-                onClick={cancelSearch}
-                title="Cancel search (Esc)"
-                data-no-drag
-                className="ml-1 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--color-fg-faint)] hover:bg-[var(--color-bg-2)] hover:text-[var(--color-fg)]"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
+              <span className="flex shrink-0 items-center gap-1">
+                searching…
+                <button
+                  type="button"
+                  onClick={cancelSearch}
+                  title="Cancel search (Esc)"
+                  data-no-drag
+                  className="inline-flex h-5 w-5 items-center justify-center rounded hover:bg-[var(--color-bg-2)] hover:text-[var(--color-fg)]"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </span>
             )}
           </div>
           <div
             ref={listRef}
+            data-testid="fif-results"
             onScroll={(e) => {
               const el = e.currentTarget;
               if (el.scrollHeight - el.scrollTop - el.clientHeight < 240 && renderLimit < rows.length) {
                 setRenderLimit(Math.min(rows.length, renderLimit + RENDER_CHUNK));
               }
             }}
-            className="max-h-[78vh] overflow-y-auto py-1"
+            className={cn("max-h-[78vh] overflow-y-auto", rows.length > 0 && "py-1")}
           >
-            {!query && (
-              <div className="px-3 py-3 text-[13px] text-[var(--color-fg-dim)]">
-                Searching <span className="font-semibold text-[var(--color-fg)]">{projectName ?? "this task"}</span> via <code className="text-[12px]">git grep</code>. Respects <code className="text-[12px]">.gitignore</code>.
-              </div>
-            )}
-            {query && query.trim().length > 0 && query.trim().length < MIN_QUERY && (
-              <div className="px-3 py-3 text-[13px] text-[var(--color-fg-faint)]">
-                Type at least {MIN_QUERY} characters to search.
-              </div>
-            )}
-            {query && query.trim().length >= MIN_QUERY && !searching && groups.length === 0 && (
-              <div className="px-3 py-3 text-[13px] text-[var(--color-fg-faint)]">No matches</div>
-            )}
             {rows.slice(0, renderLimit).map((r, i) => {
               if (r.kind === "header") {
                 const name = r.path.split("/").pop() || r.path;
@@ -378,7 +441,7 @@ export function FindInFilesDialog() {
                 >
                   <span className="w-12 shrink-0 text-right tabular-nums text-[var(--color-fg-faint)]">{h.line}</span>
                   <span className="min-w-0 flex-1 truncate text-[var(--color-fg)]">
-                    {highlight(h.preview, query.trim())}
+                    {highlight(h.preview, query.trim(), { regex: regexMode, case_sensitive: matchCase })}
                   </span>
                 </button>
               );

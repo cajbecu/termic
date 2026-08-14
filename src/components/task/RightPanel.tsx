@@ -901,6 +901,11 @@ function RTab({ label, active, badge, repoBadge, onClick }: { label: string; act
   return (
     <button
       onClick={onClick}
+      // Text alone can't address these tabs once a badge renders inside them
+      // ("Git" becomes "Git29"), so e2e aims at the label + active state.
+      data-testid="right-tab"
+      data-tab={label}
+      data-active={active ? "true" : "false"}
       className={cn(
         "flex flex-1 items-center justify-center gap-1.5 border-b-2 text-[13px] font-medium transition-colors",
         active

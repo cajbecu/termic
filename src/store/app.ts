@@ -1762,10 +1762,20 @@ export const useApp = create<AppState>((set, get) => ({
 
   closeTab: (taskId, tabId) => {
    let focusId = "";
+   // Whether a tab was actually removed, gating the durable re-sync below
+   // (the reorderTab pattern). Without it, a close that matched NOTHING
+   // still rewrote persisted_tabs from the store's tab list — and on a
+   // task not opened this session that list is empty, so the rewrite kept
+   // only the default tab and dropped every other agent's session id from
+   // disk. No GUI path passes an id it is not rendering, so this never
+   // fired in the app; `termic tab close` can name a tab on an unmounted
+   // task, which is what surfaced it (GH #185).
+   let closed = false;
    set(s => {
     const list = s.tabs[taskId] || [];
     const idx = list.findIndex(t => t.id === tabId);
     if (idx < 0) return s;
+    closed = true;
     const closing = list[idx];
     // Best-effort PTY kill; ignore failures (already-dead PTYs etc.).
     if (closing.type === "terminal" && closing.ptyId) ipc.ptyKill(closing.ptyId).catch(() => {});
@@ -1836,8 +1846,8 @@ export const useApp = create<AppState>((set, get) => ({
    // Re-sync the durable set: a closed SECONDARY tab is dropped (X = forget
    // it), while a closed MAIN tab stays durable and auto-resumes when the
    // task wakes — see the merge rule in syncDurableTabs. No-op if
-   // nothing changed.
-   get().syncDurableTabs(taskId);
+   // nothing changed, and skipped entirely when nothing was closed.
+   if (closed) get().syncDurableTabs(taskId);
    if (focusId) {
      // Sync activePaneId to the main pane so the store agrees with where
      // focus is going. Without this, activePaneId still points to the split
@@ -2266,15 +2276,27 @@ export const useApp = create<AppState>((set, get) => ({
 // Convenience selectors. CRITICAL: never create a new array/object literal
 // inside the selector — Zustand 5 / React 19 will warn (or worse, loop) on
 // non-cached snapshots. We use a shared EMPTY constant for the "no tabs" case.
-const EMPTY_TABS: Tab[] = Object.freeze([]) as unknown as Tab[];
+export const EMPTY_TABS: Tab[] = Object.freeze([]) as unknown as Tab[];
 
-export const useActiveTask = () => useApp(s => {
+// The selector BODIES are exported separately from the hooks that wrap them so
+// `selectorFanout.test.ts` can measure the real selectors instead of a copy
+// that silently drifts. Passing a fresh arrow to `useApp` on every render is
+// fine and is what these did inline: `useSyncExternalStore` compares the
+// returned snapshot with Object.is, never the selector's identity.
+
+export const selectActiveTask = (s: AppState) => {
   const id = s.activeTaskId;
   if (!id) return null;
   return s.tasks.find(w => w.id === id) ?? null;
-});
+};
 /** All tabs for a task (main pane + split panes). */
+export const selectTaskTabs = (taskId: string | null | undefined) =>
+  (s: AppState): Tab[] => (taskId ? (s.tabs[taskId] ?? EMPTY_TABS) : EMPTY_TABS);
+export const selectActiveTabId = (taskId: string | null | undefined) =>
+  (s: AppState) => (taskId ? s.activeTab[taskId] : undefined);
+
+export const useActiveTask = () => useApp(selectActiveTask);
 export const useTaskTabs = (taskId: string | null | undefined) =>
-  useApp(s => (taskId ? (s.tabs[taskId] ?? EMPTY_TABS) : EMPTY_TABS));
+  useApp(selectTaskTabs(taskId));
 export const useActiveTabId = (taskId: string | null | undefined) =>
-  useApp(s => (taskId ? s.activeTab[taskId] : undefined));
+  useApp(selectActiveTabId(taskId));

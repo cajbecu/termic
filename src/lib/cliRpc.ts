@@ -22,6 +22,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useApp } from "@/store/app";
 import { usePrefs } from "@/store/prefs";
+import { usePromptLibrary } from "@/store/prompts";
 import {
   onPtyData,
   projectAdd,
@@ -806,6 +807,40 @@ async function listAgentsHandler(): Promise<{ agents: RegistryEntry[] }> {
   return { agents: registryView() };
 }
 
+// ─────────────────────────── prompt library (Phase 4) ────────────────
+
+/** The prompt library, live: what `-P/--library` and `termic prompts`
+ *  resolve against. Bodies ride along so the server's selector resolver
+ *  can substitute them without a second round-trip; the LIST path asks
+ *  for `bodies: false` (it discards them, and the builtins alone are
+ *  ~16 KB per call) and gets empty strings in the field, keeping the
+ *  shape stable. Reading the store at request time is the whole design:
+ *  user overrides/renames/deletions are always current, deleted
+ *  builtins do not exist, and unedited builtins keep tracking the
+ *  shipped defaults (docs/plans/cli.md, Phase 4). The store hydrates
+ *  from localStorage at module import, so there is no cold-launch race
+ *  to guard. */
+// Exported for the vitest spec: the shape below is what the Rust
+// resolver deserializes, so a drift here must go red in a test.
+export function listPromptsHandler(params?: unknown): {
+  prompts: {
+    id: string; title: string; body: string;
+    builtin: boolean; enabled: boolean; modified: boolean;
+  }[];
+} {
+  const bodies = (params as { bodies?: unknown })?.bodies !== false;
+  return {
+    prompts: usePromptLibrary.getState().prompts.map(p => ({
+      id: p.id,
+      title: p.title,
+      body: bodies ? p.body : "",
+      builtin: p.builtin,
+      enabled: p.enabled,
+      modified: p.modified,
+    })),
+  };
+}
+
 // ─────────────────────────── new_tab (GH #138) ───────────────────────
 
 interface NewTabParams {
@@ -986,13 +1021,89 @@ export async function newTabHandler(raw: unknown): Promise<{
   return { taskId: p.taskId, tabId, cli, title };
 }
 
+/** Typed domain failures for `tab close`, same sentinel scheme as
+ *  `sendErr` (decoded by cli_server.rs `parse_tab_close_error`). */
+function closeTabErr(code: string, msg: string): Error {
+  return new Error(`cli_tab_close:${code}: ${msg}`);
+}
+
+/** `termic tab close` (GH #185): the GUI's × as an RPC.
+ *
+ *  Deliberately `closeTab`, not `requestCloseTab`: the latter is the
+ *  confirm gate (lib/closeTab.ts), and a modal in a windowless app driven
+ *  by a script would hang the socket until the read timeout. The server
+ *  has already run the only confirmation this path gets (the default-tab
+ *  `--yes` guard) and already stopped the PTY, so what is left is exactly
+ *  the store mutation the × performs. */
+export async function closeTabHandler(
+  params: unknown,
+): Promise<{ taskId: string; tabId: string; killedPty: boolean }> {
+  const p = params as { taskId?: unknown; tabId?: unknown };
+  if (typeof p?.taskId !== "string" || !p.taskId) throw new Error("close_tab requires a taskId");
+  if (typeof p?.tabId !== "string" || !p.tabId) throw new Error("close_tab requires a tabId");
+  const app = useApp.getState();
+  if (!app.tasks.some(t => t.id === p.taskId)) await app.loadAll();
+  const s = useApp.getState();
+  const task = s.tasks.find(t => t.id === p.taskId);
+  if (!task) throw new Error("no such task");
+  // A task that is not mounted has no open strip to close a tab out of,
+  // and mounting one to make it would respawn every agent in it (the
+  // newTabHandler rule). Symmetric with `termic tab`, which refuses a
+  // stopped task for that reason.
+  //
+  // It is also the outermost of three layers over a real way to lose
+  // data, found while building this verb: closeTab used to re-sync the
+  // durable set even when it matched no tab, and that sync rebuilds
+  // persisted_tabs from the store's tab list, which on a task never
+  // opened this session is EMPTY. It wrote back the default tab alone
+  // and dropped every other agent's session id from disk, having closed
+  // nothing. Fixed at the source (app.ts only syncs when a tab actually
+  // went, pinned by an app.test.ts case), so the store is safe whoever
+  // calls. The unknown-tab refusal below is the second layer, and this
+  // check is the third: it exists for the MESSAGE, so a caller hears
+  // "the task is not open" rather than a baffling "that tab no longer
+  // exists" about a tab `termic status` is listing.
+  if (!s.mountedTasks.has(p.taskId)) {
+    throw closeTabErr(
+      "task_stopped",
+      `task ${task.name} is not open in Termic, so it has no tabs to close (open it with \`termic open\`)`,
+    );
+  }
+  const tab = (s.tabs[p.taskId] ?? []).find(t => t.id === p.tabId);
+  if (!tab) {
+    throw closeTabErr(
+      "unknown_tab",
+      "that tab no longer exists; see `termic status` for the open tabs",
+    );
+  }
+  // Unreachable today: both resolver paths exclude pane tabs (tab_states
+  // filters `!paneId`, the persisted fallback filters `pane_leaf_id`).
+  // Guarded anyway because closeTab is the WRONG action for one, and this
+  // is the seam where that would stop being obvious.
+  if (tab.type === "terminal" && (tab as TerminalTab).paneId) {
+    throw closeTabErr(
+      "not_closable",
+      "that tab lives in a split pane; close it in the window",
+    );
+  }
+  // Read the pty id BEFORE closing: only agent tabs carry a PtyRole, so
+  // for a shell or custom-terminal tab the store is the ONLY side that
+  // knows a process was running. closeTab kills it; the server cannot
+  // see that happen, so report it back.
+  const killedPty = tab.type === "terminal" && !!(tab as TerminalTab).ptyId;
+  s.closeTab(p.taskId, p.tabId);
+  return { taskId: p.taskId, tabId: p.tabId, killedPty };
+}
+
 // ─────────────────────────── dispatch ────────────────────────────────
 
 const handlers: Record<string, Handler> = {
   open_task: openTaskHandler,
   new_task: newTaskHandler,
   new_tab: newTabHandler,
+  close_tab: closeTabHandler,
   list_agents: listAgentsHandler,
+  list_prompts: listPromptsHandler,
   send_prompt: sendPromptHandler,
   archive_task: archiveTaskHandler,
   rename_task: renameTaskHandler,

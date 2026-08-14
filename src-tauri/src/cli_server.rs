@@ -61,6 +61,10 @@ const ARCHIVE_TIMEOUT: Duration = Duration::from_secs(300);
 /// or a respawn (PTY spawn deadline 15s + margin); the injection into a
 /// respawned agent continues app-side after the RPC returns.
 const SEND_TIMEOUT: Duration = Duration::from_secs(60);
+/// `close_tab` is a store mutation plus a durable-set rewrite: no process
+/// spawn, no git, and the PTY is already stopped before it runs. Generous
+/// only against a webview busy with a repaint.
+const CLOSE_TAB_TIMEOUT: Duration = Duration::from_secs(10);
 thread_local! {
     /// Set by the `quit` handler, consumed by `serve_conn` once the reply has
     /// been written: a flag rather than a direct call so teardown cannot race
@@ -577,6 +581,16 @@ pub(crate) trait CliHost: Send + Sync {
     /// Tell live attach sessions on this task why they are ending,
     /// BEFORE the PTYs are killed.
     fn notify_detach(&self, task_id: &str, reason: &str);
+    /// The same, narrowed to ONE tab (`tab close`): the task's other
+    /// agents keep running, so their attach sessions must not be told
+    /// anything.
+    fn notify_tab_detach(&self, task_id: &str, tab_id: &str, reason: &str);
+    /// Stop one tab's agent PTY and guarantee it is gone: SIGTERM, a
+    /// short grace, then SIGKILL. Returns the victim count. Called AFTER
+    /// the webview drops the tab, as the termination guarantee over its
+    /// fire-and-forget kill; see `crate::stop_tab_ptys` for why running
+    /// it first is the wrong order.
+    fn stop_tab_ptys(&self, task_id: &str, tab_id: &str) -> u32;
     /// The user's home directory (session transcripts live under it).
     fn home_dir(&self) -> Option<PathBuf>;
 }
@@ -698,7 +712,17 @@ pub(crate) fn handle_request(req: &Request, host: &dyn CliHost, sink: &mut dyn E
             )
         }
         Command::Agents => handle_agents(req, host),
+        Command::Prompts { .. } => handle_prompts(req, host),
         Command::Tab { .. } => handle_tab(req, host, sink),
+        Command::TabClose { task, project, tab, yes, cwd } => handle_tab_close(
+            &req.id,
+            host,
+            task.as_deref(),
+            project.as_deref(),
+            tab,
+            *yes,
+            cwd.as_deref(),
+        ),
         Command::Archive { task, project } => {
             handle_archive(&req.id, host, task, project.as_deref())
         }
@@ -922,6 +946,7 @@ fn handle_new(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Re
     let Command::New {
         name,
         prompt,
+        prompt_ref,
         agent,
         mode,
         base,
@@ -970,7 +995,8 @@ fn handle_new(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Re
         return fail(ErrorCode::BadRequest, "the task name is empty".into());
     }
     // An empty prompt would mint a prompt id nothing ever reports on
-    // and burn the whole delivery timeout under --wait.
+    // and burn the whole delivery timeout under --wait. (`-P` resolves
+    // further down, after the cheap validations.)
     let prompt = prompt.as_ref().filter(|p| !p.trim().is_empty());
 
     let (projects, tasks) = host.projects_tasks();
@@ -1099,6 +1125,20 @@ fn handle_new(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Re
         }
         Some(_) => {}
     }
+
+    // `-P` resolves against the LIVE prompt library AFTER the cheap
+    // local validations (the handle_tab ordering: a doomed request must
+    // not pay a webview round-trip, and error precedence should not
+    // diverge between the verbs) and BEFORE the task is created (fail
+    // fast: a bad selector must not leave a task behind).
+    let prompt: Option<String> = match prompt_ref.as_deref() {
+        Some(sel) => match resolve_prompt_ref(host, sel, prompt.map(String::as_str)) {
+            Ok(p) => Some(p),
+            Err(e) => return Reply { id: id.clone(), ok: false, data: None, error: Some(e) },
+        },
+        None => prompt.cloned(),
+    };
+    let prompt = prompt.as_ref();
 
     // Register delivery interest BEFORE the webview learns the id, so a
     // fast report can never race past us.
@@ -1719,13 +1759,14 @@ fn parse_send_error(e: &str) -> (ErrorCode, String) {
 }
 
 fn handle_send(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Reply {
-    let Command::Send { task, project, prompt, resume, fresh, wait, timeout_ms, tab, cwd } =
-        &req.cmd
+    let Command::Send {
+        task, project, prompt, prompt_ref, resume, fresh, wait, timeout_ms, tab, cwd,
+    } = &req.cmd
     else {
         unreachable!("handle_send called with a non-send command")
     };
     let id = &req.id;
-    if prompt.trim().is_empty() {
+    if prompt.trim().is_empty() && prompt_ref.is_none() {
         return Reply::err(id, ErrorCode::BadRequest, "the prompt is empty");
     }
     // clap guards this in the shipped CLI; the wire guard keeps a
@@ -1754,6 +1795,18 @@ fn handle_send(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> R
     let target = match tab.as_deref().map(|sel| resolve_tab_selector(host, &t, sel)).transpose() {
         Ok(rt) => rt,
         Err(e) => return Reply { id: id.clone(), ok: false, data: None, error: Some(e) },
+    };
+
+    // `-P` resolves against the live prompt library BEFORE anything is
+    // delivered or respawned (the handle_new fail-fast rule).
+    let prompt: String = match prompt_ref.as_deref() {
+        Some(sel) => {
+            match resolve_prompt_ref(host, sel, Some(prompt.as_str())) {
+                Ok(p) => p,
+                Err(e) => return Reply { id: id.clone(), ok: false, data: None, error: Some(e) },
+            }
+        }
+        None => prompt.clone(),
     };
 
     // Register delivery interest BEFORE the webview learns the id (the
@@ -2184,6 +2237,227 @@ fn handle_agents(req: &Request, host: &dyn CliHost) -> Reply {
     Reply::ok(id, ReplyData::Agents(proto::AgentsData { agents }))
 }
 
+// ───────────────────────── prompt library (Phase 4) ──────────────────
+
+/// One prompt as the webview's `list_prompts` RPC reports it: the live
+/// store's computed view (overrides applied, deleted builtins absent,
+/// disabled ones present with `enabled: false`).
+#[derive(Debug, Clone, serde::Deserialize)]
+struct PromptInfo {
+    id: String,
+    title: String,
+    /// Empty when the RPC was asked for `bodies: false` (the list path,
+    /// which discards them anyway); never resolve `-P` against such a
+    /// fetch.
+    body: String,
+    builtin: bool,
+    enabled: bool,
+    modified: bool,
+}
+
+/// The `list_prompts` reply envelope. Deserializing the whole value
+/// (rather than cloning a sub-array out of it) also makes a missing
+/// `prompts` key fail loudly via serde, never read as an empty library.
+#[derive(serde::Deserialize)]
+struct ListPromptsReply {
+    prompts: Vec<PromptInfo>,
+}
+
+/// The live prompt library, read from the webview AT REQUEST TIME. This
+/// is the design, not a convenience: resolving against the store means
+/// user overrides/renames/deletions are always current and unedited
+/// builtins keep tracking shipped defaults (docs/plans/cli.md, Phase 4).
+/// `bodies: false` skips the body payload (~16 KB of builtins alone)
+/// for the list path, which never uses it.
+fn fetch_prompts(host: &dyn CliHost, bodies: bool) -> Result<Vec<PromptInfo>, String> {
+    let value = host.rpc("list_prompts", serde_json::json!({ "bodies": bodies }), OPEN_TIMEOUT)?;
+    serde_json::from_value::<ListPromptsReply>(value)
+        .map(|r| r.prompts)
+        .map_err(|e| format!("bad list_prompts reply: {e}"))
+}
+
+/// Titles are user-authored with NO length cap in Settings, and reply
+/// lines cap at MAX_LINE_BYTES post-escape: clip them for the wire so
+/// one pasted-document title (or a large library of them) cannot break
+/// the connection. Rows are otherwise bounded (ids are builtin slugs or
+/// UUIDs, flags are fixed).
+fn clip_title(s: &str) -> String {
+    const TITLE_BUDGET: usize = 2 * 1024;
+    let (kept, cut) = proto::json_budget_prefix(s, TITLE_BUDGET);
+    if cut { format!("{kept}...") } else { s.to_string() }
+}
+
+/// Resolve a `-P/--library` selector, mirroring resolve_tab_selector's
+/// identity philosophy: the stable id is the identity (`builtin:review`,
+/// a custom prompt's UUID), the title a case-insensitive convenience.
+/// Deleted builtins are simply absent from the list; DISABLED prompts
+/// resolve (disabled = hidden from the dropdown, not dead). Documented
+/// contract: pin ids in scripts, use titles interactively.
+fn resolve_prompt_selector<'a>(
+    prompts: &'a [PromptInfo],
+    selector: &str,
+) -> Result<&'a PromptInfo, proto::ErrorBody> {
+    let err = |code: ErrorCode, message: String| proto::ErrorBody { code, message, data: None };
+    // Trim once and match on the trimmed form: shell quoting and
+    // copy-paste routinely add stray whitespace, and matching the raw
+    // string would turn `-P "builtin:review "` into a NotFound for a
+    // prompt that exists.
+    let selector = selector.trim();
+    // The shipped CLI pre-rejects an empty selector, but the wire is a
+    // public surface of its own (handle_send's rule): without this, ""
+    // title-matches the unnamed placeholder prompts the GUI's "New
+    // prompt" button persists.
+    if selector.is_empty() {
+        return Err(err(ErrorCode::BadRequest, "the prompt selector is empty".into()));
+    }
+    // 1. The identity itself.
+    if let Some(p) = prompts.iter().find(|p| p.id == selector) {
+        return Ok(p);
+    }
+    // 2. Exact title, case-insensitive.
+    let sel = selector.to_lowercase();
+    let matches: Vec<&PromptInfo> =
+        prompts.iter().filter(|p| p.title.to_lowercase() == sel).collect();
+    match matches.as_slice() {
+        [] => Err(err(
+            ErrorCode::NotFound,
+            format!("no prompt matches \"{selector}\"; see `termic prompts` for the library"),
+        )),
+        [one] => Ok(one),
+        many => Err(err(
+            ErrorCode::Ambiguous,
+            format!(
+                "\"{}\" matches more than one prompt: {}; use the id",
+                clip_title(selector),
+                many.iter()
+                    .map(|p| format!("{} (id {})", clip_title(&p.title), p.id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )),
+    }
+}
+
+/// Fold a resolved library body and the literal `-p` text into one
+/// prompt: the body, one blank line, then the text. The blank line is
+/// contract (documented composition), so BOTH edges of the seam are
+/// normalized: all trailing whitespace on the body (a body ending in a
+/// whitespace-only line is trivially produced by the Settings
+/// textarea), and all leading whitespace on the text (piped stdin
+/// often opens with blank lines, and `-p -` is the flagship handoff
+/// input).
+fn compose_prompt(body: &str, literal: Option<&str>) -> String {
+    let body = body.trim_end();
+    match literal {
+        Some(text) if !text.trim().is_empty() => format!("{body}\n\n{}", text.trim_start()),
+        _ => body.to_string(),
+    }
+}
+
+/// Resolve `prompt_ref` into the effective prompt for new/send/tab.
+/// Called BEFORE any task or tab is created (fail fast: a bad selector
+/// must not leave a task behind, docs/plans/cli.md Phase 4).
+fn resolve_prompt_ref(
+    host: &dyn CliHost,
+    selector: &str,
+    literal: Option<&str>,
+) -> Result<String, proto::ErrorBody> {
+    let prompts = fetch_prompts(host, true)
+        .map_err(|e| proto::ErrorBody { code: ErrorCode::Internal, message: e, data: None })?;
+    let p = resolve_prompt_selector(&prompts, selector)?;
+    // Refuse an empty BODY outright, even when `-p` text would survive
+    // composition: firing an empty library prompt is a mistake worth
+    // naming, and silently delivering just the text (with a junk
+    // leading blank line) would hide it. Alone, an empty prompt would
+    // also mint a delivery id nothing ever reports on (the `-p` rule).
+    if p.body.trim().is_empty() {
+        return Err(proto::ErrorBody {
+            code: ErrorCode::Unsupported,
+            message: format!("prompt \"{}\" ({}) has an empty body", clip_title(&p.title), p.id),
+            data: None,
+        });
+    }
+    let composed = compose_prompt(&p.body, literal);
+    // Mirror the CLI's PROMPT_MAX_BYTES gate: `-P` substitutes the body
+    // server-side AFTER that gate ran on the literal alone, so routing
+    // text through the library must not become a bypass of the limit.
+    const COMPOSED_PROMPT_MAX_BYTES: usize = 900 * 1024;
+    if proto::json_escaped_len(&composed) > COMPOSED_PROMPT_MAX_BYTES {
+        return Err(proto::ErrorBody {
+            code: ErrorCode::Unsupported,
+            message: format!(
+                "the composed prompt is too large (limit {} KB once encoded; control characters count sixfold)",
+                COMPOSED_PROMPT_MAX_BYTES / 1024
+            ),
+            data: None,
+        });
+    }
+    Ok(composed)
+}
+
+/// `termic prompts [show <sel>]`: list the library, or resolve one
+/// selector and include its body. Read-only; the sandbox posture is
+/// unchanged (caged agents get no CLI surface, listing included).
+fn handle_prompts(req: &Request, host: &dyn CliHost) -> Reply {
+    let Command::Prompts { selector } = &req.cmd else {
+        unreachable!("handle_prompts called with a non-prompts command")
+    };
+    let id = &req.id;
+    // The list form never uses bodies, so it does not fetch them.
+    let prompts = match fetch_prompts(host, selector.is_some()) {
+        Ok(p) => p,
+        Err(e) => return Reply::err(id, ErrorCode::Internal, &e),
+    };
+    let entry = |p: &PromptInfo, with_body: bool| {
+        // Reply lines cap at MAX_LINE_BYTES post-escape (the logs/diff
+        // rule), so a pasted-a-whole-spec body is trimmed. NO marker
+        // text inside the body: `show` pipes into agents, and a marker
+        // would arrive as instructions. The `truncated` flag carries
+        // the fact; the CLI warns on stderr.
+        let (body, truncated) = if with_body {
+            const BODY_BUDGET: usize = 850 * 1024;
+            let (kept, cut) = proto::json_budget_prefix(&p.body, BODY_BUDGET);
+            (Some(kept.to_string()), cut)
+        } else {
+            (None, false)
+        };
+        proto::PromptEntry {
+            id: p.id.clone(),
+            title: clip_title(&p.title),
+            builtin: p.builtin,
+            enabled: p.enabled,
+            modified: p.modified,
+            body,
+            truncated,
+        }
+    };
+    match selector {
+        None => Reply::ok(
+            id,
+            ReplyData::Prompts(proto::PromptsData {
+                prompts: prompts.iter().map(|p| entry(p, false)).collect(),
+            }),
+        ),
+        Some(sel) => match resolve_prompt_selector(&prompts, sel) {
+            // An empty body refuses HERE too, not just under `-P`: the
+            // documented `show <sel> | send -p -` pipe would otherwise
+            // print nothing, exit 0, and fail downstream with a
+            // misleading stdin error. Empty prompts genuinely exist
+            // (the GUI's "New prompt" persists {title:"", body:""}).
+            Ok(p) if p.body.trim().is_empty() => Reply::err(
+                id,
+                ErrorCode::Unsupported,
+                format!("prompt \"{}\" ({}) has an empty body", clip_title(&p.title), p.id),
+            ),
+            Ok(p) => Reply::ok(
+                id,
+                ReplyData::Prompts(proto::PromptsData { prompts: vec![entry(p, true)] }),
+            ),
+            Err(e) => Reply { id: id.clone(), ok: false, data: None, error: Some(e) },
+        },
+    }
+}
+
 /// `termic tab` (GH #138). Tab creation lives in the webview (the store owns
 /// the tab list and TerminalPane spawns the PTY from it), so this resolves the
 /// task here and hands the rest to `new_tab`, which owns registry validation:
@@ -2195,10 +2469,15 @@ fn handle_agents(req: &Request, host: &dyn CliHost) -> Reply {
 /// the spawn-pending rule, i.e. exactly what `send` to a respawned agent
 /// does, so delivery stays confirmed (docs/plans/cli.md, Phase 1).
 fn handle_tab(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Reply {
-    let Command::Tab { task, project, kind, prompt, wait, timeout_ms, resume, cwd } = &req.cmd
+    let Command::Tab { task, project, kind, prompt, prompt_ref, wait, timeout_ms, resume, cwd } =
+        &req.cmd
     else {
         unreachable!("handle_tab called with a non-tab command")
     };
+    // Everything below treats "-p or -P present" as "a prompt rides
+    // this tab"; the composed text is resolved right before the tab is
+    // opened, after the cheap validations.
+    let has_prompt = prompt.is_some() || prompt_ref.is_some();
     let id = &req.id;
     if resume.is_some() {
         // A session id only means something to a NAMED agent tab: shell /
@@ -2231,9 +2510,11 @@ fn handle_tab(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Re
         }
     }
     if let Some(p) = prompt {
-        if p.trim().is_empty() {
+        if p.trim().is_empty() && prompt_ref.is_none() {
             return Reply::err(id, ErrorCode::BadRequest, "the prompt is empty");
         }
+    }
+    if has_prompt {
         // A prompt needs an agent on the other end. Shell and terminal
         // kinds provably are not; Default is checked below once the task
         // is known (its cli decides), and the webview still has the
@@ -2246,7 +2527,7 @@ fn handle_tab(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Re
             );
         }
     }
-    if *wait && prompt.is_none() {
+    if *wait && !has_prompt {
         return Reply::err(id, ErrorCode::BadRequest, "--wait needs a prompt to wait on");
     }
     let (projects, tasks) = host.projects_tasks();
@@ -2260,7 +2541,7 @@ fn handle_tab(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Re
         Ok(t) => t.clone(),
         Err(e) => return Reply::err(id, e.code, &e.message),
     };
-    if prompt.is_some() && matches!(kind, proto::TabKind::Default) {
+    if has_prompt && matches!(kind, proto::TabKind::Default) {
         let non_agent = t.cli == "shell"
             || t.cli == "custom"
             || host.agents().iter().any(|a| a.id == t.cli && a.kind == "terminal");
@@ -2272,6 +2553,16 @@ fn handle_tab(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Re
             );
         }
     }
+
+    // `-P` resolves BEFORE the tab is opened (fail fast: a bad selector
+    // must not leave an empty tab behind, the handle_new rule).
+    let prompt: Option<String> = match prompt_ref.as_deref() {
+        Some(sel) => match resolve_prompt_ref(host, sel, prompt.as_deref()) {
+            Ok(p) => Some(p),
+            Err(e) => return Reply { id: id.clone(), ok: false, data: None, error: Some(e) },
+        },
+        None => prompt.clone(),
+    };
 
     let (kind_str, agent_id) = match kind {
         proto::TabKind::Agent { id } => ("agent", Some(id.clone())),
@@ -2420,6 +2711,128 @@ fn handle_tab(req: &Request, host: &dyn CliHost, sink: &mut dyn EventSink) -> Re
             Reply { id: id.clone(), ok: false, data: None, error: Some(e) }
         }
     }
+}
+
+// ─────────────────────────── tab close ───────────────────────────────
+
+/// Domain failures from the `close_tab` webview handler, same sentinel
+/// scheme as `parse_send_error`. The webview owns the STORE's view of the
+/// strip, which can differ from the resolver's cache by a beat, so its
+/// refusals need real codes rather than a flattened Internal.
+fn parse_tab_close_error(e: &str) -> (ErrorCode, String) {
+    let Some(rest) = e.strip_prefix("cli_tab_close:") else {
+        return (ErrorCode::Internal, format!("could not close the tab ({e})"));
+    };
+    let (code, msg) = rest.split_once(':').unwrap_or(("", rest));
+    let code = match code {
+        // The store's strip no longer has it: the resolver's cache
+        // trailed a tab that closed underneath us.
+        "unknown_tab" => ErrorCode::NotFound,
+        "task_stopped" | "not_closable" => ErrorCode::Unsupported,
+        _ => ErrorCode::Internal,
+    };
+    (code, msg.trim().to_string())
+}
+
+/// `termic tab close`: the GUI's × as a verb (GH #185).
+///
+/// Ordered like `archive`, for the same reason: attached clients get the
+/// in-band reason BEFORE the signal turns their stream into a bare
+/// disconnect, and the PTY is gone before the webview drops the tab, so
+/// the store can never hand a live pty id to a tab that no longer exists.
+/// Unlike archive this is scoped to one tab, which is the entire point:
+/// an orchestrator cleaning up the tabs it opened must not take down the
+/// session it is driving from.
+fn handle_tab_close(
+    id: &str,
+    host: &dyn CliHost,
+    task: Option<&str>,
+    project: Option<&str>,
+    tab: &str,
+    yes: bool,
+    cwd: Option<&str>,
+) -> Reply {
+    let (projects, tasks) = host.projects_tasks();
+    let t = match resolve_task_arg(&projects, &tasks, task, project, cwd) {
+        Ok(t) => t.clone(),
+        Err(e) => return Reply { id: id.into(), ok: false, data: None, error: Some(e) },
+    };
+    // AnyStripTab, unlike every other tab-targeting verb: closing is not
+    // driving, and `termic tab --shell` can OPEN a shell tab, so refusing
+    // to close one would leave exactly the litter this verb is for.
+    let rt = match resolve_tab_selector_with(host, &t, tab, TabReach::AnyStripTab) {
+        Ok(rt) => rt,
+        Err(e) => return Reply { id: id.into(), ok: false, data: None, error: Some(e) },
+    };
+    // The default tab is what every UNQUALIFIED send/wait/attach/logs
+    // resolves to, so closing it silently changes what the caller's other
+    // commands are talking to. Guarded regardless of whether its agent is
+    // still live: an exited default tab is still the resolution target,
+    // and it is DURABLE (the task brings it back on reopen), so "it looked
+    // dead" is not evidence that closing it is free.
+    if rt.is_default && !yes {
+        return Reply::err(
+            id,
+            ErrorCode::Unsupported,
+            format!(
+                "tab {} is this task's default tab, the one an unqualified `send`/`wait`/`attach` resolves to; pass --yes to close it anyway",
+                rt.id
+            ),
+        );
+    }
+    host.notify_tab_detach(&t.id, &rt.id, "closed");
+    // Closing the LAST strip tab puts the whole task to sleep: the
+    // webview unmounts its TaskView, which takes the aux shell and any
+    // split-pane agent down with it. Those carry their own attach
+    // sessions and are NOT covered by the per-tab notify above, so they
+    // would get a bare disconnect. Tell the task at large in that one
+    // case, the same reason archive does it unconditionally.
+    if rt.strip_len == 1 {
+        host.notify_detach(&t.id, "closed");
+    }
+    // The webview drops the tab FIRST, and only then does anything die.
+    //
+    // The reverse (stop the PTY, then close) leaves TerminalPane MOUNTED
+    // over a dying agent, and its exit handler treats that as the agent
+    // quitting on its own: it raises an "agent exited" attention (a
+    // desktop notification, since a CLI caller is by definition not
+    // watching), and inside RESUME_FAILURE_MS of a resume it takes the
+    // failed-resume branch and clears the tab's session id on disk. That
+    // last one is perverse, it destroys exactly the session pointer a
+    // graceful stop is meant to protect. Dropping the tab first unmounts
+    // the pane, so the exit is nobody's business, which is precisely why
+    // the GUI's close button has never had the problem.
+    let value = match host.rpc(
+        "close_tab",
+        serde_json::json!({ "taskId": t.id, "tabId": rt.id }),
+        CLOSE_TAB_TIMEOUT,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            let (code, msg) = parse_tab_close_error(&e);
+            return Reply::err(id, code, msg);
+        }
+    };
+    // The webview's own kill is fire-and-forget, so sweep after it: this
+    // is what makes termination a GUARANTEE rather than a hope by the
+    // time we report success. Normally finds nothing (the pane's unmount
+    // already killed it), and only agent tabs carry the PtyRole it
+    // resolves, so for the rest the webview's report below is the only
+    // account of whether a process was running.
+    let killed = host.stop_tab_ptys(&t.id, &rt.id);
+    let webview_killed = value.get("killedPty").and_then(|v| v.as_bool()).unwrap_or(false);
+    Reply::ok(
+        id,
+        ReplyData::TabClose(proto::TabCloseData {
+            task_id: t.id,
+            tab_id: rt.id,
+            cli: rt.cli,
+            title: rt.title,
+            tab_kind: rt.kind,
+            was_default: rt.is_default,
+            killed_pty: killed > 0 || webview_killed,
+        }),
+    )
 }
 
 // ───────────────────────────── archive ───────────────────────────────
@@ -3086,6 +3499,12 @@ impl CliHost for TauriHost {
     fn notify_detach(&self, task_id: &str, reason: &str) {
         crate::notify_task_detach(&self.app.state::<crate::PtyManager>(), task_id, reason);
     }
+    fn notify_tab_detach(&self, task_id: &str, tab_id: &str, reason: &str) {
+        crate::notify_tab_detach(&self.app.state::<crate::PtyManager>(), task_id, tab_id, reason);
+    }
+    fn stop_tab_ptys(&self, task_id: &str, tab_id: &str) -> u32 {
+        crate::stop_tab_ptys(&self.app.state::<crate::PtyManager>(), task_id, tab_id) as u32
+    }
     fn home_dir(&self) -> Option<PathBuf> {
         dirs::home_dir()
     }
@@ -3317,10 +3736,43 @@ pub(crate) fn cached_tab_states(
 // ───────────────────── tab selectors (GH #138 part 2) ────────────────
 
 /// A `--tab` selector, resolved to a strip tab's stable id (what
-/// `PtyRole.tab_id` carries).
+/// `PtyRole.tab_id` carries), plus what the resolver already knew about
+/// it. The extra fields are captured HERE rather than re-read later so a
+/// caller acting on the tab (`tab close`) cannot have the snapshot shift
+/// underneath it between resolving and deciding.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedTab {
     pub id: String,
+    /// Resolved cli id ("claude", "codex", ...).
+    pub cli: String,
+    /// Display title the GUI gave it (agent-authored, mutable).
+    pub title: String,
+    /// The tab an unqualified `send`/`wait`/`attach`/`logs` resolves to.
+    pub is_default: bool,
+    /// "agent" | "shell" | "terminal" | "run". Only agent tabs carry a
+    /// `PtyRole`, so only they can be stopped by id from the Rust side.
+    pub kind: String,
+    /// How many tabs the strip held at resolve time, or 0 when there was
+    /// no live snapshot to count. `tab close` reads it to notice that it
+    /// is about to close the LAST one, which puts the whole task to
+    /// sleep and takes the aux shell and split panes with it.
+    pub strip_len: usize,
+}
+
+/// Which tabs a selector is allowed to reach.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum TabReach {
+    /// Agent tabs only: everything that DRIVES a tab (send / wait /
+    /// attach / logs) needs a `PtyRole` and a settle signal, and putting
+    /// an uncaged shell on the control socket where it can be driven
+    /// remotely is the thing the write-only rule exists to prevent.
+    AgentsOnly,
+    /// Any strip tab. For `tab close` (GH #185): closing is not driving.
+    /// Nothing goes into the PTY and nothing comes out of it, so the
+    /// write-only rule has nothing to say about it, and the CLI can open
+    /// shell and custom-terminal tabs (`termic tab --shell`), so refusing
+    /// to close them would leave exactly the litter #185 is about.
+    AnyStripTab,
 }
 
 /// Resolve `--tab <n|id|title>` against the task's strip, from the
@@ -3328,18 +3780,25 @@ pub(crate) struct ResolvedTab {
 /// (docs/plans/cli.md, GH #138): the tab id IS the identity, so an
 /// exact id match wins; a 1-based index and a case-insensitive
 /// title/cli match are human conveniences resolving to it. Ambiguity
-/// is an error listing the candidates, never a guess. Only AGENT tabs
-/// resolve: everything a selector feeds (send/wait/attach/logs) can
-/// only reach a tab with a PtyRole and a settle signal; shell and
-/// terminal tabs are write-only from the CLI by design.
+/// is an error listing the candidates, never a guess. `reach` decides
+/// whether non-agent tabs resolve; see `TabReach`.
 fn resolve_tab_selector(
     host: &dyn CliHost,
     task: &Task,
     selector: &str,
 ) -> Result<ResolvedTab, proto::ErrorBody> {
+    resolve_tab_selector_with(host, task, selector, TabReach::AgentsOnly)
+}
+
+fn resolve_tab_selector_with(
+    host: &dyn CliHost,
+    task: &Task,
+    selector: &str,
+    reach: TabReach,
+) -> Result<ResolvedTab, proto::ErrorBody> {
     let err = |code: ErrorCode, message: String| proto::ErrorBody { code, message, data: None };
-    let gate = |index: u32, t: &TabAgentState| -> Result<ResolvedTab, proto::ErrorBody> {
-        if t.kind != "agent" {
+    let gate = |index: u32, t: &TabAgentState, strip_len: usize| -> Result<ResolvedTab, proto::ErrorBody> {
+        if reach == TabReach::AgentsOnly && t.kind != "agent" {
             return Err(err(
                 ErrorCode::Unsupported,
                 format!(
@@ -3348,7 +3807,14 @@ fn resolve_tab_selector(
                 ),
             ));
         }
-        Ok(ResolvedTab { id: t.id.clone() })
+        Ok(ResolvedTab {
+            id: t.id.clone(),
+            cli: t.cli.clone(),
+            title: t.title.clone(),
+            is_default: t.is_default,
+            kind: t.kind.clone(),
+            strip_len,
+        })
     };
 
     let snap = host.agent_cache().snapshot();
@@ -3376,13 +3842,37 @@ fn resolve_tab_selector(
                 || pt.cli == "shell"
                 || pt.run_member.is_some()
                 || host.agents().iter().any(|a| a.id == pt.cli && a.kind == "terminal");
-            if terminal_kind {
+            if terminal_kind && reach == TabReach::AgentsOnly {
                 return Err(err(
                     ErrorCode::Unsupported,
                     "that tab is not an agent tab; only agent tabs are reachable, the rest are write-only from the CLI".into(),
                 ));
             }
-            return Ok(ResolvedTab { id: pt.id.clone() });
+            return Ok(ResolvedTab {
+                id: pt.id.clone(),
+                cli: pt.cli.clone(),
+                // The durable record's label, falling back to the cli id
+                // the way the strip does before an agent titles itself.
+                title: pt.title.clone().unwrap_or_else(|| pt.cli.clone()),
+                is_default: pt.is_default,
+                // The durable record has no kind field, so reconstruct
+                // the SAME four values the live snapshot reports
+                // (cliAgentState.ts computeTabState). Collapsing every
+                // non-agent to "terminal" would make the two resolution
+                // paths disagree about the same tab, and `tab_kind` is a
+                // documented four-value contract a script can branch on.
+                kind: if pt.run_member.is_some() {
+                    "run".into()
+                } else if pt.cli == "shell" {
+                    "shell".into()
+                } else if terminal_kind {
+                    "terminal".into()
+                } else {
+                    "agent".into()
+                },
+                // No live strip to count.
+                strip_len: 0,
+            });
         }
         return Err(err(
             ErrorCode::Internal,
@@ -3392,7 +3882,7 @@ fn resolve_tab_selector(
 
     // 1. The identity itself.
     if let Some((i, t)) = tabs.iter().enumerate().find(|(_, t)| t.id == selector) {
-        return gate(i as u32 + 1, t);
+        return gate(i as u32 + 1, t, tabs.len());
     }
     // 2. A 1-based strip index (`status` prints the same numbering).
     if let Ok(n) = selector.parse::<usize>() {
@@ -3406,7 +3896,7 @@ fn resolve_tab_selector(
                 ),
             ));
         }
-        return gate(n as u32, &tabs[n - 1]);
+        return gate(n as u32, &tabs[n - 1], tabs.len());
     }
     // 3. Title or cli id, case-insensitive. Titles are agent-authored
     // and drift mid-turn, so they are a convenience, not the identity.
@@ -3428,7 +3918,7 @@ fn resolve_tab_selector(
                     .join(", ")
             ),
         )),
-        [(i, t)] => gate(*i as u32 + 1, t),
+        [(i, t)] => gate(*i as u32 + 1, t, tabs.len()),
         many => Err(err(
             ErrorCode::Ambiguous,
             format!(
@@ -4240,6 +4730,22 @@ mod tests {
         fn notify_detach(&self, task_id: &str, reason: &str) {
             self.ops.lock().unwrap().push(format!("detach:{task_id}:{reason}"));
         }
+        fn notify_tab_detach(&self, task_id: &str, tab_id: &str, reason: &str) {
+            self.ops.lock().unwrap().push(format!("tab_detach:{task_id}:{tab_id}:{reason}"));
+        }
+        fn stop_tab_ptys(&self, task_id: &str, tab_id: &str) -> u32 {
+            self.ops.lock().unwrap().push(format!("stop_tab:{task_id}:{tab_id}"));
+            // Removing it models the PTY actually going away, so a second
+            // close of the same tab reports killed_pty: false the way
+            // the real host would.
+            let gone = self
+                .tab_ptys
+                .lock()
+                .unwrap()
+                .remove(&(task_id.to_string(), tab_id.to_string()))
+                .is_some();
+            u32::from(gone)
+        }
         fn home_dir(&self) -> Option<PathBuf> {
             self.home.clone()
         }
@@ -4626,6 +5132,7 @@ mod tests {
         Command::New {
             name: name.into(),
             prompt: None,
+            prompt_ref: None,
             agent: None,
             mode: None,
             base: None,
@@ -4943,6 +5450,7 @@ mod tests {
             project: None,
             kind,
             prompt: None,
+            prompt_ref: None,
             wait: false,
             timeout_ms: None,
             resume: None,
@@ -6131,6 +6639,325 @@ mod tests {
         host.tasks.iter().find(|t| t.id == "w3").unwrap().clone()
     }
 
+    // ── tab close (GH #185) ──────────────────────────────────────────
+
+    fn close_req(tab: &str, yes: bool) -> Request {
+        req(
+            Command::TabClose {
+                task: Some("w3".into()),
+                project: None,
+                tab: tab.into(),
+                yes,
+                cwd: None,
+            },
+            Some("tok"),
+        )
+    }
+
+    /// A strip whose close RPC succeeds, with a live PTY on the secondary
+    /// agent tab so `killed_pty` has something to report.
+    fn close_host() -> StubHost {
+        let host = StubHost::default();
+        seed_strip(&host);
+        host.rpc_results
+            .lock()
+            .unwrap()
+            .insert("close_tab".into(), Ok(serde_json::json!({})));
+        host.tab_ptys
+            .lock()
+            .unwrap()
+            .insert(("w3".into(), "tab-b".into()), "pty-b".into());
+        host
+    }
+
+    #[test]
+    fn tab_close_drops_the_tab_then_stops_the_pty() {
+        let host = close_host();
+        let reply = handle(&close_req("2", false), &host);
+        assert!(reply.ok, "{:?}", reply.error);
+        match reply.data {
+            Some(ReplyData::TabClose(c)) => {
+                assert_eq!(c.tab_id, "tab-b");
+                assert_eq!(c.cli, "codex");
+                // The label comes from the resolver's snapshot, so the
+                // reply names the tab as the GUI showed it.
+                assert_eq!(c.title, "fixing tests");
+                assert!(!c.was_default);
+                assert!(c.killed_pty);
+            }
+            other => panic!("expected tab_close, got {other:?}"),
+        }
+        // ORDER is the contract. Detach first, the archive rule: an
+        // attached client learns why before its stream goes quiet.
+        //
+        // Then CLOSE, and only then stop. The reverse leaves TerminalPane
+        // mounted over a dying agent, and its exit handler reads that as
+        // the agent quitting by itself: it raises an "agent exited"
+        // desktop notification at a caller who is by definition not
+        // watching, and within RESUME_FAILURE_MS of a resume it clears
+        // the tab's session id on disk, destroying the very pointer the
+        // graceful stop exists to protect. The sweep still runs last so
+        // termination is guaranteed by the time we answer.
+        assert_eq!(
+            *host.ops.lock().unwrap(),
+            vec!["tab_detach:w3:tab-b:closed", "rpc:close_tab", "stop_tab:w3:tab-b"],
+        );
+        let calls = host.rpc_calls.lock().unwrap();
+        let (_, params) = calls.iter().find(|(m, _)| m == "close_tab").expect("close_tab called");
+        assert_eq!(params["taskId"], "w3");
+        assert_eq!(params["tabId"], "tab-b");
+    }
+
+    #[test]
+    fn tab_close_reaches_a_tab_by_every_selector_shape() {
+        // Same resolution as send/wait/attach/logs; a caller must not
+        // have to learn a second addressing scheme to clean up.
+        for sel in ["tab-b", "2", "fixing tests", "CODEX"] {
+            let host = close_host();
+            let reply = handle(&close_req(sel, false), &host);
+            assert!(reply.ok, "selector {sel:?}: {:?}", reply.error);
+            match reply.data {
+                Some(ReplyData::TabClose(c)) => assert_eq!(c.tab_id, "tab-b", "selector {sel:?}"),
+                other => panic!("selector {sel:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn tab_close_refuses_the_default_tab_without_yes() {
+        let host = close_host();
+        let reply = handle(&close_req("1", false), &host);
+        assert!(!reply.ok);
+        let e = reply.error.expect("refused");
+        assert_eq!(e.code, ErrorCode::Unsupported);
+        assert!(e.message.contains("default tab"), "{}", e.message);
+        assert!(e.message.contains("--yes"), "{}", e.message);
+        // A refusal must not have killed anything on the way to saying no.
+        assert!(host.ops.lock().unwrap().is_empty(), "{:?}", host.ops.lock().unwrap());
+    }
+
+    #[test]
+    fn tab_close_yes_takes_the_default_tab_and_says_it_comes_back() {
+        let host = close_host();
+        let reply = handle(&close_req("1", true), &host);
+        assert!(reply.ok, "{:?}", reply.error);
+        match reply.data {
+            Some(ReplyData::TabClose(c)) => {
+                assert_eq!(c.tab_id, "tab-a");
+                assert!(c.was_default, "the caller has to know this one is durable");
+                // No PTY was seeded for tab-a: an agent that was not
+                // running must not be reported as stopped.
+                assert!(!c.killed_pty);
+            }
+            other => panic!("expected tab_close, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tab_close_guards_the_default_tab_whose_agent_already_exited() {
+        // The guard is about what unqualified verbs RESOLVE to, not about
+        // liveness: an exited default tab is still the resolution target,
+        // and it is still durable.
+        let host = StubHost::default();
+        push_tabs(
+            &host,
+            "w3",
+            "idle",
+            vec![tab_state("tab-a", "agent", "claude", "claude", Some("idle"), false, true)],
+        );
+        host.rpc_results
+            .lock()
+            .unwrap()
+            .insert("close_tab".into(), Ok(serde_json::json!({})));
+        let reply = handle(&close_req("1", false), &host);
+        assert!(!reply.ok, "a dead default tab is still guarded");
+        assert_eq!(reply.error.unwrap().code, ErrorCode::Unsupported);
+    }
+
+    #[test]
+    fn tab_close_reaches_a_shell_tab_that_no_other_verb_can() {
+        // The one verb that is NOT bound by the write-only rule: closing
+        // is not driving, and `termic tab --shell` can open one of these,
+        // so refusing to close it would leave the litter #185 is about.
+        let host = close_host();
+        // No PtyRole on a shell tab, so the server finds no victim and
+        // the WEBVIEW is the only side that knows a process died.
+        host.rpc_results
+            .lock()
+            .unwrap()
+            .insert("close_tab".into(), Ok(serde_json::json!({ "killedPty": true })));
+        let reply = handle(&close_req("3", false), &host);
+        assert!(reply.ok, "{:?}", reply.error);
+        match reply.data {
+            Some(ReplyData::TabClose(c)) => {
+                assert_eq!(c.tab_id, "tab-c");
+                assert_eq!(c.tab_kind, "shell");
+                assert!(c.killed_pty, "the webview's kill has to count");
+            }
+            other => panic!("expected tab_close, got {other:?}"),
+        }
+        // Every OTHER tab-targeting verb still refuses it.
+        let e = resolve_tab_selector(&host, &w3(&host), "3").unwrap_err();
+        assert_eq!(e.code, ErrorCode::Unsupported);
+        assert!(e.message.contains("write-only"), "{}", e.message);
+    }
+
+    #[test]
+    fn tab_close_refuses_a_selector_that_matches_nothing() {
+        let host = close_host();
+        let reply = handle(&close_req("9", false), &host);
+        assert_eq!(reply.error.expect("refused").code, ErrorCode::NotFound);
+        // Nothing was signalled on the way to saying no.
+        assert!(host.ops.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn tab_close_reports_a_webview_refusal_with_its_own_code() {
+        // The store is the authority on the strip and can disagree with
+        // the resolver's cache by a beat; its refusals keep real codes.
+        for (sentinel, want) in [
+            ("cli_tab_close:unknown_tab: that tab no longer exists", ErrorCode::NotFound),
+            ("cli_tab_close:task_stopped: task x is not open in Termic", ErrorCode::Unsupported),
+            ("cli_tab_close:not_closable: that tab lives in a split pane", ErrorCode::Unsupported),
+            ("the webview went away", ErrorCode::Internal),
+        ] {
+            let host = close_host();
+            host.rpc_results
+                .lock()
+                .unwrap()
+                .insert("close_tab".into(), Err(sentinel.into()));
+            let reply = handle(&close_req("2", false), &host);
+            let e = reply.error.expect("refused");
+            assert_eq!(e.code, want, "{sentinel}");
+            // The webview's own message passes through: it is the side
+            // that knows why, and the refusal lands BEFORE anything is
+            // stopped, so there is no half-done state to explain away.
+            assert!(!e.message.contains("stopped but"), "{}", e.message);
+            // Refused means refused, with the agent still running.
+            assert!(
+                !host.ops.lock().unwrap().iter().any(|o| o.starts_with("stop_tab")),
+                "a failed close must not have killed the agent: {:?}",
+                host.ops.lock().unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn tab_close_warns_the_whole_task_when_it_takes_the_last_tab() {
+        // Closing the last strip tab puts the TASK to sleep: the webview
+        // unmounts its TaskView and the aux shell and any split-pane
+        // agent die with it. Those carry their own attach sessions that
+        // no per-tab notify covers, so they would get a bare disconnect.
+        let host = StubHost::default();
+        push_tabs(
+            &host,
+            "w3",
+            "idle",
+            vec![tab_state("tab-a", "agent", "claude", "claude", Some("idle"), true, true)],
+        );
+        host.rpc_results
+            .lock()
+            .unwrap()
+            .insert("close_tab".into(), Ok(serde_json::json!({})));
+        let reply = handle(&close_req("1", true), &host);
+        assert!(reply.ok, "{:?}", reply.error);
+        let ops = host.ops.lock().unwrap().clone();
+        assert!(ops.contains(&"tab_detach:w3:tab-a:closed".to_string()), "{ops:?}");
+        assert!(ops.contains(&"detach:w3:closed".to_string()), "{ops:?}");
+
+        // With siblings left on the strip the task keeps running, so the
+        // task-wide notify must NOT fire: telling every attached sibling
+        // its session is ending is the blast radius this verb avoids.
+        let host = close_host();
+        let reply = handle(&close_req("2", false), &host);
+        assert!(reply.ok, "{:?}", reply.error);
+        assert!(
+            !host.ops.lock().unwrap().iter().any(|o| o.starts_with("detach:")),
+            "{:?}",
+            host.ops.lock().unwrap(),
+        );
+    }
+
+    #[test]
+    fn tab_close_degraded_path_reports_the_real_kind() {
+        // The two resolution paths must agree about tab_kind: it is a
+        // documented four-value contract, and a script branching on
+        // "shell" must not read "terminal" merely because resolution went
+        // through the persisted fallback.
+        let host = StubHost::default();
+        host.rpc_results
+            .lock()
+            .unwrap()
+            .insert("close_tab".into(), Ok(serde_json::json!({ "killedPty": true })));
+        let persisted = |id: &str, cli: &str, run: Option<&str>| crate::PersistedTab {
+            id: id.into(),
+            cli: cli.into(),
+            title: None,
+            custom_title: false,
+            is_default: false,
+            command: None,
+            session_id: None,
+            previous_session_id: None,
+            pane_leaf_id: None,
+            run_member: run.map(str::to_string),
+        };
+        let mut host = host;
+        host.tasks.iter_mut().find(|t| t.id == "w3").unwrap().persisted_tabs = vec![
+            persisted("tab-sh", "shell", None),
+            persisted("tab-run", "claude", Some("")),
+            persisted("tab-ag", "claude", None),
+        ];
+        for (sel, want) in [("tab-sh", "shell"), ("tab-run", "run"), ("tab-ag", "agent")] {
+            let reply = handle(&close_req(sel, false), &host);
+            assert!(reply.ok, "{sel}: {:?}", reply.error);
+            match reply.data {
+                Some(ReplyData::TabClose(c)) => assert_eq!(c.tab_kind, want, "{sel}"),
+                other => panic!("{sel}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn tab_close_degrades_to_an_exact_persisted_id_and_still_guards() {
+        // No snapshot: the same degraded path the selector already has,
+        // and the durable record is what answers "is this the default?".
+        let host = StubHost::default();
+        host.rpc_results
+            .lock()
+            .unwrap()
+            .insert("close_tab".into(), Ok(serde_json::json!({})));
+        let persisted = |id: &str, is_default: bool| crate::PersistedTab {
+            id: id.into(),
+            cli: "claude".into(),
+            title: None,
+            custom_title: false,
+            is_default,
+            command: None,
+            session_id: None,
+            previous_session_id: None,
+            pane_leaf_id: None,
+            run_member: None,
+        };
+        let mut host = host;
+        host.tasks.iter_mut().find(|t| t.id == "w3").unwrap().persisted_tabs =
+            vec![persisted("tab-a", true), persisted("tab-b", false)];
+
+        // The default tab is guarded even with no live snapshot at all.
+        let reply = handle(&close_req("tab-a", false), &host);
+        assert_eq!(reply.error.expect("refused").code, ErrorCode::Unsupported);
+        // A secondary one closes, labelled from the durable record.
+        let reply = handle(&close_req("tab-b", false), &host);
+        assert!(reply.ok, "{:?}", reply.error);
+        match reply.data {
+            Some(ReplyData::TabClose(c)) => {
+                assert_eq!(c.tab_id, "tab-b");
+                assert_eq!(c.title, "claude", "no stored title falls back to the cli id");
+                assert!(!c.was_default);
+            }
+            other => panic!("expected tab_close, got {other:?}"),
+        }
+    }
+
     #[test]
     fn selector_resolves_id_index_title_and_cli() {
         let host = StubHost::default();
@@ -6561,6 +7388,7 @@ mod tests {
             project: None,
             kind: proto::TabKind::Agent { id: "claude".into() },
             prompt: Some("run the tests".into()),
+            prompt_ref: None,
             wait: false,
             timeout_ms: None,
             resume: None,
@@ -6594,6 +7422,7 @@ mod tests {
             project: None,
             kind,
             prompt: prompt.map(str::to_string),
+            prompt_ref: None,
             wait,
             timeout_ms: None,
             resume: None,
@@ -6683,6 +7512,7 @@ mod tests {
             project: None,
             kind: proto::TabKind::Agent { id: "claude".into() },
             prompt: Some("run".into()),
+            prompt_ref: None,
             wait: false,
             timeout_ms: None,
             resume: None,
@@ -6694,6 +7524,358 @@ mod tests {
         assert!(err.message.contains("was opened"), "{}", err.message);
     }
 
+    // ── prompt library (Phase 4) ─────────────────────────────────────
+
+    /// A scripted `list_prompts` reply: the shapes the resolver has to
+    /// disambiguate (id vs title, case, disabled, duplicate titles,
+    /// empty body).
+    fn prompt_lib() -> serde_json::Value {
+        serde_json::json!({ "prompts": [
+            { "id": "builtin:review", "title": "Review", "body": "Review the diff.",
+              "builtin": true, "enabled": true, "modified": false },
+            { "id": "builtin:commit", "title": "Commit", "body": "Commit the work.\n",
+              "builtin": true, "enabled": false, "modified": true },
+            { "id": "cst-1", "title": "review", "body": "Custom review body.",
+              "builtin": false, "enabled": true, "modified": false },
+            { "id": "cst-2", "title": "Ship it", "body": "a",
+              "builtin": false, "enabled": true, "modified": false },
+            { "id": "cst-3", "title": "ship IT", "body": "b",
+              "builtin": false, "enabled": true, "modified": false },
+            { "id": "cst-4", "title": "Empty", "body": "   ",
+              "builtin": false, "enabled": true, "modified": false },
+        ]})
+    }
+
+    #[test]
+    fn prompts_lists_the_library_without_bodies() {
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        let reply = handle(&req(Command::Prompts { selector: None }, Some("tok")), &host);
+        let Some(ReplyData::Prompts(p)) = reply.data else { panic!("expected prompts, got {reply:?}") };
+        assert_eq!(p.prompts.len(), 6);
+        assert_eq!(p.prompts[0].id, "builtin:review");
+        assert!(p.prompts[0].builtin && p.prompts[0].enabled && !p.prompts[0].modified);
+        // Disabled prompts are LISTED (fireable by explicit selector);
+        // the flag is what changes, not the row's existence.
+        assert!(!p.prompts[1].enabled && p.prompts[1].modified);
+        // The list carries no bodies; `show` is the body surface. The
+        // fetch itself skips them too (the ~16 KB of builtin bodies
+        // never cross the IPC just to be dropped).
+        assert!(p.prompts.iter().all(|e| e.body.is_none()));
+        let calls = host.rpc_calls.lock().unwrap();
+        assert_eq!(calls[0].1["bodies"], false, "the list path must not fetch bodies");
+    }
+
+    #[test]
+    fn prompts_show_resolves_id_first_then_title() {
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        let show = |sel: &str| {
+            handle(&req(Command::Prompts { selector: Some(sel.into()) }, Some("tok")), &host)
+        };
+        // Exact id wins even though a custom prompt is TITLED "review"
+        // (the identity philosophy: id is the identity, title a
+        // convenience).
+        let Some(ReplyData::Prompts(p)) = show("builtin:review").data else { panic!("no data") };
+        assert_eq!(p.prompts.len(), 1);
+        assert_eq!(p.prompts[0].id, "builtin:review");
+        assert_eq!(p.prompts[0].body.as_deref(), Some("Review the diff."));
+        // Stray whitespace from shell quoting / copy-paste must not turn
+        // an existing prompt into a NotFound: selectors match trimmed.
+        let Some(ReplyData::Prompts(p)) = show(" builtin:review ").data else { panic!("no data") };
+        assert_eq!(p.prompts[0].id, "builtin:review");
+        // Case-insensitive exact title; a DISABLED prompt still resolves
+        // (disabled = hidden from the dropdown, not dead).
+        let Some(ReplyData::Prompts(p)) = show("commit").data else { panic!("no data") };
+        assert_eq!(p.prompts[0].id, "builtin:commit");
+        assert!(!p.prompts[0].enabled);
+    }
+
+    #[test]
+    fn prompts_selector_ambiguity_and_miss_are_typed() {
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        let show = |sel: &str| {
+            handle(&req(Command::Prompts { selector: Some(sel.into()) }, Some("tok")), &host)
+                .error
+                .expect("refused")
+        };
+        // Two prompts titled "Ship it"/"ship IT": ambiguous, candidates
+        // listed WITH ids (the fix is to pin the id).
+        let err = show("ship it");
+        assert_eq!(err.code, ErrorCode::Ambiguous);
+        assert!(err.message.contains("cst-2") && err.message.contains("cst-3"), "{}", err.message);
+        // "review" title-matches both the builtin and the custom prompt.
+        assert_eq!(show("Review").code, ErrorCode::Ambiguous);
+        // A miss points at the discovery verb.
+        let err = show("nope");
+        assert_eq!(err.code, ErrorCode::NotFound);
+        assert!(err.message.contains("termic prompts"), "{}", err.message);
+    }
+
+    #[test]
+    fn new_with_prompt_ref_composes_and_fails_fast() {
+        // Bad selector: the error lands BEFORE any task exists.
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        let mut cmd = new_cmd("shiny", Some("web"));
+        if let Command::New { prompt_ref, .. } = &mut cmd {
+            *prompt_ref = Some("nope".into());
+        }
+        let err = handle(&req(cmd, Some("tok")), &host).error.expect("refused");
+        assert_eq!(err.code, ErrorCode::NotFound);
+        {
+            let calls = host.rpc_calls.lock().unwrap();
+            assert_eq!(
+                calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(),
+                vec!["list_prompts"],
+                "a bad -P must never reach new_task"
+            );
+        }
+
+        // Good selector + literal text: the webview receives ONE composed
+        // prompt (body, blank line, text); prompt_ref never crosses the RPC.
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        host.script_rpc("new_task", Ok(serde_json::json!({ "taskId": "nw1", "spawned": true })));
+        let mut cmd = new_cmd("shiny", Some("web"));
+        if let Command::New { prompt, prompt_ref, .. } = &mut cmd {
+            *prompt = Some("extra context".into());
+            *prompt_ref = Some("builtin:review".into());
+        }
+        let reply = handle(&req(cmd, Some("tok")), &host);
+        assert!(reply.ok, "{reply:?}");
+        let calls = host.rpc_calls.lock().unwrap();
+        let (_, params) = calls.iter().find(|(m, _)| m == "new_task").expect("new_task ran");
+        assert_eq!(params["prompt"], "Review the diff.\n\nextra context");
+        assert!(params.get("prompt_ref").is_none_or(|v| v.is_null()));
+    }
+
+    #[test]
+    fn send_with_prompt_ref_alone_delivers_the_body() {
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        host.script_rpc(
+            "send_prompt",
+            Ok(serde_json::json!({ "mode": "delivered", "capable": true })),
+        );
+        let mut cmd = send_cmd("solo", false);
+        if let Command::Send { prompt, prompt_ref, .. } = &mut cmd {
+            *prompt = String::new();
+            *prompt_ref = Some("Commit".into());
+        }
+        let reply = handle(&req(cmd, Some("tok")), &host);
+        assert!(reply.ok, "{reply:?}");
+        let calls = host.rpc_calls.lock().unwrap();
+        let (_, params) = calls.iter().find(|(m, _)| m == "send_prompt").expect("send ran");
+        // The body's trailing newline is normalized away; no literal
+        // text, so no blank-line seam either.
+        assert_eq!(params["prompt"], "Commit the work.");
+    }
+
+    #[test]
+    fn prompt_ref_with_an_empty_body_is_refused() {
+        // With AND without -p text: an empty body must refuse by name,
+        // never deliver a junk-prefixed "\n\ntext" composition.
+        for literal in ["", "do it anyway"] {
+            let host = StubHost::default();
+            host.script_rpc("list_prompts", Ok(prompt_lib()));
+            let mut cmd = send_cmd("solo", false);
+            if let Command::Send { prompt, prompt_ref, .. } = &mut cmd {
+                *prompt = literal.into();
+                *prompt_ref = Some("Empty".into());
+            }
+            let err = handle(&req(cmd, Some("tok")), &host).error.expect("refused");
+            assert_eq!(err.code, ErrorCode::Unsupported);
+            assert!(err.message.contains("empty body"), "{}", err.message);
+        }
+    }
+
+    #[test]
+    fn tab_prompt_ref_fails_before_the_tab_opens() {
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        let mut cmd = tab_cmd("solo", proto::TabKind::Agent { id: "claude".into() });
+        if let Command::Tab { prompt_ref, .. } = &mut cmd {
+            *prompt_ref = Some("nope".into());
+        }
+        let err = handle(&req(cmd, Some("tok")), &host).error.expect("refused");
+        assert_eq!(err.code, ErrorCode::NotFound);
+        {
+            let calls = host.rpc_calls.lock().unwrap();
+            assert_eq!(
+                calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(),
+                vec!["list_prompts"],
+                "a bad -P must never open a tab"
+            );
+        }
+
+        // -P alone counts as "a prompt rides this tab": refused on the
+        // promptless kinds before any RPC, exactly like -p.
+        let host = StubHost::default();
+        let mut cmd = tab_cmd("solo", proto::TabKind::Shell);
+        if let Command::Tab { prompt_ref, .. } = &mut cmd {
+            *prompt_ref = Some("builtin:review".into());
+        }
+        let err = handle(&req(cmd, Some("tok")), &host).error.expect("refused");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert!(host.rpc_calls.lock().unwrap().is_empty());
+        // And -P satisfies `--wait needs a prompt`.
+        let mut cmd = tab_cmd("solo", proto::TabKind::Agent { id: "claude".into() });
+        if let Command::Tab { prompt_ref, wait, .. } = &mut cmd {
+            *prompt_ref = Some("nope".into());
+            *wait = true;
+        }
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        let err = handle(&req(cmd, Some("tok")), &host).error.expect("refused");
+        // Reaches resolution (not the --wait guard), which then misses.
+        assert_eq!(err.code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn compose_prompt_contract() {
+        // Body, ONE blank line, text: the documented composition.
+        assert_eq!(compose_prompt("body", Some("text")), "body\n\ntext");
+        // ALL trailing body whitespace is normalized so the seam is
+        // exactly one blank line regardless of how the prompt was
+        // authored, including a trailing whitespace-only line (the
+        // Settings-textarea shape).
+        assert_eq!(compose_prompt("body\n\n", Some("text")), "body\n\ntext");
+        assert_eq!(compose_prompt("body\n \n", Some("text")), "body\n\ntext");
+        // ...and leading whitespace on the TEXT side: piped stdin often
+        // opens with blank lines (the `-p -` handoff shape).
+        assert_eq!(compose_prompt("body", Some("\n\ntext")), "body\n\ntext");
+        assert_eq!(compose_prompt("body\n", Some(" \ntext")), "body\n\ntext");
+        // No literal text (or blank): the body stands alone.
+        assert_eq!(compose_prompt("body\n", None), "body");
+        assert_eq!(compose_prompt("body", Some("   ")), "body");
+    }
+
+    #[test]
+    fn empty_prompt_selectors_are_refused_on_the_wire() {
+        // The shipped CLI pre-rejects `-P ""`, but the wire is a public
+        // surface (handle_send's rule): without the server guard, ""
+        // would title-match the unnamed placeholder prompts the GUI's
+        // "New prompt" button persists.
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        let err = handle(&req(Command::Prompts { selector: Some("  ".into()) }, Some("tok")), &host)
+            .error
+            .expect("refused");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        let mut cmd = send_cmd("solo", false);
+        if let Command::Send { prompt_ref, .. } = &mut cmd {
+            *prompt_ref = Some(String::new());
+        }
+        let err = handle(&req(cmd, Some("tok")), &host).error.expect("refused");
+        assert_eq!(err.code, ErrorCode::BadRequest);
+    }
+
+    #[test]
+    fn send_prompt_ref_failures_never_reach_delivery() {
+        // The send-side fail-fast twin of the new/tab assertions: a bad
+        // selector must resolve (and fail) before send_prompt runs or a
+        // delivery id is registered.
+        let host = StubHost::default();
+        host.script_rpc("list_prompts", Ok(prompt_lib()));
+        let mut cmd = send_cmd("solo", false);
+        if let Command::Send { prompt_ref, .. } = &mut cmd {
+            *prompt_ref = Some("nope".into());
+        }
+        let err = handle(&req(cmd, Some("tok")), &host).error.expect("refused");
+        assert_eq!(err.code, ErrorCode::NotFound);
+        let calls = host.rpc_calls.lock().unwrap();
+        assert_eq!(
+            calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(),
+            vec!["list_prompts"],
+            "a bad -P must never reach send_prompt"
+        );
+    }
+
+    #[test]
+    fn prompts_show_budgets_an_oversized_body() {
+        // Reply lines cap at MAX_LINE_BYTES post-escape; a pasted-spec
+        // body must arrive trimmed with a marker, never break the
+        // connection (the logs/diff rule).
+        let big = "x".repeat(1024 * 1024);
+        let host = StubHost::default();
+        host.script_rpc(
+            "list_prompts",
+            Ok(serde_json::json!({ "prompts": [
+                { "id": "cst-big", "title": "Big", "body": big,
+                  "builtin": false, "enabled": true, "modified": false },
+            ]})),
+        );
+        let reply =
+            handle(&req(Command::Prompts { selector: Some("cst-big".into()) }, Some("tok")), &host);
+        // The whole REPLY line fits the wire cap.
+        assert!(serde_json::to_string(&reply).unwrap().len() as u64 <= proto::MAX_LINE_BYTES);
+        let Some(ReplyData::Prompts(p)) = reply.data else { panic!("expected prompts") };
+        let body = p.prompts[0].body.as_deref().expect("body present");
+        assert!(body.len() < 900 * 1024, "body was not trimmed: {} bytes", body.len());
+        // The FLAG carries the truncation; the body itself gets no
+        // marker text (a marker would pipe into an agent as
+        // instructions via `show | send -p -`).
+        assert!(p.prompts[0].truncated);
+        assert!(body.chars().all(|c| c == 'x'), "marker text leaked into the body");
+    }
+
+    #[test]
+    fn prompts_show_refuses_an_empty_body_and_clips_runaway_titles() {
+        // `show` refuses like `-P` does: printing nothing with exit 0
+        // would make the documented `show | send -p -` pipe fail later
+        // with a misleading stdin error. And a pasted-document TITLE
+        // must not blow the reply line (Settings has no length cap).
+        let big_title = "t".repeat(64 * 1024);
+        let host = StubHost::default();
+        host.script_rpc(
+            "list_prompts",
+            Ok(serde_json::json!({ "prompts": [
+                { "id": "cst-4", "title": "Empty", "body": " ",
+                  "builtin": false, "enabled": true, "modified": false },
+                { "id": "cst-long", "title": big_title, "body": "b",
+                  "builtin": false, "enabled": true, "modified": false },
+            ]})),
+        );
+        let err = handle(&req(Command::Prompts { selector: Some("Empty".into()) }, Some("tok")), &host)
+            .error
+            .expect("refused");
+        assert_eq!(err.code, ErrorCode::Unsupported);
+        assert!(err.message.contains("empty body"), "{}", err.message);
+        let reply = handle(&req(Command::Prompts { selector: None }, Some("tok")), &host);
+        assert!(serde_json::to_string(&reply).unwrap().len() as u64 <= proto::MAX_LINE_BYTES);
+        let Some(ReplyData::Prompts(p)) = reply.data else { panic!("expected prompts") };
+        let long = p.prompts.iter().find(|e| e.id == "cst-long").expect("listed");
+        assert!(long.title.len() < 3 * 1024, "title not clipped: {} bytes", long.title.len());
+        assert!(long.title.ends_with("..."));
+    }
+
+    #[test]
+    fn prompt_ref_cannot_bypass_the_prompt_size_gate() {
+        // The CLI's 900 KB gate ran on the literal alone; the body
+        // substitutes server-side, so the COMPOSED prompt re-checks.
+        let big = "y".repeat(950 * 1024);
+        let host = StubHost::default();
+        host.script_rpc(
+            "list_prompts",
+            Ok(serde_json::json!({ "prompts": [
+                { "id": "cst-huge", "title": "Huge", "body": big,
+                  "builtin": false, "enabled": true, "modified": false },
+            ]})),
+        );
+        let mut cmd = send_cmd("solo", false);
+        if let Command::Send { prompt_ref, .. } = &mut cmd {
+            *prompt_ref = Some("cst-huge".into());
+        }
+        let err = handle(&req(cmd, Some("tok")), &host).error.expect("refused");
+        assert_eq!(err.code, ErrorCode::Unsupported);
+        assert!(err.message.contains("too large"), "{}", err.message);
+        // Refused before any delivery machinery ran.
+        let calls = host.rpc_calls.lock().unwrap();
+        assert_eq!(calls.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(), vec!["list_prompts"]);
+    }
+
     // ── send ─────────────────────────────────────────────────────────
 
     fn send_cmd(task: &str, wait: bool) -> Command {
@@ -6701,6 +7883,7 @@ mod tests {
             task: Some(task.into()),
             project: None,
             prompt: "run the tests".into(),
+            prompt_ref: None,
             resume: false,
             fresh: false,
             wait,

@@ -10,30 +10,70 @@
 //!   - EDITOR/VISUAL — Claude Code's Ctrl+G opens the wrong editor (#17).
 //!   - LANG, GPG_TTY, tool tokens, … — anything else the rc exports.
 //!
-//! Fix: shell out to `$SHELL -ilc env` ONCE, cache it, diff it against
-//! our own (bare) env, and inject the delta into everything we spawn.
-//! `-l` runs the login profile (`.zprofile`), `-i` runs the interactive
-//! rc (`.zshrc`) — both are needed because dynamic installers (nvm,
-//! mise, fnm, asdf, bun) typically write to `.zshrc`. Diffing against
-//! our own env drops inherited launchd noise (XPC_SERVICE_NAME, …) for
-//! free: unchanged keys aren't in the delta.
+//! Fix: shell out to `$SHELL -ilc env`, diff it against our own (bare)
+//! env, and inject the delta into everything we spawn. `-l` runs the
+//! login profile (`.zprofile`), `-i` runs the interactive rc (`.zshrc`)
+//! — both are needed because dynamic installers (nvm, mise, fnm, asdf,
+//! bun) typically write to `.zshrc`. Diffing against our own env drops
+//! inherited launchd noise (XPC_SERVICE_NAME, …) for free: unchanged
+//! keys aren't in the delta.
+//!
+//! Lifecycle (#186): readers NEVER block on the probe (beyond a bounded
+//! 1s courtesy wait while the very first attempt is still in flight, so
+//! launch-restored terminals usually get the real env). The state starts
+//! as the static fallback and is atomically swapped to the probed env
+//! when a probe succeeds. A failed probe is NOT cached forever: the
+//! startup loop retries with backoff, and after it gives up, any later
+//! read may kick one more background attempt (cooldown-limited), so a
+//! transiently slow rc heals without an app restart.
 //!
 //! VS Code, Cursor, Zed, GitHub Desktop all do the same thing for the
 //! same reason. See e.g. microsoft/vscode `shellEnv.ts`.
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Condvar, Mutex, Once, OnceLock};
 use std::time::{Duration, Instant};
 
-static RESOLVED_ENV: OnceLock<LoginEnv> = OnceLock::new();
-static RESOLVED_SHELL: OnceLock<String> = OnceLock::new();
+/// Per-probe deadline. The probe runs off-thread, so this protects
+/// nothing at startup — it only bounds how long a single shell gets
+/// before we give up on that attempt and schedule a retry. Generous on
+/// purpose (VS Code uses 10s): a cold rc at login can legitimately take
+/// seconds, and cutting it off used to mean permanent fallback (#186).
+const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 
-/// The resolved login-shell environment, cached after the first probe.
-#[derive(Default, Clone)]
+/// How long a reader may wait for the FIRST probe attempt before
+/// settling for the fallback env. Only ever paid while that first
+/// attempt is in flight (typically the first ~0.5s of app life), so
+/// launch-restored terminals get the real env instead of racing it.
+const FIRST_PROBE_WAIT: Duration = Duration::from_secs(1);
+
+/// Startup retry schedule: TOTAL probe attempts (the first try plus
+/// retries), with the backoff doubling between them (2s, 4s, 8s, 16s).
+const MAX_STARTUP_ATTEMPTS: u32 = 5;
+const FIRST_BACKOFF: Duration = Duration::from_secs(2);
+
+/// After the startup loop exhausts its attempts, a read may kick one
+/// more background attempt — but at most once per this cooldown, so
+/// frequent spawns against a genuinely broken shell don't fork-bomb it.
+const RETRY_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// Hard cap on read-kicked retries, so a permanently broken shell costs
+/// a BOUNDED number of probe spawns over the app's lifetime (startup
+/// attempts + this) instead of one every cooldown forever.
+const MAX_KICKED_RETRIES: u32 = 10;
+
+static STATE: OnceLock<State> = OnceLock::new();
+static PROBE_STARTED: Once = Once::new();
+static RESOLVED_SHELL: OnceLock<String> = OnceLock::new();
+static FALLBACK_DIRS: OnceLock<Vec<String>> = OnceLock::new();
+
+/// The login-shell environment as currently known — the fallback until
+/// a probe succeeds, the real thing after.
+#[derive(Default, Clone, Debug, PartialEq)]
 struct LoginEnv {
     /// PATH suitable for finding user-installed CLIs (login-shell PATH,
-    /// or a best-effort fallback if the probe failed). Kept as its own
-    /// field because PATH has fallback logic the other vars don't.
+    /// or a best-effort fallback until a probe succeeds). Kept as its
+    /// own field because PATH has fallback logic the other vars don't.
     path: String,
     /// Every OTHER variable the login shell exports that our bare env
     /// doesn't already have with the same value — the delta to inject
@@ -42,25 +82,218 @@ struct LoginEnv {
     inject: Vec<(String, String)>,
 }
 
-fn resolved() -> &'static LoginEnv {
-    RESOLVED_ENV.get_or_init(resolve_inner)
+/// Probe bookkeeping guarded by one mutex. `env` is always readable
+/// (initialized to the fallback before the first probe starts).
+struct Inner {
+    env: LoginEnv,
+    /// The first probe attempt has finished (success OR failure).
+    /// Once true, readers never wait again.
+    first_attempt_done: bool,
+    /// A probe attempt succeeded; `env` is the real login env and no
+    /// further probing will ever run.
+    succeeded: bool,
+    /// A probe attempt (or the startup retry loop, including its
+    /// backoff sleeps) is currently active — gates read-kicked retries.
+    probing: bool,
+    /// When the last attempt finished — cooldown anchor for read-kicked
+    /// retries.
+    last_attempt: Option<Instant>,
+    /// How many read-kicked retries have run, capped at
+    /// `MAX_KICKED_RETRIES` so probing is bounded over the app's life.
+    kicked_retries: u32,
 }
 
-/// Return a PATH suitable for spawning user-installed CLIs.
-/// Cached after the first call.
+struct State {
+    inner: Mutex<Inner>,
+    cvar: Condvar,
+}
+
+impl State {
+    fn new(initial: LoginEnv) -> Self {
+        State {
+            inner: Mutex::new(Inner {
+                env: initial,
+                first_attempt_done: false,
+                succeeded: false,
+                probing: false,
+                last_attempt: None,
+                kicked_retries: 0,
+            }),
+            cvar: Condvar::new(),
+        }
+    }
+
+    /// Current env, waiting at most `max_wait` for the FIRST attempt to
+    /// finish. After that attempt (either way) this never blocks.
+    fn snapshot(&self, max_wait: Duration) -> LoginEnv {
+        let guard = self.inner.lock().unwrap();
+        if !guard.first_attempt_done && !max_wait.is_zero() {
+            let (guard, _) = self
+                .cvar
+                .wait_timeout_while(guard, max_wait, |i| !i.first_attempt_done)
+                .unwrap();
+            return guard.env.clone();
+        }
+        guard.env.clone()
+    }
+
+    /// Record a finished probe attempt. `resolved` is `Some` on success
+    /// (the env to swap in). `still_probing` keeps the probing flag up
+    /// through the startup loop's backoff sleeps so read-kicked retries
+    /// don't stack a second shell on top. Returns whether a probe has
+    /// succeeded. Wakes any first-attempt waiters either way.
+    fn attempt_finished(&self, resolved: Option<LoginEnv>, still_probing: bool) -> bool {
+        let mut guard = self.inner.lock().unwrap();
+        guard.first_attempt_done = true;
+        guard.last_attempt = Some(Instant::now());
+        if let Some(env) = resolved {
+            guard.env = env;
+            guard.succeeded = true;
+            guard.probing = false;
+        } else {
+            guard.probing = still_probing;
+        }
+        self.cvar.notify_all();
+        guard.succeeded
+    }
+
+    /// Whether a read-kicked retry should run now: never after success,
+    /// never while one is in flight, at most once per `cooldown`, and
+    /// at most `max_kicks` times ever (so probing is bounded over the
+    /// app's lifetime, not a shell spawn every cooldown forever). On
+    /// `true` the probing flag is taken — the caller MUST run an
+    /// attempt and report it via `attempt_finished`.
+    fn try_begin_retry(&self, cooldown: Duration, max_kicks: u32) -> bool {
+        let mut guard = self.inner.lock().unwrap();
+        if guard.succeeded || guard.probing || !guard.first_attempt_done {
+            return false;
+        }
+        if guard.kicked_retries >= max_kicks {
+            return false;
+        }
+        if let Some(t) = guard.last_attempt {
+            if t.elapsed() < cooldown {
+                return false;
+            }
+        }
+        guard.kicked_retries += 1;
+        guard.probing = true;
+        true
+    }
+
+    /// Report a probe attempt that never ran (the probe thread died or
+    /// could not be spawned). Poison-tolerant: this is called from a
+    /// panic path, and a poisoned lock must not turn into a double
+    /// panic (abort). Readers stop waiting and the retry gate opens.
+    fn attempt_aborted(&self) {
+        let mut guard = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.first_attempt_done = true;
+        guard.last_attempt = Some(Instant::now());
+        guard.probing = false;
+        self.cvar.notify_all();
+    }
+}
+
+fn state() -> &'static State {
+    STATE.get_or_init(|| State::new(bare_login_env()))
+}
+
+/// Marks the attempt aborted if the probe thread unwinds before
+/// reporting — otherwise a panic mid-probe would leave `probing` stuck
+/// and every read waiting out `FIRST_PROBE_WAIT` for the app's life.
+struct AbortGuard {
+    armed: bool,
+}
+
+impl Drop for AbortGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            state().attempt_aborted();
+        }
+    }
+}
+
+/// Run `probe` on a background thread, reporting an aborted attempt if
+/// the thread can't be spawned or dies before reporting, so readers
+/// never wait on a probe that will never finish.
+fn spawn_probe_thread(probe: impl FnOnce() + Send + 'static) {
+    let spawned = std::thread::Builder::new()
+        .name("shell-env-probe".into())
+        .spawn(move || {
+            let mut guard = AbortGuard { armed: true };
+            probe();
+            guard.armed = false;
+        });
+    if spawned.is_err() {
+        state().attempt_aborted();
+    }
+}
+
+/// Start the background probe (idempotent). Readers call this too, so
+/// the env resolves even if `warm()` was never reached.
+fn ensure_probe_started() {
+    PROBE_STARTED.call_once(|| {
+        state().inner.lock().unwrap().probing = true;
+        spawn_probe_thread(|| {
+            run_probe_loop(
+                state(),
+                probe_once,
+                std::thread::sleep,
+                MAX_STARTUP_ATTEMPTS,
+                FIRST_BACKOFF,
+            );
+        });
+    });
+}
+
+/// Trigger resolution off the main thread so the first PTY spawn
+/// doesn't pay the shell-startup cost.
+pub fn warm() {
+    ensure_probe_started();
+}
+
+fn current_env() -> LoginEnv {
+    ensure_probe_started();
+    let st = state();
+    let env = st.snapshot(FIRST_PROBE_WAIT);
+    // Startup retries exhausted without success? Let actual usage kick
+    // one more background attempt (cooldown- and count-limited) so a
+    // slow login eventually heals instead of pinning the fallback until
+    // restart.
+    if st.try_begin_retry(RETRY_COOLDOWN, MAX_KICKED_RETRIES) {
+        spawn_probe_thread(|| {
+            let resolved = probe_once();
+            state().attempt_finished(resolved, false);
+        });
+    }
+    env
+}
+
+/// Return a PATH suitable for spawning user-installed CLIs. Never
+/// blocks once the first probe attempt has finished; until a probe
+/// succeeds this is the static fallback. For a spawn that also injects
+/// the rc delta, use `spawn_env()` — two separate calls can straddle
+/// the probe landing and mix snapshots.
 pub fn resolved_path() -> String {
-    resolved().path.clone()
+    current_env().path
 }
 
-/// The user's login-shell environment MINUS PATH and the vars we manage
-/// ourselves — i.e. EDITOR/VISUAL/LANG/GPG_TTY/tool-tokens/etc. that the
-/// rc exports but a GUI-launched `.app` never inherits. Inject these
-/// (alongside `resolved_path()`) into anything we spawn so the agent,
-/// scratch terminal, and scripts all see the same environment the user's
-/// own terminal would (#17, and the general class behind #13/#16).
-/// Cached after the first call.
-pub fn login_env() -> Vec<(String, String)> {
-    resolved().inject.clone()
+/// PATH plus the rc delta, from ONE snapshot. The delta is the user's
+/// login-shell environment MINUS PATH and the vars we manage ourselves
+/// — i.e. EDITOR/VISUAL/LANG/GPG_TTY/tool-tokens/etc. that the rc
+/// exports but a GUI-launched `.app` never inherits. Inject both into
+/// anything we spawn so the agent, scratch terminal, and scripts all
+/// see the same environment the user's own terminal would (#17, and
+/// the general class behind #13/#16). The single snapshot matters
+/// twice: the pair can't tear across the probe landing (fallback PATH
+/// with probed delta), and a spawn pays the bounded first-probe wait
+/// once, not per accessor. Delta is empty until a probe succeeds.
+pub fn spawn_env() -> (String, Vec<(String, String)>) {
+    let env = current_env();
+    (env.path, env.inject)
 }
 
 /// Absolute path to the user's preferred login shell, used to spawn
@@ -139,28 +372,59 @@ fn pick_shell(preferred: Option<String>, exists: impl Fn(&str) -> bool) -> Strin
     "/bin/sh".to_string()
 }
 
-/// Trigger resolution off the main thread so the first PTY spawn
-/// doesn't pay the shell-startup cost.
-pub fn warm() {
-    std::thread::spawn(|| {
-        let _ = resolved_path();
-    });
+/// The startup probe loop: attempt, and on failure retry with doubling
+/// backoff until `max_attempts` is spent. Injected `probe`/`sleep` keep
+/// the schedule unit-testable without spawning shells or waiting.
+fn run_probe_loop(
+    st: &State,
+    mut probe: impl FnMut() -> Option<LoginEnv>,
+    mut sleep: impl FnMut(Duration),
+    max_attempts: u32,
+    first_backoff: Duration,
+) {
+    let mut backoff = first_backoff;
+    for attempt in 1..=max_attempts {
+        let last = attempt == max_attempts;
+        if st.attempt_finished(probe(), !last) {
+            return;
+        }
+        if last {
+            return;
+        }
+        sleep(backoff);
+        backoff = backoff.saturating_mul(2);
+    }
 }
 
-fn resolve_inner() -> LoginEnv {
+/// One full probe attempt: run the shell, and on success turn its env
+/// dump into the `LoginEnv` to swap in. `None` on timeout/failure/empty.
+fn probe_once() -> Option<LoginEnv> {
+    let probed = probe_login_shell().filter(|v| !v.is_empty())?;
+    Some(env_from_probe(&probed))
+}
+
+/// The env served before any probe succeeds: the inherited PATH from a
+/// terminal launch, or the static fallback union for a GUI launch. No
+/// rc delta — we haven't seen the rc yet.
+fn bare_login_env() -> LoginEnv {
+    let bare_path = std::env::var("PATH").unwrap_or_default();
+    let from_terminal = std::env::var("TERM_PROGRAM").is_ok();
+    let path = if from_terminal && !bare_path.is_empty() {
+        bare_path
+    } else {
+        fallback_path(&bare_path)
+    };
+    LoginEnv { path, inject: Vec::new() }
+}
+
+/// Build the resolved env from a successful probe's `env` dump.
+fn env_from_probe(probed: &[(String, String)]) -> LoginEnv {
     let current: HashMap<String, String> = std::env::vars().collect();
     let bare_path = current.get("PATH").cloned().unwrap_or_default();
     // TERM_PROGRAM (set by Terminal.app, iTerm2, Ghostty, WezTerm, …) means
     // we were launched from a real terminal, so the inherited env is the
     // user's live session.
     let from_terminal = std::env::var("TERM_PROGRAM").is_ok();
-
-    // ALWAYS probe the login shell for the env delta. We used to skip this
-    // entirely for terminal launches, trusting the inherited env — but that
-    // session can be stale (e.g. `export EDITOR` added to the rc AFTER the
-    // terminal/dev-server was started), so the agent never saw it (#17).
-    // Re-reading the rc here picks it up regardless of launch staleness.
-    let probed = probe_login_shell().filter(|v| !v.is_empty());
 
     // PATH: a terminal launch already inherited the full login PATH (and may
     // carry session-specific additions), so keep it. A GUI launch gets a bare
@@ -169,8 +433,9 @@ fn resolve_inner() -> LoginEnv {
         bare_path.clone()
     } else {
         probed
-            .as_ref()
-            .and_then(|p| p.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.clone()))
+            .iter()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v.clone())
             .filter(|p| !p.is_empty())
             .unwrap_or_else(|| fallback_path(&bare_path))
     };
@@ -179,10 +444,7 @@ fn resolve_inner() -> LoginEnv {
     // only FILL gaps (never override a var the user set in that session);
     // from a GUI launch the bare env has no authority, so also override
     // differing values (e.g. launchd's LANG=C → your rc's en_US.UTF-8).
-    let inject = match &probed {
-        Some(p) => select_injected(p, &current, from_terminal),
-        None => Vec::new(),
-    };
+    let inject = select_injected(probed, &current, from_terminal);
 
     LoginEnv { path, inject }
 }
@@ -256,27 +518,44 @@ fn probe_login_shell() -> Option<Vec<(String, String)>> {
         .spawn()
         .ok()?;
 
-    // Heavy rc files (oh-my-zsh + 30 plugins) can take a couple
-    // seconds. Cap at 3s — past that, the user's setup is hostile
-    // enough that we'd rather fall back than block app startup.
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
+    // Drain stdout CONCURRENTLY with the wait below. Waiting first and
+    // reading after deadlocks on any env dump bigger than the pipe
+    // buffer (~64KB): the child blocks writing, we block waiting, and
+    // the deadline kills a probe that was fine.
+    let mut stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf).ok();
+        buf
+    });
+
+    // Bounded try_wait poll, not a condvar: Child has no waitable
+    // handle. Total poll time over the app's life is bounded too —
+    // probing stops at MAX_STARTUP_ATTEMPTS + MAX_KICKED_RETRIES
+    // attempts (or the first success), so this never becomes the
+    // app-lifetime sleep-poll CLAUDE.md bans.
+    let deadline = Instant::now() + PROBE_DEADLINE;
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
+                // Reap the killed child so it doesn't linger as a zombie
+                // (the kill also EOFs stdout, releasing the reader).
+                let _ = child.wait();
                 return None;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
             Err(_) => return None,
         }
-    }
-
-    let output = child.wait_with_output().ok()?;
-    if !output.status.success() {
+    };
+    if !status.success() {
         return None;
     }
-    Some(parse_env_output(&String::from_utf8_lossy(&output.stdout)))
+
+    let stdout = reader.join().ok()?;
+    Some(parse_env_output(&String::from_utf8_lossy(&stdout)))
 }
 
 /// Parse `env`'s `KEY=VALUE` lines into pairs. Split out so the line
@@ -303,38 +582,121 @@ fn is_env_key(k: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Shell probe failed or timed out. Union the bare PATH with the
-/// well-known dev-tool locations. Misses dynamic shims (nvm picks
-/// a node version per shell), but covers the common static
-/// installers so at least `claude`, `codex`, `gemini` resolve.
+/// No successful probe yet. Union the bare PATH with the well-known
+/// dev-tool locations. Misses dynamic shims (nvm picks a node version
+/// per shell), but covers the common static installers so at least
+/// `claude`, `codex`, `gemini` resolve.
 pub(crate) fn fallback_path(current: &str) -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let extras: Vec<String> = vec![
-        "/opt/homebrew/bin".into(),
-        "/opt/homebrew/sbin".into(),
-        "/usr/local/bin".into(),
-        "/usr/local/sbin".into(),
-        format!("{home}/.local/bin"),
-        format!("{home}/.bun/bin"),
-        format!("{home}/.deno/bin"),
-        format!("{home}/.cargo/bin"),
-        format!("{home}/.volta/bin"),
-        format!("{home}/.npm-global/bin"),
-        format!("{home}/n/bin"),
-    ];
-
     let mut seen: std::collections::HashSet<String> =
         current.split(':').map(String::from).collect();
     let mut out = current.to_string();
-    for p in extras {
+    for p in fallback_dirs() {
         if seen.insert(p.clone()) {
             if !out.is_empty() {
                 out.push(':');
             }
-            out.push_str(&p);
+            out.push_str(p);
         }
     }
     out
+}
+
+/// The well-known tool dirs, resolved against this account. The one
+/// source of truth for "where a CLI is likely installed": the PATH
+/// fallback unions these in, and CLI detection probes them directly when
+/// its login-shell lookup fails (the same degraded window). Cached after
+/// the first call: the account cannot change under a running process,
+/// and `passwd_name` must not run on several threads at once (CLI
+/// detection probes every agent in parallel).
+pub(crate) fn fallback_dirs() -> &'static [String] {
+    FALLBACK_DIRS.get_or_init(|| fallback_extras(&account_home(), &account_user()))
+}
+
+/// `$HOME`, or the passwd entry when it is unset. Same reasoning as
+/// `passwd_shell`: launchd hands a GUI `.app` a minimal environment, and
+/// the passwd database is the authority that does not depend on it.
+fn account_home() -> String {
+    let env_home = std::env::var("HOME").unwrap_or_default();
+    if !env_home.is_empty() {
+        return env_home;
+    }
+    dirs::home_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// `$USER`, or `getpwuid(getuid())->pw_name` when it is unset.
+fn account_user() -> String {
+    let env_user = std::env::var("USER").unwrap_or_default();
+    if !env_user.is_empty() {
+        return env_user;
+    }
+    passwd_name().unwrap_or_default()
+}
+
+/// The current user's login name from the passwd database.
+#[cfg(unix)]
+fn passwd_name() -> Option<String> {
+    use std::ffi::CStr;
+    // SAFETY: as in `passwd_shell` — getpwuid returns a pointer into a
+    // static libc buffer; we copy pw_name out immediately and never
+    // retain the pointer.
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() || (*pw).pw_name.is_null() {
+            return None;
+        }
+        let s = CStr::from_ptr((*pw).pw_name).to_str().ok()?.to_string();
+        (!s.is_empty()).then_some(s)
+    }
+}
+
+#[cfg(not(unix))]
+fn passwd_name() -> Option<String> {
+    None
+}
+
+/// The dir list itself, split out from the account lookups so it stays
+/// testable for an account with no resolvable home or user name.
+fn fallback_extras(home: &str, user: &str) -> Vec<String> {
+    // Nix profiles lead: a nix-darwin login PATH puts them ahead of
+    // homebrew and of /usr/bin, so when a tool exists in both places
+    // this picks the same binary the user's own terminal runs. Within
+    // the nix set, per-user before system, as nix-darwin orders them.
+    // Every one of these is stable by design (a generation switch flips
+    // the symlink behind the path), and nix deliberately keeps out of
+    // /etc/paths.d, so there is no registry a GUI app could read
+    // instead. Without them, everything installed to a nix profile is
+    // invisible whenever this fallback is in use.
+    let mut extras: Vec<String> = Vec::new();
+    if !user.is_empty() {
+        extras.push(format!("/etc/profiles/per-user/{user}/bin"));
+    }
+    if !home.is_empty() {
+        extras.push(format!("{home}/.nix-profile/bin"));
+        // With `use-xdg-base-directories` (nix 2.14+) the per-user
+        // profile lives here instead, and ~/.nix-profile never exists.
+        extras.push(format!("{home}/.local/state/nix/profile/bin"));
+    }
+    extras.push("/run/current-system/sw/bin".into());
+    extras.push("/nix/var/nix/profiles/default/bin".into());
+
+    extras.extend([
+        "/opt/homebrew/bin".to_string(),
+        "/opt/homebrew/sbin".to_string(),
+        "/usr/local/bin".to_string(),
+        "/usr/local/sbin".to_string(),
+    ]);
+    if !home.is_empty() {
+        extras.extend([
+            format!("{home}/.local/bin"),
+            format!("{home}/.bun/bin"),
+            format!("{home}/.deno/bin"),
+            format!("{home}/.cargo/bin"),
+            format!("{home}/.volta/bin"),
+            format!("{home}/.npm-global/bin"),
+            format!("{home}/n/bin"),
+        ]);
+    }
+    extras
 }
 
 #[cfg(test)]
@@ -376,6 +738,77 @@ mod tests {
             assert!(result.contains(&format!("{home}/.cargo/bin")),
                 "must add cargo bin dir");
         }
+    }
+
+    #[test]
+    fn fallback_path_adds_nix_profile_dirs() {
+        let extras = fallback_extras("/Users/x", "x");
+        for dir in [
+            "/etc/profiles/per-user/x/bin",
+            "/Users/x/.nix-profile/bin",
+            "/run/current-system/sw/bin",
+            "/nix/var/nix/profiles/default/bin",
+        ] {
+            assert!(extras.iter().any(|p| p == dir), "must add {dir}");
+        }
+    }
+
+    #[test]
+    fn fallback_path_adds_system_nix_dirs_without_home_or_user() {
+        // A GUI process can launch with neither set. The two system-wide
+        // nix profiles don't depend on either, so they still apply.
+        let extras = fallback_extras("", "");
+        assert!(extras.iter().any(|p| p == "/run/current-system/sw/bin"));
+        assert!(extras.iter().any(|p| p == "/nix/var/nix/profiles/default/bin"));
+    }
+
+    #[test]
+    fn fallback_path_adds_xdg_nix_profile_dir() {
+        // use-xdg-base-directories (nix 2.14+) moves the per-user
+        // profile here and leaves no ~/.nix-profile behind.
+        let extras = fallback_extras("/Users/x", "x");
+        assert!(extras.iter().any(|p| p == "/Users/x/.local/state/nix/profile/bin"));
+    }
+
+    #[test]
+    fn fallback_path_prefers_nix_over_homebrew() {
+        // A nix-darwin login PATH puts the nix profiles ahead of
+        // homebrew, so a tool installed in both must resolve the same
+        // way here as it does in the user's own terminal.
+        let extras = fallback_extras("/Users/x", "x");
+        let at = |dir: &str| extras.iter().position(|p| p == dir).unwrap();
+        assert!(at("/run/current-system/sw/bin") < at("/opt/homebrew/bin"));
+        assert!(at("/etc/profiles/per-user/x/bin") < at("/opt/homebrew/bin"));
+    }
+
+    #[test]
+    fn fallback_path_skips_per_user_nix_dirs_without_home_or_user() {
+        // Neither $HOME/$USER nor the passwd entry resolved. Interpolating
+        // the empties would yield a bogus /etc/profiles/per-user//bin
+        // and /.nix-profile/bin.
+        let extras = fallback_extras("", "");
+        assert!(
+            !extras.iter().any(|p| p.contains("/etc/profiles/per-user/")),
+            "no per-user profile without $USER, got: {extras:?}"
+        );
+        assert!(
+            !extras.iter().any(|p| p.starts_with("/.")),
+            "no home-relative dirs without $HOME, got: {extras:?}"
+        );
+    }
+
+    #[test]
+    fn fallback_path_keeps_nix_dirs_in_nix_darwin_order() {
+        let extras = fallback_extras("/Users/x", "x");
+        let at = |dir: &str| extras.iter().position(|p| p == dir).unwrap();
+        assert!(
+            at("/etc/profiles/per-user/x/bin") < at("/run/current-system/sw/bin"),
+            "per-user profile must precede the system profile"
+        );
+        assert!(
+            at("/run/current-system/sw/bin") < at("/nix/var/nix/profiles/default/bin"),
+            "system profile must precede the default profile"
+        );
     }
 
     #[test]
@@ -538,5 +971,159 @@ mod tests {
         ];
         let got = select_injected(&probed, &HashMap::new(), false);
         assert_eq!(got, vec![("EDITOR".to_string(), "nvim".to_string())]);
+    }
+
+    // ---- probe state machine (#186) --------------------------------------
+
+    fn fallback_env() -> LoginEnv {
+        LoginEnv { path: "/usr/bin:/bin".into(), inject: Vec::new() }
+    }
+
+    fn real_env() -> LoginEnv {
+        LoginEnv {
+            path: "/nix/profile/bin:/usr/bin:/bin".into(),
+            inject: vec![("EDITOR".into(), "nvim".into())],
+        }
+    }
+
+    #[test]
+    fn snapshot_serves_fallback_before_any_probe() {
+        // Reads must never block on an unstarted probe: zero wait returns
+        // the initial (fallback) env immediately.
+        let st = State::new(fallback_env());
+        assert_eq!(st.snapshot(Duration::ZERO), fallback_env());
+    }
+
+    #[test]
+    fn snapshot_does_not_wait_after_first_attempt_failed() {
+        // Acceptance #2: once the first attempt has finished (even in
+        // failure), reads return immediately — no per-spawn stall.
+        let st = State::new(fallback_env());
+        st.attempt_finished(None, false);
+        let t0 = Instant::now();
+        let env = st.snapshot(Duration::from_secs(5));
+        assert!(t0.elapsed() < Duration::from_secs(2), "must not wait out the timeout");
+        assert_eq!(env, fallback_env(), "failed probe leaves the fallback in place");
+    }
+
+    #[test]
+    fn snapshot_wakes_when_first_probe_succeeds() {
+        // A reader arriving mid-first-probe waits (bounded) and gets the
+        // REAL env as soon as the probe lands, not the fallback.
+        use std::sync::Arc;
+        let st = Arc::new(State::new(fallback_env()));
+        let publisher = {
+            let st = Arc::clone(&st);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                st.attempt_finished(Some(real_env()), false);
+            })
+        };
+        let t0 = Instant::now();
+        let env = st.snapshot(Duration::from_secs(5));
+        publisher.join().unwrap();
+        assert_eq!(env, real_env(), "waiter must see the probed env");
+        assert!(t0.elapsed() < Duration::from_secs(2), "must wake on publish, not timeout");
+    }
+
+    #[test]
+    fn failed_then_successful_probe_swaps_env_in() {
+        // Acceptance #1: a transient failure is NOT cached — the retry's
+        // success replaces the fallback for every later read.
+        let st = State::new(fallback_env());
+        assert!(!st.attempt_finished(None, true));
+        assert_eq!(st.snapshot(Duration::ZERO), fallback_env());
+        assert!(st.attempt_finished(Some(real_env()), false));
+        assert_eq!(st.snapshot(Duration::ZERO), real_env());
+    }
+
+    #[test]
+    fn retry_gate_blocks_after_success_and_while_probing() {
+        let st = State::new(fallback_env());
+        // First attempt still pending → no read-kicked retry.
+        assert!(!st.try_begin_retry(Duration::ZERO, 10));
+        // Loop still active (probing) → blocked.
+        st.attempt_finished(None, true);
+        assert!(!st.try_begin_retry(Duration::ZERO, 10));
+        // Loop over, cooldown elapsed (ZERO) → exactly one kick wins...
+        st.attempt_finished(None, false);
+        assert!(st.try_begin_retry(Duration::ZERO, 10));
+        // ...and holds the probing flag against a second concurrent kick.
+        assert!(!st.try_begin_retry(Duration::ZERO, 10));
+        // After success, retries stop forever.
+        st.attempt_finished(Some(real_env()), false);
+        assert!(!st.try_begin_retry(Duration::ZERO, 10));
+    }
+
+    #[test]
+    fn retry_gate_respects_cooldown() {
+        let st = State::new(fallback_env());
+        st.attempt_finished(None, false);
+        // last_attempt is "just now": a long cooldown blocks the kick, a
+        // zero cooldown allows it.
+        assert!(!st.try_begin_retry(Duration::from_secs(3600), 10));
+        assert!(st.try_begin_retry(Duration::ZERO, 10));
+    }
+
+    #[test]
+    fn retry_gate_caps_lifetime_kicks() {
+        // A permanently broken shell must cost a BOUNDED number of probes:
+        // after max_kicks read-kicked retries, the gate closes for good.
+        let st = State::new(fallback_env());
+        st.attempt_finished(None, false);
+        for _ in 0..2 {
+            assert!(st.try_begin_retry(Duration::ZERO, 2));
+            st.attempt_finished(None, false);
+        }
+        assert!(!st.try_begin_retry(Duration::ZERO, 2), "cap must close the gate");
+    }
+
+    #[test]
+    fn attempt_aborted_unblocks_readers_and_reopens_gate() {
+        // A probe thread that dies before reporting (panic, spawn failure)
+        // must not leave readers waiting out FIRST_PROBE_WAIT forever or
+        // the retry gate stuck on `probing`.
+        let st = State::new(fallback_env());
+        st.inner.lock().unwrap().probing = true;
+        st.attempt_aborted();
+        let t0 = Instant::now();
+        assert_eq!(st.snapshot(Duration::from_secs(5)), fallback_env());
+        assert!(t0.elapsed() < Duration::from_secs(2), "aborted attempt must not block reads");
+        assert!(st.try_begin_retry(Duration::ZERO, 10), "gate must reopen after abort");
+    }
+
+    #[test]
+    fn probe_loop_retries_with_doubling_backoff_until_success() {
+        // Fail twice, succeed on the third try: the loop must sleep the
+        // 2s→4s schedule, swap in the real env, then stop retrying.
+        let st = State::new(fallback_env());
+        let mut calls = 0;
+        let mut slept: Vec<Duration> = Vec::new();
+        run_probe_loop(
+            &st,
+            || {
+                calls += 1;
+                (calls == 3).then(real_env)
+            },
+            |d| slept.push(d),
+            5,
+            Duration::from_secs(2),
+        );
+        assert_eq!(calls, 3, "loop must stop probing once it succeeds");
+        assert_eq!(slept, vec![Duration::from_secs(2), Duration::from_secs(4)]);
+        assert_eq!(st.snapshot(Duration::ZERO), real_env());
+        assert!(!st.try_begin_retry(Duration::ZERO, 10), "no retries after success");
+    }
+
+    #[test]
+    fn probe_loop_exhausts_attempts_then_allows_read_kicked_retry() {
+        // Every startup attempt fails: fallback stays served, the loop
+        // stops at max_attempts, and the usage-driven retry gate opens.
+        let st = State::new(fallback_env());
+        let mut calls = 0;
+        run_probe_loop(&st, || { calls += 1; None }, |_| {}, 3, Duration::from_secs(2));
+        assert_eq!(calls, 3, "must stop at max_attempts");
+        assert_eq!(st.snapshot(Duration::ZERO), fallback_env());
+        assert!(st.try_begin_retry(Duration::ZERO, 10), "reads may now kick a retry");
     }
 }

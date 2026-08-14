@@ -43,10 +43,25 @@ use std::io::{self, BufRead, Read, Write};
 /// v8 (GH #169): attach existing work. `new` gains `from` (adopt a
 /// registered worktree instead of creating one) and `resume` (seed the
 /// agent's session id); `tab` gains `resume`.
-pub const PROTOCOL_VERSION: u32 = 8;
+///
+/// v9 (Phase 4): prompt library access. The `prompts` verb (list, or
+/// resolve one selector to its body) and `prompt_ref` on `new` / `send`
+/// / `tab` (the `-P/--library` selector; the server resolves it against
+/// the live prompt store and composes the body with any literal prompt).
+/// `send.prompt` becomes optional on the wire (`prompt_ref` can stand
+/// alone).
+///
+/// v10 (GH #185): the `tab_close` verb. Additive in shape, but a v9
+/// server rejects the new `cmd` value as a malformed request, which is
+/// exactly the skew the version gate turns into "Termic updated, rerun
+/// your command". `AttachData.reason` gains "closed".
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// serde default for `QuitData::running`.
 pub(crate) fn default_true() -> bool { true }
+
+/// serde skip helper for default-false flags.
+pub(crate) fn is_false(b: &bool) -> bool { !*b }
 
 /// Socket + token file names inside the app's data dir.
 pub const SOCKET_FILE: &str = "termic.sock";
@@ -196,6 +211,14 @@ pub enum Command {
         name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+        /// Prompt-library selector (`-P/--library`, v9): an exact prompt
+        /// id (`builtin:review`, a custom prompt's UUID) or a
+        /// case-insensitive exact title. The server resolves it against
+        /// the live prompt store BEFORE the task is created and delivers
+        /// the body; with `prompt` too, the body, a blank line, then the
+        /// text.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_ref: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<String>,
         /// "worktree" | "main". Absent = the GUI's remembered mode.
@@ -258,6 +281,18 @@ pub enum Command {
     /// Answers "what can I pass?", which was otherwise only discoverable
     /// by guessing wrong and reading the error (GH #138).
     Agents,
+    /// The prompt library (Phase 4): what `-P/--library` accepts. The
+    /// library is per-user and editable, so static help cannot carry it
+    /// (the `agents` argument). Resolution happens in the webview's live
+    /// prompt store at request time, so overrides, renames and deletions
+    /// are always current.
+    Prompts {
+        /// Absent: list the library (ids, titles, flags; no bodies).
+        /// Present: resolve ONE prompt (exact id, then case-insensitive
+        /// exact title) and include its body (`prompts show`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selector: Option<String>,
+    },
     /// Open a tab INSIDE a running task: the GUI's "+" menu as a verb.
     /// The KIND is explicit rather than a string, because the kinds differ
     /// in sandbox, resume and YOLO behaviour and a typo must not land the
@@ -274,6 +309,10 @@ pub enum Command {
         /// tab opening meanwhile. Streamed reply when present.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+        /// Prompt-library selector (`-P/--library`, v9); see `New`. The
+        /// server resolves it BEFORE the tab is opened (fail fast).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_ref: Option<String>,
         /// With `prompt`: hold the reply until that prompt's turn
         /// settles, the same contract as `send --wait`.
         #[serde(default)]
@@ -284,6 +323,30 @@ pub enum Command {
         /// only; the agent must declare `resume_id_args`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume: Option<String>,
+        /// The CLI's working directory, for worktree-first resolution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+    /// Close ONE tab of a running task: the GUI's × as a verb (GH #185).
+    /// Anything that opens tabs programmatically needs a way to clean
+    /// them up; task-level `archive` is the wrong hammer, it takes every
+    /// tab including the caller's own session.
+    TabClose {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        /// Tab selector (id, 1-based strip index, or title/cli), resolved
+        /// by the same rules `send`/`wait`/`attach`/`logs` use. Required:
+        /// there is no "the obvious tab" to close by default, and
+        /// guessing one would be the destructive direction.
+        tab: String,
+        /// Permit closing the DEFAULT tab, the one every unqualified
+        /// `send`/`wait`/`attach` resolves to. Refused without this even
+        /// when its agent already exited, because the refusal is about
+        /// what other scripts are talking to, not about liveness.
+        #[serde(default)]
+        yes: bool,
         /// The CLI's working directory, for worktree-first resolution.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
@@ -353,7 +416,14 @@ pub enum Command {
         task: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
+        /// The literal prompt text. Defaulted (v9) so `prompt_ref` can
+        /// stand alone; the server rejects the request when BOTH are
+        /// empty/absent.
+        #[serde(default)]
         prompt: String,
+        /// Prompt-library selector (`-P/--library`, v9); see `New`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_ref: Option<String>,
         /// No agent running: restore the last session, then deliver.
         #[serde(default)]
         resume: bool,
@@ -534,7 +604,9 @@ pub enum ReplyData {
     New(NewData),
     Wait(WaitData),
     Agents(AgentsData),
+    Prompts(PromptsData),
     Tab(TabData),
+    TabClose(TabCloseData),
     Quit(QuitData),
     Archive(ArchiveData),
     Rename(RenameData),
@@ -631,6 +703,39 @@ pub struct AgentEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PromptsData {
+    /// The whole library in display order for a list, exactly one entry
+    /// for a resolved selector.
+    pub prompts: Vec<PromptEntry>,
+}
+
+/// One prompt-library entry, as the CLI sees it (Phase 4).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PromptEntry {
+    /// The stable identity every selector resolves to: `builtin:<slug>`
+    /// for shipped prompts, a UUID for custom ones. Pin THIS in scripts;
+    /// titles are user-editable conveniences.
+    pub id: String,
+    pub title: String,
+    pub builtin: bool,
+    /// Shown in the GUI dropdown. A DISABLED prompt is still fireable by
+    /// explicit selector: disabled means hidden, not dead.
+    pub enabled: bool,
+    /// Built-in only: the user edited it away from the shipped text.
+    pub modified: bool,
+    /// The prompt body. Present only for a resolved selector
+    /// (`prompts show`); the list omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// True when `body` was trimmed to fit the reply-line cap. The body
+    /// itself carries NO marker text (a marker would ride a
+    /// `show | send -p -` pipe into an agent as instructions); the CLI
+    /// warns on stderr instead.
+    #[serde(default, skip_serializing_if = "crate::is_false")]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TabData {
     /// The task the tab was opened in.
     pub task_id: String,
@@ -670,6 +775,50 @@ pub struct PromptOutcome {
     /// Present under `wait`: how the watched turn ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<WaitResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TabCloseData {
+    pub task_id: String,
+    /// The tab that was closed, echoed back as its stable id: the caller
+    /// may have named it by index or title, and only the id identifies
+    /// what actually went.
+    pub tab_id: String,
+    /// Resolved cli id of the closed tab ("claude", "codex", "shell",
+    /// a custom terminal's id).
+    pub cli: String,
+    /// Display title the GUI had given it.
+    pub title: String,
+    /// "agent" | "shell" | "terminal" | "run". Unlike every other
+    /// tab-targeting verb, `tab close` reaches all of them: closing is
+    /// not driving, and the CLI can open shell tabs, so it has to be
+    /// able to clean them up.
+    ///
+    /// NOT named `kind`, which every sibling payload uses, because
+    /// `ReplyData` is an internally-tagged enum whose tag IS `kind`:
+    /// serde flattens the two into one key and the reply fails to parse
+    /// with "duplicate field `kind`". `roundtrip_every_reply` catches it.
+    #[serde(default)]
+    pub tab_kind: String,
+    /// True when this was the task's DEFAULT tab (closed under `yes`).
+    /// Load-bearing for the caller, because the default tab is DURABLE:
+    /// closing it ends the agent for now, and the task brings it back on
+    /// reopen. A secondary tab is forgotten instead, recoverable only
+    /// from the GUI's Resume menu.
+    #[serde(default)]
+    pub was_default: bool,
+    /// A live process was stopped by this close (false when the tab's
+    /// agent or shell had already exited).
+    ///
+    /// Named for the PTY, not the agent, because this verb closes shell
+    /// and custom-terminal tabs too. How it dies differs by kind, and
+    /// only agent tabs get the polite version: they carry a `PtyRole`,
+    /// so the server can find and SIGTERM them by tab id and let the
+    /// agent flush its transcript. Nothing else carries one, so those
+    /// die the way the GUI's close button kills them, which costs
+    /// nothing since they have no transcript to lose.
+    #[serde(default)]
+    pub killed_pty: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -918,8 +1067,9 @@ pub struct AttachData {
     pub task_id: String,
     /// Why the session ended: "detached" (client asked), "exited"
     /// (the PTY closed), "archived" (the task was archived under us),
-    /// "lagged" (the session fell too far behind the output stream and
-    /// was force-detached). Additive: skip unknown reasons.
+    /// "closed" (the tab was closed under us, `tab close`), "lagged"
+    /// (the session fell too far behind the output stream and was
+    /// force-detached). Additive: skip unknown reasons.
     pub reason: String,
 }
 
@@ -1347,6 +1497,7 @@ mod tests {
             Command::New {
                 name: "fix-auth".into(),
                 prompt: Some("fix the login redirect".into()),
+                prompt_ref: Some("builtin:review".into()),
                 agent: Some("claude".into()),
                 mode: Some("worktree".into()),
                 base: Some("develop".into()),
@@ -1363,6 +1514,7 @@ mod tests {
             Command::New {
                 name: "bare".into(),
                 prompt: None,
+                prompt_ref: None,
                 agent: None,
                 mode: None,
                 base: None,
@@ -1380,6 +1532,7 @@ mod tests {
             Command::New {
                 name: String::new(),
                 prompt: None,
+                prompt_ref: None,
                 agent: Some("claude".into()),
                 mode: None,
                 base: None,
@@ -1408,6 +1561,7 @@ mod tests {
                 project: None,
                 kind: TabKind::Agent { id: "claude".into() },
                 prompt: Some("run the tests".into()),
+                prompt_ref: Some("builtin:review".into()),
                 wait: true,
                 timeout_ms: Some(60_000),
                 resume: Some("018f2c1e-aaaa-bbbb-cccc-1234567890ab".into()),
@@ -1415,13 +1569,32 @@ mod tests {
             },
             Command::Tab {
                 task: None, project: None, kind: TabKind::Shell,
-                prompt: None, wait: false, timeout_ms: None, resume: None, cwd: None,
+                prompt: None, prompt_ref: None, wait: false, timeout_ms: None,
+                resume: None, cwd: None,
             },
             Command::Tab {
                 task: None, project: None, kind: TabKind::Default,
-                prompt: None, wait: false, timeout_ms: None, resume: None, cwd: None,
+                prompt: None, prompt_ref: None, wait: false, timeout_ms: None,
+                resume: None, cwd: None,
+            },
+            // v10 (GH #185): close one tab, by every selector shape.
+            Command::TabClose {
+                task: Some("fix-auth".into()),
+                project: Some("web".into()),
+                tab: "2".into(),
+                yes: true,
+                cwd: None,
+            },
+            Command::TabClose {
+                task: None,
+                project: None,
+                tab: "a1b2c3".into(),
+                yes: false,
+                cwd: Some("/tasks/web/x".into()),
             },
             Command::Agents,
+            Command::Prompts { selector: None },
+            Command::Prompts { selector: Some("builtin:review".into()) },
             Command::Quit { commit: false },
             Command::Quit { commit: true },
             Command::Archive { task: "fix-auth".into(), project: Some("web".into()) },
@@ -1445,6 +1618,7 @@ mod tests {
                 task: Some("fix-auth".into()),
                 project: Some("web".into()),
                 prompt: "run the tests".into(),
+                prompt_ref: None,
                 resume: false,
                 fresh: false,
                 wait: true,
@@ -1456,6 +1630,7 @@ mod tests {
                 task: None,
                 project: None,
                 prompt: "continue".into(),
+                prompt_ref: Some("Review".into()),
                 resume: true,
                 fresh: false,
                 wait: false,
@@ -1608,6 +1783,28 @@ mod tests {
                     usable: true,
                 }],
             }),
+            ReplyData::Prompts(PromptsData {
+                prompts: vec![
+                    PromptEntry {
+                        id: "builtin:review".into(),
+                        title: "Review".into(),
+                        builtin: true,
+                        enabled: true,
+                        modified: false,
+                        body: None,
+                        truncated: false,
+                    },
+                    PromptEntry {
+                        id: "3f1c0d6e-aaaa-bbbb-cccc-1234567890ab".into(),
+                        title: "Ship it".into(),
+                        builtin: false,
+                        enabled: false,
+                        modified: false,
+                        body: Some("Review the diff, then commit.".into()),
+                        truncated: true,
+                    },
+                ],
+            }),
             ReplyData::Tab(TabData {
                 task_id: "w1".into(),
                 tab_id: "3f1c-…".into(),
@@ -1629,6 +1826,36 @@ mod tests {
                         detail: None,
                     }),
                 }),
+            }),
+            // v10 (GH #185): a secondary tab (forgotten) and the default
+            // tab (durable), the distinction `was_default` exists for.
+            ReplyData::TabClose(TabCloseData {
+                task_id: "w1".into(),
+                tab_id: "tab-2".into(),
+                cli: "claude".into(),
+                title: "reviewing the diff".into(),
+                tab_kind: "agent".into(),
+                was_default: false,
+                killed_pty: true,
+            }),
+            ReplyData::TabClose(TabCloseData {
+                task_id: "w1".into(),
+                tab_id: "main".into(),
+                cli: "codex".into(),
+                title: "codex".into(),
+                tab_kind: "agent".into(),
+                was_default: true,
+                killed_pty: false,
+            }),
+            // A shell tab: reachable by `tab close` and nothing else.
+            ReplyData::TabClose(TabCloseData {
+                task_id: "w1".into(),
+                tab_id: "tab-sh".into(),
+                cli: "shell".into(),
+                title: "Terminal".into(),
+                tab_kind: "shell".into(),
+                was_default: false,
+                killed_pty: true,
             }),
             ReplyData::Quit(QuitData {
                 running: true,
@@ -1707,6 +1934,21 @@ mod tests {
             "not a registered project",
             serde_json::json!({ "root": "/repo/web" }),
         ));
+    }
+
+    #[test]
+    fn send_prompt_field_is_optional_on_the_wire() {
+        // v9: `prompt_ref` can stand alone, so a send line without
+        // `prompt` must parse (defaulting to empty) rather than error.
+        let line = r#"{"id":"r1","token":"t","cmd":"send","prompt_ref":"builtin:review"}"#;
+        let req: Request = serde_json::from_str(line).unwrap();
+        match req.cmd {
+            Command::Send { prompt, prompt_ref, .. } => {
+                assert_eq!(prompt, "");
+                assert_eq!(prompt_ref.as_deref(), Some("builtin:review"));
+            }
+            other => panic!("expected send, got {other:?}"),
+        }
     }
 
     #[test]

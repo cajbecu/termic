@@ -125,8 +125,16 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, activeRepoDir, pinnedExists]);
 
-  // Reset transient form state on task switch.
+  // Reset transient form state on task switch. Skipped on the first run:
+  // on mount every value here is already empty, and blanking activeRepoDir
+  // would undo the snap the effect above just made — both effects flush in
+  // the same commit, so the snap loses, and afterwards its deps are
+  // unchanged ("" in, "" out) so it never re-runs. A multi-repo task then
+  // sat on repos[0] (the wrapper, usually clean) with an empty file list
+  // and no pill selected until the user clicked one.
+  const mounted = useRef(false);
   useEffect(() => {
+    if (!mounted.current) { mounted.current = true; return; }
     setSubject(""); setBody(""); setSearch("");
     setActiveRepoDir(""); setSelected(null); setPinnedRepoDir(null);
   }, [task.id]);
@@ -418,6 +426,9 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
                 if (diff) st.closeTab(task.id, diff.id);
               }}
               title={`${r.name} (${r.branch})`}
+              data-testid="repo-pill"
+              data-repo-dir={r.dir_name}
+              data-active={r.dir_name === activeRepoDir ? "true" : "false"}
               className={cn(
                 "flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[12px] transition-colors",
                 r.dir_name === activeRepoDir
@@ -1258,6 +1269,9 @@ function FileRow({ file, label, depth = 0, pane, selectedKey, stageGlyph, taskId
       // 2px accent bar eats into the left pad; subtract it so glyphs don't shift.
       style={{ paddingLeft: 6 + depth * 12 + 8 - 2 }}
       title={`${LBL[key] || key}: ${file.path}`}
+      data-testid="git-file-row"
+      data-pane={pane}
+      data-path={file.path}
       onClick={() => onClick(file.path)}
       onDoubleClick={() => onToggle([file.path])}
     >

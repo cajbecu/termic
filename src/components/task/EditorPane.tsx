@@ -32,6 +32,8 @@ import { properties } from "@codemirror/legacy-modes/mode/properties";
 import { proto3 } from "@/lib/protoMode";
 import { taskFileRead, taskFileWrite } from "@/lib/ipc";
 import { attachHiddenScrollRestore } from "@/lib/hiddenScrollRestore";
+import { reviewCommentsExtension, dispatchSelectionComment } from "./reviewCommentsExt";
+import { bindingMatches } from "@/lib/shortcuts";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import { usePrefs, resolveTheme } from "@/store/prefs";
@@ -254,6 +256,27 @@ export function EditorPane({ task, tab, active, onContent }: {
               // any input that appears inside the editor's DOM.
               noAutocorrectOnPanelInputs,
               lintGutter(),
+              // Selection → the SAME review-comment surface the diff pane
+              // uses (GH #28): select, comment, and it queues in the
+              // reviewComments store until the user sends the batch from the
+              // pending-comments bar. Deliberately not a one-shot "type an
+              // @ref at the agent": half the value of commenting on code is
+              // making several remarks and shipping them as one instruction.
+              // Comments key off `file`, so an editor comment and a diff
+              // comment on the same path land in one list.
+              // Caveat vs the diff pane: this buffer is EDITABLE, and stored
+              // line numbers do not map through edits. A comment made before
+              // heavy typing above it can end up quoting the wrong lines. It
+              // is bounded (comments are transient, sent then cleared) and
+              // clampLine keeps a stale range in bounds.
+              reviewCommentsExtension(task.id, tab.path,
+                // Quiet surface: no icon chasing the mouse down the gutter, no
+                // labelled pill over the selection. One gutter icon, only
+                // while something is selected. The diff pane keeps both.
+                // `source: "editor"` also drops the "I reviewed your changes"
+                // framing from the message: this is code the user is reading,
+                // not a review of the agent's work.
+                { selection: "gutter", hoverGutter: false, source: "editor" }),
               indentUnit.of("  "),
               EditorState.tabSize.of(2),
               EditorView.updateListener.of(u => {
@@ -318,6 +341,28 @@ export function EditorPane({ task, tab, active, onContent }: {
   // Focused = this task is up front AND this tab is the active main-pane tab
   // (edit/diff tabs only open in the main pane, not in split panes).
   const isActive = useApp(s => s.activeTaskId === task.id && s.activeTab[task.id] === tab.id);
+
+  // Keyboard route to the same composer. A window listener rather than a
+  // CodeMirror keymap entry because the binding is user-rebindable (usePrefs).
+  // Which editor answers: the one holding DOM focus; when focus is somewhere
+  // else entirely (file tree, terminal, nowhere), the visible active tab. That
+  // pair is exclusive, so two mounted editors can never both fire on one press.
+  const sendRefBinding = usePrefs(s => s.shortcuts["add-selection-to-agent"]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!bindingMatches(e, sendRefBinding)) return;
+      const v = viewRef.current;
+      if (!v) return;
+      const focused = (document.activeElement as HTMLElement | null)?.closest?.(".cm-editor");
+      if (focused ? focused !== v.dom : !isActive) return;
+      // Nothing selected: let the key fall through untouched.
+      if (!dispatchSelectionComment(v)) return;
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [sendRefBinding, task.id, isActive]);
 
   // Swap fresh disk content into the live view, annotated so it doesn't flip
   // the dirty dot. Used by both the silent preview-reload path and the user

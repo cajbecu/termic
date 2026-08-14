@@ -22,12 +22,21 @@ export interface ReviewComment {
    *  file-level comment (no specific lines — "comment on the whole file"). */
   startLine: number | null;
   endLine: number | null;
-  /** The source text at the range, verbatim. Empty for file-level
-   *  comments. Used both for display and as drift-proof context for the
-   *  agent. */
+  /** The text the user actually selected, verbatim, captured once and never
+   *  re-read. Partial lines included: if they highlighted half of line 40,
+   *  that half is the quote. Empty for file-level comments. This is both what
+   *  the composer shows and the drift-proof context the agent gets, so it must
+   *  keep saying what the user pointed at even after the file moves under it
+   *  (only the line numbers follow the code, see reanchor). */
   quote: string;
   /** The user's feedback. */
   body: string;
+  /** Where the comment was made. A diff is a review surface, so a batch off
+   *  one is announced as review feedback ("I reviewed your changes..."). A
+   *  source file is not: there the user is pointing at code they are reading,
+   *  which is not a review of anything, and the framing would be a lie. Absent
+   *  = diff (the original surface). */
+  source?: "diff" | "editor";
 }
 
 /** A comment-in-progress: range + quote captured, body not yet written.
@@ -47,6 +56,11 @@ interface ReviewCommentsState {
 
   add: (c: Omit<ReviewComment, "id">) => string;
   update: (taskId: string, id: string, body: string) => void;
+  /** Re-point a comment at where its code ended up. Called by the editor as
+   *  it maps the original selection through edits (lib/commentAnchors.ts), so
+   *  a comment made on line 12 still says 12 after three lines are typed above
+   *  it. Moves the LOCATOR only: the quote stays exactly what was selected. */
+  reanchor: (taskId: string, id: string, at: { startLine: number; endLine: number }) => void;
   remove: (taskId: string, id: string) => void;
   clear: (taskId: string) => void;
 }
@@ -69,6 +83,19 @@ export const useReviewComments = create<ReviewCommentsState>((set) => ({
         [taskId]: (s.byTask[taskId] ?? []).map((c) => (c.id === id ? { ...c, body } : c)),
       },
     })),
+
+  reanchor: (taskId, id, at) =>
+    set((s) => {
+      const list = s.byTask[taskId];
+      if (!list?.some((c) => c.id === id)) return s;
+      return {
+        byTask: {
+          ...s.byTask,
+          [taskId]: list.map((c) =>
+            c.id === id ? { ...c, startLine: at.startLine, endLine: at.endLine } : c),
+        },
+      };
+    }),
 
   remove: (taskId, id) =>
     set((s) => ({
@@ -134,10 +161,19 @@ export function composeCommentsMessage(comments: ReviewComment[]): string {
         const fence = "`".repeat(Math.max(3, longest + 1));
         block += `\n${fence}\n${q}\n${fence}`;
       }
-      block += `\n${c.body.trim()}`;
+      // A comment body is optional when there is a quote: sending a selection
+      // with nothing to say about it is a real gesture ("look at this"). Don't
+      // leave a dangling blank line behind the fence for it.
+      if (c.body.trim()) block += `\n${c.body.trim()}`;
       blocks.push(block);
     }
   }
+
+  // Only a diff-born batch gets the review framing. Selections sent from a
+  // source file are "here is some code, here is what I want" — prefixing them
+  // with "I reviewed your changes" tells the agent it authored code it may
+  // never have touched, and invites it to answer as if defending a diff.
+  if (!comments.some(c => c.source !== "editor")) return blocks.join("\n\n");
 
   const intro =
     comments.length === 1

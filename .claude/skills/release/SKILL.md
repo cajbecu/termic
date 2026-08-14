@@ -193,6 +193,38 @@ Both `changelog.md` and `changelog.json` are also seeded directly in the
 `termic.dev` repo so the feature works before the first release that runs the
 updated CI.
 
+## Post-release notifications (minor releases only)
+
+After a **minor release** (x.Y.0) — not patches — post release notification comments on the GitHub issues and PRs addressed in this release.
+
+**Skip for patch releases (x.y.Z > 0).**
+
+### Workflow
+
+1. **Find closed issues** since the previous minor release:
+   ```sh
+   gh issue list -R simion/termic --state closed --limit 50 --json number,title,closedAt
+   ```
+   Filter to those closed in the ~2 weeks before the release date.
+
+2. **Find merged PRs** and check which ones have no linked issue (parse body for `closes #N` / `fixes #N`):
+   ```sh
+   gh pr list -R simion/termic --state merged --limit 30 --json number,title,mergedAt,body
+   ```
+
+3. **Propose the list** before posting anything:
+   - Issues closed as part of this release
+   - PRs merged with no linked issue (user-facing ones only — skip internal tooling / docs-only PRs)
+
+4. **Draft messages** for approval:
+   - **Standard issue**: `This shipped in [vX.Y.0](<release-url>), released today. Thanks for reporting!`
+   - **Standard PR (no issue)**: `This is live in [vX.Y.0](<release-url>), released today. Thanks for the contribution!`
+   - **Custom**: For issues with significant back-and-forth, check existing comments first — if already explained, keep it short: just the "shipped in vX.Y.0" line.
+
+5. **Post only after approval.** Batch all comments in one step.
+
+---
+
 ## Developing the update UI
 
 `check()` never returns an update in a `tauri dev` build (no signed release to

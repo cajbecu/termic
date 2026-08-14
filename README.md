@@ -361,17 +361,13 @@ Open an issue to push something up the list or pick one off.
    of host-toolchain friction this sidesteps.
 7. **Windows prebuilts.** AppImage CI is live for Linux; Windows MSI is
    the matching CI matrix entry.
-8. **Send selection to the agent as a reference.** Select text in the
-   editor, right-click or hover, and push it into the active agent terminal
-   as an `@file:123` style reference so the agent picks it up as context.
-   ([#174](https://github.com/simion/termic/issues/174))
-9. **Opt-in usage telemetry.** Anonymous, opt-in analytics via a self-hosted
+8. **Opt-in usage telemetry.** Anonymous, opt-in analytics via a self-hosted
    Umami instance. Strictly limited to usage patterns (which features are
    used, how often) and crash reports — nothing else. No code, no prompts,
    no file paths, no agent output, no project names. Minimum viable event
    set: the goal is performance and feature prioritization, not surveillance.
    Off by default, one toggle in Settings.
-10. **Investigating agent lifecycle hooks.** Termic infers "the agent
+9. **Investigating agent lifecycle hooks.** Termic infers "the agent
     finished" from the terminal stream (OSC progress sequences and window
     titles), which costs no config, works for every agent including ones
     you add yourself, and keeps working inside the sandbox. Every
@@ -386,7 +382,7 @@ Open an issue to push something up the list or pick one off.
     default, with a real uninstall, and OSC stays authoritative
     regardless. Research and measurement plan in
     [docs/research/agent-hooks.md](docs/research/agent-hooks.md).
-11. **Intentional agent-driven orchestration.** The plumbing already
+10. **Intentional agent-driven orchestration.** The plumbing already
     ships: agents get `TERMIC_CLI` and a tutorial in their environment,
     so a running agent can spawn a task with `--wait`, prompt another one,
     read its result and branch on the exit code. What is missing is
@@ -398,38 +394,40 @@ Open an issue to push something up the list or pick one off.
     documentation, and how much orchestration the tool should suggest
     rather than obey. Notes in
     [docs/research/agent-orchestration.md](docs/research/agent-orchestration.md).
-12. **Performance benchmarks in CI.** "Performance trumps polish" is the
-    first rule in this repo, and today it is enforced by review and habit.
-    Nothing measures it. The gap to close is a set of benchmark targets
-    (idle CPU with several terminals open, cold start to first paint,
-    main-thread jank while a TUI repaints hard, RSS growth across a long
-    agent session) wired into CI so a regression fails a PR instead of
-    surfacing weeks later as "feels slower lately". Inspired by
-    [Orca](https://github.com/stablyai/orca), which ships `bench:idle-cpu`,
-    `bench:startup` and `bench:main-thread-jank`. Worth noting it is a
-    cautionary tale as much as a model: Orca measures and still carries
-    open reports of 23-33% idle renderer CPU and memory that climbs over a
-    session. Measuring is not sufficient. Not measuring is worse.
-13. **Import Warp and Ghostty themes.** Termic has a native JSON theme
+11. **Import Warp and Ghostty themes.** Termic has a native JSON theme
     format, so a custom theme is a file drop away, but two large theme
     ecosystems already exist and neither is ours. Scan `~/.warp/themes`
     and Ghostty's theme directory, translate both into termic's format,
     and let people pick from the library they already collected. Borrowed
     from [Orca](https://github.com/stablyai/orca), which does the import
     well and, unlike termic, has no native theme format underneath it.
-14. **Search every session you have ever run.** The agent CLIs already
-    write full transcripts to disk (`~/.claude/projects/**`, Codex's
-    rollout files), and termic already knows which task produced which
-    session. A streaming keyword scan over those files answers "what did
-    we already try, and where" with no index, no embeddings, no server
-    and nothing leaving the machine. Spotify's Xirp ships exactly this
-    shape and pairs it with upload to their hosted portal; the local
-    half is the interesting half. Notes in
-    [docs/research/agent-orchestration.md](docs/research/agent-orchestration.md).
-15. ~~**First-class git surface.** Commit / push / pull / branch switch from inside the app instead of dropping to the aux terminal.~~ (Done)
-16. ~~**More coding agents.** First-class opencode, pi.dev, and cline support, plus exploring other CLI coding agents as they land. Launch presets for local models via ollama so an agent can run fully on-device.~~ (Done)
-17. ~~**Flexible terminal splits.** iTerm-style pane splitting in any direction — horizontal, vertical, and nested — so multiple terminals, agents, or aux sessions can live side by side in the same workspace view without switching tabs.~~ (Done)
-18. ~~**Quick-jump to next waiting agent.** A keyboard shortcut to instantly focus the next agent that is waiting for input, so you can cycle through a multi-agent session without hunting for the right tab by eye.~~ (Done)
+12. **On-device dictation for agent prompts.** Prompts to a coding agent
+    are prose, not code: a paragraph of intent, constraints and a bit of
+    context. That is the kind of text people speak faster than they
+    type, and it is worth more here than in a normal editor because one
+    dictated prompt can be broadcast to four agents at once. macOS 26
+    (Tahoe) ships `SpeechAnalyzer` and `SpeechTranscriber` in the Speech
+    framework, which run entirely on device against the Apple Silicon
+    Neural Engine, no network and no vendor key, which is the only way a
+    feature like this belongs in an app that is otherwise wholly
+    on-device. Early third-party measurements put it well ahead of
+    Whisper on speed (a 34-minute file transcribed in about 45 seconds,
+    roughly 55% faster than MacWhisper's Large V3 Turbo), though those
+    are other people's numbers on other people's hardware and the
+    interesting figure for us is streaming latency for a 20-second
+    utterance, not bulk throughput. Hard constraints: **macOS 26+ and
+    Apple Silicon only**, so this is strictly additive, hidden rather
+    than degraded everywhere else (Intel, older macOS, Linux, Windows),
+    and never on the critical path of typing a prompt. Open questions
+    before any of it is worth building: whether the speech models arrive
+    as downloadable assets on first use and what that means for a first
+    run offline, what streaming partial-result latency actually feels
+    like inside a terminal-focused UI, how a Swift bridge is best shaped
+    from the Rust side, how microphone TCC interacts with the sandbox,
+    and whether `DictationTranscriber` is a good enough fallback for
+    unsupported languages to bother with. Research first: the question
+    is whether it earns a permission prompt and a platform-specific code
+    path, not how to build it.
 
 ---
 
@@ -439,6 +437,8 @@ Termic is free, AGPL-3.0, and built by its author and a growing group of dedicat
 
 | [![DontPayFull](https://static.dontpayfull.com/static/images/logo/logo.png)](https://www.dontpayfull.com) |
 |---|
+
+Also sponsoring: [Vyttle](https://vyttle.com), [Sage Haven](https://sagehaven.ai).
 
 [![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?style=flat&logo=github)](https://github.com/sponsors/simion)
 

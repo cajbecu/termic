@@ -23,7 +23,7 @@ import {
   snap,
   submitToAgent,
   taskViewBadge,
-  waitForAgentPty,
+  waitForAgentReady,
   waitForAppShell,
   waitForWorkBadge,
   waitForWorkBadgeGone,
@@ -52,7 +52,7 @@ describe("agent working state", () => {
     await requireTermicApi();
     await requireWorkBadges();
     taskId = await openTask("e2e-agent-working");
-    await waitForAgentPty(taskId);
+    await waitForAgentReady(taskId);
 
     await submitToAgent(taskId, "do something");
 
@@ -82,7 +82,7 @@ describe("agent attention", () => {
     await requireWorkBadges();
 
     a = await openTask("e2e-attn-a");
-    await waitForAgentPty(a);
+    await waitForAgentReady(a);
     await submitToAgent(a, "do something");
     await waitForWorkBadge(a, "working", {
       timeout: 10_000,
@@ -123,7 +123,7 @@ describe("message queue", () => {
     await requireTermicApi();
     await requireWorkBadges();
     taskId = await openTask("e2e-queue");
-    await waitForAgentPty(taskId);
+    await waitForAgentReady(taskId);
 
     // Put the agent to work.
     await submitToAgent(taskId, "work");
@@ -309,7 +309,7 @@ describe("pending work defers done", () => {
     await requireTermicApi();
     await requireWorkBadges();
     taskId = await openTask("e2e-pending-work");
-    await waitForAgentPty(taskId);
+    await waitForAgentReady(taskId);
 
     await submitToAgent(taskId, "#pending 2");
     await waitForWorkBadge(taskId, "working", {
@@ -368,7 +368,7 @@ describe("a hold that never clears still ends", () => {
     await requireWorkBadges();
     await browser.execute((ms) => localStorage.setItem("workDoneCeilingMs", String(ms)), CEILING_MS);
     taskId = await openTask("e2e-pending-ceiling");
-    await waitForAgentPty(taskId);
+    await waitForAgentReady(taskId);
 
     // Same drill as the hold spec, and #settle is never sent: the pending line
     // stays on screen for the rest of the test.
@@ -417,7 +417,7 @@ describe("a premature done is taken back", () => {
     await requireWorkBadges();
 
     a = await openTask("e2e-stage-a");
-    await waitForAgentPty(a);
+    await waitForAgentReady(a);
 
     // Task B exists BEFORE the submit. A's done only badges while nobody is
     // watching it (a focused tab's done is downgraded to idle on the spot), so
@@ -482,7 +482,7 @@ describe("agent notifications", () => {
     await requireTermicApi();
     await requireWorkBadges();
     taskId = await openTask("e2e-agent-notify");
-    await waitForAgentPty(taskId);
+    await waitForAgentReady(taskId);
 
     await submitToAgent(taskId, "#osc9 FakeAgent needs your permission");
 

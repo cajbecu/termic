@@ -5,8 +5,9 @@
 use serde::Serialize;
 use termic_proto::{
     send_mode, AgentsData, ApplyData, ArchiveData, DiffData, DiffStat, NewData, OpenData,
-    ProjectInfo, ProjectRemoveData, QuitData, RenameData, ResultData, SendData, StreamEvent,
-    TabData, TabStatus, TaskStatus, TaskSummary, WaitData, WaitOutcome, WaitResult,
+    ProjectInfo, ProjectRemoveData, PromptEntry, QuitData, RenameData, ResultData, SendData,
+    StreamEvent, TabCloseData, TabData, TabStatus, TaskStatus, TaskSummary, WaitData, WaitOutcome,
+    WaitResult,
 };
 
 /// One JSON object, compact, exactly as documented in each verb's help.
@@ -265,6 +266,41 @@ pub fn rename_text(r: &RenameData) -> String {
     }
 }
 
+/// One line naming what went, and, for the default tab, what did NOT.
+/// Closing a secondary tab forgets it; closing the default tab only ends
+/// the agent, because the task reopens that tab. A caller told only
+/// "closed" would read those two as the same thing and be wrong about
+/// half of them.
+pub fn tab_close_text(c: &TabCloseData) -> String {
+    // Same label rule as `tab_text`: the title only earns its place when
+    // it says something the cli id does not.
+    let label = if c.title.is_empty() || c.title.eq_ignore_ascii_case(&c.cli) {
+        c.cli.clone()
+    } else {
+        format!("{} ({})", c.title, c.cli)
+    };
+    // `tab close` reaches shell and custom-terminal tabs too, so the noun
+    // has to follow the kind: reporting "no agent was running" for a
+    // shell tab would read as a failure to find one.
+    let noun = if c.tab_kind == "agent" || c.tab_kind.is_empty() { "agent" } else { "terminal" };
+    let agent = if c.killed_pty {
+        format!("{noun} stopped")
+    } else {
+        format!("no {noun} was running")
+    };
+    if c.was_default {
+        format!(
+            "Closed the default {label} tab {} in {} ({agent}). It stays in the task and reopens with it.",
+            c.tab_id, c.task_id
+        )
+    } else {
+        format!(
+            "Closed {label} tab {} in {} ({agent}).",
+            c.tab_id, c.task_id
+        )
+    }
+}
+
 pub fn archive_text(a: &ArchiveData) -> String {
     // killed_agents counts every live PTY of the task (agents, shells,
     // setup tabs alike), so say "terminals", not "agents".
@@ -462,6 +498,34 @@ pub fn agents_text(a: &AgentsData) -> String {
             if e.enabled { "yes" } else { "no" },
             installed,
             if e.usable { "yes" } else { "no" },
+        ));
+    }
+    out.trim_end().to_string()
+}
+
+/// The prompt library as a table (Phase 4). Ids lead because they are
+/// the stable selector a script should pin; titles are user-editable
+/// conveniences (docs/plans/cli.md).
+pub fn prompts_text(prompts: &[PromptEntry]) -> String {
+    if prompts.is_empty() {
+        return "The prompt library is empty.".into();
+    }
+    // Custom prompt ids are UUIDs (36 chars) and titles are free text,
+    // so both columns size to the data (the agents_text rule), never
+    // narrower than their headers.
+    let idw = prompts.iter().map(|p| p.id.chars().count()).max().unwrap_or(0).max("ID".len());
+    let tw = prompts.iter().map(|p| p.title.chars().count()).max().unwrap_or(0).max("TITLE".len());
+    let mut out = format!("{:<idw$} {:<tw$} KIND     ENABLED  MODIFIED\n", "ID", "TITLE");
+    for p in prompts {
+        out.push_str(&format!(
+            "{:<idw$} {:<tw$} {:<8} {:<8} {}\n",
+            p.id,
+            p.title,
+            if p.builtin { "builtin" } else { "custom" },
+            if p.enabled { "yes" } else { "no" },
+            // A dash for custom prompts: modified only means something
+            // for a builtin (edited away from the shipped text).
+            if !p.builtin { "-" } else if p.modified { "yes" } else { "no" },
         ));
     }
     out.trim_end().to_string()
@@ -898,6 +962,60 @@ created web/fix-auth
         assert!(
             outcome_text(&r(WaitOutcome::NotDelivered, None, Some("webview reloaded")))
                 .contains("webview reloaded")
+        );
+    }
+
+    #[test]
+    fn tab_close_text_separates_forgotten_from_durable() {
+        let c = |title: &str, was_default: bool, killed_pty: bool| TabCloseData {
+            task_id: "w1".into(),
+            tab_id: "tab-2".into(),
+            cli: "claude".into(),
+            title: title.into(),
+            tab_kind: "agent".into(),
+            was_default,
+            killed_pty,
+        };
+        // A secondary tab: gone for good, so nothing is promised about it
+        // coming back.
+        assert_eq!(
+            tab_close_text(&c("reviewing the diff", false, true)),
+            "Closed reviewing the diff (claude) tab tab-2 in w1 (agent stopped).",
+        );
+        // An agent that had already exited is not reported as stopped.
+        assert_eq!(
+            tab_close_text(&c("reviewing the diff", false, false)),
+            "Closed reviewing the diff (claude) tab tab-2 in w1 (no agent was running).",
+        );
+        // The default tab is DURABLE: saying only "closed" would let a
+        // caller conclude it is gone, and it is not.
+        let dflt = tab_close_text(&c("claude", true, true));
+        assert_eq!(
+            dflt,
+            "Closed the default claude tab tab-2 in w1 (agent stopped). It stays in the task and reopens with it.",
+        );
+        // Title == cli adds nothing, so it is not repeated (the tab_text rule).
+        assert!(!dflt.contains("claude (claude)"), "{dflt}");
+        // A title that only differs from the cli id by case adds nothing,
+        // so the cli id is what renders (the tab_text rule).
+        assert_eq!(
+            tab_close_text(&c("Claude", false, true)),
+            "Closed claude tab tab-2 in w1 (agent stopped).",
+        );
+        // A shell tab has no agent, so "no agent was running" would read
+        // as a failure to find one rather than as what happened.
+        let shell = TabCloseData {
+            task_id: "w1".into(),
+            tab_id: "tab-sh".into(),
+            cli: "shell".into(),
+            title: "Terminal".into(),
+            tab_kind: "shell".into(),
+            was_default: false,
+            killed_pty: true,
+        };
+        assert_eq!(
+            tab_close_text(&shell),
+            "Closed Terminal (shell) tab tab-sh in w1 (terminal stopped).",
         );
     }
 

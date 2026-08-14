@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { archiveTask, clickByText, openTask, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitGone, waitVisible } from "../helpers";
@@ -478,7 +478,9 @@ describe("review comment alignment", () => {
       const ta = document.querySelector(".tc-comment-textarea") as HTMLTextAreaElement;
       ta.value = text;
       ta.dispatchEvent(new Event("input", { bubbles: true })); // also runs autoGrow
-      (document.querySelector(".tc-comment-composer .tc-btn-primary") as HTMLElement).click();
+      // "Add to pending" queues the comment card; the primary CTA is now Send,
+      // which ships it to the agent instead of mounting a card.
+      (document.querySelector(".tc-comment-composer .tc-btn-queue") as HTMLElement).click();
     }, body);
     await waitGone(".tc-comment-textarea");
   }
@@ -530,5 +532,231 @@ describe("review comment alignment", () => {
     expect(after.nums).toEqual(after.lines);
     expect(after.spread).toBeLessThan(2);
     await snap("comment-alignment.png");
+  });
+});
+
+// Multi-repo Git panel. A multi task's status carries the host repo FIRST
+// (dir_name ""), then one entry per member — so "the repo with the changes" is
+// almost never the first one. Opening the panel has to land on a changed repo
+// by itself; it used to open on the empty host and sit there until the user
+// clicked a pill (the mount-time reset raced the auto-select and won).
+//
+// Fixture: a non-git wrapper host plus two throwaway member repos, all under
+// one tmp dir. Torn down completely (task archived, project removed, tmp
+// deleted) so the profile is left exactly as it was found.
+describe("git multi-repo panel", () => {
+  let tmp = "";
+  let projectId: string | undefined;
+  let taskId: string | undefined;
+
+  const member = (name: string) => path.join(tmp, name);
+
+  before(() => {
+    tmp = mkdtempSync(path.join(os.tmpdir(), "e2e-multi-"));
+    mkdirSync(path.join(tmp, "host"));
+    for (const name of ["alpha", "beta"]) {
+      const p = member(name);
+      mkdirSync(p);
+      execSync(`git init -b main -q "${p}"`);
+      writeFileSync(path.join(p, "README.md"), `# ${name}\n`);
+      execSync(`git -C "${p}" add .`);
+      execSync(
+        `git -C "${p}" -c user.email=e2e@termic.dev -c user.name=e2e commit -q -m init`,
+      );
+    }
+  });
+
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+    if (projectId) {
+      await browser.execute(async (id) => {
+        await window.__termic!.ipc.projectRemove(id);
+        await window.__termic!.useApp.getState().loadAll();
+      }, projectId);
+    }
+    if (tmp) rmSync(tmp, { recursive: true, force: true });
+  });
+
+  /** The repo pills, in render order. There is exactly one Git panel in the
+   *  DOM (RightPanel is an App-level singleton over the active task), so these
+   *  need no per-task scoping. */
+  const pills = () =>
+    browser.execute(() =>
+      [...document.querySelectorAll('[data-testid="repo-pill"]')].map((e) => ({
+        dir: e.getAttribute("data-repo-dir"),
+        active: e.getAttribute("data-active") === "true",
+      })),
+    ) as Promise<Array<{ dir: string | null; active: boolean }>>;
+
+  /** Listed file rows as `<pane>:<repo-relative path>`. */
+  const rows = () =>
+    browser.execute(() =>
+      [...document.querySelectorAll('[data-testid="git-file-row"]')].map(
+        (e) => `${e.getAttribute("data-pane")}:${e.getAttribute("data-path")}`,
+      ),
+    ) as Promise<string[]>;
+
+  /** Click one of the right panel's own tabs. Not clickByText: the label grows
+   *  badge digits ("Git" → "Git21") the moment anything is changed. */
+  const openRightTab = (label: "All files" | "Git") =>
+    browser.execute((l) => {
+      const el = document.querySelector(
+        `[data-testid="right-tab"][data-tab="${l}"]`,
+      ) as HTMLElement | null;
+      if (!el) throw new Error(`no right-panel tab: ${l}`);
+      el.click();
+    }, label);
+
+  it("creates a task spanning two member repos", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+
+    const created = await browser.execute(
+      async (host, alpha, beta) => {
+        const t = window.__termic!;
+        // A run that died before its teardown leaves the project behind: the
+        // host path is fresh every time but the NAME is not, and the sidebar
+        // would accumulate them. Drop any stale one first.
+        for (const p of t.useApp.getState().projects.filter((p: any) => p.name === "e2e-multi")) {
+          try { await t.ipc.projectRemove(p.id); } catch { /* has live tasks */ }
+        }
+        const spec = (root_path: string, name: string) => ({
+          root_path,
+          name,
+          // Explicit: these repos have no remote, and an empty base would be
+          // filled in as "/main" (remote + "/" + branch) and never resolve.
+          base_branch: "main",
+          setup_script: "",
+          run_script: "",
+          archive_script: "",
+        });
+        const proj = await t.ipc.projectAddMulti(
+          host,
+          "e2e-multi",
+          [spec(alpha, "alpha"), spec(beta, "beta")],
+          true, // non-git wrapper host
+        );
+        // Member paths come back CANONICALIZED (/var/folders/… →
+        // /private/var/folders/… on macOS), and task_create_multi matches a
+        // requested member against the project's list by exact string — so
+        // feed it what the project stored, not what we passed in.
+        const at = (n: string) =>
+          proj.members!.find((m: any) => m.name === n)!.root_path;
+        const task = await t.ipc.taskCreateMulti({
+          project_id: proj.id,
+          name: "e2e-multi-git",
+          cli: "fakeagent",
+          branch: "e2e-multi-git",
+          members: [
+            { root_path: at("alpha"), mode: "worktree" as const },
+            { root_path: at("beta"), mode: "worktree" as const },
+          ],
+        });
+        await t.useApp.getState().loadAll();
+        t.useApp.getState().setActiveTask(task.id);
+        return { projectId: proj.id, taskId: task.id as string };
+      },
+      path.join(tmp, "host"),
+      member("alpha"),
+      member("beta"),
+    );
+    projectId = created.projectId;
+    taskId = created.taskId;
+
+    // Both members are checked out inside the wrapper, each on the task branch.
+    const st = await browser.execute(
+      (id) => window.__termic!.ipc.taskGitStatus(id),
+      taskId,
+    );
+    expect(st.repos.map((r: any) => r.dir_name)).toEqual(["", "alpha", "beta"]);
+  });
+
+  it("opens on the changed member repo with its files listed, no click", async () => {
+    // Start from "All files" so switching to Git below is a real mount of the
+    // panel against an ALREADY dirty status — that is the regression window.
+    await openRightTab("All files");
+
+    // Dirty the SECOND member only: the host (repos[0], the default before any
+    // selection) and alpha both stay clean, so a panel that fails to auto-select
+    // shows an empty file list.
+    await browser.execute(async (id) => {
+      await window.__termic!.ipc.taskFileWrite(id, "beta/README.md", "# beta\nedited by e2e\n");
+      window.__termic!.useApp.getState().bumpGitRevision(id);
+    }, taskId);
+    await browser.waitUntil(
+      () =>
+        browser.execute(async (id) => {
+          const s = await window.__termic!.ipc.taskGitStatus(id);
+          return s.repos_changed === 1;
+        }, taskId),
+      { timeout: 10_000, timeoutMsg: "git status never reported the member change" },
+    );
+
+    await openRightTab("Git");
+
+    // Only the changed repo gets a pill, and it is selected without a click.
+    await browser.waitUntil(
+      async () => {
+        const p = await pills();
+        return p.length === 1 && p[0].dir === "beta" && p[0].active;
+      },
+      { timeout: 10_000, timeoutMsg: "the changed member repo was never auto-selected" },
+    );
+    // ...and its file list is populated, not the empty host's.
+    expect(await rows()).toEqual(["unstaged:README.md"]);
+    await snap("git-multi-repo.png");
+  });
+
+  it("keeps the selection put when a second repo goes dirty", async () => {
+    await browser.execute(async (id) => {
+      await window.__termic!.ipc.taskFileWrite(id, "alpha/README.md", "# alpha\nedited by e2e\n");
+      window.__termic!.useApp.getState().bumpGitRevision(id);
+    }, taskId);
+
+    // The new pill appears in repo order (alpha before beta)...
+    await browser.waitUntil(
+      async () => (await pills()).length === 2,
+      { timeout: 10_000, timeoutMsg: "the second changed repo never got a pill" },
+    );
+    const p = await pills();
+    expect(p.map((r) => r.dir)).toEqual(["alpha", "beta"]);
+    // ...without stealing the selection, and the file list is still beta's.
+    expect(p.find((r) => r.dir === "beta")!.active).toBe(true);
+    expect(await rows()).toEqual(["unstaged:README.md"]);
+  });
+
+  it("swaps the file list when another repo pill is clicked", async () => {
+    await browser.execute(() => {
+      const el = document.querySelector(
+        '[data-testid="repo-pill"][data-repo-dir="alpha"]',
+      ) as HTMLElement;
+      el.click();
+    });
+    await browser.waitUntil(
+      async () => (await pills()).find((r) => r.dir === "alpha")!.active,
+      { timeout: 8_000, timeoutMsg: "clicking the alpha pill never selected it" },
+    );
+
+    // Staging inside the selected member must hit THAT repo: the row moves to
+    // the staged pane and beta's own file is untouched.
+    await browser.execute((id) =>
+      window.__termic!.ipc.taskStage(id, "alpha", ["README.md"]),
+      taskId,
+    );
+    await browser.execute((id) =>
+      window.__termic!.useApp.getState().bumpGitRevision(id), taskId);
+    await browser.waitUntil(
+      async () => (await rows()).includes("staged:README.md"),
+      { timeout: 10_000, timeoutMsg: "the staged file never moved panes" },
+    );
+    const st = await browser.execute(
+      (id) => window.__termic!.ipc.taskGitStatus(id),
+      taskId,
+    );
+    const alpha = st.repos.find((r: any) => r.dir_name === "alpha");
+    const beta = st.repos.find((r: any) => r.dir_name === "beta");
+    expect(alpha.staged.map((f: any) => f.path)).toEqual(["README.md"]);
+    expect(beta.staged).toEqual([]);
+    expect(beta.unstaged.map((f: any) => f.path)).toEqual(["README.md"]);
   });
 });
