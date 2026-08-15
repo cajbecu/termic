@@ -1,14 +1,24 @@
-// Match ranges for the find-in-files result rows. `git grep` reports only
-// the column of the FIRST match on a line, so the frontend re-matches the
-// preview to highlight every hit.
+// Match ranges for the find-in-files result rows.
 //
-// In regex mode the two engines are NOT the same flavor: git runs POSIX ERE,
-// `RegExp` runs ECMAScript. That is tolerable because this decides
+// ripgrep reports the offsets of every match on a line, so `hitRanges`
+// just forwards them and what gets painted is exactly what the search
+// engine matched, in its own flavor. `git grep` reports only the column
+// of the FIRST match, so the fallback re-matches the preview here.
+//
+// On that fallback the two engines are NOT the same flavor: git runs POSIX
+// ERE, `RegExp` runs ECMAScript. That is tolerable because this decides
 // highlighting only, never which rows exist. POSIX-only syntax
 // (`[[:digit:]]`, `\<`) leaves the row unhighlighted; ECMAScript-only syntax
 // (`\d`, `(?:…)`) matches nothing in git, so there is no row to paint.
 
-import type { GrepOpts } from "@/lib/ipc";
+import type { GrepHit, GrepOpts } from "@/lib/ipc";
+
+/** Ranges to highlight for one result row. Prefers what the backend
+ *  reported over re-deriving it. */
+export function hitRanges(hit: GrepHit, query: string, opts: GrepOpts): Array<[number, number]> {
+  if (hit.ranges?.length) return hit.ranges;
+  return findRanges(hit.preview, query, opts);
+}
 
 /** `[start, end)` ranges of `query` in `text`, under the same flags the
  *  search ran with. Literal mode escapes the metacharacters, so the query

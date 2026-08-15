@@ -132,15 +132,32 @@ export const taskMatchIgnoredFiles = (id: string, clicked: string) =>
 
 // ───────────────────────────── find in files ─────────────────────────────
 
-export interface GrepHit { path: string; line: number; col: number; preview: string }
+export interface GrepHit {
+  path: string;
+  line: number;
+  col: number;
+  preview: string;
+  /** UTF-16 `[start, end)` offsets of every match on the line, straight
+   *  from the search engine. ripgrep reports them; `git grep` can't, and
+   *  sends `[]` so the frontend re-matches the preview (findMatches.ts). */
+  ranges: Array<[number, number]>;
+}
 
-/** How the query is matched. `regex` is a POSIX ERE (git grep -E), NOT
- *  PCRE — git is not always compiled with libpcre. Kept as one object so
- *  the two flags can't be swapped at a call site, and so the search and
- *  its result highlighting always read the same pair. */
+/** Which program backs find-in-files, decided once per process by Rust.
+ *  Picks the regex flavor and whether the dialog offers the install hint. */
+export type FindBackend = "ripgrep" | "git-grep";
+
+export const taskFindBackend = () => invoke<FindBackend>("task_find_backend");
+
+/** How the query is matched. `regex` is a Rust regex under ripgrep and a
+ *  POSIX ERE (git grep -E) on the fallback, never PCRE — git is not always
+ *  compiled with libpcre. Kept as one object so the two flags can't be
+ *  swapped at a call site, and so the search and its result highlighting
+ *  always read the same pair. */
 export interface GrepOpts { regex: boolean; case_sensitive: boolean }
 
-/** Start a streaming `git grep` in the task. Results arrive via
+/** Start a streaming search in the task (ripgrep, or `git grep` where rg
+ *  isn't installed). Results arrive via
  *  `grep-result://<searchId>` events (see `onGrepResult`) and a final
  *  `grep-done://<searchId>` (`onGrepDone`). The caller generates a fresh
  *  `searchId` per keystroke so we can ignore late events from cancelled
