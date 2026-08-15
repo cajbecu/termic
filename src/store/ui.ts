@@ -43,15 +43,43 @@ export interface TerminalDropRequest {
   taskId: string;
 }
 
+/** Pre-fill for the New Task dialog. Every field is optional; the dialog
+ *  falls back to its usual project/last-used defaults for anything absent,
+ *  so a seed can carry as little as one field. */
+export interface NewTaskSeed {
+  /** Pre-fills "Branch from". */
+  baseBranch?: string;
+  /** Pre-fills the name field (a full name, not only a prefix, despite
+   *  the historical key). */
+  namePrefix?: string;
+  /** Open straight into "import an existing worktree" mode. */
+  importMode?: boolean;
+  /** Pre-fills the first-message textarea (GH #192, deep links). Sent to
+   *  the agent after create; never auto-submitted from the link itself. */
+  prompt?: string;
+  /** Agent CLI id to pre-select. Ignored when it names an agent this
+   *  install does not offer. */
+  agent?: string;
+  /** Task type to pre-select, overriding the user's remembered choice. */
+  mode?: "worktree" | "repo_root";
+  /** Bumped by `openNewTask` on every call. The dialog's reset effect keys
+   *  on it, so a SECOND open for the same project re-seeds the form instead
+   *  of no-op'ing — which is what a second deep link is (GH #192): the
+   *  window raises, and without this it raises onto the first link's name
+   *  and prompt. Assigned by the store; callers never set it. */
+  nonce?: number;
+}
+
 interface UIState {
   // dialog visibility
   newProjectOpen: boolean;
   newTaskProjectId: string | null;  // null = closed
   /** Optional seed for the New worktree dialog — when set, the dialog
-   *  pre-fills the branch-from field with this value. Used by the
-   *  "Duplicate task" flow to branch a new worktree off an
-   *  existing one's tip. Cleared when the dialog closes. */
-  newTaskSeed: { baseBranch?: string; namePrefix?: string; importMode?: boolean } | null;
+   *  pre-fills fields with these values. Used by the "Duplicate task" flow
+   *  (branch off an existing task's tip) and by `termic://` deep links
+   *  (GH #192), which can additionally seed the prompt, agent and task
+   *  type. Cleared when the dialog closes. */
+  newTaskSeed: NewTaskSeed | null;
   /** "Run a command" dialog — project id to open it for, null = closed.
    *  Creates a task whose default tab runs a user-supplied launch command
    *  instead of an agent. `customCommandMode` picks worktree vs main
@@ -178,7 +206,7 @@ interface UIState {
   // actions
   openNewProject: () => void;
   closeNewProject: () => void;
-  openNewTask: (projectId: string, seed?: { baseBranch?: string; namePrefix?: string; importMode?: boolean }) => void;
+  openNewTask: (projectId: string, seed?: NewTaskSeed) => void;
   closeNewTask: () => void;
   openCustomCommand: (projectId: string, mode?: "worktree" | "repo_root") => void;
   closeCustomCommand: () => void;
@@ -309,7 +337,13 @@ export const useUI = create<UIState>(set => ({
 
   openNewProject:    () => set({ newProjectOpen: true }),
   closeNewProject:   () => set({ newProjectOpen: false }),
-  openNewTask:  (projectId, seed) => set({ newTaskProjectId: projectId, newTaskSeed: seed ?? null }),
+  // Every open carries a fresh nonce, including a seedless one: "open the New
+  // Task dialog" means a fresh form even when it is already up for the same
+  // project, and only the store can guarantee the value actually changes.
+  openNewTask:  (projectId, seed) => set(s => ({
+    newTaskProjectId: projectId,
+    newTaskSeed: { ...(seed ?? {}), nonce: (s.newTaskSeed?.nonce ?? 0) + 1 },
+  })),
   closeNewTask: () => set({ newTaskProjectId: null, newTaskSeed: null }),
   openCustomCommand:  (projectId, mode = "repo_root") => set({ customCommandProjectId: projectId, customCommandMode: mode }),
   closeCustomCommand: () => set({ customCommandProjectId: null }),

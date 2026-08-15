@@ -9,6 +9,51 @@
 - **Files**: `workspace_file_read` (text, 2 MB cap) / `workspace_file_write`, `workspace_file_read_base64` (async + spawn_blocking; images only by extension whitelist, 10 MB cap, takes `known_fp` and returns `{ unchanged, mime?, data?, fp }` for the markdown preview's data: URLs — `unchanged: true` skips the read+encode when `known_fp` still matches, the fast path for agent-settle revalidation storms), `workspace_path_stat` (`{ exists, is_dir }`, tolerates a missing leaf so link-existence checks don't error — also accepts a path that's exactly a composition member's own root, via `resolve_workspace_git_path_ex`). `task_file_fp` is the same resolution with no read at all: it returns just the `mtime:len` fingerprint, so the PDF pane can tell a real rewrite from an agent-settle tick without pulling a 20 MB file through the IPC it doesn't need (the bytes go over the `taskpdf:` scheme). All of them are member-aware (`resolve_workspace_git_path`) and worktree-contained (`safe_workspace_path` for an existing target, `check_workspace_path_existence` when the target may legitimately be missing); both file reads run through `read_capped_file` (TOCTOU-safe: fstat on the open handle, not a separate path stat).
 - **Misc**: `notify`, `open_path` (handles URLs via macOS `open`), `home_dir`, `path_exists`, `log_line`.
 
+## `termic://` deep links (GH #192)
+
+A public integration surface: an external system (ticket tracker, internal dashboard, shell alias) drives Termic from a link. Two actions:
+
+```
+termic://new?project=web&worktree=1&name=fix-login&p=Fix%20the%20login%20bug
+termic://open?project=web&task=fix-login
+```
+
+`new` (pre-fills the New Task dialog):
+
+| param | meaning |
+| --- | --- |
+| `project` | **required.** Registered project, by id or by name (case-insensitive). |
+| `name` | task name (max 200 chars) |
+| `prompt` / `p` | first message, pre-filled into the dialog (max 8000 chars) |
+| `agent` / `cli` | agent id to pre-select; ignored if this install doesn't offer it |
+| `mode` | `worktree` or `main`. `worktree=1` is the shorthand. |
+| `base` | "Branch from" ref |
+
+`open` (selects an existing task):
+
+| param | meaning |
+| --- | --- |
+| `task` | **required.** Live task, by id or by name (case-insensitive). Archived tasks don't match. |
+| `project` | optional scope. A bare name matching in two projects is *ambiguous*, not a coin flip. |
+
+The rule that separates them, and that any future action must pick a side of:
+
+> **Navigation is immediate, state change is a modal, destruction is not a link.**
+
+`open` only selects something that already exists, so it just happens. **`new` never creates anything** — it fills the form and a human presses Create. That is the whole security model for accepting a `prompt`: links are authored in the ticket tracker, so whoever can file or edit an issue (in many orgs that includes external reporters) controls the text. It is also why an unregistered `project` is a hard error rather than a fallback to "the first project" or a silent project add. Do not add an auto-create or skip-confirmation option.
+
+**Templating gotcha.** A tracker that expands `{{issue.summary}}` without a URL-encode filter truncates silently at the first `&` or `#` — both common in ticket titles — turning `Fix login & signup` into `Fix login `. Raw `+` becomes a space and raw newlines vanish. The confirm step is what catches this: the user sees the mangled text in the textarea instead of an agent acting on half a sentence. Template authors should apply the tracker's encode filter (Jira automation's `.urlEncode()`, and equivalents elsewhere).
+
+Explicit non-goals: no `project/add` (a link must never register a repo — that routes around the gate above), and nothing destructive (`archive`, `quit`), where no amount of confirmation justifies exposure to a channel any web page can trigger.
+
+Where the pieces live:
+
+- **Scheme registration**: `tauri.conf.json` → `plugins.deep-link.desktop.schemes`. The bundler turns this into `CFBundleURLTypes`; it merges with the hand-written `src-tauri/Info.plist` rather than replacing it. **Deep links only work from a bundled `.app`** — not under `npm run tauri:dev`, so test with `make beta` or `tauri build`.
+- **Rust** (`lib.rs`) is a pipe, not a parser: every arriving URL lands in `PENDING_DEEP_LINKS` and the webview gets a payload-free nudge (`termic://deep-link`). The queue exists because macOS delivers the launch URL while the webview is still booting; the webview always reads through `deep_link_take_pending`, which drains atomically, so a link is never handled twice.
+- **Parsing + validation** is entirely in `src/lib/deepLink.ts`, because the checks that matter (a *registered* project, an *existing* task) need the webview store. `initDeepLinks()` is chained off `loadAll()` in `App.tsx` for the same reason.
+- **Raising**: `queue_deep_link` calls `leave_windowless` when a window already exists. macOS activates the app for a link it routes, but that does not un-hide a window windowless mode put away, and a dialog behind a hidden window is indistinguishable from a link that did nothing. Gated on the window existing so cold-start `setup` doesn't flip `SHOWN_ONCE` ahead of normal startup ordering.
+- **Second instance**: on Windows/Linux a link spawns a fresh process, which the single-instance preflight kills. It hands the URL over first via the control socket's unauthenticated `open_url` verb (proto v11), which raises and queues in one request. macOS never gets here (LaunchServices routes to the running app).
+
 ## Critical shapes (fail silently)
 
 - `pty_spawn` payload is `{ args: SpawnArgs }`, NOT `SpawnArgs` at top level. Wrong shape → "invalid length 0, expected struct SpawnArgs".
