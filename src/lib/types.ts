@@ -269,6 +269,8 @@ export interface PersistedTab {
   /** Run pop-out tab marker (GH #54): the member dir ("" = host project)
    *  when this tab hosts the run script. Restores as a RunPane. */
   run_member?: string | null;
+  /** Pinned state, so a pinned tab comes back pinned and leftmost. */
+  pinned?: boolean;
 }
 
 /** Per-member input for `task_create_multi`. `root_path` matches a
@@ -707,6 +709,10 @@ export interface BaseTab {
    *  main pane tab (shown in the task tab bar). Split-pane tabs are
    *  ephemeral — they are not persisted across launches. */
   paneId?: string;
+  /** Pinned tabs sort before every unpinned tab in their strip, and
+   *  "Close others" / "Close to the right" skip them. `pinTab` / `unpinTab`
+   *  own both the flag and the move that keeps that order true. */
+  pinned?: boolean;
 }
 
 export interface TerminalTab extends BaseTab {

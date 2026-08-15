@@ -22,7 +22,8 @@ import { Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { visibleCliIds, isTerminalEntry } from "@/lib/agents";
 import { focusPaneTab } from "@/lib/tabFocus";
-import { requestClosePaneTab } from "@/lib/closeTab";
+import { requestClosePaneTab, requestClosePaneTabs } from "@/lib/closeTab";
+import { TabContextMenu } from "./TabContextMenu";
 import { showDragGhost, moveDragGhost, hideDragGhost } from "@/lib/dragGhost";
 import { detectDropZone, setDropHighlight, clearDropHighlight, type DropZone } from "@/lib/dropZones";
 
@@ -48,6 +49,8 @@ export function PaneHeader({ leaf, task, onClose }: PaneHeaderProps) {
   const moveTabToPane    = useApp(s => s.moveTabToPane);
   const moveTabToMain    = useApp(s => s.moveTabToMain);
   const moveTabToSplit   = useApp(s => s.moveTabToSplit);
+  const pinTab           = useApp(s => s.pinTab);
+  const unpinTab         = useApp(s => s.unpinTab);
 
   // Cross-pane drag: lets tabs be dragged to other panes' headers or back to
   // the main tab strip.
@@ -208,51 +211,84 @@ export function PaneHeader({ leaf, task, onClose }: PaneHeaderProps) {
     setOpen(false);
   }
 
+  // Closing the pane's last tab collapses the pane, matching ⌘W
+  // (useShortcuts). Without this the X leaves an empty "New pane" behind while
+  // ⌘W removes it. Capture wasLastTab before the async confirm, and only
+  // collapse if the close actually went through (onClose === closePane for
+  // this leaf).
+  function closePaneTabAt(tabId: string) {
+    const wasLastTab = (leaf.tabIds?.length ?? 1) <= 1;
+    void requestClosePaneTab(task.id, paneId, tabId).then(closed => {
+      if (closed && wasLastTab) onClose();
+    });
+  }
+
+  // Pinned tabs sit outside the scroller so they stay in reach (issue #183).
+  // The store keeps them at the head of the leaf, so this split preserves order.
+  const pinnedTabs = paneTabs.filter(t => t.pinned);
+  const looseTabs = paneTabs.filter(t => !t.pinned);
+
+  const renderPill = (tab: Tab) => (
+    <TabContextMenu
+      key={tab.id}
+      tabs={paneTabs}
+      tabId={tab.id}
+      pinned={!!tab.pinned}
+      onPin={() => pinTab(task.id, tab.id)}
+      onUnpin={() => unpinTab(task.id, tab.id)}
+      onClose={() => closePaneTabAt(tab.id)}
+      onCloseMany={(ids) => requestClosePaneTabs(task.id, paneId, ids)}
+    >
+      <TabPill
+        task={task}
+        tab={tab}
+        active={tab.id === activeTabId}
+        paneFocused={isPaneFocused}
+        compact
+        // focusPaneTab: keyboard focus must follow the click so ⌘W (which
+        // derives the pane from DOM focus) targets THIS pane afterwards.
+        onSelect={() => { setPaneActiveTab(task.id, paneId, tab.id); focusPaneTab(tab.id); }}
+        onClose={() => closePaneTabAt(tab.id)}
+        onUnpin={() => unpinTab(task.id, tab.id)}
+        renaming={null}
+        onStartRename={() => {}}
+        onChangeRename={() => {}}
+        onCommitRename={() => {}}
+        onCancelRename={() => {}}
+        dragging={dragTabId === tab.id}
+        dragTx={0}
+        onStartDrag={(e) => startTabDrag(tab.id, e)}
+      />
+    </TabContextMenu>
+  );
+
   return (
     <div
       data-pane-header=""
       data-pane-id={paneId}
       className="termic-tabstrip flex h-9 shrink-0 items-stretch border-b border-[var(--color-border-soft)] bg-[var(--color-bg-1)] select-none"
     >
-      {/* Scrollable tab pills — same geometry as main TabBar. */}
-      <div className="flex min-w-0 flex-1 items-stretch overflow-x-auto no-scrollbar pl-2">
+      {/* Tab pills — same geometry as the main TabBar, including its fixed
+          pinned region + scrolling remainder. */}
+      <div className="flex min-w-0 flex-1 items-stretch pl-2">
         {paneTabs.length === 0 ? (
           <span className="flex items-center px-2 text-[12.5px] italic text-[var(--color-fg-faint)]">
             New pane
           </span>
         ) : (
-          paneTabs.map(tab => (
-            <TabPill
-              key={tab.id}
-              task={task}
-              tab={tab}
-              active={tab.id === activeTabId}
-              paneFocused={isPaneFocused}
-              compact
-              // focusPaneTab: keyboard focus must follow the click so ⌘W (which
-              // derives the pane from DOM focus) targets THIS pane afterwards.
-              onSelect={() => { setPaneActiveTab(task.id, paneId, tab.id); focusPaneTab(tab.id); }}
-              // Closing the pane's last tab collapses the pane, matching ⌘W
-              // (useShortcuts). Without this the X leaves an empty "New pane"
-              // behind while ⌘W removes it. Capture wasLastTab before the
-              // async confirm, and only collapse if the close actually went
-              // through (onClose === closePane for this leaf).
-              onClose={() => {
-                const wasLastTab = (leaf.tabIds?.length ?? 1) <= 1;
-                void requestClosePaneTab(task.id, paneId, tab.id).then(closed => {
-                  if (closed && wasLastTab) onClose();
-                });
-              }}
-              renaming={null}
-              onStartRename={() => {}}
-              onChangeRename={() => {}}
-              onCommitRename={() => {}}
-              onCancelRename={() => {}}
-              dragging={dragTabId === tab.id}
-              dragTx={0}
-              onStartDrag={(e) => startTabDrag(tab.id, e)}
-            />
-          ))
+          <>
+            {pinnedTabs.length > 0 && (
+              <>
+                <div data-pinned-strip="" className="flex shrink-0 items-stretch overflow-x-auto no-scrollbar max-w-[55%]">
+                  {pinnedTabs.map(renderPill)}
+                </div>
+                <div className="mx-1 h-5 w-px shrink-0 self-center bg-[var(--color-border-soft)]" />
+              </>
+            )}
+            <div data-scroll-strip="" className="flex min-w-0 flex-1 items-stretch overflow-x-auto no-scrollbar">
+              {looseTabs.map(renderPill)}
+            </div>
+          </>
         )}
       </div>
 

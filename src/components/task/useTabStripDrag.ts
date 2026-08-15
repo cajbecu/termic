@@ -122,8 +122,13 @@ export function useTabStripDrag(opts: {
     }
     const stripT = stripTabsRef.current; const allT = allTabsRef.current;
     const cur = stripT.findIndex(t => t.id === d.id);
-    if (target === cur) return;
     const filteredWithout = stripT.filter(t => t.id !== d.id);
+    // Pinned tabs own the head of the strip, so a drag can only reorder WITHIN
+    // its own group: a pinned pill stops at the boundary, an unpinned one can't
+    // cross above it (issue #183).
+    const boundary = filteredWithout.filter(t => t.pinned).length;
+    target = stripT[cur]?.pinned ? Math.min(target, boundary) : Math.max(target, boundary);
+    if (target === cur) return;
     const fullWithout = allT.filter(t => t.id !== d.id);
     let fullTarget: number;
     if (target >= filteredWithout.length) {

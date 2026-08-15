@@ -55,6 +55,9 @@ until `make e2e` is green and this file reflects it.
 | ✅ Default tasks path | The global setting ships a real value (not an empty box); a new project's `tasks_path` starts empty so that setting applies; an absolute default lands worktrees at `<default>/<project>/<task>` and a relative one at `<repo>/<default>/<task>`, both verified on disk; a project's own tasks path overrides it; the project field shows the global-derived path as its placeholder while staying empty; the Settings → Tasks preview flips between the two halves of the rule as it is typed, and emptying the required field blocks the save | `settings.e2e.ts` |
 | ✅ Tabs | Add a terminal tab via the "+" menu; switch active tab | `tabs-layout.e2e.ts` |
 | ✅ Tab rename | Double-click inline edit commits the new name | `tabs-layout.e2e.ts` |
+| ✅ Tab context menu | Right-click a pill: Pin moves the tab to the head of the strip and a second pin appends to the end of that block; Unpin drops back to the first slot after it; Close to the right and Close others spare every pinned tab and the clicked one; both go disabled when they have nothing to close (GH #183) | `tabs-layout.e2e.ts` |
+| ✅ Pinned pill has no close X | A pinned pill offers "Unpin tab" where an unpinned one offers "Close tab", so one stray click cannot kill a live PTY; that control unpins (the tab survives) and the X comes back with it (GH #183) | `tabs-layout.e2e.ts` |
+| ✅ Pinned tabs stay in view | A pinned tab lives outside the strip's scroller: with the strip flooded past overflow and scrolled to its end, the pinned pill has not moved a pixel and is still fully inside the bar (GH #183) | `tabs-layout.e2e.ts` |
 | ✅ Theme | Picker switches theme; palette class applied to `<html>` | `tabs-layout.e2e.ts` |
 | ✅ Editor persist | Single-click = preview tab; double-click persists it | `editor.e2e.ts` |
 | ✅ Split panes | Unsplit start; split-right → 2 leaves; split-below → 3 | `tabs-layout.e2e.ts` |

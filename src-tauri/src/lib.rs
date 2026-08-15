@@ -417,6 +417,10 @@ pub struct PersistedTab {
     /// the run script ("" = host project). Restores the RunPane in its pane.
     #[serde(default)]
     pub run_member: Option<String>,
+    /// Pinned tabs sort before the others in their strip. Persisted so a
+    /// pinned tab comes back pinned and leftmost.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 /// Frontend payload for `task_set_tabs`. `session_id` is only honored
@@ -444,6 +448,8 @@ pub struct PersistedTabInput {
     pub pane_leaf_id: Option<String>,
     #[serde(default)]
     pub run_member: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 impl Task {
@@ -4316,6 +4322,7 @@ fn task_set_tabs(id: String, tabs: Vec<PersistedTabInput>) -> Result<(), String>
                 command: t.command,
                 pane_leaf_id: t.pane_leaf_id,
                 run_member: t.run_member,
+                pinned: t.pinned,
             }
         })
         .collect();
@@ -4334,6 +4341,7 @@ fn task_set_tabs(id: String, tabs: Vec<PersistedTabInput>) -> Result<(), String>
                 && a.previous_session_id == b.previous_session_id
                 && a.pane_leaf_id == b.pane_leaf_id
                 && a.run_member == b.run_member
+                && a.pinned == b.pinned
         });
     if same {
         return Ok(());
@@ -4431,6 +4439,7 @@ fn task_set_right_tabs(id: String, tabs: Vec<PersistedTabInput>) -> Result<(), S
                 command: t.command,
                 pane_leaf_id: None,
                 run_member: None,
+                pinned: t.pinned,
             }
         })
         .collect();
@@ -11800,6 +11809,22 @@ mod tests {
         assert!(apply_cli_default_migration(&mut s));
         assert!(s.cli_enabled);
         assert!(s.cli_default_migrated);
+    }
+
+    // Pinned tabs (GH #183). Task JSON has no migration step: `#[serde(default)]`
+    // IS the compatibility story, so a task file written before pinning existed
+    // must still load, and a pinned one must survive a save/load round trip.
+    #[test]
+    fn a_task_file_without_pinned_loads_with_it_off() {
+        let t: PersistedTab = serde_json::from_str(r#"{"id":"t1","cli":"claude"}"#).unwrap();
+        assert!(!t.pinned);
+    }
+
+    #[test]
+    fn pinned_survives_a_round_trip() {
+        let t = PersistedTab { id: "t1".into(), cli: "claude".into(), pinned: true, ..Default::default() };
+        let back: PersistedTab = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert!(back.pinned);
     }
 
     fn role(kind: &str, task: &str) -> PtyRole {
