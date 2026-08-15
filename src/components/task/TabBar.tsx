@@ -489,11 +489,18 @@ export function TabPill({ task, tab, active, paneFocused, compact, onSelect, onC
       // always sized to comfortably fit 3 tabs; min-w floors
       // readability, max-w caps a lone tab on a very wide bar.
       style={{
-        // Main strip sizes tabs to fit ~three; the right strip sizes to
-        // content. A PINNED pill sizes to content too: it lives in the strip's
-        // fixed (non-scrolling) region, which is shrink-to-fit, so a percentage
-        // basis there has nothing definite to resolve against.
-        ...(compact || tab.pinned ? null : { flex: "0 1 calc((100% - 5rem) / 3)" }),
+        // Main strip sizes tabs to fit ~three; the right strip sizes to content.
+        // A PINNED pill gets an outright FIXED width instead. It lives in the
+        // strip's shrink-to-fit region, so a content-sized one re-measures on
+        // every OSC title the agent emits, resizing itself and shoving the whole
+        // scrolling remainder sideways. A flex-basis is not enough here: the
+        // region is a scroll container, whose intrinsic width does not track a
+        // shrinkable item's basis, so the pill collapsed to its min-w. The value
+        // equals max-w below, so an uncrowded pinned tab is exactly as wide as
+        // its unpinned neighbours; past the region's cap it scrolls.
+        ...(tab.pinned
+          ? { flex: "0 0 auto", width: compact ? 220 : 260 }
+          : compact ? null : { flex: "0 1 calc((100% - 5rem) / 3)" }),
         // While dragging this pill rides the cursor via translateX and
         // floats above its neighbours. z-index needs the inline value so
         // it beats sibling stacking contexts. pointer-events: none lets

@@ -731,6 +731,22 @@ describe("tab context menu", () => {
       tabId,
     );
 
+  const pillWidth = (tabId: string) =>
+    browser.execute((wid, id) => {
+      const pill = document.querySelector(
+        `[data-task-id="${wid}"] [data-tab-id="${id}"]`,
+      ) as HTMLElement | null;
+      return pill ? Math.round(pill.getBoundingClientRect().width) : -1;
+    }, taskId, tabId);
+
+  const tabLiveTitle = (tabId: string) =>
+    browser.execute((wid, id) => {
+      const tab = (window.__termic!.useApp.getState().tabs[wid] ?? []).find(
+        (t: any) => t.id === id,
+      );
+      return (tab?.liveTitle as string) ?? "";
+    }, taskId, tabId);
+
   // Titles of the pill's own action buttons, which is what the user can click.
   // Run-tab controls (Restart / Stop / Run) would show up here too; these
   // fixtures are plain shells and an agent, so the trailing slot is all there is.
@@ -768,6 +784,27 @@ describe("tab context menu", () => {
     expect(await strip()).toEqual([s2, agent, s0, s1]);
     expect(await isPinned(s2)).toBe(true);
     await snap("tab-menu-pinned.png");
+  });
+
+  it("holds a pinned pill's width steady while its live title changes", async () => {
+    const [s2, , s0] = await strip(); // [s2*, agent, s0, s1]
+    // A pinned pill sits in the strip's shrink-to-fit region, so a
+    // content-sized one would re-measure on every OSC title the agent emits and
+    // shove the whole scrolling remainder sideways with it.
+    const before = await pillWidth(s2);
+    // Same width as an unpinned neighbour when the row is not crowded.
+    expect(before).toBe(await pillWidth(s0));
+
+    for (const title of ["x", "a considerably longer live title than before", "y"]) {
+      await browser.execute((wid, id, t) => {
+        window.__termic!.useApp.getState().setTabLiveTitle(wid, id, t);
+      }, taskId, s2, title);
+      await browser.waitUntil(
+        async () => (await tabLiveTitle(s2)) === title,
+        { timeout: 5_000, timeoutMsg: `live title never became "${title}"` },
+      );
+      expect(await pillWidth(s2)).toBe(before);
+    }
   });
 
   it("trades the close X for an unpin control on a pinned pill", async () => {
