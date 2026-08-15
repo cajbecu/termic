@@ -46,8 +46,39 @@ describe("git dirty tree", () => {
         original,
       );
     }
+    // The section-collapse flags are global and outlive the task; leave none
+    // behind for the suites after this one.
+    await browser.execute(() => {
+      localStorage.removeItem("gitUnstagedCollapsed");
+      localStorage.removeItem("gitStagedCollapsed");
+    });
     if (taskId) await archiveTask(taskId);
   });
+
+  const paneCollapsed = (pane: "unstaged" | "staged") =>
+    browser.execute((p) => {
+      const el = document.querySelector(
+        `[data-testid="git-pane-header"][data-pane="${p}"]`,
+      );
+      return el?.getAttribute("data-collapsed") ?? null;
+    }, pane) as Promise<string | null>;
+
+  const rowCount = (pane: "unstaged" | "staged") =>
+    browser.execute(
+      (p) =>
+        document.querySelectorAll(`[data-testid="git-file-row"][data-pane="${p}"]`)
+          .length,
+      pane,
+    ) as Promise<number>;
+
+  const togglePane = async (pane: "unstaged" | "staged") => {
+    await browser.execute((p) => {
+      const el = document.querySelector(
+        `[data-testid="git-pane-header"][data-pane="${p}"]`,
+      ) as HTMLElement | null;
+      el?.click();
+    }, pane);
+  };
 
   it("lists a modified file after the tree changes", async () => {
     await waitForAppShell();
@@ -104,6 +135,58 @@ describe("git dirty tree", () => {
         ),
       { timeout: 8_000, timeoutMsg: "diff tab never opened" },
     );
+  });
+
+  it("collapses the Unstaged section to its header", async () => {
+    // The panel's 4s git poll is skipped while the window is unfocused, and a
+    // parallel suite run leaves it unfocused. Drive the fetch instead of
+    // waiting for a tick that may never come.
+    await browser.execute((id) => {
+      window.__termic!.useApp.getState().bumpGitRevision(id);
+    }, taskId);
+    await browser.waitUntil(async () => (await rowCount("unstaged")) > 0, {
+      timeout: 15_000,
+      timeoutMsg: "the unstaged section never listed a file",
+    });
+
+    await togglePane("unstaged");
+
+    await browser.waitUntil(async () => (await rowCount("unstaged")) === 0, {
+      timeout: 4_000,
+      timeoutMsg: "the unstaged rows survived the collapse",
+    });
+    expect(await paneCollapsed("unstaged")).toBe("true");
+    await snap("git-pane-collapsed.png");
+  });
+
+  it("expands the Unstaged section again", async () => {
+    await togglePane("unstaged");
+
+    await browser.waitUntil(async () => (await rowCount("unstaged")) > 0, {
+      timeout: 4_000,
+      timeoutMsg: "the unstaged rows never came back",
+    });
+    expect(await paneCollapsed("unstaged")).toBe("false");
+  });
+
+  it("remembers the Staged section state in localStorage", async () => {
+    await togglePane("staged");
+    await browser.waitUntil(
+      async () => (await paneCollapsed("staged")) === "true",
+      { timeout: 4_000, timeoutMsg: "the staged section never collapsed" },
+    );
+    expect(
+      await browser.execute(() => localStorage.getItem("gitStagedCollapsed")),
+    ).toBe("1");
+
+    await togglePane("staged");
+    await browser.waitUntil(
+      async () => (await paneCollapsed("staged")) === "false",
+      { timeout: 4_000, timeoutMsg: "the staged section never expanded" },
+    );
+    expect(
+      await browser.execute(() => localStorage.getItem("gitStagedCollapsed")),
+    ).toBe("0");
   });
 });
 

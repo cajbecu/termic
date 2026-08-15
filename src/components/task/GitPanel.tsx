@@ -49,6 +49,8 @@ const LS_VIEW   = "gitViewMode";
 const LS_HIDE   = "gitHideUntracked";
 const LS_RATIO  = "gitSplitRatio";
 const LS_PUSH   = "gitPushDefault";
+const LS_UCOL   = "gitUnstagedCollapsed";
+const LS_SCOL   = "gitStagedCollapsed";
 
 export function readView(): ViewMode {
   try { const v = localStorage.getItem(LS_VIEW); if (v === "tree" || v === "list" || v === "combined") return v; } catch {}
@@ -94,6 +96,10 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
   const [body, setBody] = useState("");
   const [committing, setCommitting] = useState(false);
   const [pushDefault, setPushDefault] = useState<boolean>(() => readBool(LS_PUSH));
+  // Section collapse (header-only). Global, not per task, so it is never
+  // reset by the task-switch effect below.
+  const [unstagedCollapsed, setUnstagedCollapsed] = useState<boolean>(() => readBool(LS_UCOL));
+  const [stagedCollapsed, setStagedCollapsed] = useState<boolean>(() => readBool(LS_SCOL));
   // Collapsed tree folders, keyed `${pane}\0${dirPath}`.
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   // Selected row, keyed `${pane}\0${path}` (a file can sit in both panes
@@ -142,6 +148,8 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
   const persist = (key: string, val: string) => { try { localStorage.setItem(key, val); } catch {} };
   const changeView = (v: ViewMode) => { setViewMode(v); persist(LS_VIEW, v); };
   const toggleHide = () => setHideUntracked(h => { const n = !h; persist(LS_HIDE, n ? "1" : "0"); return n; });
+  const toggleUnstagedCollapsed = () => setUnstagedCollapsed(c => { const n = !c; persist(LS_UCOL, n ? "1" : "0"); return n; });
+  const toggleStagedCollapsed   = () => setStagedCollapsed(c => { const n = !c; persist(LS_SCOL, n ? "1" : "0"); return n; });
 
   const repo: GitRepo | undefined = repos.find(r => r.dir_name === activeRepoDir) ?? repos[0];
   // Every group is diffable: the backend's resolve_task_git_path runs
@@ -312,6 +320,9 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
   // here would compute every move off the same stale base and make the
   // divider snap back and forth. A functional update reads the live value;
   // a ref carries it into onEnd for the persist.
+  // The ratio only applies while both sections show their file list; a
+  // collapsed one is header-height and the other takes the rest.
+  const bothOpen = !unstagedCollapsed && !stagedCollapsed;
   const bodyRef = useRef<HTMLDivElement>(null);
   const ratioRef = useRef(ratio);
   ratioRef.current = ratio;
@@ -483,6 +494,7 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
         <Pane
           title="Unstaged" files={unstaged} pane="unstaged" viewMode={viewMode}
           collapsed={collapsed} setCollapsed={setCollapsed}
+          paneCollapsed={unstagedCollapsed} onTogglePane={toggleUnstagedCollapsed}
           clickable={clickable} selectedKey={selected} stageGlyph={stageGlyph}
           taskId={task.id} viewedCount={countViewed(unstaged)}
           headerAction={unstaged.length > 0 ? { label: "Stage all", onClick: () => doStage(unstaged.map(f => f.path)) } : undefined}
@@ -491,14 +503,18 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
           onDiscard={(paths) => doDiscard(paths, paths.length === 1 ? { pane: "unstaged" } : undefined)}
           rowActionIcon="down"
           root={task.path} repoDir={dir} truncated={repo?.truncated}
-          style={{ flexBasis: `${ratio * 100}%`, flexGrow: 0, flexShrink: 0 }}
+          className={unstagedCollapsed ? "shrink-0" : "min-h-0 flex-1"}
+          style={bothOpen ? { flexBasis: `${ratio * 100}%`, flexGrow: 0, flexShrink: 0 } : undefined}
         />
         <div className="relative h-px shrink-0 bg-[var(--color-border-soft)]">
-          <ResizeHandle direction="y" className="top-0" onDrag={onSplitDrag} onEnd={() => persist(LS_RATIO, String(ratioRef.current))} />
+          {bothOpen && (
+            <ResizeHandle direction="y" className="top-0" onDrag={onSplitDrag} onEnd={() => persist(LS_RATIO, String(ratioRef.current))} />
+          )}
         </div>
         <Pane
           title="Staged" files={staged} pane="staged" viewMode={viewMode}
           collapsed={collapsed} setCollapsed={setCollapsed}
+          paneCollapsed={stagedCollapsed} onTogglePane={toggleStagedCollapsed}
           clickable={clickable} selectedKey={selected} stageGlyph={stageGlyph}
           taskId={task.id} viewedCount={countViewed(staged)}
           headerAction={staged.length > 0 ? { label: "Unstage all", onClick: () => doUnstage(staged.map(f => f.path)) } : undefined}
@@ -507,7 +523,7 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
           onDiscard={(paths) => doDiscard(paths, paths.length === 1 ? { pane: "staged" } : undefined)}
           rowActionIcon="up"
           root={task.path} repoDir={dir}
-          className="min-h-0 flex-1"
+          className={stagedCollapsed ? "shrink-0" : "min-h-0 flex-1"}
         />
       </div>
 
@@ -773,6 +789,9 @@ interface PaneProps {
   viewMode: ViewMode;
   collapsed: Set<string>;
   setCollapsed: React.Dispatch<React.SetStateAction<Set<string>>>;
+  /** The whole section is collapsed to its header (no file list). */
+  paneCollapsed: boolean;
+  onTogglePane: () => void;
   clickable: boolean;
   /** Currently selected row key (`${pane} ${path}`), or null. */
   selectedKey: string | null;
@@ -803,13 +822,24 @@ interface PaneProps {
 }
 
 function Pane({
-  title, files, pane, viewMode, collapsed, setCollapsed, clickable, selectedKey, stageGlyph,
+  title, files, pane, viewMode, collapsed, setCollapsed, paneCollapsed, onTogglePane, clickable, selectedKey, stageGlyph,
   taskId, viewedCount = 0, headerAction, onRowClick, onToggle, onDiscard, rowActionIcon, root, repoDir, truncated, className, style,
 }: PaneProps) {
   return (
     <div className={cn("flex flex-col overflow-hidden", className)} style={style}>
-      <div className="flex h-7 shrink-0 items-center justify-between border-b border-[var(--color-border-soft)] bg-[var(--color-bg-1)] px-2.5">
-        <span className="flex items-center gap-1.5 text-[11.5px] font-medium uppercase tracking-[0.06em] text-[var(--color-fg-dim)]">
+      <div className="group flex h-7 shrink-0 items-center border-b border-[var(--color-border-soft)] bg-[var(--color-bg-1)] hover:bg-[var(--color-hover)]">
+        <button
+          type="button"
+          onClick={onTogglePane}
+          aria-expanded={!paneCollapsed}
+          data-testid="git-pane-header"
+          data-pane={pane}
+          data-collapsed={paneCollapsed}
+          className="flex h-full flex-1 items-center gap-1.5 pl-2.5 pr-1 text-[11.5px] font-medium uppercase tracking-[0.06em] text-[var(--color-fg-dim)] group-hover:text-[var(--color-fg)]"
+        >
+          {paneCollapsed
+            ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />
+            : <ChevronDown  className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />}
           {title}
           <span className="tabular-nums text-[var(--color-fg-faint)]">{files.length}</span>
           {viewedCount > 0 && (
@@ -818,42 +848,46 @@ function Pane({
               <span className="tabular-nums">{viewedCount}/{files.length}</span>
             </span>
           )}
-        </span>
+        </button>
         {headerAction && (
           <button
             onClick={headerAction.onClick}
-            className="rounded px-1.5 py-0.5 text-[11.5px] text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]"
+            className="mr-2.5 shrink-0 rounded px-1.5 py-0.5 text-[11.5px] text-[var(--color-fg-dim)] hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)]"
           >
             {headerAction.label}
           </button>
         )}
       </div>
-      {truncated && (
+      {!paneCollapsed && truncated && (
         <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-2.5 py-1 text-[11px] text-[var(--color-fg-faint)]">
           File list capped at 5 000 entries. Add large dirs to .gitignore.
         </div>
       )}
-      <div className="min-h-0 flex-1 overflow-hidden">
-        {files.length === 0 ? (
-          <div className="px-3 py-1.5 text-[12px] text-[var(--color-fg-faint)]">
-            {pane === "unstaged" ? "Nothing to stage" : "Nothing staged"}
-          </div>
-        ) : (
-          <FileList
-            files={files} pane={pane} viewMode={viewMode}
-            collapsed={collapsed} setCollapsed={setCollapsed} clickable={clickable}
-            selectedKey={selectedKey} stageGlyph={stageGlyph} taskId={taskId}
-            onRowClick={onRowClick}
-            onToggle={onToggle} onDiscard={onDiscard} rowActionIcon={rowActionIcon}
-            root={root} repoDir={repoDir}
-          />
-        )}
-      </div>
+      {!paneCollapsed && (
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {files.length === 0 ? (
+            <div className="px-3 py-1.5 text-[12px] text-[var(--color-fg-faint)]">
+              {pane === "unstaged" ? "Nothing to stage" : "Nothing staged"}
+            </div>
+          ) : (
+            <FileList
+              files={files} pane={pane} viewMode={viewMode}
+              collapsed={collapsed} setCollapsed={setCollapsed} clickable={clickable}
+              selectedKey={selectedKey} stageGlyph={stageGlyph} taskId={taskId}
+              onRowClick={onRowClick}
+              onToggle={onToggle} onDiscard={onDiscard} rowActionIcon={rowActionIcon}
+              root={root} repoDir={repoDir}
+            />
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function FileList(props: Omit<PaneProps, "title" | "headerAction" | "className" | "style">) {
+type FileListProps = Omit<PaneProps, "title" | "headerAction" | "className" | "style" | "paneCollapsed" | "onTogglePane">;
+
+function FileList(props: FileListProps) {
   const { files, viewMode, collapsed, pane } = props;
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -893,7 +927,7 @@ function FileList(props: Omit<PaneProps, "title" | "headerAction" | "className" 
   );
 }
 
-function rowProps(p: Omit<PaneProps, "title" | "headerAction" | "className" | "style">) {
+function rowProps(p: FileListProps) {
   return {
     pane: p.pane,
     selectedKey: p.selectedKey,
@@ -973,7 +1007,7 @@ function flattenRows(files: GitFile[], viewMode: ViewMode, collapsed: Set<string
   return rows;
 }
 
-function renderFlatRow(row: FlatRow, props: Omit<PaneProps, "title" | "headerAction" | "className" | "style">) {
+function renderFlatRow(row: FlatRow, props: FileListProps) {
   if (row.kind === "dirhdr") {
     return (
       <div key={`h:${row.label}`} className="truncate px-2.5 pb-0.5 pt-1.5 text-[11px] font-medium uppercase tracking-wider text-[var(--color-fg-dim)]">
@@ -1125,7 +1159,7 @@ function buildTree(files: GitFile[]): TreeNode {
   return root;
 }
 
-function TreeView(props: Omit<PaneProps, "title" | "headerAction" | "className" | "style">) {
+function TreeView(props: FileListProps) {
   const { files, pane, collapsed, setCollapsed, onToggle, onDiscard, rowActionIcon, stageGlyph, root, repoDir } = props;
   const tree = useMemo(() => buildTree(files), [files]);
   const DirActionIcon = rowActionIcon === "down" ? ArrowDown : ArrowUp;
