@@ -8898,6 +8898,189 @@ fn task_stop_script(id: String, kind: String, member: Option<String>) -> Result<
 
 // ───────────────────────────── find in files ─────────────────────────────
 
+/// Which program backs find-in-files. ripgrep when the user has it
+/// (faster on big repos, Unicode-aware, and its Rust regex is the same
+/// flavor the frontend highlights with), `git grep` otherwise, so a
+/// machine without rg keeps working exactly as before.
+#[derive(Clone, Copy, PartialEq)]
+enum FindBackend {
+    Ripgrep(&'static str),
+    GitGrep,
+}
+
+impl FindBackend {
+    /// Stable id for the frontend. Not the binary path: this crosses IPC
+    /// and only ever picks wording in the find dialog.
+    fn name(self) -> &'static str {
+        match self {
+            FindBackend::Ripgrep(_) => "ripgrep",
+            FindBackend::GitGrep => "git-grep",
+        }
+    }
+}
+
+/// First executable named `bin` in a colon-separated PATH. Hand-rolled
+/// instead of shelling out to `which` because this runs on the search
+/// path and a process spawn is the expensive part of the probe.
+fn find_on_path(bin: &str, path: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    path.split(':')
+        .filter(|d| !d.is_empty())
+        .map(|d| Path::new(d).join(bin))
+        .find(|p| {
+            fs::metadata(p)
+                .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        })
+}
+
+/// Resolve the backend, memoizing only an answer that can't get better.
+///
+/// Probed against the login-shell PATH, NOT our inherited one: a
+/// GUI-launched .app gets a bare launchd PATH with no /opt/homebrew/bin,
+/// so `rg` would look uninstalled for every Homebrew user (same reason
+/// `git_bytes` injects the resolved env).
+///
+/// That PATH arrives asynchronously though (shell_env probes a login
+/// shell off-thread and serves a static fallback until it lands), so a
+/// search fired in the first moments after launch can miss an rg that IS
+/// installed. Caching THAT verdict would pin git grep for the rest of
+/// the session, so a miss found on the fallback PATH is not cached and
+/// the next search asks again. Cached for good once either the probe has
+/// landed or we've actually found rg (a hit is authoritative: the binary
+/// is right there, however we learned of it).
+///
+/// Re-resolving costs a few `stat`s per PATH entry, no process spawn,
+/// once per search start.
+///
+/// `TERMIC_FIND_BACKEND=git-grep` pins the fallback so the e2e suite can
+/// cover both paths on a machine that has ripgrep installed.
+static FIND_BACKEND: std::sync::OnceLock<FindBackend> = std::sync::OnceLock::new();
+
+/// May this resolution be memoized for the rest of the session?
+///
+/// A hit always: rg is at that path, however we learned of it. A miss
+/// only once the PATH it was computed from is final, because the static
+/// fallback has no Homebrew/nvm/bun dirs and its "not installed" is not
+/// an answer, just an early read.
+fn backend_verdict_is_final(found_rg: bool, path_is_final: bool) -> bool {
+    found_rg || path_is_final
+}
+
+fn find_backend() -> FindBackend {
+    if let Some(b) = FIND_BACKEND.get() { return *b; }
+
+    if std::env::var("TERMIC_FIND_BACKEND").as_deref() == Ok("git-grep") {
+        return *FIND_BACKEND.get_or_init(|| FindBackend::GitGrep);
+    }
+    let (path, path_is_final) = shell_env::resolved_path_final();
+    let found = find_on_path("rg", &path).map(|p| {
+        // Leaked once per process, so the path can live in a Copy enum
+        // that gets moved into the search thread.
+        FindBackend::Ripgrep(Box::leak(p.to_string_lossy().into_owned().into_boxed_str()))
+    });
+    let backend = found.unwrap_or(FindBackend::GitGrep);
+    if backend_verdict_is_final(found.is_some(), path_is_final) {
+        return *FIND_BACKEND.get_or_init(|| backend);
+    }
+    // Provisional: search with git grep now, look for rg again next time.
+    backend
+}
+
+/// Which backend find-in-files will use, for the dialog: it words the
+/// regex tooltip from the flavor and offers the "install ripgrep" hint
+/// only on the fallback.
+///
+/// `settled` is false while the answer could still improve (the login
+/// PATH hasn't landed, so an installed rg may not be visible yet). The
+/// dialog must not memoize an unsettled answer, or it would keep
+/// offering "install ripgrep" to someone who has it.
+#[derive(Serialize)]
+pub struct FindBackendInfo {
+    backend: &'static str,
+    settled: bool,
+}
+
+/// MUST stay async: resolving can wait on the login-shell probe (up to a
+/// second right after launch), and a sync command would pay that on the
+/// main thread and freeze the webview.
+#[tauri::command]
+async fn task_find_backend() -> FindBackendInfo {
+    tauri::async_runtime::spawn_blocking(|| {
+        let backend = find_backend();
+        FindBackendInfo { backend: backend.name(), settled: FIND_BACKEND.get().is_some() }
+    })
+    .await
+    .unwrap_or(FindBackendInfo { backend: "git-grep", settled: false })
+}
+
+/// One match line, backend-agnostic.
+struct RawHit {
+    path: String,
+    line: u32,
+    col: u32,
+    preview: String,
+    /// UTF-16 `[start, end)` offsets of every match on this line. ripgrep
+    /// reports them, so the frontend paints exactly what the search
+    /// engine matched. `git grep` reports only the first column, so this
+    /// stays empty and the frontend re-matches the preview itself.
+    ranges: Vec<[u32; 2]>,
+}
+
+/// Byte offset → UTF-16 offset, the unit JS string indexes use. ripgrep
+/// counts bytes; handing those to the frontend would smear the highlight
+/// right by one per non-ASCII char earlier on the line. Clamps to the
+/// enclosing char for a non-boundary offset.
+fn byte_to_utf16(s: &str, byte: usize) -> u32 {
+    let mut n = 0usize;
+    for (i, ch) in s.char_indices() {
+        if i >= byte { return n as u32; }
+        n += ch.len_utf16();
+    }
+    n as u32
+}
+
+/// `git grep -n --column` line: `path:LINE:COL:preview`.
+fn parse_git_grep_line(line: &str) -> Option<RawHit> {
+    let mut it = line.splitn(4, ':');
+    let path = it.next()?.to_string();
+    let line_no: u32 = it.next()?.parse().ok()?;
+    let col: u32 = it.next()?.parse().ok()?;
+    let preview = it.next().unwrap_or("").to_string();
+    if path.is_empty() || line_no == 0 { return None; }
+    Some(RawHit { path, line: line_no, col, preview, ranges: Vec::new() })
+}
+
+/// One `--json` event from ripgrep. Only `type: "match"` carries a hit;
+/// begin/end/summary events are skipped.
+///
+/// Non-UTF-8 paths and lines arrive as `{"bytes": "<base64>"}` instead of
+/// `{"text": …}` — those are dropped rather than guessing an encoding
+/// (`git grep` would have emitted mojibake for the same file).
+fn parse_rg_json_line(line: &str) -> Option<RawHit> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v.get("type")?.as_str()? != "match" { return None; }
+    let d = v.get("data")?;
+    let path = d.get("path")?.get("text")?.as_str()?.to_string();
+    let line_no = d.get("line_number")?.as_u64()? as u32;
+    let text = d.get("lines")?.get("text")?.as_str()?;
+    let preview = text.trim_end_matches('\n').trim_end_matches('\r').to_string();
+    if path.is_empty() || line_no == 0 { return None; }
+
+    let mut ranges: Vec<[u32; 2]> = Vec::new();
+    for s in d.get("submatches").and_then(|s| s.as_array()).into_iter().flatten() {
+        let (Some(a), Some(b)) = (
+            s.get("start").and_then(|x| x.as_u64()),
+            s.get("end").and_then(|x| x.as_u64()),
+        ) else { continue };
+        ranges.push([byte_to_utf16(&preview, a as usize), byte_to_utf16(&preview, b as usize)]);
+    }
+    // git grep's column is 1-based; keep the contract identical so
+    // `revealAt` doesn't need to know which backend ran.
+    let col = ranges.first().map(|r| r[0] + 1).unwrap_or(1);
+    Some(RawHit { path, line: line_no, col, preview, ranges })
+}
+
 /// Per-task in-flight grep PID. Each new search SIGKILLs the
 /// previous one for the same task so typing doesn't fan out into
 /// dozens of zombie git-grep procs.
@@ -8918,9 +9101,12 @@ fn running_greps_swap(ws_id: &str, new_pid: Option<i32>) -> Option<i32> {
 /// the cap the child is SIGKILLed and `truncated: true` is reported.
 /// Re-entrant safety: any previous grep for the same task is killed
 /// before this one starts (typing fires a new search per keystroke).
-/// `regex` picks POSIX ERE (`-E`) over a literal match (`-F`). Not PCRE
+///
+/// Runs ripgrep when it's installed and `git grep` otherwise (see
+/// `find_backend`), which also decides the regex flavor `regex` selects:
+/// Rust regex under rg, POSIX ERE (`-E`) under git grep. Not git's PCRE
 /// (`-P`) — git is not always compiled with libpcre, Apple's is not.
-/// `case_sensitive` drops the default `-i`.
+/// `case_sensitive` drops the default case folding.
 #[derive(Deserialize)]
 pub struct GrepOpts {
     pub regex: bool,
@@ -8970,11 +9156,49 @@ fn task_grep_start(
     let app_o = app.clone();
     let ws_id_o = id.clone();
     let search_id_o = search_id.clone();
-    // git grep flags: -n line numbers, --column column, -I skip binary,
-    // -F literal / -E POSIX ERE, -i / --no-ignore-case, --untracked
-    // --exclude-standard include new files but respect .gitignore.
-    let match_mode = if opts.regex { "-E" } else { "-F" };
-    let case_flag = if opts.case_sensitive { "--no-ignore-case" } else { "-i" };
+    // One child per repo, spawned in its own process group so the whole
+    // tree dies with a single kill on the negated pid.
+    let spawn_in = move |backend: FindBackend, rcwd: &std::path::Path| {
+        let mut cmd = match backend {
+            // rg flags: --json (implies line numbers + match offsets),
+            // --hidden to match `git grep --untracked`'s view of
+            // non-ignored dotfiles, and !.git/ because --hidden would
+            // otherwise expose the object store. --no-config so a user's
+            // RIPGREP_CONFIG_PATH (say a stray --smart-case or -uu)
+            // can't quietly change what termic finds. Binary files and
+            // .gitignore are handled by rg's defaults.
+            FindBackend::Ripgrep(bin) => {
+                let mut c = std::process::Command::new(bin);
+                c.args(["--json", "--no-config", "--hidden", "--glob", "!.git/"]);
+                if !opts.regex { c.arg("-F"); }
+                c.arg(if opts.case_sensitive { "-s" } else { "-i" });
+                c.args(["-e", &query]);
+                c
+            }
+            // git grep flags: -n line numbers, --column column, -I skip
+            // binary, -F literal / -E POSIX ERE, -i / --no-ignore-case,
+            // --untracked --exclude-standard include new files but
+            // respect .gitignore.
+            FindBackend::GitGrep => {
+                let mut c = std::process::Command::new("git");
+                c.args([
+                    "grep",
+                    "-n", "--column", "-I",
+                    if opts.regex { "-E" } else { "-F" },
+                    if opts.case_sensitive { "--no-ignore-case" } else { "-i" },
+                    "--untracked", "--exclude-standard",
+                    "--no-color",
+                    "-e", &query,
+                ]);
+                c
+            }
+        };
+        cmd.current_dir(rcwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+    };
 
     thread::spawn(move || {
         // process_group(0) to kill the tree. We run one child per repo,
@@ -8995,6 +9219,9 @@ fn task_grep_start(
         };
 
         let mut my_pid: Option<i32> = None;
+        // Resolved HERE, not in the command: this can wait on the
+        // login-shell probe, and task_grep_start is sync (main thread).
+        let mut backend = find_backend();
         'repos: for (rcwd, prefix) in &repos {
             // Before each repo, bail if the slot changed: a newer search
             // (different pid) supersedes us, or a cancel cleared it (None).
@@ -9006,40 +9233,38 @@ fn task_grep_start(
                     break 'repos;
                 }
             }
-            let spawn = std::process::Command::new("git")
-                .args([
-                    "grep",
-                    "-n", "--column", "-I", match_mode, case_flag,
-                    "--untracked", "--exclude-standard",
-                    "--no-color",
-                    "-e", &query,
-                ])
-                .current_dir(rcwd)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .process_group(0)
-                .spawn();
-            let mut child = match spawn { Ok(c) => c, Err(_) => continue 'repos };
+            let mut child = match spawn_in(backend, rcwd) {
+                Ok(c) => c,
+                // rg resolved at probe time but is gone now (upgrade,
+                // uninstall). Degrade to git grep instead of reporting
+                // zero matches, which would read as "nothing here".
+                Err(_) if backend != FindBackend::GitGrep => {
+                    backend = FindBackend::GitGrep;
+                    match spawn_in(backend, rcwd) { Ok(c) => c, Err(_) => continue 'repos }
+                }
+                Err(_) => continue 'repos,
+            };
             let pid = child.id() as i32;
             my_pid = Some(pid);
             running_greps_swap(&ws_id_o, Some(pid));
 
             if let Some(stdout) = child.stdout.take() {
                 for line in BufReader::new(stdout).lines().map_while(|r| r.ok()) {
-                    // git grep -n --column output: "path:LINE:COL:preview"
-                    let mut it = line.splitn(4, ':');
-                    let path = it.next().unwrap_or("").to_string();
-                    let line_no: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-                    let col: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-                    let preview = it.next().unwrap_or("").to_string();
-                    if path.is_empty() || line_no == 0 { continue; }
+                    let hit = match backend {
+                        FindBackend::Ripgrep(_) => parse_rg_json_line(&line),
+                        FindBackend::GitGrep => parse_git_grep_line(&line),
+                    };
+                    // rg emits begin/end/summary events between matches;
+                    // both backends can emit a line we can't read.
+                    let Some(hit) = hit else { continue };
                     if batch.is_empty() { batch_started = std::time::Instant::now(); }
                     batch.push(serde_json::json!({
                         // Prefix member paths so clicks resolve from the wrapper.
-                        "path": format!("{prefix}{path}"),
-                        "line": line_no,
-                        "col": col,
-                        "preview": preview,
+                        "path": format!("{prefix}{}", hit.path),
+                        "line": hit.line,
+                        "col": hit.col,
+                        "preview": hit.preview,
+                        "ranges": hit.ranges,
                     }));
                     count += 1;
                     if batch.len() >= BATCH_MAX
@@ -11777,7 +12002,7 @@ pub fn run() {
             task_set_tabs, task_set_tab_session_id, task_set_tab_previous_session_id,
             task_set_split_layout,
             task_set_right_tabs, task_set_right_tab_session_id,
-            task_grep_start, task_grep_cancel,
+            task_grep_start, task_grep_cancel, task_find_backend,
             task_spotlight_start, task_spotlight_stop, task_spotlight_resync, task_spotlight_status,
             task_diff, task_files, task_list_files_for_finder, task_match_ignored_files, task_send_diff_to_main,
             task_changes, task_git_status, task_git_branches, project_git_branches, project_branch_context, task_git_checkout, task_git_update, task_git_update_info, task_stage, task_unstage, task_commit, task_discard,
@@ -12114,6 +12339,126 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    // ── find-in-files backends (GH #181) ──
+    //
+    // Both parsers feed the same GrepHit contract, so the frontend never
+    // learns which backend ran. These pin the shape of that contract.
+
+    #[test]
+    fn git_grep_line_parses_into_a_hit_without_ranges() {
+        let h = parse_git_grep_line("src/lib.rs:42:7:  let x = 1;").expect("a match line");
+        assert_eq!(h.path, "src/lib.rs");
+        assert_eq!((h.line, h.col), (42, 7));
+        assert_eq!(h.preview, "  let x = 1;");
+        assert!(h.ranges.is_empty(), "git grep can't report match ranges, the frontend re-matches");
+    }
+
+    #[test]
+    fn git_grep_line_keeps_colons_that_belong_to_the_code() {
+        // splitn(4) matters: `a::b` in the preview must not be eaten.
+        let h = parse_git_grep_line("s.rs:1:1:foo::bar(x:y)").expect("a match line");
+        assert_eq!(h.preview, "foo::bar(x:y)");
+    }
+
+    #[test]
+    fn git_grep_rejects_non_match_output() {
+        assert!(parse_git_grep_line("").is_none());
+        assert!(parse_git_grep_line("Binary file x matches").is_none());
+        assert!(parse_git_grep_line("src/lib.rs:0:1:zero line number").is_none());
+    }
+
+    #[test]
+    fn rg_match_event_carries_every_range_on_the_line() {
+        let ev = r#"{"type":"match","data":{"path":{"text":"src/a.ts"},"lines":{"text":"foo bar foo\n"},"line_number":9,"absolute_offset":0,"submatches":[{"match":{"text":"foo"},"start":0,"end":3},{"match":{"text":"foo"},"start":8,"end":11}]}}"#;
+        let h = parse_rg_json_line(ev).expect("a match event");
+        assert_eq!(h.path, "src/a.ts");
+        assert_eq!(h.line, 9);
+        assert_eq!(h.preview, "foo bar foo", "trailing newline must be stripped");
+        assert_eq!(h.ranges, vec![[0, 3], [8, 11]]);
+        assert_eq!(h.col, 1, "col is 1-based, same contract as git grep --column");
+    }
+
+    #[test]
+    fn rg_ranges_are_utf16_not_byte_offsets() {
+        // rg counts bytes. "héllo " is 7 bytes but 6 UTF-16 units, so a
+        // byte-offset range would paint one char to the right of the match.
+        let ev = r#"{"type":"match","data":{"path":{"text":"a.txt"},"lines":{"text":"héllo world\n"},"line_number":1,"submatches":[{"match":{"text":"world"},"start":7,"end":12}]}}"#;
+        let h = parse_rg_json_line(ev).expect("a match event");
+        assert_eq!(h.ranges, vec![[6, 11]]);
+        assert_eq!(&h.preview[..], "héllo world");
+        // Sanity: the UTF-16 range actually spans the matched word.
+        let utf16: Vec<u16> = h.preview.encode_utf16().collect();
+        let picked = String::from_utf16(&utf16[6..11]).unwrap();
+        assert_eq!(picked, "world");
+    }
+
+    #[test]
+    fn rg_skips_events_that_are_not_matches() {
+        assert!(parse_rg_json_line(r#"{"type":"begin","data":{"path":{"text":"a.ts"}}}"#).is_none());
+        assert!(parse_rg_json_line(r#"{"type":"end","data":{"path":{"text":"a.ts"}}}"#).is_none());
+        assert!(parse_rg_json_line("not json at all").is_none());
+    }
+
+    #[test]
+    fn rg_drops_matches_it_cannot_decode() {
+        // Non-UTF-8 path: rg sends {"bytes": base64} instead of {"text"}.
+        // Guessing an encoding would put a garbage row in the results.
+        let ev = r#"{"type":"match","data":{"path":{"bytes":"YS50eHQ="},"lines":{"text":"hit\n"},"line_number":1,"submatches":[{"match":{"text":"hit"},"start":0,"end":3}]}}"#;
+        assert!(parse_rg_json_line(ev).is_none());
+    }
+
+    #[test]
+    fn path_probe_only_accepts_an_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let empty = dir.path().join("empty");
+        let real = dir.path().join("real");
+        fs::create_dir_all(&empty).unwrap();
+        fs::create_dir_all(&real).unwrap();
+
+        // A non-executable file with the right name must not win.
+        fs::write(real.join("rg"), b"#!/bin/sh\n").unwrap();
+        let path = format!("{}:{}", empty.display(), real.display());
+        assert!(find_on_path("rg", &path).is_none(), "a chmod-less file is not a backend");
+
+        fs::set_permissions(real.join("rg"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(find_on_path("rg", &path), Some(real.join("rg")));
+        assert!(find_on_path("rg", "").is_none(), "an empty PATH must not panic");
+    }
+
+    // The backend is memoized for the whole session, and the login-shell
+    // PATH lands asynchronously. Caching a miss read off the static
+    // fallback (no /opt/homebrew/bin) would pin git grep until relaunch
+    // for someone who has rg installed, so only these three combinations
+    // may be kept.
+    #[test]
+    fn a_miss_on_the_fallback_path_is_never_memoized() {
+        assert!(!backend_verdict_is_final(false, false), "ask again once the real PATH lands");
+        assert!(backend_verdict_is_final(false, true), "a miss on the final PATH is the answer");
+    }
+
+    #[test]
+    fn finding_rg_is_final_whatever_path_it_came_from() {
+        // The binary exists at that path; a later PATH can't unfind it.
+        assert!(backend_verdict_is_final(true, false));
+        assert!(backend_verdict_is_final(true, true));
+    }
+
+    #[test]
+    fn path_probe_takes_the_first_hit_in_path_order() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        for d in [&first, &second] {
+            fs::write(d.join("rg"), b"x").unwrap();
+            fs::set_permissions(d.join("rg"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!("{}:{}", first.display(), second.display());
+        assert_eq!(find_on_path("rg", &path), Some(first.join("rg")));
+    }
 
     // CLI graduation (0.26.0): the serde default only reaches profiles with
     // the field absent, so existing installs need the one-time flip. The

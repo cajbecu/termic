@@ -1,22 +1,27 @@
-// ⇧⌘F find-in-files. Streams `git grep` results live: every keystroke
-// fires a fresh search with a new searchId; Rust SIGKILLs the previous
-// in-flight grep automatically so we never fan out into zombies.
+// ⇧⌘F find-in-files. Streams results live: every keystroke fires a fresh
+// search with a new searchId; Rust SIGKILLs the previous in-flight search
+// automatically so we never fan out into zombies.
 //
 // No caching, no indexing. Literal and case-insensitive by default; the `.*`
-// toggle switches the query to a POSIX ERE (git grep -E) and `Aa` drops the
-// `-i`. Both toggles persist in prefs.
+// toggle switches the query to a regex and `Aa` drops the case folding. Both
+// toggles persist in prefs.
+//
+// Rust picks the backend (GH #181): ripgrep when installed, `git grep`
+// otherwise. That decides the regex flavor the `.*` tooltip names, and
+// whether we offer the install hint, so the dialog asks for it once.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Search, X } from "lucide-react";
+import { Search, X, Zap } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
 import { usePrefs } from "@/store/prefs";
 import {
-  taskGrepStart, taskGrepCancel,
-  onGrepResult, onGrepDone, type GrepHit, type GrepOpts,
+  taskGrepStart, taskGrepCancel, taskFindBackend,
+  onGrepResult, onGrepDone, type FindBackend, type GrepHit, type GrepOpts,
 } from "@/lib/ipc";
-import { findRanges } from "@/lib/findMatches";
+import { hitRanges } from "@/lib/findMatches";
 import { fileIconUrl } from "@/lib/explorer/iconResolver";
 import { cn } from "@/lib/utils";
 
@@ -32,6 +37,24 @@ const MIN_QUERY = 3;
 // chunk when the user scrolls near the bottom. Keeps the DOM small during
 // the hot path (typing) without committing to full virtualization.
 const RENDER_CHUNK = 80;
+const RIPGREP_INSTALL_URL = "https://github.com/BurntSushi/ripgrep#installation";
+
+// Cache the backend for the app's lifetime, but ONLY once Rust calls it
+// settled. Early after launch the login-shell PATH hasn't landed, so an
+// installed rg can still be invisible; keeping that answer would leave
+// the install hint up all session for someone who has it. Unsettled means
+// ask again on the next open (one IPC per ⇧⌘F, and it settles fast).
+let settledBackend: FindBackend | null = null;
+async function loadBackend(): Promise<FindBackend> {
+  if (settledBackend) return settledBackend;
+  try {
+    const info = await taskFindBackend();
+    if (info.settled) settledBackend = info.backend;
+    return info.backend;
+  } catch {
+    return "git-grep";
+  }
+}
 
 interface FileGroup { path: string; hits: GrepHit[] }
 
@@ -68,8 +91,9 @@ function FlagToggle(
   );
 }
 
-function highlight(preview: string, needle: string, opts: GrepOpts): React.ReactNode {
-  const ranges = findRanges(preview, needle, opts);
+function highlight(hit: GrepHit, needle: string, opts: GrepOpts): React.ReactNode {
+  const preview = hit.preview;
+  const ranges = hitRanges(hit, needle, opts);
   if (!ranges.length) return preview;
   const out: React.ReactNode[] = [];
   let i = 0;
@@ -99,6 +123,16 @@ export function FindInFilesDialog() {
     if (!task) return null;
     return s.projects.find(p => p.id === task.project_id)?.name ?? null;
   });
+
+  // Asked on OPEN, not on mount: this component is mounted for the app's
+  // whole life, and at startup the PATH probe usually hasn't landed yet.
+  const [backend, setBackend] = useState<FindBackend | null>(null);
+  useEffect(() => {
+    if (!taskId) return;
+    let live = true;
+    loadBackend().then(b => { if (live) setBackend(b); });
+    return () => { live = false; };
+  }, [taskId]);
 
   const regexMode = usePrefs(s => s.findInFilesRegex);
   const setRegexMode = usePrefs(s => s.setFindInFilesRegex);
@@ -328,7 +362,11 @@ export function FindInFilesDialog() {
     if (!trimmed) {
       return (
         <>
-          Searching <span className="font-semibold text-[var(--color-fg)]">{projectName ?? "this task"}</span> via <code className="text-[12px]">git grep</code>. Respects <code className="text-[12px]">.gitignore</code>.
+          Searching <span className="font-semibold text-[var(--color-fg)]">{projectName ?? "this task"}</span>
+          {/* Held back until the probe lands, so the backend name never
+              flips under the user a frame after the dialog opens. */}
+          {backend && <> via <code className="text-[12px]">{backend === "ripgrep" ? "ripgrep" : "git grep"}</code></>}
+          . Respects <code className="text-[12px]">.gitignore</code>.
         </>
       );
     }
@@ -368,14 +406,35 @@ export function FindInFilesDialog() {
             />
             <FlagToggle
               on={regexMode} onToggle={() => setRegexMode(!regexMode)}
-              glyph=".*" title="Use a regular expression (POSIX ERE)" testId="fif-regex"
+              glyph=".*"
+              title={backend === "ripgrep"
+                ? "Use a regular expression (Rust regex)"
+                : "Use a regular expression (POSIX ERE)"}
+              testId="fif-regex"
             />
+            {/* Fallback only: ripgrep is faster on big repos, so tell the
+                user it exists. Never shown once rg is on their PATH. */}
+            {backend === "git-grep" && (
+              <button
+                type="button"
+                onMouseDown={e => e.preventDefault()}
+                onClick={() => { openUrl(RIPGREP_INSTALL_URL).catch(() => {}); }}
+                title="Searching with git grep. Install ripgrep for faster search."
+                data-testid="fif-rg-hint"
+                data-no-drag
+                className="inline-flex h-5 shrink-0 items-center gap-1 rounded px-1.5 text-[11px] text-[var(--color-fg-faint)] hover:bg-[var(--color-bg-2)] hover:text-[var(--color-fg)]"
+              >
+                <Zap className="h-3 w-3" />
+                rg
+              </button>
+            )}
           </div>
           {/* ONE row for every state, always mounted at a fixed height:
               message or count on the left, the search indicator pinned
               right. Everything that changes while typing lives here, so
               neither the toggles above nor the rows below ever shift. */}
           <div
+            data-testid="fif-status"
             className={cn(
               "flex min-h-5 items-center justify-between gap-3 px-3 py-3 text-[13px]",
               query ? "text-[var(--color-fg-faint)]" : "text-[var(--color-fg-dim)]",
@@ -441,7 +500,7 @@ export function FindInFilesDialog() {
                 >
                   <span className="w-12 shrink-0 text-right tabular-nums text-[var(--color-fg-faint)]">{h.line}</span>
                   <span className="min-w-0 flex-1 truncate text-[var(--color-fg)]">
-                    {highlight(h.preview, query.trim(), { regex: regexMode, case_sensitive: matchCase })}
+                    {highlight(h, query.trim(), { regex: regexMode, case_sensitive: matchCase })}
                   </span>
                 </button>
               );

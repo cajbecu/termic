@@ -63,6 +63,21 @@ foot-guns, every subtle bug we've fixed before) lives in
 
 ---
 
+## Docs structure
+
+```
+docs/
+  research/    # ideas and early explorations — nothing here is approved or committed to
+  plans/       # approved specs, ready to pick up and implement
+  *.md         # reference and operational docs
+```
+
+If you want something to work on, `docs/plans/` is the place to look. Every file there is scoped and approved — no design work needed, just implementation. Pick one, open an issue to claim it, and go.
+
+AI contributions are more than welcome. One important caveat: must be manually tested, thoroughly.
+
+---
+
 ## How to contribute
 
 ### Reporting bugs
