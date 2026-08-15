@@ -143,11 +143,17 @@ export interface GrepHit {
   ranges: Array<[number, number]>;
 }
 
-/** Which program backs find-in-files, decided once per process by Rust.
- *  Picks the regex flavor and whether the dialog offers the install hint. */
+/** Which program backs find-in-files. Picks the regex flavor and whether
+ *  the dialog offers the install hint. */
 export type FindBackend = "ripgrep" | "git-grep";
 
-export const taskFindBackend = () => invoke<FindBackend>("task_find_backend");
+/** `settled: false` means the answer could still improve: Rust probes the
+ *  login-shell PATH off-thread, and until it lands an installed `rg` may
+ *  not be visible yet. Don't cache an unsettled answer, or the dialog
+ *  keeps offering "install ripgrep" to someone who already has it. */
+export interface FindBackendInfo { backend: FindBackend; settled: boolean }
+
+export const taskFindBackend = () => invoke<FindBackendInfo>("task_find_backend");
 
 /** How the query is matched. `regex` is a Rust regex under ripgrep and a
  *  POSIX ERE (git grep -E) on the fallback, never PCRE — git is not always

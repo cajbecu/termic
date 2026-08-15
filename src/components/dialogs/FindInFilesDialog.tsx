@@ -39,12 +39,21 @@ const MIN_QUERY = 3;
 const RENDER_CHUNK = 80;
 const RIPGREP_INSTALL_URL = "https://github.com/BurntSushi/ripgrep#installation";
 
-// The backend can't change without a relaunch (Rust resolves it once per
-// process), so ask once per app run instead of on every dialog open.
-let backendOnce: Promise<FindBackend> | null = null;
-function loadBackend(): Promise<FindBackend> {
-  backendOnce ??= taskFindBackend().catch((): FindBackend => "git-grep");
-  return backendOnce;
+// Cache the backend for the app's lifetime, but ONLY once Rust calls it
+// settled. Early after launch the login-shell PATH hasn't landed, so an
+// installed rg can still be invisible; keeping that answer would leave
+// the install hint up all session for someone who has it. Unsettled means
+// ask again on the next open (one IPC per ⇧⌘F, and it settles fast).
+let settledBackend: FindBackend | null = null;
+async function loadBackend(): Promise<FindBackend> {
+  if (settledBackend) return settledBackend;
+  try {
+    const info = await taskFindBackend();
+    if (info.settled) settledBackend = info.backend;
+    return info.backend;
+  } catch {
+    return "git-grep";
+  }
 }
 
 interface FileGroup { path: string; hits: GrepHit[] }
@@ -115,8 +124,15 @@ export function FindInFilesDialog() {
     return s.projects.find(p => p.id === task.project_id)?.name ?? null;
   });
 
+  // Asked on OPEN, not on mount: this component is mounted for the app's
+  // whole life, and at startup the PATH probe usually hasn't landed yet.
   const [backend, setBackend] = useState<FindBackend | null>(null);
-  useEffect(() => { let live = true; loadBackend().then(b => { if (live) setBackend(b); }); return () => { live = false; }; }, []);
+  useEffect(() => {
+    if (!taskId) return;
+    let live = true;
+    loadBackend().then(b => { if (live) setBackend(b); });
+    return () => { live = false; };
+  }, [taskId]);
 
   const regexMode = usePrefs(s => s.findInFilesRegex);
   const setRegexMode = usePrefs(s => s.setFindInFilesRegex);

@@ -299,9 +299,13 @@ describe("find in files", () => {
   // actually ran, and the "install rg" nudge must never appear to someone
   // who already has it.
   it("names the backend it searched with", async () => {
-    const backend = await browser.execute(
-      () => window.__termic!.invoke("task_find_backend") as Promise<string>,
-    );
+    const backend = await browser.execute(async () => {
+      const info = (await window.__termic!.invoke("task_find_backend")) as {
+        backend: string;
+        settled: boolean;
+      };
+      return info.backend;
+    });
     expect(["ripgrep", "git-grep"]).toContain(backend);
 
     const wanted = backend === "ripgrep" ? "ripgrep" : "git grep";

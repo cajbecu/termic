@@ -8934,40 +8934,84 @@ fn find_on_path(bin: &str, path: &str) -> Option<PathBuf> {
         })
 }
 
-/// Resolve the backend once per process.
+/// Resolve the backend, memoizing only an answer that can't get better.
 ///
 /// Probed against the login-shell PATH, NOT our inherited one: a
 /// GUI-launched .app gets a bare launchd PATH with no /opt/homebrew/bin,
 /// so `rg` would look uninstalled for every Homebrew user (same reason
 /// `git_bytes` injects the resolved env).
 ///
+/// That PATH arrives asynchronously though (shell_env probes a login
+/// shell off-thread and serves a static fallback until it lands), so a
+/// search fired in the first moments after launch can miss an rg that IS
+/// installed. Caching THAT verdict would pin git grep for the rest of
+/// the session, so a miss found on the fallback PATH is not cached and
+/// the next search asks again. Cached for good once either the probe has
+/// landed or we've actually found rg (a hit is authoritative: the binary
+/// is right there, however we learned of it).
+///
+/// Re-resolving costs a few `stat`s per PATH entry, no process spawn,
+/// once per search start.
+///
 /// `TERMIC_FIND_BACKEND=git-grep` pins the fallback so the e2e suite can
 /// cover both paths on a machine that has ripgrep installed.
+static FIND_BACKEND: std::sync::OnceLock<FindBackend> = std::sync::OnceLock::new();
+
+/// May this resolution be memoized for the rest of the session?
+///
+/// A hit always: rg is at that path, however we learned of it. A miss
+/// only once the PATH it was computed from is final, because the static
+/// fallback has no Homebrew/nvm/bun dirs and its "not installed" is not
+/// an answer, just an early read.
+fn backend_verdict_is_final(found_rg: bool, path_is_final: bool) -> bool {
+    found_rg || path_is_final
+}
+
 fn find_backend() -> FindBackend {
-    use std::sync::OnceLock;
-    static CACHE: OnceLock<FindBackend> = OnceLock::new();
-    *CACHE.get_or_init(|| {
-        if std::env::var("TERMIC_FIND_BACKEND").as_deref() == Ok("git-grep") {
-            return FindBackend::GitGrep;
-        }
-        let (path, _) = shell_env::spawn_env();
-        match find_on_path("rg", &path) {
-            // Leaked once per process, so the path can live in a Copy enum
-            // that gets moved into the search thread.
-            Some(p) => FindBackend::Ripgrep(Box::leak(
-                p.to_string_lossy().into_owned().into_boxed_str(),
-            )),
-            None => FindBackend::GitGrep,
-        }
-    })
+    if let Some(b) = FIND_BACKEND.get() { return *b; }
+
+    if std::env::var("TERMIC_FIND_BACKEND").as_deref() == Ok("git-grep") {
+        return *FIND_BACKEND.get_or_init(|| FindBackend::GitGrep);
+    }
+    let (path, path_is_final) = shell_env::resolved_path_final();
+    let found = find_on_path("rg", &path).map(|p| {
+        // Leaked once per process, so the path can live in a Copy enum
+        // that gets moved into the search thread.
+        FindBackend::Ripgrep(Box::leak(p.to_string_lossy().into_owned().into_boxed_str()))
+    });
+    let backend = found.unwrap_or(FindBackend::GitGrep);
+    if backend_verdict_is_final(found.is_some(), path_is_final) {
+        return *FIND_BACKEND.get_or_init(|| backend);
+    }
+    // Provisional: search with git grep now, look for rg again next time.
+    backend
 }
 
 /// Which backend find-in-files will use, for the dialog: it words the
 /// regex tooltip from the flavor and offers the "install ripgrep" hint
 /// only on the fallback.
+///
+/// `settled` is false while the answer could still improve (the login
+/// PATH hasn't landed, so an installed rg may not be visible yet). The
+/// dialog must not memoize an unsettled answer, or it would keep
+/// offering "install ripgrep" to someone who has it.
+#[derive(Serialize)]
+pub struct FindBackendInfo {
+    backend: &'static str,
+    settled: bool,
+}
+
+/// MUST stay async: resolving can wait on the login-shell probe (up to a
+/// second right after launch), and a sync command would pay that on the
+/// main thread and freeze the webview.
 #[tauri::command]
-fn task_find_backend() -> &'static str {
-    find_backend().name()
+async fn task_find_backend() -> FindBackendInfo {
+    tauri::async_runtime::spawn_blocking(|| {
+        let backend = find_backend();
+        FindBackendInfo { backend: backend.name(), settled: FIND_BACKEND.get().is_some() }
+    })
+    .await
+    .unwrap_or(FindBackendInfo { backend: "git-grep", settled: false })
 }
 
 /// One match line, backend-agnostic.
@@ -9112,8 +9156,6 @@ fn task_grep_start(
     let app_o = app.clone();
     let ws_id_o = id.clone();
     let search_id_o = search_id.clone();
-    let backend = find_backend();
-
     // One child per repo, spawned in its own process group so the whole
     // tree dies with a single kill on the negated pid.
     let spawn_in = move |backend: FindBackend, rcwd: &std::path::Path| {
@@ -9177,7 +9219,9 @@ fn task_grep_start(
         };
 
         let mut my_pid: Option<i32> = None;
-        let mut backend = backend;
+        // Resolved HERE, not in the command: this can wait on the
+        // login-shell probe, and task_grep_start is sync (main thread).
+        let mut backend = find_backend();
         'repos: for (rcwd, prefix) in &repos {
             // Before each repo, bail if the slot changed: a newer search
             // (different pid) supersedes us, or a cancel cleared it (None).
@@ -12381,6 +12425,24 @@ mod tests {
         fs::set_permissions(real.join("rg"), fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(find_on_path("rg", &path), Some(real.join("rg")));
         assert!(find_on_path("rg", "").is_none(), "an empty PATH must not panic");
+    }
+
+    // The backend is memoized for the whole session, and the login-shell
+    // PATH lands asynchronously. Caching a miss read off the static
+    // fallback (no /opt/homebrew/bin) would pin git grep until relaunch
+    // for someone who has rg installed, so only these three combinations
+    // may be kept.
+    #[test]
+    fn a_miss_on_the_fallback_path_is_never_memoized() {
+        assert!(!backend_verdict_is_final(false, false), "ask again once the real PATH lands");
+        assert!(backend_verdict_is_final(false, true), "a miss on the final PATH is the answer");
+    }
+
+    #[test]
+    fn finding_rg_is_final_whatever_path_it_came_from() {
+        // The binary exists at that path; a later PATH can't unfind it.
+        assert!(backend_verdict_is_final(true, false));
+        assert!(backend_verdict_is_final(true, true));
     }
 
     #[test]
