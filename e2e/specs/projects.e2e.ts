@@ -47,6 +47,41 @@ describe("project add/remove", () => {
     );
   });
 
+  // The dashed "New task" placeholder stands in for the task rows an empty
+  // project does not have yet, so it must be the same height as one. It used
+  // to be ~11px taller, which broke the sidebar rhythm.
+  it("sizes the empty-project placeholder like a task row", async () => {
+    const id = projectId!;
+    await browser.execute((i) => {
+      window.__termic!.useApp.getState().setProjectCollapsed(i, false);
+    }, id);
+    const trigger = `[data-testid="project-empty-new-task-${id}"]`;
+    await waitVisible(trigger);
+    const placeholderH = await browser.execute(
+      (sel) => (document.querySelector(sel) as HTMLElement).offsetHeight,
+      trigger,
+    );
+
+    const taskId = await browser.execute(async (i) => {
+      const t = window.__termic!;
+      const task = await t.ipc.taskOpenRepo(i, "fakeagent", "placeholder-size");
+      await t.useApp.getState().loadAll();
+      return task.id as string;
+    }, id);
+    const row = `[data-sidebar-task-id="${taskId}"]`;
+    await waitVisible(row);
+    const rowH = await browser.execute(
+      (sel) => (document.querySelector(sel) as HTMLElement).offsetHeight,
+      row,
+    );
+
+    expect(placeholderH).toEqual(rowH);
+    await browser.execute(async (i) => {
+      await window.__termic!.ipc.taskArchive(i);
+      await window.__termic!.useApp.getState().loadAll();
+    }, taskId);
+  });
+
   it("reorders projects", async () => {
     // Put the newly-added project first, then restore original order.
     const ids = await browser.execute(

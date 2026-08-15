@@ -1349,13 +1349,17 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                     narrow widths. */}
                 {!collapsed && taskList.length === 0 && !compact && pendingRepoRoot?.projectId !== p.id && (
                   <div
-                    className="ml-5 mr-1 mb-1 mt-0.5"
+                    className="ml-3 mr-1 mb-px"
                     onClick={e => e.stopPropagation()}
                   >
                     <DropdownRoot>
                       <DropdownTrigger asChild>
                         <button
-                          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-[var(--color-border)] bg-transparent px-2 py-2 text-[12.5px] text-[var(--color-fg-dim)] hover:border-[var(--color-accent-soft)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)] data-[state=open]:border-[var(--color-accent-soft)] data-[state=open]:text-[var(--color-fg)]"
+                          data-testid={`project-empty-new-task-${p.id}`}
+                          // h-[26px] is the task row height (py-1 + an 18px
+                          // content box), so the placeholder and the rows it
+                          // stands in for share one rhythm.
+                          className="flex h-[26px] w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-[var(--color-border)] bg-transparent px-2 text-[13px] text-[var(--color-fg-dim)] hover:border-[var(--color-accent-soft)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)] data-[state=open]:border-[var(--color-accent-soft)] data-[state=open]:text-[var(--color-fg)]"
                         >
                           <Plus className="h-3.5 w-3.5 shrink-0" />
                           <span>New task</span>
