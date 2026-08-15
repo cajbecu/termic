@@ -43,7 +43,7 @@ Performance: `make perf` runs the nightly suite (startup, memory) and the local-
 
 ## Scratchpad
 
-`scratchpad/` at the repo root is gitignored and local-only. Put throwaway work there: market/competitor research, GTM notes, half-finished drafts, one-off analysis, anything that shouldn't ship or be reviewed. Nothing in it has to be release-quality. Working docs meant for contributors (investigations, resume docs, plans) belong in the tracked `docs/plans/` instead.
+`scratchpad/` at the repo root is gitignored and local-only. Put throwaway work there: market/competitor research, GTM notes, half-finished drafts, one-off analysis, anything that shouldn't ship or be reviewed. Nothing in it has to be release-quality. Working docs meant for contributors belong in the tracked `docs/` tree: `docs/research/` for ideas and explorations, `docs/plans/` for approved implementation-ready specs.
 
 ## Releasing
 
