@@ -111,6 +111,16 @@ export function addLeafTab(tree: SplitTree, leafId: string, tabId: string): Spli
   return { ...tree, a: addLeafTab(tree.a, leafId, tabId), b: addLeafTab(tree.b, leafId, tabId) };
 }
 
+/** Replace a leaf's tabIds wholesale (reorder). The caller passes the same set,
+ *  so activeTabId stays valid. */
+export function setLeafTabs(tree: SplitTree, leafId: string, tabIds: string[]): SplitTree {
+  if (tree.type === 'pane') {
+    if (tree.id !== leafId) return tree;
+    return { ...tree, tabIds };
+  }
+  return { ...tree, a: setLeafTabs(tree.a, leafId, tabIds), b: setLeafTabs(tree.b, leafId, tabIds) };
+}
+
 /** Remove a tab from a leaf's tabIds; updates activeTabId to the neighbour. */
 export function removeLeafTab(tree: SplitTree, leafId: string, tabId: string): SplitTree {
   if (tree.type === 'pane') {

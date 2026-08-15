@@ -6993,6 +6993,7 @@ mod tests {
             previous_session_id: None,
             pane_leaf_id: None,
             run_member: run.map(str::to_string),
+            pinned: false,
         };
         let mut host = host;
         host.tasks.iter_mut().find(|t| t.id == "w3").unwrap().persisted_tabs = vec![
@@ -7030,6 +7031,7 @@ mod tests {
             previous_session_id: None,
             pane_leaf_id: None,
             run_member: None,
+            pinned: false,
         };
         let mut host = host;
         host.tasks.iter_mut().find(|t| t.id == "w3").unwrap().persisted_tabs =
@@ -7138,6 +7140,7 @@ mod tests {
                 previous_session_id: None,
                 pane_leaf_id: None,
                 run_member: None,
+                pinned: false,
             },
             crate::PersistedTab {
                 id: "tab-x".into(),
@@ -7150,6 +7153,7 @@ mod tests {
                 previous_session_id: None,
                 pane_leaf_id: None,
                 run_member: None,
+                pinned: false,
             },
             crate::PersistedTab {
                 id: "tab-sh".into(),
@@ -7162,6 +7166,7 @@ mod tests {
                 previous_session_id: None,
                 pane_leaf_id: None,
                 run_member: None,
+                pinned: false,
             },
         ];
         assert_eq!(resolve_tab_selector(&host, &t, "tab-a").unwrap().id, "tab-a");

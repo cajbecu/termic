@@ -74,6 +74,34 @@ async function confirmTabClose(tab: Tab | undefined, paneTab: boolean): Promise<
   return true;
 }
 
+/** One confirm for a whole set (the context menu's "Close others" / "Close to
+ *  the right"). A per-tab confirm would stack five modals on one gesture, so
+ *  this dialog counts the losses and asks once. */
+async function confirmBulkClose(tabs: Tab[]): Promise<boolean> {
+  const agents = useApp.getState().agents;
+  const dirty = tabs.filter(t => t.type === "edit" && t.dirty);
+  // Same rule as confirmTabClose: an already-exited terminal-like tab has
+  // neither a process to stop nor a session to lose.
+  const live = tabs.filter(t =>
+    t.type === "terminal" && t.cli !== "shell"
+    && !(isTerminalCli(t.cli, agents) && !t.ptyId));
+  if (!dirty.length && (!live.length || !usePrefs.getState().confirmBeforeCloseAgentTab)) return true;
+  const parts: string[] = [];
+  if (dirty.length) {
+    parts.push(`termic discards the unsaved changes in ${dirty.length} ${dirty.length === 1 ? "file" : "files"}.`);
+  }
+  if (live.length) {
+    parts.push(`termic ends ${live.length} agent ${live.length === 1 ? "session" : "sessions"}.`);
+  }
+  const ok = await useUI.getState().askConfirm({
+    title: `Close ${tabs.length} ${tabs.length === 1 ? "tab" : "tabs"}?`,
+    message: parts.join(" "),
+    confirmLabel: "Close tabs",
+    destructive: true,
+  });
+  return ok === true;
+}
+
 /** After a fast-path close (confirm skipped, see above), tell the user
  *  where the tab went. Secondary tabs snapshot into `closedTabs` on close
  *  (see app.ts's closeTab) so the toast's action can reopen the exact one
@@ -133,4 +161,23 @@ export async function requestClosePaneTab(taskId: string, paneId: string, tabId:
   useApp.getState().closePaneTab(taskId, paneId, tabId);
   if (fastClose && tab) toastClosedTab(taskId, tab, true);
   return true;
+}
+
+/** Close a set of main-pane tabs behind ONE confirm. Secondary agent tabs still
+ *  snapshot into `closedTabs`, so the "+" menu's Resume section can bring any of
+ *  them back. */
+export async function requestCloseTabs(taskId: string, tabIds: string[]) {
+  const tabs = (useApp.getState().tabs[taskId] ?? []).filter(t => tabIds.includes(t.id));
+  if (!tabs.length) return;
+  if (!(await confirmBulkClose(tabs))) return;
+  for (const t of tabs) useApp.getState().closeTab(taskId, t.id);
+}
+
+/** Close a set of split-pane tabs behind ONE confirm. The clicked tab always
+ *  survives both menu actions, so the pane can never end up empty here. */
+export async function requestClosePaneTabs(taskId: string, paneId: string, tabIds: string[]) {
+  const tabs = (useApp.getState().tabs[taskId] ?? []).filter(t => tabIds.includes(t.id));
+  if (!tabs.length) return;
+  if (!(await confirmBulkClose(tabs))) return;
+  for (const t of tabs) useApp.getState().closePaneTab(taskId, paneId, t.id);
 }

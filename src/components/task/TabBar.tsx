@@ -9,13 +9,14 @@ import { Button } from "@/components/ui/Button";
 import { DropdownRoot, DropdownTrigger, DropdownMenu } from "@/components/ui/Dropdown";
 import { NewTabMenuItems } from "./NewTabMenuItems";
 import { CliIcon, CLI_BRAND_COLOR, CLI_LABEL, resolveIconId } from "@/icons/cli";
-import { Plus, X, GitCompare, FileText, SquareSplitVertical, SquareSplitHorizontal, TerminalSquare, Bell, Megaphone, Repeat, RotateCw, Square, Play, AlertTriangle } from "lucide-react";
+import { Plus, X, GitCompare, FileText, SquareSplitVertical, SquareSplitHorizontal, TerminalSquare, Bell, Megaphone, Pin, Repeat, RotateCw, Square, Play, AlertTriangle } from "lucide-react";
 import { Spinner } from "@/components/ui/Spinner";
 import { ptyKill } from "@/lib/ipc";
 import { usePrefs } from "@/store/prefs";
 import { Tip } from "@/components/ui/Tooltip";
 import { useUI } from "@/store/ui";
-import { requestCloseTab } from "@/lib/closeTab";
+import { requestCloseTab, requestCloseTabs } from "@/lib/closeTab";
+import { TabContextMenu } from "./TabContextMenu";
 import { focusMainTab } from "@/lib/tabFocus";
 import { visibleCliIds, agentDisplayName, isTerminalEntry } from "@/lib/agents";
 import { cn } from "@/lib/utils";
@@ -33,6 +34,8 @@ export function TabBar({ task }: { task: Task }) {
   const addTab = useApp(s => s.addTab);
   const reorderTab = useApp(s => s.reorderTab);
   const renameTab = useApp(s => s.renameTab);
+  const pinTab = useApp(s => s.pinTab);
+  const unpinTab = useApp(s => s.unpinTab);
   const stripRef = useRef<HTMLDivElement>(null);
 
   // The + menu's own rows live in NewTabMenuItems (shared with the sidebar
@@ -122,6 +125,40 @@ export function TabBar({ task }: { task: Task }) {
     });
   }
 
+  // The store keeps pinned tabs at the head of the strip, so splitting here
+  // preserves the display order (and therefore the DOM order the drag code
+  // reads back out of `stripRef`).
+  const pinnedTabs = tabs.filter(t => t.pinned);
+  const looseTabs = tabs.filter(t => !t.pinned);
+
+  const renderPill = (t: Tab) => (
+    <TabContextMenu
+      key={t.id} tabs={tabs} tabId={t.id} pinned={!!t.pinned}
+      onPin={() => pinTab(task.id, t.id)}
+      onUnpin={() => unpinTab(task.id, t.id)}
+      onClose={() => requestCloseTab(task.id, t.id)}
+      onCloseMany={(ids) => requestCloseTabs(task.id, ids)}
+    >
+      <TabPill
+        task={task} tab={t} active={t.id === activeId} paneFocused={mainFocused}
+        // focusMainTab: keyboard focus must follow the click into the tab's
+        // content (terminal / editor) — otherwise the previously focused
+        // pane keeps DOM focus and ⌘W acts on the wrong pane.
+        onSelect={() => { if (suppressClickRef.current) return; setActive(task.id, t.id); focusMainTab(t.id); }}
+        onClose={() => requestCloseTab(task.id, t.id)}
+        onUnpin={() => unpinTab(task.id, t.id)}
+        renaming={renaming?.id === t.id ? renaming.value : null}
+        onStartRename={() => setRenaming({ id: t.id, value: t.title })}
+        onChangeRename={(v) => setRenaming(r => r ? { ...r, value: v } : r)}
+        onCommitRename={commitRename}
+        onCancelRename={() => setRenaming(null)}
+        dragging={dragId === t.id}
+        dragTx={dragId === t.id ? dragTx : 0}
+        onStartDrag={(e) => startDrag(t.id, e)}
+      />
+    </TabContextMenu>
+  );
+
   return (
     <div className="termic-tabstrip flex h-9 shrink-0 border-b border-[var(--color-border-soft)] bg-[var(--color-bg-1)]">
       {/* Left portion: scrollable tab pills + a fixed control cluster (new-tab,
@@ -135,32 +172,43 @@ export function TabBar({ task }: { task: Task }) {
         ref={stripRef}
         data-main-strip=""
         className={cn(
-          "flex min-w-0 flex-1 items-stretch gap-0 pl-2 no-scrollbar",
-          // While dragging, let the pill escape the strip's clip and lift the
-          // whole strip above the right strip (a later DOM sibling that would
-          // otherwise paint over the pill) so the tab stays visible as it
-          // crosses into the other pane.
-          dragId ? "relative z-30 overflow-visible" : "overflow-x-auto overflow-y-hidden",
+          "flex min-w-0 flex-1 items-stretch gap-0 pl-2",
+          // While dragging, lift the whole strip above the right strip (a later
+          // DOM sibling that would otherwise paint over the pill) so the tab
+          // stays visible as it crosses into the other pane.
+          dragId && "relative z-30",
         )}
       >
-        {tabs.map(t => (
-          <TabPill
-            key={t.id} task={task} tab={t} active={t.id === activeId} paneFocused={mainFocused}
-            // focusMainTab: keyboard focus must follow the click into the tab's
-            // content (terminal / editor) — otherwise the previously focused
-            // pane keeps DOM focus and ⌘W acts on the wrong pane.
-            onSelect={() => { if (suppressClickRef.current) return; setActive(task.id, t.id); focusMainTab(t.id); }}
-            onClose={() => requestCloseTab(task.id, t.id)}
-            renaming={renaming?.id === t.id ? renaming.value : null}
-            onStartRename={() => setRenaming({ id: t.id, value: t.title })}
-            onChangeRename={(v) => setRenaming(r => r ? { ...r, value: v } : r)}
-            onCommitRename={commitRename}
-            onCancelRename={() => setRenaming(null)}
-            dragging={dragId === t.id}
-            dragTx={dragId === t.id ? dragTx : 0}
-            onStartDrag={(e) => startDrag(t.id, e)}
-          />
-        ))}
+        {/* Pinned region — OUTSIDE the scroller, which is the whole point of
+            pinning (issue #183): a pinned tab must stay in reach no matter how
+            far the rest of the strip is scrolled. Capped so that many pinned
+            tabs cannot eat the bar and strand the "+" button; past the cap this
+            region scrolls on its own. */}
+        {pinnedTabs.length > 0 && (
+          <>
+            <div
+              data-pinned-strip=""
+              className={cn(
+                "flex shrink-0 items-stretch no-scrollbar max-w-[55%]",
+                dragId ? "overflow-visible" : "overflow-x-auto",
+              )}
+            >
+              {pinnedTabs.map(renderPill)}
+            </div>
+            <div className="mx-1 h-5 w-px shrink-0 self-center bg-[var(--color-border-soft)]" />
+          </>
+        )}
+
+        <div
+          data-scroll-strip=""
+          className={cn(
+            "flex min-w-0 flex-1 items-stretch gap-0 no-scrollbar",
+            // The dragged pill escapes this clip so it stays visible while it
+            // crosses into the other pane.
+            dragId ? "overflow-visible" : "overflow-x-auto overflow-y-hidden",
+          )}
+        >
+        {looseTabs.map(renderPill)}
 
         {/* New tab button — right after the last tab. When scrolling lands,
             move this back to the sticky right cluster. */}
@@ -186,6 +234,7 @@ export function TabBar({ task }: { task: Task }) {
             />
           </DropdownMenu>
         </DropdownRoot>
+        </div>
       </div>
 
       {/* Fixed control cluster — never scrolls; always reachable on the right. */}
@@ -239,7 +288,7 @@ function SplitBelowToggle({ taskId }: { taskId: string }) {
   );
 }
 
-export function TabPill({ task, tab, active, paneFocused, compact, onSelect, onClose, renaming, onStartRename, onChangeRename, onCommitRename, onCancelRename, dragging, dragTx, onStartDrag }: {
+export function TabPill({ task, tab, active, paneFocused, compact, onSelect, onClose, onUnpin, renaming, onStartRename, onChangeRename, onCommitRename, onCancelRename, dragging, dragTx, onStartDrag }: {
   task: Task; tab: Tab; active: boolean;
   /** True when this pill's pane is the focused one. The active tab keeps its
    *  bg highlight regardless, but only shows the accent underline when its
@@ -249,6 +298,10 @@ export function TabPill({ task, tab, active, paneFocused, compact, onSelect, onC
    *  fit-three-tabs flex basis. */
   compact?: boolean;
   onSelect: () => void; onClose: () => void;
+  /** A PINNED pill trades its close × for a pin that unpins on click, so the
+   *  tab the user marked as important is never one stray click from a dead
+   *  PTY. ⌘W and the context menu's Close stay as the ways out. */
+  onUnpin: () => void;
   renaming: string | null;  // current draft value while renaming, else null
   onStartRename: () => void;
   onChangeRename: (v: string) => void;
@@ -280,6 +333,9 @@ export function TabPill({ task, tab, active, paneFocused, compact, onSelect, onC
   const showBell    = !showFailed && reason === "attention";
   const showDone    = !showFailed && !showBell && workState === "done";
   const showWorking = workingIndicator && !showFailed && !showBell && !showDone && workState === "working";
+  // Something already occupies the trailing slot at rest, so the action button
+  // (close ×, or the pin on a pinned tab) waits for hover.
+  const slotTaken = showFailed || showBell || showDone || showWorking || !!tab.dirty;
   const iconId = tab.type === "terminal" ? resolveIconId(tab.cli, agents) : "";
   const color = tab.type === "terminal" ? CLI_BRAND_COLOR[iconId] : "text-[var(--color-fg-dim)]";
   const isRenaming = renaming !== null;
@@ -317,6 +373,7 @@ export function TabPill({ task, tab, active, paneFocused, compact, onSelect, onC
     <div
       ref={pillRef}
       data-tab-id={tab.id}
+      {...(tab.pinned ? { "data-pinned": "" } : null)}
       // Start a pointer-drag for reordering, except while renaming (so the
       // inline input handles text selection / caret normally).
       onPointerDown={(e) => { if (!isRenaming) onStartDrag(e); }}
@@ -343,7 +400,17 @@ export function TabPill({ task, tab, active, paneFocused, compact, onSelect, onC
       // readability, max-w caps a lone tab on a very wide bar.
       style={{
         // Main strip sizes tabs to fit ~three; the right strip sizes to content.
-        ...(compact ? null : { flex: "0 1 calc((100% - 5rem) / 3)" }),
+        // A PINNED pill gets an outright FIXED width instead. It lives in the
+        // strip's shrink-to-fit region, so a content-sized one re-measures on
+        // every OSC title the agent emits, resizing itself and shoving the whole
+        // scrolling remainder sideways. A flex-basis is not enough here: the
+        // region is a scroll container, whose intrinsic width does not track a
+        // shrinkable item's basis, so the pill collapsed to its min-w. The value
+        // equals max-w below, so an uncrowded pinned tab is exactly as wide as
+        // its unpinned neighbours; past the region's cap it scrolls.
+        ...(tab.pinned
+          ? { flex: "0 0 auto", width: compact ? 220 : 260 }
+          : compact ? null : { flex: "0 1 calc((100% - 5rem) / 3)" }),
         // While dragging this pill rides the cursor via translateX and
         // floats above its neighbours. z-index needs the inline value so
         // it beats sibling stacking contexts. pointer-events: none lets
@@ -451,9 +518,10 @@ export function TabPill({ task, tab, active, paneFocused, compact, onSelect, onC
           </span>
         );
       })()}
-      {/* Trailing slot — iTerm2 convention: status badge / dirty dot
-          by default; close × on hover. Fixed cell so the pill never
-          jiggles. Priority: failed > attention > done > dirty > none. */}
+      {/* Trailing slot — iTerm2 convention: status badge / dirty dot by
+          default; the action button (close ×, or the unpin pin on a pinned
+          tab) on hover. Fixed cell so the pill never jiggles.
+          Priority: failed > attention > done > dirty > none. */}
       {!isRenaming && (
         <span className="relative flex h-4 w-4 shrink-0 items-center justify-center">
           {(showFailed || showBell || showDone || showWorking) ? (
@@ -499,14 +567,30 @@ export function TabPill({ task, tab, active, paneFocused, compact, onSelect, onC
               className="absolute h-[7px] w-[7px] rounded-full bg-[var(--color-fg-dim)] transition-opacity group-hover:opacity-0"
             />
           )}
-          <button
-            title="Close tab"
-            className={cn(
-              "absolute inset-0 flex items-center justify-center rounded p-0.5 text-[var(--color-fg-faint)] transition-opacity hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)]",
-              (!active || tab.dirty || showFailed || showBell || showDone || showWorking) && "opacity-0 group-hover:opacity-100",
-            )}
-            onClick={(e) => { e.stopPropagation(); onClose(); }}
-          ><X className="h-3 w-3" /></button>
+          {tab.pinned ? (
+            // No close × on a pinned tab: the affordance would contradict the
+            // intent, and one stray click would kill a live PTY (a secondary
+            // agent tab is forgotten for good, see closeTab.ts). The pin is
+            // always on show when nothing outranks it, so pinned state can
+            // never hide behind a status badge.
+            <button
+              title="Unpin tab"
+              className={cn(
+                "absolute inset-0 flex items-center justify-center rounded p-0.5 text-[var(--color-fg-faint)] transition-opacity hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)]",
+                slotTaken && "opacity-0 group-hover:opacity-100",
+              )}
+              onClick={(e) => { e.stopPropagation(); onUnpin(); }}
+            ><Pin className="h-3 w-3" /></button>
+          ) : (
+            <button
+              title="Close tab"
+              className={cn(
+                "absolute inset-0 flex items-center justify-center rounded p-0.5 text-[var(--color-fg-faint)] transition-opacity hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)]",
+                (!active || slotTaken) && "opacity-0 group-hover:opacity-100",
+              )}
+              onClick={(e) => { e.stopPropagation(); onClose(); }}
+            ><X className="h-3 w-3" /></button>
+          )}
         </span>
       )}
     </div>

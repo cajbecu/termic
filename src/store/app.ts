@@ -6,9 +6,10 @@ import { useUI } from "@/store/ui";
 import type { Project, Task, Tab, TerminalTab, DiffTab, PersistedTab, SplitTree, PaneLeaf, SplitDir } from "@/lib/types";
 import {
   findLeaf, getAllLeaves, countLeaves, replaceNode, removeLeaf,
-  addLeafTab, removeLeafTab, setLeafActiveTabId, pruneLeafTabs, dropEmptyLeaves,
+  addLeafTab, removeLeafTab, setLeafTabs, setLeafActiveTabId, pruneLeafTabs, dropEmptyLeaves,
   updateSplitRatio, findAdjacentPane, equalizeSplitsOnAxis,
 } from "@/lib/splitTree";
+import { pinBoundary } from "@/lib/tabActions";
 import * as ipc from "@/lib/ipc";
 import { groupOf } from "@/lib/projectGroups";
 import { useRace } from "@/store/race";
@@ -88,7 +89,7 @@ export interface AppState {
   terminalSplitCollapsed: Record<string, boolean>;
   /** Per-task: bottom-terminal tab IDs (each = its own scratch shell).
    *  Lives in memory only — like the main terminal tabs, PTYs die with the app. */
-  bottomTabs: Record<string, { id: string; title: string; liveTitle?: string; autoFocus?: boolean }[]>;
+  bottomTabs: Record<string, { id: string; title: string; liveTitle?: string; autoFocus?: boolean; pinned?: boolean }[]>;
   /** Per-task: id of the active bottom-terminal tab. */
   activeBottomTab: Record<string, string>;
   /** Per-task: the iTerm-like split-pane tree for the main content area.
@@ -205,6 +206,10 @@ export interface AppState {
   addBottomTab: (taskId: string, opts?: { focus?: boolean }) => string;
   closeBottomTab: (taskId: string, tabId: string) => void;
   setActiveBottomTab: (taskId: string, tabId: string) => void;
+  /** `pinTab` / `unpinTab` for the bottom scratch shells. Those live in their
+   *  own array and are never persisted, so their pin lasts the session only. */
+  pinBottomTab: (taskId: string, tabId: string) => void;
+  unpinBottomTab: (taskId: string, tabId: string) => void;
   /** Update a bottom-shell tab's live OSC 0/2 title (what the shell emits,
    *  e.g. the running command or cwd). Falls back to the base "shell N" when
    *  empty. Idempotent. */
@@ -287,6 +292,11 @@ export interface AppState {
    *  tab is pulled out (i.e. an index into the other tabs, 0..length-1).
    *  No-op if the order is unchanged. */
   reorderTab: (taskId: string, tabId: string, toIndex: number) => void;
+  /** Pin a tab: flag it and append it to its strip's pinned block. Unpin: clear
+   *  the flag and drop it to the first slot after that block (Chrome
+   *  semantics). Works for both main-strip and split-pane tabs. */
+  pinTab: (taskId: string, tabId: string) => void;
+  unpinTab: (taskId: string, tabId: string) => void;
   closeTab: (taskId: string, tabId: string) => void;
   /** Reopen a `closedTabs` entry as a fresh tab, forcing its original
    *  `sessionId` so the agent resumes via `--resume <uuid>` (see
@@ -423,9 +433,67 @@ function durablePersistedTabs(tabs: Tab[] | undefined): PersistedTab[] {
       // Run pop-out tabs persist WITH their marker so the RunPane comes back
       // in its pane on relaunch (the run script re-fires, like custom tabs).
       run_member: t.runTab ? t.runTab.member : null,
+      pinned: !!t.pinned,
     }));
 }
 
+/**
+ * Move `tabId` to its strip's pin boundary and persist. Shared by `pinTab` and
+ * `unpinTab`: both send the tab to the SAME index, so this reads the flag that
+ * was just written rather than being told which way it went.
+ */
+function reseatAtPinBoundary(
+  set: (partial: Partial<AppState>) => void,
+  get: () => AppState,
+  taskId: string,
+  tabId: string,
+) {
+  const s = get();
+  const list = s.tabs[taskId] ?? [];
+  const tab = list.find(t => t.id === tabId);
+  if (!tab) return;
+  const paneId = (tab as TerminalTab).paneId;
+  if (paneId) {
+    const tree = s.splitTree[taskId];
+    if (!tree) return;
+    const leaf = findLeaf(tree, paneId);
+    if (!leaf) return;
+    const strip = leaf.tabIds.map(id => list.find(t => t.id === id)).filter(Boolean) as Tab[];
+    const without = leaf.tabIds.filter(id => id !== tabId);
+    without.splice(pinBoundary(strip, tabId), 0, tabId);
+    set({ splitTree: { ...s.splitTree, [taskId]: setLeafTabs(tree, paneId, without) } });
+    get().saveSplitLayout(taskId);
+  } else {
+    // reorderTab indexes into the FULL per-task array, which interleaves
+    // split-pane tabs — so anchor on the main tab that must follow this one
+    // (the same mapping useTabStripDrag does).
+    const main = list.filter(t => !(t as TerminalTab).paneId);
+    const mainWithout = main.filter(t => t.id !== tabId);
+    const anchor = mainWithout[pinBoundary(main, tabId)];
+    const fullWithout = list.filter(t => t.id !== tabId);
+    get().reorderTab(taskId, tabId, anchor
+      ? fullWithout.findIndex(t => t.id === anchor.id)
+      : fullWithout.length);
+  }
+  // reorderTab bails when the order is already right (a tab pinned while it
+  // sits at the boundary), but the flag itself still has to reach disk.
+  get().syncDurableTabs(taskId);
+}
+
+/** `reseatAtPinBoundary` for the bottom scratch shells (own array, no disk). */
+function reseatBottomAtPinBoundary(
+  set: (partial: Partial<AppState>) => void,
+  get: () => AppState,
+  taskId: string,
+  tabId: string,
+) {
+  const list = get().bottomTabs[taskId] ?? [];
+  const tab = list.find(t => t.id === tabId);
+  if (!tab) return;
+  const next = list.filter(t => t.id !== tabId);
+  next.splice(pinBoundary(list, tabId), 0, tab);
+  set({ bottomTabs: { ...get().bottomTabs, [taskId]: next } });
+}
 
 /**
  * True when the user can actually SEE this tab, and therefore does not need a
@@ -927,6 +995,24 @@ export const useApp = create<AppState>((set, get) => ({
   setActiveBottomTab: (taskId, tabId) => set(s => ({
     activeBottomTab: { ...s.activeBottomTab, [taskId]: tabId },
   })),
+  pinBottomTab: (taskId, tabId) => {
+    set(s => ({
+      bottomTabs: {
+        ...s.bottomTabs,
+        [taskId]: (s.bottomTabs[taskId] ?? []).map(t => t.id === tabId ? { ...t, pinned: true } : t),
+      },
+    }));
+    reseatBottomAtPinBoundary(set, get, taskId, tabId);
+  },
+  unpinBottomTab: (taskId, tabId) => {
+    set(s => ({
+      bottomTabs: {
+        ...s.bottomTabs,
+        [taskId]: (s.bottomTabs[taskId] ?? []).map(t => t.id === tabId ? { ...t, pinned: false } : t),
+      },
+    }));
+    reseatBottomAtPinBoundary(set, get, taskId, tabId);
+  },
   setBottomTabLiveTitle: (taskId, tabId, liveTitle) => set(s => {
     const list = s.bottomTabs[taskId];
     if (!list) return s;
@@ -1442,6 +1528,7 @@ export const useApp = create<AppState>((set, get) => ({
         ...(pt.session_id ? { sessionId: pt.session_id } : {}),
         ...(pt.previous_session_id ? { previousSessionId: pt.previous_session_id } : {}),
         ...(unattendedRestore && pt.is_default ? { unattended: true } : {}),
+        ...(pt.pinned ? { pinned: true } : {}),
         // idle: restored run tabs keep their spot but never auto-fire the
         // script — the user presses play (RunPane placeholder / pill).
         ...(pt.run_member != null ? { runTab: { member: pt.run_member, previewUrl: null, idle: true } } : {}),
@@ -1484,6 +1571,7 @@ export const useApp = create<AppState>((set, get) => ({
                 : agentDisplayName(pt.cli, s.agents),
               customTitle: !!pt.custom_title,
               paneId: pt.pane_leaf_id!,
+              ...(pt.pinned ? { pinned: true } : {}),
               ...(pt.command ? { command: pt.command } : {}),
               ...(pt.session_id ? { sessionId: pt.session_id } : {}),
               ...(pt.previous_session_id ? { previousSessionId: pt.previous_session_id } : {}),
@@ -1758,6 +1846,16 @@ export const useApp = create<AppState>((set, get) => ({
     });
     // Persist the new order so restore preserves it.
     if (changed) get().syncDurableTabs(taskId);
+  },
+
+  pinTab: (taskId, tabId) => {
+    get().patchTab(taskId, tabId, { pinned: true });
+    reseatAtPinBoundary(set, get, taskId, tabId);
+  },
+
+  unpinTab: (taskId, tabId) => {
+    get().patchTab(taskId, tabId, { pinned: false });
+    reseatAtPinBoundary(set, get, taskId, tabId);
   },
 
   closeTab: (taskId, tabId) => {
