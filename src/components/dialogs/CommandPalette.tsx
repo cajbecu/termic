@@ -185,8 +185,10 @@ export function CommandPalette() {
         });
       }
       cmds.push({
-        // Not styled destructive — confirmAndArchive shows a confirm modal
-        // (with the delete-branch checkbox), so the red isn't needed here.
+        // Not styled destructive — confirmAndArchive normally shows a confirm
+        // modal (with the delete-branch checkbox), so the red isn't needed.
+        // Once the user has ticked "Don't ask again" there, this entry archives
+        // on Enter with no prompt; Settings › Tasks is the way back.
         id: "archive-task", section: "Task", label: `Archive "${task.name}"`,
         icon: Archive, keywords: "delete remove close worktree",
         run: act(() => { void confirmAndArchive(task); }),

@@ -242,7 +242,11 @@ interface UIState {
    *  replacement for `window.confirm()` with our own chrome + theming. */
   askConfirm: {
     (req: ConfirmRequest & { checkbox: ConfirmCheckbox }): Promise<ConfirmResult>;
-    (req: ConfirmRequest & { dontAskAgain: boolean }): Promise<ConfirmResult>;
+    // `true`, not `boolean`: a request that passes `dontAskAgain: false` gets
+    // no second checkbox, so confirmAnswer hands back a bare boolean. Typing
+    // that call as ConfirmResult would compile and then read `.confirmed` off
+    // a boolean at runtime, silently turning a confirm into a cancel.
+    (req: ConfirmRequest & { dontAskAgain: true }): Promise<ConfirmResult>;
     (req: ConfirmRequest & { checkbox: undefined }): Promise<boolean>;
     (req: ConfirmRequest): Promise<boolean | ConfirmResult>;
   };

@@ -292,8 +292,12 @@ describe("task archive", () => {
 // that stored branch answer.
 describe("archive confirmation", () => {
   const ARCHIVE_REPO = path.join(process.cwd(), ".e2e", "fixture-repo");
-  const BRANCH_A = "e2e-archive-ask";
-  const BRANCH_B = "e2e-archive-silent";
+  // Deliberately NOT the task names below: the dialog title is
+  // `Archive "<task name>"?`, so a branch named after its task would satisfy
+  // the "names the branch" assertion even if the branch code block never
+  // rendered at all.
+  const BRANCH_A = "wt-ask-alpha";
+  const BRANCH_B = "wt-silent-beta";
   let prefsOriginal: { confirm: boolean; deleteBranch: boolean } | undefined;
   // The first case creates it and backs out of archiving it; the second one
   // then archives that same task for real.
@@ -383,6 +387,7 @@ describe("archive confirmation", () => {
       p.setArchiveDeleteBranch(false);
     });
     askTaskId = await createWorktreeTask("e2e-archive-ask", BRANCH_A);
+    expect(branchExists(BRANCH_A)).toBe(true);
 
     await clickWhenVisible('[data-testid="archive-task"]');
     await waitForArchiveDialog();
