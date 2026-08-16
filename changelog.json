@@ -1,9 +1,9 @@
 {
   "versions": [
     {
-      "version": "0.27.0",
+      "version": "0.27.1",
       "date": "2026-08-16",
-      "summary": "A commit graph, comments on any file, ripgrep search, and a big idle-CPU fix."
+      "summary": "A commit graph, branch compare, comments on any file, and a big idle-CPU fix."
     },
     {
       "version": "0.26.0",

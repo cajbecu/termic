@@ -4,20 +4,17 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [0.27.0] - 2026-08-16
+## [0.27.1] - 2026-08-16
 
-A commit graph, comments on any file, ripgrep search, and a big idle-CPU fix.
+A commit graph, branch compare, comments on any file, and a big idle-CPU fix.
 
 ### Features
-- The Git tab gets a commit graph at its foot: a dense row per commit (lane gutter, ref chips, subject, age), click a row for the files it touched, click a file for that revision's diff. Hover a row for the author, date and full message. Choose what it shows (this branch, every branch, or specific refs) and drag it to the height you want. Committed work used to vanish from Termic the moment the tree went clean. Lane colours come from the theme palette. (#199)
-- A Push button next to Commit, badged with how many commits are waiting to go out.
-- A built-in "Hand off to another agent" prompt. Agents in one task run their real CLI and share no transcript, so handing work over has meant doing it by hand. The prompt has the current agent list the installed agents, ask which to hand to, write a handoff doc, open that agent in a new tab of the same task, then wait for and read its result file rather than trusting its last chat message. (#172)
+- **Git.** The right panel's Git tab is three sub-tabs. **Commit** stages and commits as before, with a Push button badged by the number of commits waiting to go out. **History** is a full-height commit graph: a dense row per commit (lane gutter, ref chips, subject, age), hover for the author, date and full message, click through to any file's diff at that revision. Scope it to this branch, every branch or refs you pick, collapse merged side branches with "First parent only", and search commit messages across the whole branch (git runs the search, so a match ten pages back still comes up first). **Compare** answers what all of it adds up to: one list of every path that differs between any ref and your working tree, committed, staged, unstaged and untracked together, rendered as a tree, and because its right side is the live file, mark-as-viewed and inline comments keep working, so a whole feature can be reviewed file by file without leaving Termic. Committed work used to vanish from the panel the moment the tree went clean, which is the gap all of this closes. The Unstaged and Staged sections collapse, with Stage all / Unstage all still live. Lane colours come from the theme palette. (#199, #208)
 - Select code in any file you are reading and comment on it, the same surface the diff pane has. Several remarks ship as one message, a body is optional, and Shift+Cmd+L stacks a selection from the keyboard. Queued comments follow their code as you edit around them, and the quote is frozen at capture. (#174)
 - Find in files runs on ripgrep when you have it: faster on large repos, Unicode-aware, and its regex is what the results highlight with. Without it, `git grep` exactly as before, named in the dialog. (#181)
 - Find in files gets a `.*` regexp toggle and an `Aa` match-case toggle, both off by default.
 - Right-click any tab pill for Pin, Close, Close others, Close to the right. Pinned tabs sit in their own block outside the scroller, so they stay in reach however far the strip is scrolled, and the flag persists. (#183)
 - Right-clicking a tab also offers Split right, Split down and Move to split. Move to split arms a cursor-following drag with the same ghost and edge highlight as a real one, so a tab can be placed in an existing pane without a grab; the next click drops it, Escape cancels.
-- The Unstaged and Staged sections collapse, with Stage all / Unstage all still live, and the state persists.
 - Right-clicking a task row in the sidebar offers a New submenu, the same rows as the tab strip's "+". (#197)
 - `termic://` links open a pre-filled New Task dialog: `termic://new?project=web&worktree=1&name=fix-login&p=Fix%20the%20login%20bug`. The link only fills the form; a human still presses Create, which is the whole security model for taking a prompt from any page that can navigate to a URL scheme. New Task grows an optional first-message box. (#192)
 - New Task can set the agent's resume arguments before its first spawn, the same override the task menu edits. It replaces a session-ID box that only appeared for agents able to resume by id, so codex and gemini had no field at all. (#169)
