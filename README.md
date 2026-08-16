@@ -335,147 +335,107 @@ see in iTerm.
 
 ## Roadmap
 
-Every item below is tracked by an issue labelled
-[`planned`](https://github.com/simion/termic/issues?q=is%3Aissue+label%3Aplanned).
-That issue, not the position in this list, is the item's identity: the
-numbering shifts every time something ships. Open an issue to push
-something up the list, or comment on one to pick it off.
+Two lists, and the difference between them is a commitment.
 
-1. **Code intelligence via language server plugins.**
-   ([#174](https://github.com/simion/termic/issues/174)) Cmd-click
-   go-to-definition, find class / symbol, hover types, inline diagnostics.
-   Pluggable language server plugins (rust-analyzer, typescript-language-server,
-   pyright, gopls and others) resolved from the user's toolchain automatically.
-   A fast heuristic (ripgrep + tree-sitter) pass for all languages, then real
-   LSP where a server is present. The commenting half of #174 shipped in
-   0.27.0; this is the code-navigation half. Design and measurements in
-   [docs/research/lsp.md](docs/research/lsp.md).
-2. **Mobile app.** ([#165](https://github.com/simion/termic/issues/165)) A
-   companion mobile application for remote control and monitoring of tasks
-   on the go.
-3. **MCP server endpoint.** ([#176](https://github.com/simion/termic/issues/176))
-   A scoped control plane agents can call without holding a terminal. The
-   2026-07-28 spec revision made the protocol stateless, so a per-task
-   bearer token can finally answer which task is calling and what it may
-   do, which is the grant a sandboxed agent can be given safely. Design
-   and the argument for reopening the question in
-   [docs/research/mcp.md](docs/research/mcp.md).
-4. **Linear + GitHub PR integration.**
-   ([#222](https://github.com/simion/termic/issues/222)) Paste an issue / PR
-   URL, get a workspace seeded with title + body. Create the PR from the app
-   via `gh`. No OAuth.
-5. **Sandbox parity on Linux + Windows.**
-   ([#223](https://github.com/simion/termic/issues/223)) macOS Seatbelt today;
-   bubblewrap / landlock on Linux and AppContainer on Windows are the gap.
-6. **Docker-based sandboxing.**
-   ([#224](https://github.com/simion/termic/issues/224)) An opt-in, more brutal alternative to
-   Seatbelt: run each agent inside a container off a default, editable
-   Dockerfile that ships the supported agents. Install whatever your agents
-   need in the image; they cannot escape it and only see the paths you mount
-   (just the project repo(s) by default, everything else installed but not
-   mounted). Cross-platform for free, and pairs well with per-agent
-   credential injection (or a single CLI login) so you need not mount secrets
-   at all. See [#49](https://github.com/simion/termic/issues/49) for the kind
-   of host-toolchain friction this sidesteps. Design and findings in
-   [docs/research/docker-sandbox/](docs/research/docker-sandbox/).
-7. **Windows prebuilts.**
-   ([#225](https://github.com/simion/termic/issues/225)) AppImage CI is live
-   for Linux; Windows MSI is the matching CI matrix entry. Audit and plan in
-   [docs/research/windows.md](docs/research/windows.md), none of it compiled on
-   Windows yet.
-8. **Opt-in usage telemetry.**
-   ([#226](https://github.com/simion/termic/issues/226)) Anonymous, opt-in analytics via a self-hosted
-   Umami instance. Strictly limited to usage patterns (which features are
-   used, how often) and crash reports — nothing else. No code, no prompts,
-   no file paths, no agent output, no project names. Minimum viable event
-   set: the goal is performance and feature prioritization, not surveillance.
-   Off by default, one toggle in Settings.
-9. **Investigating agent lifecycle hooks.**
-    ([#227](https://github.com/simion/termic/issues/227)) Termic infers "the agent
-    finished" from the terminal stream (OSC progress sequences and window
-    titles), which costs no config, works for every agent including ones
-    you add yourself, and keeps working inside the sandbox. Every
-    supported CLI now also exposes a lifecycle hook system that states it
-    outright, with a payload carrying the assistant's closing message,
-    whether the agent is blocked on a permission prompt or on a question,
-    and a warning before context compaction. Whether that is worth
-    writing into your agent config is an open question, so the first step
-    is measuring hooks against OSC across the scenarios that actually
-    break detection (interrupts, permission prompts, subagents,
-    compaction). If it earns its place it ships opt-in and off by
-    default, with a real uninstall, and OSC stays authoritative
-    regardless. Research and measurement plan in
-    [docs/research/agent-hooks.md](docs/research/agent-hooks.md).
-10. **Intentional agent-driven orchestration.**
-    ([#228](https://github.com/simion/termic/issues/228)) The plumbing already
-    ships: agents get `TERMIC_CLI` and a tutorial in their environment,
-    so a running agent can spawn a task with `--wait`, prompt another one,
-    read its result and branch on the exit code. What is missing is
-    intent. Environment variables are passive, nothing puts that surface
-    in the model's context, and termic has no opinion about shape (fan
-    out, queue behind, supervisor and workers). Researching whether to
-    put the surface in the agent's context the way Spotify's Xirp does,
-    or to wait for the MCP endpoint where the schema is the
-    documentation, and how much orchestration the tool should suggest
-    rather than obey. Notes in
-    [docs/research/agent-orchestration.md](docs/research/agent-orchestration.md).
-11. **Import Warp and Ghostty themes.**
-    ([#229](https://github.com/simion/termic/issues/229)) Termic has a native JSON theme
-    format, so a custom theme is a file drop away, but two large theme
-    ecosystems already exist and neither is ours. Scan `~/.warp/themes`
-    and Ghostty's theme directory, translate both into termic's format,
-    and let people pick from the library they already collected. Borrowed
-    from [Orca](https://github.com/stablyai/orca), which does the import
-    well and, unlike termic, has no native theme format underneath it.
-12. **On-device dictation for agent prompts.**
-    ([#178](https://github.com/simion/termic/issues/178)) Prompts to a coding agent
-    are prose, not code: a paragraph of intent, constraints and a bit of
-    context. That is the kind of text people speak faster than they
-    type, and it is worth more here than in a normal editor because one
-    dictated prompt can be broadcast to four agents at once. macOS 26
-    (Tahoe) ships `SpeechAnalyzer` and `SpeechTranscriber` in the Speech
-    framework, which run entirely on device against the Apple Silicon
-    Neural Engine, no network and no vendor key, which is the only way a
-    feature like this belongs in an app that is otherwise wholly
-    on-device. Early third-party measurements put it well ahead of
-    Whisper on speed (a 34-minute file transcribed in about 45 seconds,
-    roughly 55% faster than MacWhisper's Large V3 Turbo), though those
-    are other people's numbers on other people's hardware and the
-    interesting figure for us is streaming latency for a 20-second
-    utterance, not bulk throughput. Hard constraints: **macOS 26+ and
-    Apple Silicon only**, so this is strictly additive, hidden rather
-    than degraded everywhere else (Intel, older macOS, Linux, Windows),
-    and never on the critical path of typing a prompt. Open questions
-    before any of it is worth building: whether the speech models arrive
-    as downloadable assets on first use and what that means for a first
-    run offline, what streaming partial-result latency actually feels
-    like inside a terminal-focused UI, how a Swift bridge is best shaped
-    from the Rust side, how microphone TCC interacts with the sandbox,
-    and whether `DictationTranscriber` is a good enough fallback for
-    unsupported languages to bother with. Research first: the question
-    is whether it earns a permission prompt and a platform-specific code
-    path, not how to build it.
-13. **Termic in the official Homebrew cask repository.**
-    ([#230](https://github.com/simion/termic/issues/230)) Today the install
-    path is this repo's own tap
-    ([simion/homebrew-termic](https://github.com/simion/homebrew-termic)),
-    so it takes a `brew tap` first and the token is
-    `simion/termic/termic`. Upstream would make it plain
-    `brew install --cask termic`. The cask itself is ready: the `.dmg` is
-    Developer ID signed and notarized, so it needs no Gatekeeper
-    workaround, and its `livecheck` makes it autobump-eligible, meaning
-    new releases would not cost a Homebrew maintainer a PR each.
-    [PR #274896](https://github.com/Homebrew/homebrew-cask/pull/274896) is
-    filed and closed on one thing only: notability. Homebrew asks for 30
-    forks, 30 watchers or 75 stars, and triples that to **90 forks, 90
-    watchers or 225 stars** when the author submits their own software.
-    The forks already clear the third-party bar, so stars are the
-    realistic lane and the
-    [star count on this repo](https://github.com/simion/termic/stargazers)
-    is the live figure: **at 225 the same PR gets reopened**. If you would
-    rather type
-    `brew install --cask termic`, starring the repo is the literal
-    mechanism.
+**Planned** is what will be built. Each one has an issue labelled
+[`planned`](https://github.com/simion/termic/issues?q=is%3Aissue+label%3Aplanned),
+and that issue is where its progress lives.
+
+**Ideas** are not committed to. Most have a write-up under
+[`docs/ideas/`](docs/ideas/) arguing the case, and several are detailed
+enough to build from, but none of them is decided. They deliberately have
+no tracking issue: an issue implies someone intends to do it. Open one, or
+comment on the discussion linked below, if you want to make the case or
+pick something up.
+
+Approved ideas move to [`docs/plans/`](docs/plans/) as implementation-ready
+specs and get an issue at the same time. That is the whole promotion path:
+`docs/ideas/` → `docs/plans/` + a `planned` issue → built.
+
+### Planned
+
+- **Code intelligence via language server plugins.**
+  ([#174](https://github.com/simion/termic/issues/174)) Cmd-click
+  go-to-definition, find class / symbol, hover types, inline diagnostics.
+  Pluggable language servers (rust-analyzer, typescript-language-server,
+  pyright, gopls) resolved from the user's toolchain automatically, with a
+  fast heuristic pass (ripgrep + tree-sitter) for languages that have no
+  server present. The commenting half of #174 shipped in 0.27.0; this is
+  the code-navigation half. Design and measurements in
+  [docs/ideas/lsp.md](docs/ideas/lsp.md).
+- **Mobile app.** ([#165](https://github.com/simion/termic/issues/165)) A
+  companion app for checking on and steering tasks while away from the Mac.
+
+### Ideas
+
+- **MCP server endpoint.** A scoped control plane an agent can call without
+  being handed a terminal. The 2026-07-28 spec revision made the protocol
+  stateless, so a per-task bearer token can finally answer which task is
+  calling and what it may do, which is the narrowest grant a sandboxed agent
+  could be given. [docs/ideas/mcp.md](docs/ideas/mcp.md), discussion in
+  [#176](https://github.com/simion/termic/issues/176).
+- **On-device dictation for agent prompts.** Prompts to a coding agent are
+  prose, and one dictated prompt can be broadcast to four agents at once.
+  macOS 26's `SpeechAnalyzer` runs entirely on device, which is the only way
+  this belongs in an app that is otherwise wholly local. Apple Silicon and
+  macOS 26+ only, so strictly additive. Discussion in
+  [#178](https://github.com/simion/termic/issues/178).
+- **Intentional agent-driven orchestration.** The plumbing already ships:
+  an agent can spawn a task with `--wait`, prompt another, read its result
+  and branch on the exit code. What is missing is intent, and an opinion
+  about shape (fan out, queue behind, supervisor and workers).
+  [docs/ideas/agent-orchestration.md](docs/ideas/agent-orchestration.md).
+- **Agent lifecycle hooks, measured against OSC detection.** Termic infers
+  "the agent finished" from the terminal stream, which needs no config and
+  survives the sandbox. Every supported CLI now also exposes hooks that say
+  it outright. Whether that earns a place in a user's agent config is an
+  open question, and the first step is measurement, not implementation.
+  [docs/ideas/agent-hooks.md](docs/ideas/agent-hooks.md).
+- **Docker-based sandboxing.** An opt-in, more brutal alternative to
+  Seatbelt: each agent inside a container off an editable Dockerfile, seeing
+  only the paths you mount. Cross-platform for free, and it pairs with
+  per-agent credential injection so secrets need not be mounted at all.
+  [docs/ideas/docker-sandbox/](docs/ideas/docker-sandbox/).
+- **Windows support, then Windows prebuilts.** Linux AppImage CI is live;
+  the Windows MSI is the matching matrix entry, and it depends on the app
+  compiling on Windows at all. The audit in
+  [docs/ideas/windows.md](docs/ideas/windows.md) is a prediction: nothing in
+  it has been built on Windows yet.
+- **Sandbox parity on Linux and Windows.** macOS Seatbelt is the only
+  backend today; bubblewrap / landlock and AppContainer are the gap. See
+  [docs/sandbox.md](docs/sandbox.md) for the behaviour they would have to
+  match.
+- **Profiles (multi-window, Chrome-style).** Separate windows with their own
+  projects and settings. [docs/ideas/profiles.md](docs/ideas/profiles.md).
+- **The Space layer.** A grouping above projects. The Task rename in v0.19.0
+  deliberately reserved the word.
+  [docs/ideas/space-layer.md](docs/ideas/space-layer.md).
+- **Ambient agent status.** A Dock tile, or a strip beside the Dock, showing
+  what every agent is doing without bringing the window forward.
+  [docs/ideas/dock-widget.md](docs/ideas/dock-widget.md).
+- **Import Warp and Ghostty themes.** Termic has a native JSON theme format,
+  but two large theme ecosystems already exist and neither is ours. Scan
+  both directories, translate, and let people pick from the library they
+  already collected.
+- **Linear + GitHub PR integration.** Paste an issue or PR URL, get a task
+  seeded with its title and body; create the PR from the app via `gh`. No
+  OAuth.
+- **Opt-in usage telemetry.** Anonymous, off by default, one toggle: which
+  features are used and how often, plus crash reports. No code, no prompts,
+  no file paths, no agent output, no project names.
+- **Termic in the official Homebrew cask repository.** Today the install
+  path is this repo's own tap, so it takes a `brew tap` first. Upstream
+  would make it plain `brew install --cask termic`. The cask is ready (the
+  `.dmg` is signed and notarized, and its `livecheck` makes it
+  autobump-eligible), and
+  [Homebrew/homebrew-cask#274896](https://github.com/Homebrew/homebrew-cask/pull/274896)
+  is filed and closed on one thing only: notability. Homebrew asks for 90
+  forks, 90 watchers or 225 stars when the author submits their own
+  software. The forks already clear the third-party bar, so
+  [stars](https://github.com/simion/termic/stargazers) are the realistic
+  lane, and at 225 the same PR gets reopened.
+
+
 
 ---
 

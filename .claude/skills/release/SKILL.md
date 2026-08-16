@@ -90,25 +90,29 @@ The README roadmap goes stale silently: nothing in the build, the tests or
 the release flow reads it, so a shipped item sits in the list until someone
 notices by eye. This step is the only thing that catches it.
 
-Every roadmap item is tracked by an issue labelled `planned`, and that issue
-number, not the position in the list, is the item's identity. The numbering
-shifts every time something ships, so **never cite a roadmap item by its
-position** in a doc, a commit message or a comment. Cite the issue.
+The roadmap has two halves. **Planned** items each have an issue labelled
+`planned`, and that issue, not the position in the list, is the item's
+identity: never cite a roadmap item by position, in a doc, a commit message
+or a comment. **Ideas** deliberately have NO issue (see CLAUDE.md's docs-tree
+section) and are checked against `docs/ideas/` instead.
 
 ```sh
-gh issue list --label planned --state closed    # shipped, still in the README
-gh issue list --label planned --state open      # should match the README list
+gh issue list --label planned --state closed    # shipped, may still be in Planned
+gh issue list --label planned --state open      # should match README ## Planned
+ls docs/ideas docs/plans                        # should match README ## Ideas
 ```
 
-For each closed one: delete its README item (do not mark it done, the
+For each closed one: delete its Planned item (do not mark it done, the
 roadmap is what is *not* built), and if it shipped in this release make sure
 the changelog entry covers it. If an item shipped only in part, narrow the
 README text to the remaining half rather than deleting it, and say so.
 
-For each open one with no README item, either add it or drop the label.
+For each open one with no Planned item, either add it or drop the label. For
+each `docs/ideas/` file with no Ideas bullet, add one (or delete the file if
+the idea is dead).
 
-Anything new that lands on the roadmap needs an issue with the `planned`
-label first, so this query stays the whole truth.
+A new PLANNED item needs a `planned` issue and a `docs/plans/` spec. A new
+idea needs neither: it is a file and a bullet. Do not open issues for ideas.
 
 ---
 

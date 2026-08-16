@@ -173,7 +173,7 @@ export function GeneralSection() {
 
       {/* macOS only: the CloseRequested handler that reads close_action is
           #[cfg(target_os = "macos")], because Windows and most Linux desktops
-          expect close to quit (docs/research/windows.md). Rendering the control
+          expect close to quit (docs/ideas/windows.md). Rendering the control
           elsewhere would save a setting nothing reads. */}
       {IS_MAC && <Block id="setting-close-action">
         <div className="flex flex-col gap-1">

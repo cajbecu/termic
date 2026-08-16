@@ -2,7 +2,7 @@
 
 **Status: reference.** Written as research, and the question it opened has
 since been answered and partly built, which is why it sits in `docs/` rather
-than `docs/research/`: CLAUDE.md makes it required reading before anyone adds
+than `docs/ideas/`: CLAUDE.md makes it required reading before anyone adds
 a perf check or a threshold. It answers one question, from a README roadmap
 item that has since shipped and been pruned: can
 "performance trumps polish" be enforced by CI instead of by review and

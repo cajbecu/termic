@@ -43,31 +43,38 @@ Performance: `make perf` runs the nightly suite (startup, memory) and the local-
 
 ## Scratchpad
 
-`scratchpad/` at the repo root is gitignored and local-only. Put throwaway work there: market/competitor research, GTM notes, half-finished drafts, one-off analysis, anything that shouldn't ship or be reviewed. Nothing in it has to be release-quality. Working docs meant for contributors belong in the tracked `docs/` tree: `docs/research/` for ideas and explorations, `docs/plans/` for approved implementation-ready specs.
+`scratchpad/` at the repo root is gitignored and local-only. Put throwaway work there: market/competitor research, GTM notes, half-finished drafts, one-off analysis, anything that shouldn't ship or be reviewed. Nothing in it has to be release-quality. Working docs meant for contributors belong in the tracked `docs/` tree: `docs/ideas/` for anything not yet approved, `docs/plans/` for approved implementation-ready specs. See ## Docs tree.
 
 ## Docs tree: what goes where, and what you owe it when you ship
 
-Three tiers, and a doc's tier is a claim about its status, not a filing preference:
+Two categories for unbuilt work, and a doc's directory is a claim about its status, not a filing preference:
 
 ```
 docs/*.md          reference + operational. True of the app as it exists today.
-docs/plans/        approved specs, scoped, ready to implement. No design work left.
-docs/research/     ideas and explorations. Nothing here is approved or committed to.
+docs/plans/        approved and refined. Ready to implement, no design work left.
+docs/ideas/        everything not yet approved. Detailed or not, it is not decided.
 ```
 
-The bar for `plans/` is high and the directory is usually near-empty; that is the honest state, not a gap to fill. A file whose own header says "proposed, not started" belongs in `research/`, however detailed it is. `lsp.md`, `windows.md` and `docker-sandbox/` all sat in `plans/` while saying exactly that, and were moved.
+There is no third bucket for "detailed but undecided": that is an idea. `lsp.md`, `windows.md` and `docker-sandbox/` are all build-ready documents that are still ideas, because nobody has committed to them. The bar for `plans/` is high and the directory is usually near-empty; that is the honest state, not a gap to fill.
 
-`scratchpad/` is the fourth tier and is gitignored: throwaway work that shouldn't ship or be reviewed. See ## Scratchpad.
+`scratchpad/` is gitignored throwaway work, outside all of this. See ## Scratchpad.
+
+**GitHub issues are for planned work only.** An idea does not get an issue: an issue implies somebody intends to do it, and a backlog of issues nobody will action is worse than no backlog. An idea lives in its `docs/ideas/` file and, if it is worth advertising, one bullet under the README roadmap's Ideas heading. When an idea is approved it moves to `docs/plans/` and gets an issue labelled `planned` at the same time. **Never open an issue for an idea, a roadmap bullet, or a doc you just wrote.** If you think something deserves promoting, say so and stop.
 
 **Shipping a change is not done until the docs tree reflects it.** The doc move lands in the same commit as the code, exactly like its test. Which move depends on what you did:
 
-- **Implemented a `docs/plans/` spec.** Delete the plan. It described work that no longer needs doing, and a stale plan is worse than no plan because someone will pick it up. Fold anything still true (a measurement, a trap, a decision and its reasoning) into the matching `docs/*.md` reference doc first. Precedent: `plans/cli.md`, `plans/notarization.md` and `plans/workspace-to-task-rename.md` were deleted in a1d6759 once shipped.
+- **Implemented a `docs/plans/` spec.** Delete the plan and close its issue. It described work that no longer needs doing, and a stale plan is worse than no plan because someone will pick it up. Fold anything still true (a measurement, a trap, a decision and its reasoning) into the matching `docs/*.md` reference doc first. Precedent: `plans/cli.md`, `plans/notarization.md` and `plans/workspace-to-task-rename.md` were deleted in a1d6759 once shipped.
 - **Implemented part of a plan.** Narrow the plan to what is left and say what shipped. Do not leave it describing the whole thing.
-- **A research doc became a decision.** Move `research/ → plans/` and rewrite the header to a spec: what to build, not whether to. Moving a "Status: proposed, not started" file into `plans/` without rewriting it breaks the tier's contract.
-- **A plan turned out to be unapproved, or its premise changed.** Move it `plans/ → research/` and say why at the top. Precedent: `mcp.md` was demoted in the same restructure when the 2026-07-28 spec revision reopened the question.
+- **An idea got approved.** Move `ideas/ → plans/`, rewrite the header into a spec (what to build, not whether to), open its `planned` issue, and move its README bullet from Ideas to Planned. All four, or the three lists disagree.
+- **A plan's premise changed.** Move it back `plans/ → ideas/`, say why at the top, and close its issue. Precedent: `mcp.md` was demoted when the 2026-07-28 spec revision reopened the question.
 - **Changed behaviour a `docs/*.md` reference doc describes.** Update that doc. `ipc.md`, `data-model.md`, `ui.md`, `shortcuts.md`, `sandbox.md`, `themes.md`, `performance.md` and `gotchas.md` are load-bearing for the next agent, and a wrong one costs more than a missing one.
 - **Removed scaffolding.** Update `tech-debt.md`, which indexes it.
-- **Shipped a roadmap item.** Don't touch the README roadmap or `CHANGELOG.md`; both are maintainer-only (## Releasing). Say in your summary that it closes issue #N, and stop.
+
+The README roadmap, `docs/plans/`, `docs/ideas/` and the `planned` issue list are four views of the same thing and must agree: every Planned bullet has a `planned` issue, and every Ideas bullet with a write-up links its `docs/ideas/` file. The README is the USER-FACING view, so it lists features, not chores: an internal follow-up plan (`plans/right-panel-refresh.md` is the current example) belongs in `docs/plans/` with no roadmap bullet. Anything a user would notice does get one. The README roadmap and `CHANGELOG.md` are still maintainer-only to EDIT (## Releasing): if your change ships a roadmap item, say "closes #N" in your summary and stop.
+
+Cross-doc references: link by **path**, and never cite a roadmap item by its position in the list. The list is reordered whenever something ships, and `docs/perf-ci.md` cited "roadmap item 12" until the item above it shipped and the reference silently became wrong.
+
+## Releasing). Say in your summary that it closes issue #N, and stop.
 
 Cross-doc references: link by **path**, and never cite a README roadmap item by its list position. The numbering shifts every time something ships, and `docs/perf-ci.md` cited "roadmap item 12" until the item above it shipped and the reference silently became wrong. Roadmap items are identified by their `planned`-labelled issue.
 
