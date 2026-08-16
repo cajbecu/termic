@@ -37,9 +37,9 @@ npm run build        # tsc -b && vite build
 
 Unit/Rust: `npm test` (vitest) + `cargo test`. UI flows: the written e2e suite (`make e2e`, WebdriverIO on the real window). The e2e suite also runs in CI on `macos-14` (`.github/workflows/test.yml`), deliberately NOT a required check yet, it is there to surface flakiness before it gates merges. Run it locally anyway; do not treat the CI job as your test pass.
 
-Performance: `make perf` runs the nightly suite (startup, memory) and the local-only bench (idle CPU, GPU) and reports them separately. Neither gates. What DOES gate a PR is the count-and-invariant class (`src/store/selectorFanout.test.ts`) because counts survive a 3-core CI runner and timings do not. Read [docs/research/perf-ci.md](docs/research/perf-ci.md) before adding a perf check, especially before adding a threshold.
+Performance: `make perf` runs the nightly suite (startup, memory) and the local-only bench (idle CPU, GPU) and reports them separately. Neither gates. What DOES gate a PR is the count-and-invariant class (`src/store/selectorFanout.test.ts`) because counts survive a 3-core CI runner and timings do not. Read [docs/perf-ci.md](docs/perf-ci.md) before adding a perf check, especially before adding a threshold.
 
-**When you implement or modify ANY functionality that could regress, run the relevant tests before committing and keep them green** — not just UI. Logic/Rust: `npm test` + `cargo test`. Behavior/flows: `make e2e` (rebuilds the `--features e2e` binary + runs the suite). Add or update the spec/test that covers what you changed — a change and its test land in the same commit. The suite is a maintained asset: authoring rules live in the **`e2e` skill**, the coverage map + roadmap in [docs/plans/e2e-coverage.md](docs/plans/e2e-coverage.md). Each spec should cover a feature with several cases (happy path + edge/negative + state transitions), not just one, so it actually catches regressions.
+**When you implement or modify ANY functionality that could regress, run the relevant tests before committing and keep them green** — not just UI. Logic/Rust: `npm test` + `cargo test`. Behavior/flows: `make e2e` (rebuilds the `--features e2e` binary + runs the suite). Add or update the spec/test that covers what you changed — a change and its test land in the same commit. The suite is a maintained asset: authoring rules live in the **`e2e` skill**, the coverage map + roadmap in [docs/e2e-coverage.md](docs/e2e-coverage.md). Each spec should cover a feature with several cases (happy path + edge/negative + state transitions), not just one, so it actually catches regressions.
 
 ## Scratchpad
 
@@ -55,6 +55,8 @@ docs/plans/        approved specs, scoped, ready to implement. No design work le
 docs/research/     ideas and explorations. Nothing here is approved or committed to.
 ```
 
+The bar for `plans/` is high and the directory is usually near-empty; that is the honest state, not a gap to fill. A file whose own header says "proposed, not started" belongs in `research/`, however detailed it is. `lsp.md`, `windows.md` and `docker-sandbox/` all sat in `plans/` while saying exactly that, and were moved.
+
 `scratchpad/` is the fourth tier and is gitignored: throwaway work that shouldn't ship or be reviewed. See ## Scratchpad.
 
 **Shipping a change is not done until the docs tree reflects it.** The doc move lands in the same commit as the code, exactly like its test. Which move depends on what you did:
@@ -67,7 +69,7 @@ docs/research/     ideas and explorations. Nothing here is approved or committed
 - **Removed scaffolding.** Update `tech-debt.md`, which indexes it.
 - **Shipped a roadmap item.** Don't touch the README roadmap or `CHANGELOG.md`; both are maintainer-only (## Releasing). Say in your summary that it closes issue #N, and stop.
 
-Cross-doc references: link by **path**, and never cite a README roadmap item by its list position. The numbering shifts every time something ships, and `docs/research/perf-ci.md` cited "roadmap item 12" until the item above it shipped and the reference silently became wrong. Roadmap items are identified by their `planned`-labelled issue.
+Cross-doc references: link by **path**, and never cite a README roadmap item by its list position. The numbering shifts every time something ships, and `docs/perf-ci.md` cited "roadmap item 12" until the item above it shipped and the reference silently became wrong. Roadmap items are identified by their `planned`-labelled issue.
 
 ## Releasing
 
@@ -103,7 +105,7 @@ Deeper references — read when working in that area:
 - [docs/data-model.md](docs/data-model.md) — data dirs, Project/Task/Settings/Tab entities
 - [docs/tech-debt.md](docs/tech-debt.md) — index of temporary/removable scaffolding (e.g. the workspace→task migration) + purge checklists
 - [docs/performance.md](docs/performance.md) — perf traps, sub-pixel/rendering hardening, what is measured where (`make perf`)
-- [docs/research/perf-ci.md](docs/research/perf-ci.md) — why counts gate PRs and timings only run nightly; what Orca actually does
+- [docs/perf-ci.md](docs/perf-ci.md) — why counts gate PRs and timings only run nightly; what Orca actually does
 - [docs/sandbox.md](docs/sandbox.md) — sandbox-exec + CONNECT proxy, YOLO interaction, deny debugging
 - [docs/shortcuts.md](docs/shortcuts.md) — shortcut system architecture, adding shortcuts, glyph rendering
 - [docs/themes.md](docs/themes.md) — custom theme file format (`~/.config/termic/themes/*.json`), ui/terminal key reference
@@ -111,4 +113,4 @@ Deeper references — read when working in that area:
 - [docs/gotchas.md](docs/gotchas.md) — common bugs (encountered + fixed), React/Zustand traps
 - [docs/automation.md](docs/automation.md) — automation bridge, E2E testing (use the `e2e` skill, don't improvise)
 - [docs/e2e-tests.md](docs/e2e-tests.md) — written WebdriverIO e2e suite (run via `make e2e`); authoring lives in the `e2e` skill
-- [docs/plans/e2e-coverage.md](docs/plans/e2e-coverage.md) — e2e coverage checklist + roadmap (what's tested, what's next)
+- [docs/e2e-coverage.md](docs/e2e-coverage.md) — e2e coverage checklist + roadmap (what's tested, what's next)

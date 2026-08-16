@@ -1,8 +1,12 @@
-# E2E coverage plan & checklist
+# E2E coverage map & checklist
+
+**Status: reference.** Not a plan to implement and then delete: it is a
+living map, updated by nearly every feature commit, which is why it sits in
+`docs/` rather than `docs/plans/`.
 
 The running map of what our WebdriverIO e2e suite covers and what it still
 needs. Update this whenever you add/change a spec. Harness + authoring rules
-live in [docs/e2e-tests.md](../e2e-tests.md) and the **`e2e` skill**.
+live in [docs/e2e-tests.md](e2e-tests.md) and the **`e2e` skill**.
 
 - **Run:** `make e2e` (build + run) · `npm run test:e2e` (iterate). ~40s serial.
 - **Specs are grouped by area** into ~10 files (one app launch each; cases run sequentially and self-clean). Add a new test as an `it` in the relevant group file.

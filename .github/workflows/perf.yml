@@ -11,7 +11,7 @@ name: Performance (nightly)
 # What DOES gate a PR lives in the normal test job: counts and static facts,
 # which are machine-independent (src/store/selectorFanout.test.ts is the worked
 # example). The full argument, including why Orca can gate its nightly and we
-# cannot, is in docs/research/perf-ci.md.
+# cannot, is in docs/perf-ci.md.
 #
 # So this job reports. It writes a step summary you can read without
 # downloading anything, and uploads the JSON so a series can be assembled

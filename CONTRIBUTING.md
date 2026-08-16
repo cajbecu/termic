@@ -72,9 +72,11 @@ docs/
   *.md         # reference and operational docs
 ```
 
-A doc's directory is a claim about its status, not a filing preference. `docs/plans/` means approved and buildable; `docs/research/` means the question is still open.
+A doc's directory is a claim about its status, not a filing preference. `docs/plans/` means approved and buildable; `docs/research/` means the question is still open; `docs/*.md` describes the app as it exists today.
 
-If you want something to work on, `docs/plans/` is the place to look. Every file there is scoped and approved — no design work needed, just implementation. Pick one, open an issue to claim it, and go.
+If you want something to work on, `docs/plans/` is the place to look. Every file there is scoped and approved — no design work needed, just implementation. Pick one, open an issue to claim it, and go. The bar is high, so it is usually near-empty.
+
+`docs/research/` is the bigger pile and it is open to anyone, but the first deliverable there is an argument, not a patch. Several of those files (`lsp.md`, `windows.md`, `docker-sandbox/`) are detailed enough to build from and still say "proposed, not started" at the top, which means the decision has not been made. Comment on the tracking issue before you build one.
 
 The [README roadmap](./README.md#roadmap) is the other list. Every item there is tracked by an issue labelled [`planned`](https://github.com/simion/termic/issues?q=is%3Aissue+label%3Aplanned), and that issue, not the item's position in the list, is its identity — the numbering shifts every time something ships, so don't cite a roadmap item by number anywhere.
 

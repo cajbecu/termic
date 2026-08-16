@@ -11955,7 +11955,7 @@ pub fn run() {
             // into minimize-to-tray is the kind of default people hate. Those
             // platforms keep Tauri's native close. `--headless` still
             // goes windowless everywhere, because there the user asked for no
-            // window. See docs/plans/windows.md.
+            // window. See docs/research/windows.md.
             #[cfg(target_os = "macos")]
             {
                 let handle = app.handle().clone();

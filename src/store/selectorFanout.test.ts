@@ -10,7 +10,7 @@
 //
 // Why this shape rather than a wall-clock benchmark: the count is
 // machine-independent, so it can gate a PR on a 3-core CI VM. Timings cannot.
-// See docs/research/perf-ci.md for the full argument. The one time assertion
+// See docs/perf-ci.md for the full argument. The one time assertion
 // here is a loose backstop with orders of magnitude of headroom, not a budget.
 //
 // This models `useSyncExternalStore` exactly: on every store notification each

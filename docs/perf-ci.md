@@ -1,7 +1,10 @@
 # Performance benchmarks in CI (investigation)
 
-**Status: research, now partly built.** This doc answers one question,
-from a README roadmap item that has since shipped and been pruned: can
+**Status: reference.** Written as research, and the question it opened has
+since been answered and partly built, which is why it sits in `docs/` rather
+than `docs/research/`: CLAUDE.md makes it required reading before anyone adds
+a perf check or a threshold. It answers one question, from a README roadmap
+item that has since shipped and been pruned: can
 "performance trumps polish" be enforced by CI instead of by review and
 habit, and if so, which parts of it. It was
 written before any of it existed and is kept as the reasoning behind
@@ -30,7 +33,7 @@ The short answer: **yes, but only for metrics that are counts or
 static facts.** App-level timings, CPU percentages and GPU utilisation
 cannot be gated on a GitHub macOS runner. That split is not a compromise
 invented here; it is what Orca independently converged on, and it maps
-cleanly onto the bear traps in [performance.md](../performance.md).
+cleanly onto the bear traps in [performance.md](performance.md).
 
 ## Finding: what Orca actually gates on
 

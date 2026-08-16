@@ -163,7 +163,7 @@ perf: ## Run both performance suites locally and report each separately.
 	@# that a CI runner cannot measure honestly. They print separately because
 	@# they carry different amounts of trust: section 1 is reproducible,
 	@# section 2 is only as good as the desktop it ran on.
-	@# Why not gated: docs/research/perf-ci.md.
+	@# Why not gated: docs/perf-ci.md.
 	@[ -x node_modules/.bin/wdio ] || npm install
 	@node scripts/e2e-seed.mjs
 	@npm run perf:build

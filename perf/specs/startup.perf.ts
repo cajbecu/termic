@@ -1,7 +1,7 @@
 // Cold start to first paint, plus the WebGL renderer fact.
 //
 // The renderer string is the load-bearing part of this spec, not a footnote.
-// It answers the open question from docs/research/perf-ci.md: does WKWebView
+// It answers the open question from docs/perf-ci.md: does WKWebView
 // get a hardware context on a macos-14 runner, or does it fall back to
 // software? If it is software, every frame-timing number from this runner
 // describes a software rasteriser rather than termic, and the jank spec is

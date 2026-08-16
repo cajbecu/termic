@@ -78,7 +78,7 @@ describe("editor open", () => {
 
   // NOTE: CodeMirror's OWN ⌘F search panel is keyboard-shortcut-only and does
   // not route reliably across window-focus states in this harness (see the
-  // environment-limited list in docs/plans/e2e-coverage.md), so it stays a
+  // environment-limited list in docs/e2e-coverage.md), so it stays a
   // manual check. The markdown preview's ⌘F is a plain window listener and IS
   // covered — see "find in markdown preview" at the bottom of this file.
 

@@ -22,7 +22,7 @@ green.
 What gates a PR instead is the count-and-invariant class, which is
 machine-independent: `src/store/selectorFanout.test.ts` is the worked example.
 The full argument, including why Orca can gate its nightly latency budgets and
-we cannot, is in [docs/research/perf-ci.md](../docs/research/perf-ci.md).
+we cannot, is in [docs/perf-ci.md](../docs/perf-ci.md).
 
 A metric earns a threshold after its real spread is known, not before. The
 90-day artifact retention exists so that decision can be made from data.

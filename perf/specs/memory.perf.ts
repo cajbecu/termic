@@ -5,7 +5,7 @@
 // as a monotonic trend across iterations, not as a percentage, so neighbour
 // noise moves the absolute number without destroying the delta. CPU on the
 // same runner is dominated by noise we cannot see or control, which is why it
-// stays in `make perf` and out of CI. See docs/research/perf-ci.md.
+// stays in `make perf` and out of CI. See docs/perf-ci.md.
 //
 // The delta is the interesting row, not the absolute. Absolute RSS depends on
 // the runner image; growth-per-iteration is a property of our code.

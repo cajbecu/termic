@@ -4,7 +4,7 @@
 //
 // NOT run on PRs. The metrics here are durations and memory, which a 3-core
 // virtualised runner cannot resolve tightly enough to gate a merge on. The
-// argument, and what IS gated per-PR instead, is in docs/research/perf-ci.md.
+// argument, and what IS gated per-PR instead, is in docs/perf-ci.md.
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";

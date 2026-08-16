@@ -267,7 +267,7 @@ describe("setWorkState", () => {
 //
 // This is a COUNT assertion, which is the class that can gate a PR — a 3-core
 // CI runner counts the same as an M1 Max, where the CPU figure would not
-// survive the trip (docs/performance.md, docs/research/perf-ci.md).
+// survive the trip (docs/performance.md, docs/perf-ci.md).
 describe("setTabLiveTitle", () => {
   it("applies a title that actually changed", () => {
     const taskId = "ws1";

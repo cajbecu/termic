@@ -13,7 +13,7 @@
 // its nightly latency budgets because it runs on Linux under xvfb where there
 // is no GPU variance; we cannot copy that part. So: collect a timestamped
 // series, learn the spread, and only then decide which metrics have earned a
-// threshold. Reasoning in docs/research/perf-ci.md.
+// threshold. Reasoning in docs/perf-ci.md.
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -118,7 +118,7 @@ function renderMarkdown(r: {
   const lines: string[] = [
     "## Nightly performance report",
     "",
-    "Ungated: a trend line, not a pass/fail. See `docs/research/perf-ci.md`.",
+    "Ungated: a trend line, not a pass/fail. See `docs/perf-ci.md`.",
     "",
     "| Metric | Value | Unit | Note |",
     "| --- | ---: | --- | --- |",

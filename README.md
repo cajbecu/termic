@@ -349,7 +349,7 @@ something up the list, or comment on one to pick it off.
    A fast heuristic (ripgrep + tree-sitter) pass for all languages, then real
    LSP where a server is present. The commenting half of #174 shipped in
    0.27.0; this is the code-navigation half. Design and measurements in
-   [docs/plans/lsp.md](docs/plans/lsp.md).
+   [docs/research/lsp.md](docs/research/lsp.md).
 2. **Mobile app.** ([#165](https://github.com/simion/termic/issues/165)) A
    companion mobile application for remote control and monitoring of tasks
    on the go.
@@ -377,11 +377,11 @@ something up the list, or comment on one to pick it off.
    credential injection (or a single CLI login) so you need not mount secrets
    at all. See [#49](https://github.com/simion/termic/issues/49) for the kind
    of host-toolchain friction this sidesteps. Design and findings in
-   [docs/plans/docker-sandbox/](docs/plans/docker-sandbox/).
+   [docs/research/docker-sandbox/](docs/research/docker-sandbox/).
 7. **Windows prebuilts.**
    ([#225](https://github.com/simion/termic/issues/225)) AppImage CI is live
    for Linux; Windows MSI is the matching CI matrix entry. Audit and plan in
-   [docs/plans/windows.md](docs/plans/windows.md), none of it compiled on
+   [docs/research/windows.md](docs/research/windows.md), none of it compiled on
    Windows yet.
 8. **Opt-in usage telemetry.**
    ([#226](https://github.com/simion/termic/issues/226)) Anonymous, opt-in analytics via a self-hosted

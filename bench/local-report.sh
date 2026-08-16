@@ -5,7 +5,7 @@
 # display and an undisturbed desktop. On a virtualised runner every one of the
 # seven traps in bench/README.md produces a plausible wrong number instead of
 # an error, which is worse than not measuring. So these live here, behind a
-# human, and never in a workflow. See docs/research/perf-ci.md.
+# human, and never in a workflow. See docs/perf-ci.md.
 #
 # Exits 0 even when it cannot measure. This is a reporting tool, not a gate,
 # and `make perf` must still surface the CI-suite section that ran before it.

@@ -4,7 +4,7 @@
 CPU, GPU and compositor cost, which cannot be measured on a virtualised
 GitHub runner without producing confidently wrong numbers. The reasoning, and
 what *can* be gated in CI instead, is in
-[docs/research/perf-ci.md](../docs/research/perf-ci.md).
+[docs/perf-ci.md](../docs/perf-ci.md).
 
 This harness was built for GH #140 and it earned its keep: it refuted a claim
 that had already shipped into the 0.26.0 changelog. It lived in the gitignored

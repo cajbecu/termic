@@ -46,4 +46,4 @@ make perf-ci    # nightly suite only
 ```
 
 Idle CPU is deliberately absent from CI. Why, and what it would take to gate
-any of this: [docs/research/perf-ci.md](research/perf-ci.md).
+any of this: [docs/perf-ci.md](perf-ci.md).
