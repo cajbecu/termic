@@ -196,13 +196,16 @@ const fixture = process.env.E2E_FIXTURE ?? path.join(process.cwd(), ".e2e", "fix
 
 // GH #199: committed work used to vanish from termic the moment the tree went
 // clean, sending people to VS Code or Fork to see what an agent had just done.
-// The History tab is that view: a graph of real commits, each expandable into
+// The Graph section of the Commit tab is that view: real commits, each expandable into
 // the files it touched, each file opening a diff of THAT revision.
 describe("git history tab", () => {
   let taskId: string | undefined;
   /** Subject of the commit this spec makes, unique per run so a leftover
    *  fixture commit from an earlier run can't satisfy the assertions. */
   const subject = `e2e history probe ${Date.now()}`;
+  /** The fixture's own branch, read rather than assumed: the picker lists it
+   *  by name and `main` vs `master` depends on the seeding git's defaults. */
+  const BRANCH = execSync(`git -C "${fixture}" branch --show-current`).toString().trim();
 
   after(async () => {
     if (taskId) await archiveTask(taskId);
@@ -216,7 +219,7 @@ describe("git history tab", () => {
     } catch { /* the commit never landed */ }
   });
 
-  const openRightTab = (label: "All files" | "Commit" | "History") =>
+  const openRightTab = (label: "All files" | "Commit") =>
     browser.execute((l) => {
       const el = document.querySelector(
         `[data-testid="right-tab"][data-tab="${l}"]`,
@@ -224,6 +227,20 @@ describe("git history tab", () => {
       if (!el) throw new Error(`no right-panel tab: ${l}`);
       el.click();
     }, label);
+
+  /** Open Commit, then expand its Graph section. The graph used to be its own
+   *  tab (GH #199); it lives at the foot of Commit now (GH #208) and starts
+   *  collapsed, so reaching it is two clicks, not one. */
+  const openGraph = async () => {
+    await openRightTab("Commit");
+    await browser.execute(() => {
+      const sec = document.querySelector('[data-testid="git-graph-section"]');
+      if (sec?.getAttribute("data-collapsed") === "false") return;
+      const btn = document.querySelector('[data-testid="git-graph-toggle"]') as HTMLElement | null;
+      if (!btn) throw new Error("no Graph toggle in the Commit tab");
+      btn.click();
+    });
+  };
 
   /** Subjects of the commit rows currently rendered, newest first. */
   const commitSubjects = () =>
@@ -244,11 +261,11 @@ describe("git history tab", () => {
     execSync(`git -C "${fixture}" add history-probe.txt`);
     execSync(`git -C "${fixture}" commit -q -m "${subject}"`);
 
-    await openRightTab("History");
+    await openGraph();
 
     await browser.waitUntil(
       async () => (await commitSubjects())[0] === subject,
-      { timeout: 15_000, timeoutMsg: "the new commit never appeared at the top of History" },
+      { timeout: 15_000, timeoutMsg: "the new commit never appeared at the top of the Graph" },
     );
     // The seeded repo's own first commit is under it — this is a list, not a
     // single row.
@@ -339,26 +356,68 @@ describe("git history tab", () => {
     expect(header).not.toContain("Comment");
   });
 
-  it("switches between this branch and all branches", async () => {
-    await openRightTab("History");
-    const scopeState = () =>
-      browser.execute(() =>
-        document.querySelector('[data-testid="history-scope"]')?.getAttribute("data-all"));
-    expect(await scopeState()).toBe("false");
-    await browser.execute(() =>
-      (document.querySelector('[data-testid="history-scope"]') as HTMLElement).click());
-    await browser.waitUntil(async () => (await scopeState()) === "true", {
-      timeout: 5_000,
-      timeoutMsg: "the branch-scope toggle never flipped",
-    });
-    // Still a real list after the refetch (the fixture has one branch, so the
-    // contents are the same — what matters is that --all doesn't empty it).
-    await browser.waitUntil(async () => (await commitSubjects()).length > 1, {
-      timeout: 10_000,
-      timeoutMsg: "the all-branches view came back empty",
-    });
-    await browser.execute(() =>
-      (document.querySelector('[data-testid="history-scope"]') as HTMLElement).click());
+  it("scopes the graph from the ref picker: Auto, All, and a named branch", async () => {
+    await openGraph();
+    const trigger = '[data-testid="history-scope"]';
+    const scope = () =>
+      browser.execute((sel) => {
+        const el = document.querySelector(sel);
+        return { all: el?.getAttribute("data-all"), picked: el?.getAttribute("data-picked") };
+      }, trigger);
+    const openMenu = () =>
+      browser.execute((sel) => (document.querySelector(sel) as HTMLElement).click(), trigger);
+    /** Click a row in the open picker by the ref name it carries. */
+    const pick = (name: string) =>
+      browser.execute((n) => {
+        const row = document.querySelector(`[data-testid="history-scope-row"][data-ref="${n}"]`) as HTMLElement | null;
+        if (!row) throw new Error(`no picker row for ${n}`);
+        row.click();
+      }, name);
+
+    // Auto is the default: HEAD alone, nothing picked.
+    expect(await scope()).toEqual({ all: "false", picked: "0" });
+
+    await openMenu();
+    await pick("All");
+    await browser.waitUntil(async () => (await scope()).all === "true",
+      { timeout: 5_000, timeoutMsg: "All never took effect" });
+    // --all must not empty the graph (the fixture has one branch, so the
+    // contents match Auto; what matters is that the refetch returned rows).
+    await browser.waitUntil(async () => (await commitSubjects()).length > 1,
+      { timeout: 10_000, timeoutMsg: "the all-refs view came back empty" });
+
+    // A named branch is a different scope again, and it is a MULTI-select, so
+    // the menu stays open and the count is what changes.
+    await openMenu();
+    await pick(BRANCH);
+    await browser.waitUntil(async () => {
+      const s = await scope();
+      return s.all === "false" && s.picked === "1";
+    }, { timeout: 5_000, timeoutMsg: "picking a branch never registered" });
+    await browser.waitUntil(async () => (await commitSubjects()).length > 1,
+      { timeout: 10_000, timeoutMsg: "the picked-branch view came back empty" });
+
+    // Unticking the last ref lands back on Auto, not on an empty graph.
+    await pick(BRANCH);
+    await browser.waitUntil(async () => {
+      const s = await scope();
+      return s.all === "false" && s.picked === "0";
+    }, { timeout: 5_000, timeoutMsg: "unticking the last ref never returned to Auto" });
+    await browser.keys(["Escape"]);
+  });
+
+  it("indents a commit's subject to its own lane", async () => {
+    await openGraph();
+    // The graph reads as VS Code's does: a row's text starts just past ITS
+    // dot, so a branch's rows are a visibly indented run. Rows on the same
+    // lane share an offset; a row on a deeper lane starts further right.
+    const offsets = await browser.execute(() =>
+      [...document.querySelectorAll('[data-testid="history-subject"]')]
+        .slice(0, 12)
+        .map(e => Math.round((e as HTMLElement).getBoundingClientRect().left)));
+    expect(offsets.length).toBeGreaterThan(1);
+    // Every row is inset past the gutter's first lane, never at 0.
+    expect(Math.min(...offsets)).toBeGreaterThan(0);
   });
 });
 
@@ -849,7 +908,7 @@ describe("git multi-repo panel", () => {
 
   /** Click one of the right panel's own tabs. Not clickByText: the label grows
    *  badge digits ("Commit" → "Commit21") the moment anything is changed. */
-  const openRightTab = (label: "All files" | "Commit" | "History") =>
+  const openRightTab = (label: "All files" | "Commit") =>
     browser.execute((l) => {
       const el = document.querySelector(
         `[data-testid="right-tab"][data-tab="${l}"]`,

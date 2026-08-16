@@ -76,13 +76,19 @@ This is a deliberate behavior CHANGE, not a bug fix. Previously closing the last
 
 The webview stays ALIVE while windowless — it owns PTY lifetime and every work-state signal, so tearing it down would kill the agents. It is not suspended (WebKit only clamps timers to 1 Hz). What windowless mode DOES have to do is collapse the task panes to zero geometry, or xterm keeps drawing for an invisible window: see docs/performance.md bear trap 2b and `src/lib/windowlessMode.ts`.
 
-## Right-panel tabs (All files / Commit / History)
+## Right-panel tabs (All files / Commit)
 
-**Commit** is the working tree (Fork-style staging), **History** is what has already been committed (issue #199). The staging tab was called "Git" until History arrived; with two git surfaces the name stopped saying which one you were on.
+**Commit** is one git surface with two halves: the working tree at the top (Fork-style staging) and, at its foot, a collapsible **Graph** section holding what has already been committed (issue #199).
 
-History is modelled on VS Code's Source Control Graph: one dense row per commit — lane gutter, ref chips, subject, age — clicking a row expands it into the files that commit touched, and clicking a file opens a diff of THAT revision (`scope: "commit:<sha>"`, both sides read out of the object store). Lane maths is a pure function in [`lib/gitGraph.ts`](../src/lib/gitGraph.ts) (unit-tested; the panel only renders what it returns), lane colours come from the `--color-palette-*` tokens so every theme recolours the graph for free, and the gutter is clipped at 6 lanes because a 220px panel cannot spend its width on a wide graph.
+The graph was its own third tab when it landed. It moved inside Commit (GH #208) because the two answer halves of one question, "what is in this branch", and a tab switch made it impossible to read a commit and its uncommitted follow-up at the same time. It starts collapsed (one header row): this tab is opened to stage and commit, and an expanded graph costs a `git log` per repo. Expanded, it takes half the body and the two file lists share the rest, with a drag handle between them; the split and the collapse both persist (`gitGraphCollapsed`, `gitGraphRatio`).
 
-Two things the History tab deliberately does NOT do: it shows no review affordances on a historical diff (both "Mark as viewed" and review comments address the file an agent is about to edit, and neither side of a commit diff is that file), and it hides the unpushed markers entirely when the branch has no upstream, where "not pushed" would be true of every commit and mean nothing.
+The graph follows the Commit tab's repo pills rather than drawing its own, so a multi-repo task cannot end up with two repo selectors disagreeing.
+
+The graph is modelled on VS Code's Source Control Graph: one dense row per commit — lane gutter, ref chips, subject, age — clicking a row expands it into the files that commit touched, and clicking a file opens a diff of THAT revision (`scope: "commit:<sha>"`, both sides read out of the object store). Lane maths is a pure function in [`lib/gitGraph.ts`](../src/lib/gitGraph.ts) (unit-tested; the panel only renders what it returns), lane colours come from the `--color-palette-*` tokens so every theme recolours the graph for free, and the gutter is clipped at 6 lanes because a 220px panel cannot spend its width on a wide graph. A row's subject is indented to its OWN lane (`textIndent`, clamped the same way the dot is), so a branch's rows read as one indented run instead of a column of text detached from the lines beside it.
+
+**Scope** is a ref picker, not a toggle: All, Auto (the checked-out branch alone, the default), then the repo's branches, remote branches and tags, each with the sha it points at, multi-select and filterable. It replaced a single button reading "This branch", which was both a state and an invitation to click with no way to tell which, and which could not express "these two branches together" at all. Picked refs are allowlisted against the repo's real refs before they reach a `git log` argv (see [ipc.md](ipc.md)).
+
+Two things the graph deliberately does NOT do: it shows no review affordances on a historical diff (both "Mark as viewed" and review comments address the file an agent is about to edit, and neither side of a commit diff is that file), and it hides the unpushed markers entirely when the branch has no upstream, where "not pushed" would be true of every commit and mean nothing.
 
 ## Right-panel footer (Setup / Run / Terminal)
 

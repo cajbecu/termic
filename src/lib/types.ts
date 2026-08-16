@@ -604,6 +604,9 @@ export interface GitRepo {
   last_commit_message: string;
   /** True when the file lists were capped at 5 000 entries. */
   truncated?: boolean;
+  /** Commits the upstream does not have, i.e. what Push would send. 0 when
+   *  there is no upstream: Push then creates one rather than being disabled. */
+  ahead?: number;
 }
 
 export interface GitStatus {
@@ -612,7 +615,7 @@ export interface GitStatus {
   repos_changed: number;
 }
 
-/** One row of the History tab's graph (issue #199). */
+/** One row of the Commit tab's Graph section (issue #199). */
 export interface GitCommit {
   sha: string;
   /** Abbreviation git chose, unambiguous within the repo. */
@@ -632,6 +635,15 @@ export interface GitCommit {
 }
 
 /** One page of `task_git_log`. */
+/** One selectable ref in the Graph section's scope picker. */
+export interface GitRef {
+  /** Short name as the user knows it: `main`, `origin/main`, `v1.2.0`. */
+  name: string;
+  /** Abbreviated sha it points at. */
+  sha: string;
+  kind: "branch" | "remote" | "tag";
+}
+
 export interface GitLogPage {
   commits: GitCommit[];
   has_more: boolean;
@@ -874,7 +886,7 @@ export interface DiffTab extends BaseTab {
   path: string;
   /** Which pane the diff was opened from (GH #122):
    *  "staged" diffs HEAD→index, "unstaged" diffs index→worktree.
-   *  `commit:<sha>` diffs that commit against its parent — the History tab
+   *  `commit:<sha>` diffs that commit against its parent — the Graph section
    *  (GH #199), where BOTH sides come out of the object store.
    *  Absent → HEAD→worktree (the full uncommitted delta). */
   scope?: "unstaged" | "staged" | `commit:${string}`;

@@ -7,7 +7,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Project, ProjectMember, Task, CreateTaskArgs, CreateMultiArgs, Settings, DiscoveredRepo,
   ImportableWorktree, CliInfo, ChangeFile, Changes, GitStatus, CheckoutResult, UpdateMode, UpdateResult, UpdateInfo, FileEntry, Agent, RepoConfig,
-  SandboxMode, TaskDiffSummary, CliInstallStatus, BranchContext, GitFile, GitLogPage,
+  SandboxMode, TaskDiffSummary, CliInstallStatus, BranchContext, GitFile, GitLogPage, GitRef,
 } from "./types";
 import type { CustomThemeFile } from "./customTheme";
 import {
@@ -431,12 +431,24 @@ export const taskRevealPath = (id: string, path: string) =>
 export const taskChanges  = (id: string) => invoke<Changes>("task_changes", { id });
 // Fork-style staging: staged/unstaged split per repo + stage/unstage/commit.
 export const taskGitStatus = (id: string) => invoke<GitStatus>("task_git_status", { id });
-/** One page of committed history for the History tab (GH #199). `skip` pages
+/** One page of committed history for the Graph section (GH #199). `skip` pages
  *  through it (the panel appends), `allBranches` swaps this branch's history
  *  for `--all`. Newest first, `--topo-order` so a branch stays contiguous. */
+/** `allBranches` is `--all`; otherwise `refs` names the ones to walk (the
+ *  History scope picker's multi-select), and an empty list means HEAD alone.
+ *  Refs are allowlisted against the repo's real refs on the Rust side. */
 export const taskGitLog = (
   id: string, dirName: string, skip: number, limit: number, allBranches: boolean,
-) => invoke<GitLogPage>("task_git_log", { id, dirName, skip, limit, allBranches });
+  refs: string[] = [],
+) => invoke<GitLogPage>("task_git_log", { id, dirName, skip, limit, allBranches, refs });
+/** Every ref the scope picker may offer: local branches, remote-tracking
+ *  branches and tags, freshest first. */
+export const taskGitRefs = (id: string, dirName: string) =>
+  invoke<GitRef[]>("task_git_refs", { id, dirName });
+/** Push the repo's current branch without committing, for the Push button.
+ *  Creates the upstream when the branch has none, same as Commit and Push. */
+export const taskGitPush = (id: string, dirName: string) =>
+  invoke<void>("task_git_push", { id, dirName });
 /** The files one commit touched (merges report against their first parent). */
 export const taskGitCommitFiles = (id: string, dirName: string, sha: string) =>
   invoke<GitFile[]>("task_git_commit_files", { id, dirName, sha });

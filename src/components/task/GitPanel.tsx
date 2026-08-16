@@ -21,7 +21,7 @@ import {
   ChevronRight, ChevronDown, ArrowDown, ArrowUp, List, ListTree, Rows3, Check, Eye, Search, Trash2, MessageSquare, Loader2, GitBranch, GitMerge, RotateCw,
 } from "lucide-react";
 import type { Task, GitStatus, GitRepo, GitFile, UpdateMode, UpdateInfo } from "@/lib/types";
-import { taskStage, taskUnstage, taskCommit, taskDiscard, taskGitBranches, taskGitCheckout, taskGitUpdate, taskGitUpdateInfo } from "@/lib/ipc";
+import { taskStage, taskUnstage, taskCommit, taskDiscard, taskGitBranches, taskGitCheckout, taskGitUpdate, taskGitUpdateInfo, taskGitPush } from "@/lib/ipc";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import { usePrefs } from "@/store/prefs";
@@ -35,6 +35,7 @@ import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownSepa
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from "@/components/ui/ContextMenu";
 import { Tip } from "@/components/ui/Tooltip";
 import { CopyPathItems } from "./CopyPathItems";
+import { HistoryPanel } from "./HistoryPanel";
 import { fileIconUrl, folderIconUrl } from "@/lib/explorer/iconResolver";
 
 // Per-side status → glyph / color / label. `?` is untracked (rendered as
@@ -51,6 +52,10 @@ const LS_RATIO  = "gitSplitRatio";
 const LS_PUSH   = "gitPushDefault";
 const LS_UCOL   = "gitUnstagedCollapsed";
 const LS_SCOL   = "gitStagedCollapsed";
+/** Graph section: collapsed by default (the working tree is why you opened
+ *  this tab), and its own share of the body once expanded. */
+const LS_GCOL   = "gitGraphCollapsed";
+const LS_GRATIO = "gitGraphRatio";
 
 export function readView(): ViewMode {
   try { const v = localStorage.getItem(LS_VIEW); if (v === "tree" || v === "list" || v === "combined") return v; } catch {}
@@ -59,12 +64,12 @@ export function readView(): ViewMode {
 function readBool(key: string): boolean {
   try { return localStorage.getItem(key) === "1"; } catch { return false; }
 }
-function readRatio(): number {
-  try { const n = parseFloat(localStorage.getItem(LS_RATIO) || ""); if (n >= 0.1 && n <= 0.9) return n; } catch {}
-  return 0.5;
+function readRatio(key = LS_RATIO, fallback = 0.5): number {
+  try { const n = parseFloat(localStorage.getItem(key) || ""); if (n >= 0.1 && n <= 0.9) return n; } catch {}
+  return fallback;
 }
 
-export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff }: {
+export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff, onOpenCommitDiff, reloadToken = 0 }: {
   task: Task;
   status: GitStatus | null;
   refresh: () => void;
@@ -73,6 +78,10 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
    *  unstaged → index→worktree. */
   onOpenDiff: (path: string, pane: "unstaged" | "staged") => void;
   onDoubleClickDiff: (path: string) => void;
+  /** Opens a diff of one file at one revision, for the Graph section. */
+  onOpenCommitDiff?: (path: string, sha: string, title: string) => void;
+  /** Same refresh signals the status poll rides, forwarded to the Graph. */
+  reloadToken?: number;
 }) {
   const pushToast = useUI(s => s.pushToast);
   const nonGit = useApp(s => s.projects.find(p => p.id === task.project_id)?.non_git);
@@ -95,11 +104,18 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [committing, setCommitting] = useState(false);
+  const [pushing, setPushing] = useState(false);
   const [pushDefault, setPushDefault] = useState<boolean>(() => readBool(LS_PUSH));
   // Section collapse (header-only). Global, not per task, so it is never
   // reset by the task-switch effect below.
   const [unstagedCollapsed, setUnstagedCollapsed] = useState<boolean>(() => readBool(LS_UCOL));
   const [stagedCollapsed, setStagedCollapsed] = useState<boolean>(() => readBool(LS_SCOL));
+  // Graph starts collapsed: this tab is opened to stage and commit, and the
+  // graph costs a `git log` per repo. One line of chrome until asked for.
+  const [graphCollapsed, setGraphCollapsed] = useState<boolean>(() => {
+    try { return localStorage.getItem(LS_GCOL) !== "0"; } catch { return true; }
+  });
+  const [graphRatio, setGraphRatio] = useState<number>(() => readRatio(LS_GRATIO, 0.5));
   // Collapsed tree folders, keyed `${pane}\0${dirPath}`.
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   // Selected row, keyed `${pane}\0${path}` (a file can sit in both panes
@@ -150,6 +166,7 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
   const toggleHide = () => setHideUntracked(h => { const n = !h; persist(LS_HIDE, n ? "1" : "0"); return n; });
   const toggleUnstagedCollapsed = () => setUnstagedCollapsed(c => { const n = !c; persist(LS_UCOL, n ? "1" : "0"); return n; });
   const toggleStagedCollapsed   = () => setStagedCollapsed(c => { const n = !c; persist(LS_SCOL, n ? "1" : "0"); return n; });
+  const toggleGraphCollapsed    = () => setGraphCollapsed(c => { const n = !c; persist(LS_GCOL, n ? "1" : "0"); return n; });
 
   const repo: GitRepo | undefined = repos.find(r => r.dir_name === activeRepoDir) ?? repos[0];
   // Every group is diffable: the backend's resolve_task_git_path runs
@@ -314,6 +331,19 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
   };
   const setPush = (push: boolean) => { setPushDefault(push); persist(LS_PUSH, push ? "1" : "0"); doCommit(push); };
 
+  /** Push what is already committed. Pins the repo for the same reason
+   *  `doCommit` does: the push clears `ahead`, and an unpinned pill for a
+   *  clean repo would vanish under the user mid-action. */
+  const doPush = () => {
+    if (pushing) return;
+    setPushing(true);
+    setPinnedRepoDir(dir);
+    taskGitPush(task.id, dir)
+      .then(() => { pushToast(ahead > 0 ? `Pushed ${ahead} commit${ahead === 1 ? "" : "s"}` : "Pushed", "success"); refresh(); })
+      .catch(e => pushToast(String(e), "error"))
+      .finally(() => setPushing(false));
+  };
+
   // ── resizable split ──
   // ResizeHandle calls onDrag with the delta since the LAST mousemove, so
   // we MUST accumulate from the latest ratio. Using the render-time `ratio`
@@ -330,6 +360,18 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
     const h = bodyRef.current?.clientHeight ?? 0;
     if (h <= 0) return;
     setRatio(r => Math.min(0.9, Math.max(0.1, r + dy / h)));
+  };
+
+  // Same accumulate-from-live-value rule as the staged/unstaged divider, for
+  // the one between the working tree and the graph. Measured against the whole
+  // body, since that is what the two of them share.
+  const graphRatioRef = useRef(graphRatio);
+  graphRatioRef.current = graphRatio;
+  const onGraphDrag = (dy: number) => {
+    const h = bodyRef.current?.clientHeight ?? 0;
+    if (h <= 0) return;
+    // Dragging DOWN (dy > 0) grows the file lists and shrinks the graph.
+    setGraphRatio(r => Math.min(0.9, Math.max(0.1, r - dy / h)));
   };
 
   // Keyboard shortcuts for the selected file:
@@ -391,6 +433,11 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
   const fileWord = stagedCount === 1 ? "File" : "Files";
   const commitDisabled = committing || !subject.trim() || stagedCount === 0;
   const commitLabel = `Commit ${stagedCount} ${fileWord}${pushDefault ? " and Push" : ""}`;
+  // Commits the upstream does not have. 0 covers both "in sync" and "no
+  // upstream": in the second case the button still works and creates one,
+  // which is why it is not disabled on a 0 count.
+  const ahead = repo?.ahead ?? 0;
+  const pushDisabled = pushing || committing || nonGit;
 
   // ⌘/Ctrl+Enter from either commit field fires the commit button (the
   // remembered Commit / Commit-and-Push mode), so you never have to reach
@@ -489,8 +536,17 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
         </DropdownRoot>
       </div>
 
-      {/* 3-5. Unstaged / handle / Staged */}
+      {/* 3-5. Unstaged / handle / Staged, then the Graph section under them.
+          The working tree and the graph split the body: expanded, the graph
+          takes `graphRatio` of it and the two file lists share the rest, both
+          sides resizable by the divider between them. */}
       <div ref={bodyRef} className="relative flex min-h-0 flex-1 flex-col">
+      <div
+        className="relative flex min-h-0 flex-col"
+        style={graphCollapsed
+          ? { flex: "1 1 0%", minHeight: 0 }
+          : { flexBasis: `${(1 - graphRatio) * 100}%`, flexGrow: 0, flexShrink: 1, minHeight: 0 }}
+      >
         <Pane
           title="Unstaged" files={unstaged} pane="unstaged" viewMode={viewMode}
           collapsed={collapsed} setCollapsed={setCollapsed}
@@ -527,6 +583,46 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
         />
       </div>
 
+      {/* Divider between the working tree and the graph. Only draggable while
+          the graph is open; collapsed, its header is the whole section. */}
+      <div className="relative h-px shrink-0 bg-[var(--color-border-soft)]">
+        {!graphCollapsed && (
+          <ResizeHandle direction="y" className="top-0" onDrag={onGraphDrag} onEnd={() => persist(LS_GRATIO, String(graphRatioRef.current))} />
+        )}
+      </div>
+
+      <div
+        className={cn("flex min-h-0 flex-col", graphCollapsed && "shrink-0")}
+        style={graphCollapsed ? undefined : { flexBasis: `${graphRatio * 100}%`, flexGrow: 0, flexShrink: 1, minHeight: 0 }}
+        data-testid="git-graph-section"
+        data-collapsed={graphCollapsed ? "true" : "false"}
+      >
+        <button
+          data-testid="git-graph-toggle"
+          onClick={toggleGraphCollapsed}
+          aria-expanded={!graphCollapsed}
+          className="flex h-[26px] w-full shrink-0 items-center gap-1 px-2 text-left text-[11px] font-semibold tracking-wide text-[var(--color-fg-dim)] uppercase hover:bg-[var(--color-hover)]"
+        >
+          {graphCollapsed
+            ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />
+            : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />}
+          Graph
+        </button>
+        {/* Unmounted while collapsed, not hidden: mounted it holds a git log
+            per repo and re-reads on every refresh tick. */}
+        {!graphCollapsed && (
+          <div className="min-h-0 flex-1">
+            <HistoryPanel
+              task={task}
+              repoDir={dir}
+              reloadToken={reloadToken}
+              onOpenDiff={(path, sha, title) => onOpenCommitDiff?.(path, sha, title)}
+            />
+          </div>
+        )}
+      </div>
+      </div>
+
       {/* 6. Commit form */}
       <div className="flex shrink-0 flex-col gap-1.5 border-t border-[var(--color-border-soft)] p-2">
         <input
@@ -546,8 +642,34 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
           spellCheck={false} autoCorrect="off" autoCapitalize="off" autoComplete="off"
           className="w-full resize-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-[12.5px] leading-snug text-[var(--color-fg)] outline-none placeholder:text-[var(--color-fg-faint)] focus:border-[var(--color-accent)]"
         />
-        {/* Split commit button: main = remembered mode, caret picks. */}
-        <div className="flex justify-end">
+        {/* Split commit button: main = remembered mode, caret picks.
+            Push sits beside it because the commits it sends are usually not
+            the one you are about to make: an agent's, or your own from the
+            terminal. Its badge is how many are waiting. */}
+        <div className="flex items-center justify-end gap-1.5">
+          <button
+            data-testid="git-push"
+            data-ahead={ahead}
+            disabled={pushDisabled}
+            onClick={doPush}
+            title={ahead > 0
+              ? `Push ${ahead} commit${ahead === 1 ? "" : "s"} to the remote`
+              : "Push this branch to the remote"}
+            className={cn(
+              "mr-auto flex h-7 items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 text-[12.5px] font-medium transition-colors",
+              pushDisabled
+                ? "cursor-not-allowed text-[var(--color-fg-faint)] opacity-50"
+                : "text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
+            )}
+          >
+            {pushing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowUp className="h-3.5 w-3.5" />}
+            {pushing ? "Pushing…" : "Push"}
+            {ahead > 0 && (
+              <span className="rounded bg-[var(--color-accent-soft)] px-1 text-[10.5px] tabular-nums text-[var(--color-accent)]">
+                {ahead}
+              </span>
+            )}
+          </button>
           <button
             disabled={commitDisabled}
             onClick={() => doCommit(pushDefault)}
@@ -1061,7 +1183,7 @@ function DirRow({ row, pane, setCollapsed, onToggle, onDiscard, rowActionIcon, s
       <ContextMenuTrigger asChild>
         <div
           onClick={toggle}
-          className="group flex h-[24px] w-full cursor-pointer items-center gap-1.5 px-2 pr-1 text-left text-[12.5px] text-[var(--color-fg)]/85 hover:bg-[var(--color-hover)]"
+          className="group flex h-[26px] w-full cursor-pointer items-center gap-1.5 px-2 pr-1 text-left text-[13px] text-[var(--color-fg)]/85 hover:bg-[var(--color-hover)]"
           style={{ paddingLeft: 6 + depth * 12 }}
         >
           <ChevronRight className={cn("h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)] transition-transform", !isCollapsed && "rotate-90")} />
@@ -1191,7 +1313,7 @@ function TreeView(props: FileListProps) {
             <ContextMenuTrigger asChild>
               <div
                 onClick={() => toggle(k.path)}
-                className="group flex h-[24px] w-full cursor-pointer items-center gap-1.5 px-2 pr-1 text-left text-[12.5px] text-[var(--color-fg)]/85 hover:bg-[var(--color-hover)]"
+                className="group flex h-[26px] w-full cursor-pointer items-center gap-1.5 px-2 pr-1 text-left text-[13px] text-[var(--color-fg)]/85 hover:bg-[var(--color-hover)]"
                 style={{ paddingLeft: 6 + depth * 12 }}
               >
                 <ChevronRight className={cn("h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)] transition-transform", !isCollapsed && "rotate-90")} />
@@ -1314,7 +1436,11 @@ function FileRow({ file, label, depth = 0, pane, selectedKey, stageGlyph, taskId
         style={{ background: COL[key] || "var(--color-fg-dim)" }}
       >{SC[key] || key}</span>
       <img src={fileIconUrl(label)} alt="" className={cn("h-4 w-4 shrink-0 file-icon", viewed && !selected && "opacity-50")} />
-      <span className={cn("truncate flex-1 font-mono text-[12px]", viewed && !selected && "text-[var(--color-fg-faint)] line-through decoration-[var(--color-fg-faint)]/40")}>{label}</span>
+      {/* Same face and size as the All files tree (13px, medium, not mono).
+          A changed file and the same file in the tree are the same object;
+          rendering one in monospace made them read as different kinds of
+          thing, and mono is wider, so long paths truncated sooner. */}
+      <span className={cn("truncate flex-1 font-medium", viewed && !selected && "text-[var(--color-fg-faint)] line-through decoration-[var(--color-fg-faint)]/40")}>{label}</span>
       {commentCount > 0 && (
         <Tip side="left" content={`${commentCount} inline ${commentCount === 1 ? "comment" : "comments"}`}>
           <span className="flex shrink-0 items-center gap-0.5 rounded bg-[var(--color-bg-3)] px-1 text-[10.5px] tabular-nums text-[var(--color-fg-dim)]">

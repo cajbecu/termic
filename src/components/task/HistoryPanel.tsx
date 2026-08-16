@@ -1,5 +1,5 @@
-// Committed history with a commit graph — the right panel's "History" tab
-// (issue #199). The Commit tab only ever shows the working tree, so once an
+// Committed history with a commit graph — the Graph section at the foot of
+// the right panel's Commit tab (issue #199, moved there by GH #208). The Commit tab only ever shows the working tree, so once an
 // agent committed, its work vanished from the UI and people left for VS Code
 // or Fork to see what had just happened.
 //
@@ -9,22 +9,23 @@
 // (pure + unit-tested); this file is the rendering and the IPC.
 //
 // Layout, top to bottom:
-//   1. Repo pills   — multi-repo tasks only, same idea as the Commit tab.
-//   2. Scope row    — branch chip + "This branch" / "All branches".
+//   1. Repo pills   — only when uncontrolled; inside Commit its pills win.
+//   2. Scope row    — branch chip + the ref picker (All / Auto / refs).
 //   3. Commit rows  — graph gutter, chips, subject, age. Selected row expands
 //                     into its meta line + file list.
 //   4. Load more    — pages of PAGE_SIZE, appended.
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { GitBranch, Tag, ArrowUp, Loader2, Copy, Check } from "lucide-react";
-import type { GitCommit, GitFile, Task } from "@/lib/types";
-import { taskGitLog, taskGitCommitFiles } from "@/lib/ipc";
+import { GitBranch, Tag, ArrowUp, Loader2, Copy, Check, ChevronDown } from "lucide-react";
+import type { GitCommit, GitFile, GitRef, Task } from "@/lib/types";
+import { taskGitLog, taskGitRefs, taskGitCommitFiles } from "@/lib/ipc";
 import { layoutGraph, graphWidth, type GraphRow } from "@/lib/gitGraph";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useApp } from "@/store/app";
 import { cn } from "@/lib/utils";
 import { Tip } from "@/components/ui/Tooltip";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuLabel } from "@/components/ui/ContextMenu";
+import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownLabel } from "@/components/ui/Dropdown";
 import { fileIconUrl } from "@/lib/explorer/iconResolver";
 
 /** Commits per page. VS Code's graph loads 50 and pages on scroll; a page here
@@ -49,6 +50,17 @@ export function clampLane(lane: number, lanes: number): number {
 }
 /** Ref chips shown inline before the subject; the rest collapse into "+N". */
 const MAX_CHIPS = 2;
+/** Gap between a row's dot and where its text starts. */
+const TEXT_GAP = 8;
+
+/** Left inset for a row's text, so a subject starts just past its OWN dot
+ *  instead of at one column shared with every row. VS Code's graph reads this
+ *  way, and it is what makes a branch's rows visibly belong to it: an indented
+ *  run of subjects IS the branch. Clipped lanes fold onto the last drawn one,
+ *  exactly as the dot does, so text never parts company with its marker. */
+export function textIndent(lane: number, lanes: number): number {
+  return clampLane(lane, lanes) * LANE_W + LANE_W / 2 + DOT_R + TEXT_GAP;
+}
 
 /** Lane colours. Theme-aware by construction — these are the same palette
  *  tokens the sidebar's folder colours use, so every theme (including custom
@@ -115,18 +127,30 @@ export function parseRefs(refs: string[]): RefChip[] {
   return out.sort((a, b) => rank[a.kind] - rank[b.kind]);
 }
 
-export function HistoryPanel({ task, reloadToken, onOpenDiff }: {
+export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirProp }: {
   task: Task;
   /** Bumped by the panel header's refresh and by agent-settle / git ticks.
    *  Re-reads the pages already on screen without resetting the scroll. */
   reloadToken: number;
   /** Open a diff tab for one file of one commit (sides = sha^ → sha). */
   onOpenDiff: (path: string, sha: string, title: string) => void;
+  /** Repo to read, when the host already has a repo selector of its own (the
+   *  Commit tab's pills). Given one, this panel drops its own pills instead of
+   *  showing a second set that can disagree with them. */
+  repoDir?: string;
 }) {
   const nonGit = useApp(s => s.projects.find(p => p.id === task.project_id)?.non_git);
-  const members = task.composition ?? [];
-  const [repoDir, setRepoDir] = useState("");
+  const controlled = repoDirProp !== undefined;
+  const members = controlled ? [] : (task.composition ?? []);
+  const [ownRepoDir, setRepoDir] = useState("");
+  const repoDir = controlled ? repoDirProp : ownRepoDir;
   const [allBranches, setAllBranches] = useState(false);
+  /** Refs the picker selected. Empty and not `allBranches` = Auto: HEAD alone,
+   *  which is the "what did the agent just do?" default the tab exists for. */
+  const [pickedRefs, setPickedRefs] = useState<string[]>([]);
+  /** Stable dep for the fetch effects: a new array every render would refetch
+   *  forever, and the ref list is short enough to compare as a string. */
+  const refsKey = pickedRefs.join(" ");
   const [commits, setCommits] = useState<GitCommit[]>([]);
   const [branch, setBranch] = useState("");
   const [upstream, setUpstream] = useState("");
@@ -141,7 +165,10 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff }: {
   loadedRef.current = Math.max(PAGE_SIZE, commits.length);
 
   // A different repo or scope is a different history, not more of this one.
-  useEffect(() => { setSelected(null); }, [repoDir, allBranches, task.id]);
+  useEffect(() => { setSelected(null); }, [repoDir, allBranches, refsKey, task.id]);
+  // Refs belong to a repo. Carrying a selection across would ask for branches
+  // the new repo does not have, which is answered with an empty graph.
+  useEffect(() => { setPickedRefs([]); setAllBranches(false); }, [repoDir, task.id]);
 
   // Refresh: re-read from the top, as many rows as are showing. It has to be a
   // fresh window rather than a patch, because a commit landing at HEAD shifts
@@ -150,7 +177,7 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff }: {
     if (nonGit) { setLoading(false); return; }
     let alive = true;
     setLoading(true);
-    taskGitLog(task.id, repoDir, 0, loadedRef.current, allBranches)
+    taskGitLog(task.id, repoDir, 0, loadedRef.current, allBranches, pickedRefs)
       .then(page => {
         if (!alive) return;
         setCommits(page.commits);
@@ -162,7 +189,8 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff }: {
       .catch(e => { if (alive) setErr(String(e)); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [task.id, repoDir, allBranches, reloadToken, nonGit]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refsKey is pickedRefs
+  }, [task.id, repoDir, allBranches, refsKey, reloadToken, nonGit]);
 
   /** Next page, appended. Uses the backend's `skip`, so paging back through a
    *  long history costs one page per click instead of re-walking everything
@@ -170,7 +198,7 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff }: {
    *  shifts the window, and the overlap would otherwise render twice. */
   const loadMore = useCallback(() => {
     setPaging(true);
-    taskGitLog(task.id, repoDir, commits.length, PAGE_SIZE, allBranches)
+    taskGitLog(task.id, repoDir, commits.length, PAGE_SIZE, allBranches, pickedRefs)
       .then(page => {
         setCommits(prev => {
           const seen = new Set(prev.map(c => c.sha));
@@ -180,7 +208,8 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff }: {
       })
       .catch(e => setErr(String(e)))
       .finally(() => setPaging(false));
-  }, [task.id, repoDir, allBranches, commits.length]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refsKey is pickedRefs
+  }, [task.id, repoDir, allBranches, refsKey, commits.length]);
 
   const rows = useMemo(() => layoutGraph(commits), [commits]);
   const lanes = Math.min(graphWidth(rows), MAX_LANES);
@@ -213,20 +242,13 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff }: {
         <span className="min-w-0 flex-1 truncate text-[var(--color-fg-dim)]" title={branch || "detached HEAD"}>
           {branch || "detached HEAD"}
         </span>
-        <button
-          data-testid="history-scope"
-          data-all={allBranches ? "true" : "false"}
-          onClick={() => setAllBranches(v => !v)}
-          title={allBranches ? "Showing every branch in this repo" : "Showing this branch only"}
-          className={cn(
-            "shrink-0 rounded px-1.5 py-0.5 transition-colors",
-            allBranches
-              ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
-              : "text-[var(--color-fg-faint)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
-          )}
-        >
-          {allBranches ? "All branches" : "This branch"}
-        </button>
+        <ScopePicker
+          taskId={task.id}
+          repoDir={repoDir}
+          allBranches={allBranches}
+          picked={pickedRefs}
+          onChange={(all, refs) => { setAllBranches(all); setPickedRefs(refs); }}
+        />
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">
@@ -280,6 +302,145 @@ function Empty({ children, tone }: { children: React.ReactNode; tone?: "err" }) 
     )}>
       {children}
     </div>
+  );
+}
+
+/** Which refs the graph walks, VS Code's ref picker in miniature: a filter
+ *  box, then All / Auto, then the repo's branches, remotes and tags, each with
+ *  the sha it points at. Multi-select, because comparing two branches in one
+ *  graph is the thing a single toggle could never express.
+ *
+ *  The old control was one button that said "This branch", which is both a
+ *  state and an invitation to click: you could not tell which. A list of
+ *  checkboxes has neither problem.
+ *
+ *  Refs load when the menu OPENS, not on mount: this component lives for the
+ *  panel's whole life, and a branch created in the terminal must appear
+ *  without a reload. */
+function ScopePicker({ taskId, repoDir, allBranches, picked, onChange }: {
+  taskId: string;
+  repoDir: string;
+  allBranches: boolean;
+  picked: string[];
+  onChange: (allBranches: boolean, refs: string[]) => void;
+}) {
+  const [refs, setRefs] = useState<GitRef[] | null>(null);
+  const [filter, setFilter] = useState("");
+
+  const load = useCallback(() => {
+    taskGitRefs(taskId, repoDir).then(setRefs).catch(() => setRefs([]));
+  }, [taskId, repoDir]);
+
+  const groups = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    const match = (r: GitRef) => !q || r.name.toLowerCase().includes(q);
+    const of = (kind: GitRef["kind"]) => (refs ?? []).filter(r => r.kind === kind && match(r));
+    return [
+      { label: "branches", items: of("branch") },
+      { label: "remote branches", items: of("remote") },
+      { label: "tags", items: of("tag") },
+    ].filter(g => g.items.length > 0);
+  }, [refs, filter]);
+
+  const label = allBranches ? "All" : picked.length === 0 ? "Auto" : `${picked.length} refs`;
+  const title = allBranches
+    ? "Showing every ref in this repo"
+    : picked.length === 0
+      ? "Showing the checked-out branch and its history"
+      : `Showing ${picked.join(", ")}`;
+
+  const toggleRef = (name: string) => {
+    const next = picked.includes(name) ? picked.filter(r => r !== name) : [...picked, name];
+    // Unchecking the last one lands back on Auto rather than on an empty
+    // graph, which is the only state here that shows nothing and explains
+    // nothing.
+    onChange(false, next);
+  };
+
+  return (
+    <DropdownRoot onOpenChange={(open) => { if (open) { setFilter(""); load(); } }}>
+      <DropdownTrigger asChild>
+        <button
+          data-testid="history-scope"
+          data-all={allBranches ? "true" : "false"}
+          data-picked={picked.length}
+          title={title}
+          className={cn(
+            "flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 transition-colors",
+            allBranches || picked.length > 0
+              ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+              : "text-[var(--color-fg-faint)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
+          )}
+        >
+          {label}
+          <ChevronDown className="h-3 w-3" />
+        </button>
+      </DropdownTrigger>
+      <DropdownMenu align="end" className="max-h-[60vh] w-[280px] overflow-auto">
+        <div className="p-1">
+          <input
+            autoFocus
+            value={filter}
+            onChange={e => setFilter(e.target.value)}
+            onKeyDown={e => e.stopPropagation()}
+            placeholder="Filter refs"
+            spellCheck={false}
+            className="h-6 w-full rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 text-[11.5px] text-[var(--color-fg)] outline-none placeholder:text-[var(--color-fg-faint)] focus:border-[var(--color-accent)]"
+          />
+        </div>
+        <ScopeRow
+          label="All" hint="every ref in this repo"
+          checked={allBranches}
+          onSelect={() => onChange(!allBranches, [])}
+        />
+        <ScopeRow
+          label="Auto" hint="the checked-out branch"
+          checked={!allBranches && picked.length === 0}
+          onSelect={() => onChange(false, [])}
+        />
+        {refs === null && (
+          <div className="px-2 py-1.5 text-[11.5px] text-[var(--color-fg-faint)]">Reading refs…</div>
+        )}
+        {refs !== null && groups.length === 0 && (
+          <div className="px-2 py-1.5 text-[11.5px] text-[var(--color-fg-faint)]">
+            {filter.trim() ? "No ref matches that." : "This repo has no refs yet."}
+          </div>
+        )}
+        {groups.map(g => (
+          <div key={g.label}>
+            <DropdownLabel>{g.label}</DropdownLabel>
+            {g.items.map(r => (
+              <ScopeRow
+                key={r.kind + r.name}
+                label={r.name} hint={r.sha}
+                checked={picked.includes(r.name)}
+                onSelect={() => toggleRef(r.name)}
+              />
+            ))}
+          </div>
+        ))}
+      </DropdownMenu>
+    </DropdownRoot>
+  );
+}
+
+/** One checkbox row in the scope picker. `onSelect` does NOT close the menu:
+ *  picking refs is a multi-select, and a menu that shut after every tick would
+ *  make selecting three branches three round trips. */
+function ScopeRow({ label, hint, checked, onSelect }: {
+  label: string; hint: string; checked: boolean; onSelect: () => void;
+}) {
+  return (
+    <DropdownItem
+      data-testid="history-scope-row"
+      data-ref={label}
+      data-checked={checked ? "true" : "false"}
+      onSelect={(e: Event) => { e.preventDefault(); onSelect(); }}
+    >
+      <Check className={cn("h-3.5 w-3.5 shrink-0", !checked && "opacity-0")} />
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      <span className="shrink-0 text-[10.5px] text-[var(--color-fg-faint)]">{hint}</span>
+    </DropdownItem>
   );
 }
 
@@ -376,7 +537,16 @@ const CommitRow = memo(function CommitRow({
               selected ? "bg-[var(--color-sel)]" : "hover:bg-[var(--color-hover)]",
             )}
           >
+            {/* The gutter spans the full graph width and the text starts just
+                past THIS row's dot, so the two overlap rather than sitting in
+                two columns. Negative margin instead of absolute positioning
+                keeps the row a plain flex line that can still be measured. */}
             <LaneGutter row={row} lanes={lanes} width={gutter} />
+            <span
+              aria-hidden="true"
+              className="shrink-0"
+              style={{ marginLeft: textIndent(row.lane, lanes) - gutter }}
+            />
             {/* Capped: a commit that happens to carry four refs (a branch, its
                 remote, the remote HEAD, a tag) would otherwise push the
                 subject — the thing you are actually scanning for — off the

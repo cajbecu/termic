@@ -6225,6 +6225,23 @@ pub struct GitRepo {
     /// than shown. Typical cause: large untracked dirs (e.g. node_modules)
     /// not in .gitignore.
     pub truncated: bool,
+    /// Commits on this branch that its upstream does not have, i.e. what a
+    /// push would send. 0 when there is no upstream, because "everything is
+    /// unpushed" is not a number worth badging: the Push button offers to
+    /// create the upstream instead.
+    pub ahead: usize,
+}
+
+/// `git rev-list --count @{upstream}..HEAD`, or 0 when the branch has no
+/// upstream or no commits. Cheap: a count, not a walk the caller sees.
+fn ahead_count(cwd: &Path) -> usize {
+    if git(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], cwd).is_err() {
+        return 0;
+    }
+    git(&["rev-list", "--count", "@{upstream}..HEAD"], cwd)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 #[derive(Clone, Debug, Serialize, Default)]
@@ -6310,6 +6327,7 @@ async fn task_git_status(id: String) -> Result<GitStatus, String> {
                 last_commit_message: last_msg(p),
                 staged, unstaged,
                 truncated,
+                ahead: ahead_count(p),
             }
         };
 
@@ -6765,13 +6783,106 @@ fn parse_git_log(out: &str, unpushed: &std::collections::HashSet<String>) -> Vec
     commits
 }
 
+/// One selectable ref for the History tab's scope picker.
+#[derive(Debug, Clone, Serialize)]
+pub struct GitRef {
+    /// Short name as the user knows it: `main`, `origin/main`, `v1.2.0`.
+    pub name: String,
+    /// Abbreviated sha it points at, shown beside the name.
+    pub sha: String,
+    /// "branch" | "remote" | "tag", so the picker can group and icon them.
+    pub kind: String,
+}
+
+/// Every ref the History scope picker may offer, which is also the ALLOWLIST
+/// the log validates against. Nothing else may reach a `git log` argv: a
+/// caller-supplied revision string is otherwise one `--upload-pack=…` away
+/// from being a flag, and rejecting anything not enumerated here is the only
+/// check that cannot be out-thought by a clever ref name.
+fn git_refs(cwd: &Path) -> Vec<GitRef> {
+    // %(refname:short) is the name a user types; %(objectname:short) the sha
+    // shown beside it. Sorted so the freshest branch is first, which is almost
+    // always the one being looked for.
+    let out = git(
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)\u{1f}%(objectname:short)\u{1f}%(refname)",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ],
+        cwd,
+    )
+    .unwrap_or_default();
+
+    out.lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\u{1f}');
+            let name = parts.next()?.trim();
+            let sha = parts.next()?.trim();
+            let full = parts.next()?.trim();
+            if name.is_empty() || sha.is_empty() {
+                return None;
+            }
+            // `origin/HEAD` is a symbolic alias for another entry in this same
+            // list. Offering it would let the user pick the same history twice
+            // under two names.
+            if name.ends_with("/HEAD") {
+                return None;
+            }
+            let kind = if full.starts_with("refs/heads/") {
+                "branch"
+            } else if full.starts_with("refs/remotes/") {
+                "remote"
+            } else {
+                "tag"
+            };
+            Some(GitRef { name: name.to_string(), sha: sha.to_string(), kind: kind.to_string() })
+        })
+        .collect()
+}
+
+#[tauri::command]
+async fn task_git_refs(id: String, dir_name: String) -> Result<Vec<GitRef>, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<GitRef>, String> {
+        let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        let cwd = repo_cwd(&w, &dir_name)?;
+        Ok(git_refs(&cwd))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Keep only refs that actually exist in `cwd`, preserving the caller's order
+/// and dropping duplicates. An allowlist, deliberately: see `git_refs`.
+fn allowed_refs(cwd: &Path, requested: &[String]) -> Vec<String> {
+    let known: std::collections::HashSet<String> =
+        git_refs(cwd).into_iter().map(|r| r.name).collect();
+    let mut seen = std::collections::HashSet::new();
+    requested
+        .iter()
+        .map(|r| r.trim().to_string())
+        .filter(|r| known.contains(r) && seen.insert(r.clone()))
+        .collect()
+}
+
 /// A page of committed history for the History tab.
 ///
-/// `all_branches` swaps the default (this branch only, the question "what did
-/// the agent just do?") for `--all`, which brings in every ref including the
-/// worktree's siblings. Ordered `--topo-order` so a branch reads as one
-/// contiguous run of rows instead of being interleaved by commit date.
-fn git_log_page(cwd: &Path, skip: usize, limit: usize, all_branches: bool) -> GitLogPage {
+/// Scope, in precedence order: `all_branches` is `--all` (every ref in the
+/// repo, siblings included); otherwise `refs` names the ones to walk, which is
+/// the picker's multi-select; otherwise the default is HEAD alone, the "what
+/// did the agent just do?" question the tab was built for.
+///
+/// Ordered `--topo-order` so a branch reads as one contiguous run of rows
+/// instead of being interleaved by commit date.
+fn git_log_page(
+    cwd: &Path,
+    skip: usize,
+    limit: usize,
+    all_branches: bool,
+    refs: &[String],
+) -> GitLogPage {
     // Bounded: a page is a screenful-ish, and an unbounded limit from a buggy
     // caller would walk a 200k-commit repo on the UI's behalf.
     let limit = limit.clamp(1, 1_000);
@@ -6806,8 +6917,25 @@ fn git_log_page(cwd: &Path, skip: usize, limit: usize, all_branches: bool) -> Gi
         "--no-pager", "log", "--topo-order", FORMAT,
         "--max-count", &max, "--skip", &skip_s,
     ];
+    // Allowlisted before it can reach argv, and appended last so a ref can
+    // never be read as one of the flags above.
+    let picked = if all_branches { Vec::new() } else { allowed_refs(cwd, refs) };
     if all_branches {
         args.push("--all");
+    } else {
+        // Every requested ref was unknown (deleted branch, stale UI). Falling
+        // through to the HEAD default would silently answer a different
+        // question, so answer none: an empty page reads as "that scope is
+        // gone" instead of "here is main again".
+        if !refs.is_empty() && picked.is_empty() {
+            return GitLogPage {
+                commits: Vec::new(),
+                has_more: false,
+                branch,
+                upstream,
+            };
+        }
+        args.extend(picked.iter().map(|s| s.as_str()));
     }
     // An unborn branch (no commits yet) makes `git log` fail; that is an empty
     // graph, not an error the user should see.
@@ -6826,11 +6954,12 @@ async fn task_git_log(
     skip: usize,
     limit: usize,
     all_branches: bool,
+    refs: Option<Vec<String>>,
 ) -> Result<GitLogPage, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<GitLogPage, String> {
         let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
         let cwd = repo_cwd(&w, &dir_name)?;
-        Ok(git_log_page(&cwd, skip, limit, all_branches))
+        Ok(git_log_page(&cwd, skip, limit, all_branches, &refs.unwrap_or_default()))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -6973,20 +7102,47 @@ async fn task_commit(
         git(&args, &cwd).map_err(|e| e.to_string())?;
 
         if push {
-            // Try a plain push first (upstream already set). If it fails
-            // (most commonly: no upstream for a fresh worktree branch),
-            // fall back to `-u <remote> <branch>` to set it.
-            if git(&["push"], &cwd).is_err() {
-                let remote = detect_default_remote(&cwd);
-                let branch = git(&["branch", "--show-current"], &cwd)
-                    .map_err(|e| e.to_string())?.trim().to_string();
-                if branch.is_empty() {
-                    return Err("cannot push: detached HEAD".to_string());
-                }
-                git(&["push", "-u", &remote, &branch], &cwd).map_err(|e| e.to_string())?;
-            }
+            git_push(&cwd)?;
         }
         Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Push the current branch. Tries a plain push first (upstream already set);
+/// on failure, most commonly a fresh worktree branch with no upstream, falls
+/// back to `-u <remote> <branch>` to create it.
+///
+/// Shared by `task_commit`'s push half and the standalone Push button, so the
+/// set-upstream behaviour cannot differ between "Commit and Push" and pushing
+/// what is already committed.
+fn git_push(cwd: &Path) -> Result<(), String> {
+    if git(&["push"], cwd).is_ok() {
+        return Ok(());
+    }
+    let remote = detect_default_remote(cwd);
+    let branch = git(&["branch", "--show-current"], cwd)
+        .map_err(|e| e.to_string())?
+        .trim()
+        .to_string();
+    if branch.is_empty() {
+        return Err("cannot push: detached HEAD".to_string());
+    }
+    git(&["push", "-u", &remote, &branch], cwd).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Push a repo's current branch without committing anything, for the Push
+/// button beside Commit. Separate from `task_commit`'s push flag because the
+/// common case it serves is commits that are already made (an agent's, or
+/// yours from the terminal) and only need sending.
+#[tauri::command]
+async fn task_git_push(id: String, dir_name: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        let cwd = repo_cwd(&w, &dir_name)?;
+        git_push(&cwd)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -12053,7 +12209,7 @@ pub fn run() {
             task_spotlight_start, task_spotlight_stop, task_spotlight_resync, task_spotlight_status,
             task_diff, task_files, task_list_files_for_finder, task_match_ignored_files, task_send_diff_to_main,
             task_changes, task_git_status, task_git_branches, project_git_branches, project_branch_context, task_git_checkout, task_git_update, task_git_update_info, task_stage, task_unstage, task_commit, task_discard,
-            task_git_log, task_git_commit_files,
+            task_git_log, task_git_refs, task_git_push, task_git_commit_files,
             task_file_diff, task_file_diff_sides, task_file_read, task_file_read_base64, task_file_fp, task_file_write, task_dir_list, task_path_stat,
             task_path_rename, task_path_delete, task_reveal_path,
             task_rename, project_rename,
@@ -13784,7 +13940,7 @@ mod tests {
         git_run(&repo, &["checkout", "-q", &main]);
         git_run(&repo, &["merge", "--no-ff", "-m", "merge topic", "topic"]);
 
-        let page = git_log_page(&repo, 0, 50, false);
+        let page = git_log_page(&repo, 0, 50, false, &[]);
         assert_eq!(page.branch, main);
         assert!(page.upstream.is_empty(), "a local-only repo has no upstream");
         let subjects: Vec<&str> = page.commits.iter().map(|c| c.subject.as_str()).collect();
@@ -13806,15 +13962,167 @@ mod tests {
         for i in 0..5 {
             git_commit_file(&repo, &format!("f{i}.txt"), "x\n", &format!("commit {i}"));
         }
-        let first = git_log_page(&repo, 0, 2, false);
+        let first = git_log_page(&repo, 0, 2, false, &[]);
         assert_eq!(first.commits.len(), 2, "a page must not leak the lookahead row");
         assert!(first.has_more);
-        let second = git_log_page(&repo, 2, 2, false);
+        let second = git_log_page(&repo, 2, 2, false, &[]);
         assert_eq!(second.commits.len(), 2);
         assert_ne!(first.commits[0].sha, second.commits[0].sha, "skip must advance the page");
         // The tail page knows it is the tail.
-        let tail = git_log_page(&repo, 0, 500, false);
+        let tail = git_log_page(&repo, 0, 500, false, &[]);
         assert!(!tail.has_more);
+    }
+
+    /// A repo with an unmerged side branch, which is the only shape where the
+    /// three scopes (HEAD / picked refs / --all) give three different answers.
+    fn repo_with_side_branch(repo: &Path) -> (String, String) {
+        git_init_with_commit(repo);
+        git_set_identity(repo);
+        git_commit_file(repo, "a.txt", "a\n", "on main");
+        let main = git_branch(repo);
+        git_run(repo, &["checkout", "-q", "-b", "side"]);
+        git_commit_file(repo, "s.txt", "s\n", "only on side");
+        git_run(repo, &["checkout", "-q", &main]);
+        (main, "side".to_string())
+    }
+
+    #[test]
+    fn ahead_count_is_zero_without_an_upstream_and_counts_unpushed_after_one() {
+        let origin_dir = tempdir().unwrap();
+        let origin = origin_dir.path().to_path_buf();
+        git_run(&origin, &["init", "-q", "--bare", "-b", "main"]);
+
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_init_with_commit(&repo);
+        git_set_identity(&repo);
+        let branch = git_branch(&repo);
+
+        // No upstream: "everything is unpushed" is not a number worth badging.
+        assert_eq!(ahead_count(&repo), 0);
+
+        git_run(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git_run(&repo, &["push", "-q", "-u", "origin", &branch]);
+        assert_eq!(ahead_count(&repo), 0, "in sync with the upstream");
+
+        git_commit_file(&repo, "a.txt", "a\n", "one");
+        git_commit_file(&repo, "b.txt", "b\n", "two");
+        assert_eq!(ahead_count(&repo), 2, "two commits the remote does not have");
+
+        // The badge clears once they are sent, via the same helper the button
+        // calls, so the button and the count cannot disagree.
+        git_push(&repo).unwrap();
+        assert_eq!(ahead_count(&repo), 0);
+    }
+
+    #[test]
+    fn git_push_sets_the_upstream_when_the_branch_has_none() {
+        let origin_dir = tempdir().unwrap();
+        let origin = origin_dir.path().to_path_buf();
+        git_run(&origin, &["init", "-q", "--bare", "-b", "main"]);
+
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_init_with_commit(&repo);
+        git_set_identity(&repo);
+        git_run(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+
+        // The fresh-worktree case: a plain `git push` fails here, and the
+        // fallback has to create the upstream rather than surface the error.
+        git_push(&repo).unwrap();
+        assert!(
+            git(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], &repo).is_ok(),
+            "push must leave the branch tracking its remote",
+        );
+        assert_eq!(ahead_count(&repo), 0);
+    }
+
+    #[test]
+    fn git_refs_lists_branches_and_tags_without_remote_head() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let (main, side) = repo_with_side_branch(&repo);
+        git_run(&repo, &["tag", "v1"]);
+
+        let refs = git_refs(&repo);
+        let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&main.as_str()));
+        assert!(names.contains(&side.as_str()));
+        assert!(names.contains(&"v1"));
+        // Kinds drive the picker's grouping, so they have to be right.
+        assert_eq!(refs.iter().find(|r| r.name == side).unwrap().kind, "branch");
+        assert_eq!(refs.iter().find(|r| r.name == "v1").unwrap().kind, "tag");
+        // Every entry carries a sha to show beside the name.
+        assert!(refs.iter().all(|r| !r.sha.is_empty()));
+        // `origin/HEAD` is an alias for another row; offering it would let the
+        // same history be picked twice under two names.
+        assert!(!names.iter().any(|n| n.ends_with("/HEAD")));
+    }
+
+    #[test]
+    fn allowed_refs_is_an_allowlist_that_dedupes_and_keeps_order() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let (main, side) = repo_with_side_branch(&repo);
+
+        let asked = vec![side.clone(), main.clone(), side.clone()];
+        assert_eq!(allowed_refs(&repo, &asked), vec![side.clone(), main.clone()]);
+
+        // The whole point: nothing that is not a real ref survives, so a
+        // caller-supplied string can never reach argv as a flag or a path.
+        let hostile = vec![
+            "--all".to_string(),
+            "--upload-pack=touch /tmp/pwned".to_string(),
+            "-n1".to_string(),
+            "no-such-branch".to_string(),
+            "../etc/passwd".to_string(),
+        ];
+        assert!(allowed_refs(&repo, &hostile).is_empty());
+    }
+
+    #[test]
+    fn git_log_page_scopes_to_head_picked_refs_or_all() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let (main, side) = repo_with_side_branch(&repo);
+        let subjects = |p: &GitLogPage| -> Vec<String> {
+            p.commits.iter().map(|c| c.subject.clone()).collect()
+        };
+
+        // Default: HEAD only. The unmerged side commit is not this branch's.
+        let head = git_log_page(&repo, 0, 50, false, &[]);
+        assert!(subjects(&head).contains(&"on main".to_string()));
+        assert!(!subjects(&head).contains(&"only on side".to_string()));
+
+        // --all wins over everything and brings the sibling in.
+        let all = git_log_page(&repo, 0, 50, true, &[]);
+        assert!(subjects(&all).contains(&"only on side".to_string()));
+
+        // Picked: just the side branch, which does NOT contain main's tip.
+        let picked = git_log_page(&repo, 0, 50, false, &[side.clone()]);
+        assert!(subjects(&picked).contains(&"only on side".to_string()));
+
+        // Picked both = the union, which is what --all shows in this repo.
+        let both = git_log_page(&repo, 0, 50, false, &[main.clone(), side.clone()]);
+        assert_eq!(both.commits.len(), all.commits.len());
+
+        // all_branches beats a refs list rather than intersecting with it.
+        let all_wins = git_log_page(&repo, 0, 50, true, &[side.clone()]);
+        assert_eq!(all_wins.commits.len(), all.commits.len());
+    }
+
+    #[test]
+    fn git_log_page_returns_nothing_when_every_picked_ref_is_gone() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let (main, _side) = repo_with_side_branch(&repo);
+        // A branch deleted while the picker still lists it. Falling back to
+        // HEAD would answer a different question under the old scope's label.
+        let page = git_log_page(&repo, 0, 50, false, &["deleted-branch".to_string()]);
+        assert!(page.commits.is_empty());
+        assert!(!page.has_more);
+        // The header still knows where it is, so the panel keeps its chrome.
+        assert_eq!(page.branch, main);
     }
 
     #[test]
@@ -13824,7 +14132,7 @@ mod tests {
         git_run(&repo, &["init", "-q", "-b", "main"]);
         // No commits yet: `git log` FAILS here. That must read as an empty
         // history, not an error dialog.
-        let page = git_log_page(&repo, 0, 50, false);
+        let page = git_log_page(&repo, 0, 50, false, &[]);
         assert!(page.commits.is_empty());
         assert!(!page.has_more);
     }

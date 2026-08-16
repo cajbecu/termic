@@ -1,10 +1,11 @@
-// Right panel: tabs for All files (filesystem list), Commit (Fork-style
-// staging of the working tree) and History (committed history + graph, issue
-// #199). Click a file → opens an Editor tab in the main area. Click a change,
-// or a file inside a commit → diff tab.
+// Right panel: tabs for All files (filesystem list) and Commit (Fork-style
+// staging of the working tree, with the commit graph as a collapsible Graph
+// section at its foot). Click a file → opens an Editor tab in the main area.
+// Click a change, or a file inside a commit → diff tab.
 //
-// "Commit" was called "Git" until #199 added the second git surface: with two
-// of them the old name no longer said which one you were on.
+// History was its own third tab when #199 landed it. It is inside Commit now
+// (GH #208): the graph and the working tree answer halves of one question,
+// "what is in this branch", and a tab switch made comparing them impossible.
 
 import React, { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
@@ -25,7 +26,6 @@ import { Tip } from "@/components/ui/Tooltip";
 import { AuxTerminal } from "./AuxTerminal";
 import { FileTree } from "./FileTree";
 import { GitPanel } from "./GitPanel";
-import { HistoryPanel } from "./HistoryPanel";
 import { ResizeHandle } from "@/components/ui/ResizeHandle";
 import { useScriptRuns, useRunState } from "@/store/scriptRuns";
 
@@ -55,7 +55,7 @@ export function RightPanel() {
   const addTab = useApp(s => s.addTab);
   const split = useApp(s => !!s.terminalSplit[task?.id ?? ""]);
   const toggleSplit = useApp(s => s.toggleTerminalSplit);
-  const [view, setView] = useState<"files" | "changes" | "history">("files");
+  const [view, setView] = useState<"files" | "changes">("files");
   // A reveal-in-tree request (editor breadcrumb / locate button) forces the
   // "All files" view so the tree is on screen for FileTree to expand/scroll.
   const revealFile = useApp(s => s.revealFile);
@@ -479,7 +479,6 @@ export function RightPanel() {
         <RTab label="Commit" active={view === "changes"} onClick={() => setView("changes")}
           badge={(gitStatus?.total_changed ?? 0) > 0 ? gitStatus!.total_changed : undefined}
           repoBadge={(gitStatus?.repos_changed ?? 0) > 1 ? gitStatus!.repos_changed : undefined} />
-        <RTab label="History" active={view === "history"} onClick={() => setView("history")} />
         <div className="flex shrink-0 items-center px-1.5">
           <Tip content="Refresh files and git status" side="bottom">
             <button
@@ -499,23 +498,17 @@ export function RightPanel() {
         <div className="min-h-0 flex-1 overflow-auto py-1">
           <FileTree taskId={task.id} reloadToken={fileTreeReload + fileTreeNonce + fsRevision + focusReload} refreshToken={fileTreeReload} />
         </div>
-      ) : view === "history" ? (
-        <div className="min-h-0 flex-1">
-          <HistoryPanel
-            task={task}
-            // Same signals the Git status poll rides: the manual refresh, an
-            // agent settling, and the lighter git-only tick a commit bumps.
-            reloadToken={fileTreeReload + fsRevision + gitRevision}
-            onOpenDiff={(path, sha, title) =>
-              useApp.getState().openPreviewTab(task.id, { type: "diff", path, scope: `commit:${sha}`, title })}
-          />
-        </div>
       ) : (
         <div className="min-h-0 flex-1">
           <GitPanel
             task={task}
             status={gitStatus}
             refresh={refreshGit}
+            // Same signals the Git status poll rides: the manual refresh, an
+            // agent settling, and the lighter git-only tick a commit bumps.
+            reloadToken={fileTreeReload + fsRevision + gitRevision}
+            onOpenCommitDiff={(path, sha, title) =>
+              useApp.getState().openPreviewTab(task.id, { type: "diff", path, scope: `commit:${sha}`, title })}
             onOpenDiff={(path, pane) => useApp.getState().openPreviewTab(task.id, { type: "diff", path, scope: pane, title: `Δ ${path.split("/").pop()}` })}
             onDoubleClickDiff={(path) => {
               const currentTabs = useApp.getState().tabs[task.id] || [];

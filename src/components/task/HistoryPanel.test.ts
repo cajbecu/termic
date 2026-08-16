@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { clampLane, commitAge, parseRefs } from "./HistoryPanel";
+import { clampLane, commitAge, parseRefs, textIndent } from "./HistoryPanel";
 
 // A fixed "now" so these never depend on the clock.
 const NOW = Date.UTC(2026, 7, 15, 12, 0, 0); // 2026-08-15T12:00:00Z
@@ -83,5 +83,35 @@ describe("parseRefs", () => {
     // `feature/x` is a local branch that LOOKS remote. The chip is a shade
     // off, but the name it shows must be the whole thing.
     expect(parseRefs(["feature/git-graph-199"])[0].label).toBe("feature/git-graph-199");
+  });
+});
+
+describe("textIndent", () => {
+  it("steps right one lane at a time, so a branch's rows indent as a run", () => {
+    const l0 = textIndent(0, 6);
+    const l1 = textIndent(1, 6);
+    const l2 = textIndent(2, 6);
+    expect(l1 - l0).toBe(l2 - l1);
+    expect(l1).toBeGreaterThan(l0);
+  });
+
+  it("clears the dot it sits beside", () => {
+    // Lane centre is lane * 12 + 6; the dot's radius is 3.5. Text must start
+    // past the far edge of that circle or it would overlap its own marker.
+    expect(textIndent(0, 6)).toBeGreaterThan(6 + 3.5);
+    expect(textIndent(3, 6)).toBeGreaterThan(3 * 12 + 6 + 3.5);
+  });
+
+  it("folds a clipped lane onto the last drawn one, exactly as the dot does", () => {
+    // The gutter draws at most `lanes` columns. A row deeper than that gets
+    // its dot clamped, and its text has to land in the same place or the two
+    // would part company.
+    expect(textIndent(9, 6)).toBe(textIndent(5, 6));
+    expect(textIndent(9, 6)).toBe(textIndent(clampLane(9, 6), 6));
+  });
+
+  it("survives a degenerate graph width without going negative", () => {
+    expect(textIndent(0, 0)).toBeGreaterThan(0);
+    expect(textIndent(4, 1)).toBe(textIndent(0, 1));
   });
 });
