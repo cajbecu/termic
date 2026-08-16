@@ -16,8 +16,8 @@ import { launchSetupTab } from "@/lib/runTabs";
 import { seedPromptWhenReady } from "@/lib/seedPrompt";
 import { MAX_PROMPT_CHARS } from "@/lib/deepLink";
 import { withCreateLock } from "@/lib/createLock";
-import { uniqueBranch } from "@/lib/quickTask";
-import { slugify, branchify, cn } from "@/lib/utils";
+import { uniqueBranch, derivedBranch } from "@/lib/quickTask";
+import { cn } from "@/lib/utils";
 import { Check, Loader2, AlertTriangle, GitBranch, Link2, FolderGit2, Plus } from "lucide-react";
 import { SandboxModeSelector } from "@/components/SandboxModeSelector";
 import { SANDBOX_PRESETS } from "@/lib/sandboxPresets";
@@ -228,8 +228,20 @@ export function NewTaskDialog() {
     // "Duplicate task" flow to pre-fill `base` with the source
     // task's branch tip + optionally seed a name prefix.
     const seed = useUI.getState().newTaskSeed;
-    setName(seed?.namePrefix ?? "");
-    setBranch(""); setBranchEdited(false); setErr(null);
+    const seededName = seed?.namePrefix ?? "";
+    setName(seededName);
+    // Seed the branch HERE, in the same pass as the name, rather than
+    // blanking it and leaving the job to the derive effect below. A deep
+    // link arrives with the name already filled, so the user is looking at
+    // a populated Name and an empty "Branch name" until they touch the
+    // Name field, which is the one thing a link is supposed to save them
+    // (GH #192 follow-up). `existingBranches` is empty at this point; the
+    // derive effect still runs when the repo's branch list lands and bumps
+    // the suffix if this one collides (#129).
+    // Read imperatively, like the CLI/base seeds above: the effect must not
+    // re-run (and re-blank the form) just because the prefix pref changed.
+    setBranch(derivedBranch(seededName, usePrefs.getState().branchPrefix));
+    setBranchEdited(false); setErr(null);
     setBase(seed?.baseBranch ?? p?.base_branch ?? "");
     // A LINK-supplied base is the one nobody can see before pressing Create:
     // a typo'd `base=` used to surface as a git error at create time, several
@@ -405,20 +417,10 @@ export function NewTaskDialog() {
   // `feature/<name>`, fully editable. A name that's already a qualified
   // branch (contains a "/", e.g. a Linear "username/my-feature" pasted
   // straight in) is taken verbatim with no prefix.
-  const derived = useMemo(() => {
-    const trimmed = name.trim();
-    if (!trimmed) return "";
-    const base = trimmed.includes("/")
-      ? branchify(trimmed)
-      // Normalize the user's prefix at use time: drop surrounding slashes /
-      // whitespace. An empty prefix yields a bare slug (no leading slash).
-      : (() => {
-          const prefix = branchPrefix.trim().replace(/^\/+|\/+$/g, "");
-          const slug = slugify(trimmed);
-          return prefix ? `${prefix}/${slug}` : slug;
-        })();
-    return uniqueBranch(base, existingBranches);
-  }, [name, branchPrefix, existingBranches]);
+  const derived = useMemo(
+    () => uniqueBranch(derivedBranch(name, branchPrefix), existingBranches),
+    [name, branchPrefix, existingBranches],
+  );
   useEffect(() => { if (!branchEdited) setBranch(derived); }, [derived, branchEdited]);
 
   // Load the project's importable (existing, unopened) worktrees.
@@ -754,11 +756,6 @@ export function NewTaskDialog() {
           </Field>
         )}
 
-        {/* Attach an externally-started agent session (GH #169): the id
-            seeds the first spawn's resume args. Hidden for agents that
-            cannot resume a specific session by id. */}
-        {importMode && cliSupportsResumeById(cli) && resumeSessionField}
-
         {/* Worktree vs repo-root toggle (single-repo only — multi has its
             own per-member toggle below). Repo root hides the branch + sandbox
             fields and creates in the repo's live checkout. Non-git projects
@@ -879,12 +876,6 @@ export function NewTaskDialog() {
         </Field>
         </>)}
 
-        {/* Attach an externally-started agent session (GH #169): the id
-            seeds the first spawn's resume args. Hidden for agents that
-            cannot resume a specific session by id. Import mode renders its
-            own copy below the worktree picker. */}
-        {!isMulti && !importMode && cliSupportsResumeById(cli) && resumeSessionField}
-
         {/* Optional first message (GH #192). Sent to the agent once it
             finishes booting. Hidden for a plain terminal, which has no
             prompt box to type into. */}
@@ -930,6 +921,15 @@ export function NewTaskDialog() {
             </div>
           </Field>
         )}
+
+        {/* Attach an externally-started agent session (GH #169): the id
+            seeds the first spawn's resume args. Sits BELOW the first message
+            because it is the rarer field of the two: almost every task types
+            a first message, almost none adopt an outside session. Hidden for
+            agents that cannot resume a specific session by id, and for
+            multi-repo (import mode is single-repo only, so both the create
+            and the import flow are covered by !isMulti). */}
+        {!isMulti && cliSupportsResumeById(cli) && resumeSessionField}
 
         {/* Multi-repo: per-member mode + branch picker. Each member
             row renders a small toggle (Worktree | Repo root) and, when

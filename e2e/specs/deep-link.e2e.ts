@@ -33,13 +33,17 @@ async function openLink(url: string): Promise<void> {
 async function dialogState(): Promise<{
   open: boolean;
   name: string;
+  branch: string;
   prompt: string;
   mode: string | null;
 }> {
   return browser.execute((sel) => {
     const dlg = document.querySelector(sel)?.closest('[role="dialog"]');
-    if (!dlg) return { open: false, name: "", prompt: "", mode: null };
+    if (!dlg) return { open: false, name: "", branch: "", prompt: "", mode: null };
     const name = (dlg.querySelector(sel.replace('[role="dialog"] ', "")) as HTMLInputElement)?.value ?? "";
+    // Empty string when the field isn't rendered, which is correct: the
+    // branch input only exists in worktree mode.
+    const branch = (dlg.querySelector('input[placeholder="feature/fix-login-bug"]') as HTMLInputElement)?.value ?? "";
     const prompt = (dlg.querySelector("textarea") as HTMLTextAreaElement)?.value ?? "";
     // The task-type toggle marks its active pill with the accent background.
     const active = [...dlg.querySelectorAll("button")].find(
@@ -47,7 +51,7 @@ async function dialogState(): Promise<{
         ["Main checkout", "Worktree"].includes(b.textContent?.trim() ?? "")
         && b.className.includes("accent-deep"),
     );
-    return { open: true, name, prompt, mode: active?.textContent?.trim() ?? null };
+    return { open: true, name, branch, prompt, mode: active?.textContent?.trim() ?? null };
   }, NAME_INPUT);
 }
 
@@ -109,6 +113,23 @@ describe("termic:// deep links", () => {
     await openLink(`termic://new?project=${projectName}&worktree=1&name=wt-link`);
     await waitVisible(NAME_INPUT);
     expect((await dialogState()).mode).toBe("Worktree");
+  });
+
+  // The branch has to be there on the FIRST paint, not after the user pokes
+  // the Name field. A link fills the name for you, so nothing ever fires the
+  // "typing in Name derives the branch" path, and the user is left staring at
+  // a filled name next to an empty required field.
+  it("derives the branch from the link's name with no typing", async () => {
+    await openLink(`termic://new?project=${projectName}&worktree=1&name=fix-login`);
+    await waitVisible(NAME_INPUT);
+    const s = await dialogState();
+    expect(s.name).toBe("fix-login");
+    // Prefix comes from the pref rather than a hard-coded "feature", so a
+    // profile that changed it fails this test only for a real regression.
+    const prefix = await browser.execute(
+      () => window.__termic!.usePrefs.getState().branchPrefix as string,
+    );
+    expect(s.branch).toBe(prefix ? `${prefix}/fix-login` : "fix-login");
   });
 
   it("seeds the main checkout when the link asks for one", async () => {
