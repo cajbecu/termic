@@ -57,6 +57,13 @@ const LS_SCOL   = "gitStagedCollapsed";
 const LS_GCOL   = "gitGraphCollapsed";
 const LS_GRATIO = "gitGraphRatio";
 
+/** Every button on the commit footer, so Push and Commit cannot drift apart.
+ *  `box-border` and `leading-none` are the load-bearing half: Push carries a
+ *  1px border and Commit does not, and without both of these the border and
+ *  the line box each add their own height to one button only. */
+const FOOTER_BTN =
+  "box-border flex h-7 items-center whitespace-nowrap text-[12.5px] leading-none font-medium transition-colors";
+
 export function readView(): ViewMode {
   try { const v = localStorage.getItem(LS_VIEW); if (v === "tree" || v === "list" || v === "combined") return v; } catch {}
   return "tree";
@@ -686,7 +693,8 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
               ? `Push ${ahead} commit${ahead === 1 ? "" : "s"} to the remote`
               : "Push this branch to the remote"}
             className={cn(
-              "mr-auto flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-[var(--color-border)] px-2.5 text-[12.5px] font-medium transition-colors",
+              FOOTER_BTN,
+              "mr-auto shrink-0 gap-1.5 rounded-md border border-[var(--color-border)] px-2.5",
               pushDisabled
                 ? "cursor-not-allowed text-[var(--color-fg-faint)] opacity-50"
                 : "text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
@@ -711,7 +719,8 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
             onClick={() => doCommit(pushDefault)}
             title={commitLabel}
             className={cn(
-              "flex h-7 min-w-0 items-center truncate whitespace-nowrap rounded-l-md bg-[var(--color-accent)] px-3 text-[12.5px] font-medium text-[var(--color-accent-fg)] transition-colors",
+              FOOTER_BTN,
+              "min-w-0 truncate rounded-l-md bg-[var(--color-accent)] px-3 text-[var(--color-accent-fg)]",
               commitDisabled ? "cursor-not-allowed opacity-40" : "hover:brightness-110",
             )}
           >
@@ -723,7 +732,8 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
                 disabled={commitDisabled}
                 title="Commit options"
                 className={cn(
-                  "flex h-7 w-6 shrink-0 items-center justify-center rounded-r-md border-l border-black/15 bg-[var(--color-accent)] text-[var(--color-accent-fg)] transition-colors",
+                  FOOTER_BTN,
+                  "w-6 shrink-0 justify-center rounded-r-md border-l border-black/15 bg-[var(--color-accent)] text-[var(--color-accent-fg)]",
                   commitDisabled ? "cursor-not-allowed opacity-40" : "hover:brightness-110",
                 )}
               >
