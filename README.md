@@ -365,15 +365,24 @@ specs and get an issue at the same time. That is the whole promotion path:
   [docs/ideas/lsp.md](docs/ideas/lsp.md).
 - **Mobile app.** ([#165](https://github.com/simion/termic/issues/165)) A
   companion app for checking on and steering tasks while away from the Mac.
+- **MCP server endpoint.** ([#176](https://github.com/simion/termic/issues/176))
+  A scoped control plane an agent can call without being handed a terminal.
+  The 2026-07-28 spec revision made the protocol stateless, so a per-task
+  bearer token can finally answer which task is calling and what it may do,
+  which is the narrowest grant a sandboxed agent could be given. Design in
+  [docs/plans/mcp.md](docs/plans/mcp.md).
+- **Docker-based sandboxing.** ([#231](https://github.com/simion/termic/issues/231))
+  An opt-in, more brutal alternative to Seatbelt: each agent inside a
+  container off an editable Dockerfile, seeing only the paths you mount.
+  Cross-platform for free, and it pairs with per-agent credential injection
+  so secrets need not be mounted at all. This also closes the Linux/Windows
+  sandbox-parity gap, a container is the same isolation boundary on every
+  platform, so there is no separate bubblewrap/landlock or AppContainer
+  backend to build. Design in
+  [docs/plans/docker-sandbox/](docs/plans/docker-sandbox/).
 
 ### Ideas
 
-- **MCP server endpoint.** A scoped control plane an agent can call without
-  being handed a terminal. The 2026-07-28 spec revision made the protocol
-  stateless, so a per-task bearer token can finally answer which task is
-  calling and what it may do, which is the narrowest grant a sandboxed agent
-  could be given. [docs/ideas/mcp.md](docs/ideas/mcp.md), discussion in
-  [#176](https://github.com/simion/termic/issues/176).
 - **On-device dictation for agent prompts.** Prompts to a coding agent are
   prose, and one dictated prompt can be broadcast to four agents at once.
   macOS 26's `SpeechAnalyzer` runs entirely on device, which is the only way
@@ -391,20 +400,11 @@ specs and get an issue at the same time. That is the whole promotion path:
   it outright. Whether that earns a place in a user's agent config is an
   open question, and the first step is measurement, not implementation.
   [docs/ideas/agent-hooks.md](docs/ideas/agent-hooks.md).
-- **Docker-based sandboxing.** An opt-in, more brutal alternative to
-  Seatbelt: each agent inside a container off an editable Dockerfile, seeing
-  only the paths you mount. Cross-platform for free, and it pairs with
-  per-agent credential injection so secrets need not be mounted at all.
-  [docs/ideas/docker-sandbox/](docs/ideas/docker-sandbox/).
 - **Windows support, then Windows prebuilts.** Linux AppImage CI is live;
   the Windows MSI is the matching matrix entry, and it depends on the app
   compiling on Windows at all. The audit in
   [docs/ideas/windows.md](docs/ideas/windows.md) is a prediction: nothing in
   it has been built on Windows yet.
-- **Sandbox parity on Linux and Windows.** macOS Seatbelt is the only
-  backend today; bubblewrap / landlock and AppContainer are the gap. See
-  [docs/sandbox.md](docs/sandbox.md) for the behaviour they would have to
-  match.
 - **Profiles (multi-window, Chrome-style).** Separate windows with their own
   projects and settings. [docs/ideas/profiles.md](docs/ideas/profiles.md).
 - **The Space layer.** A grouping above projects. The Task rename in v0.19.0
