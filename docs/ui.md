@@ -93,12 +93,16 @@ Order of the chrome above them, outermost first: repo pills (multi-repo tasks),
 then the branch bar, then the sub-tabs. Which repo you are looking at is what
 the branch and all three sub-tabs are ABOUT, so it cannot sit inside them.
 
-The sub-tabs share their row with whatever the active one needs: Commit and
-Compare put the file filter and the view-mode menu on the right of it (shared
-deliberately, so switching keeps what you typed and where a folder sits),
-History puts the ref picker there instead, a filter over files being
-meaningless in a list of commits. Two rows of tabs would be a lot for a panel
-that drags down to 220px.
+One filter box serves all three, on the branch row (the branch chip is one
+short control on a full-width row, so the filter rides with it rather than
+spending a row of its own). It narrows files in Commit and Compare and commit
+rows in History, matching subject, author or sha. In History it filters the
+commits ALREADY LOADED rather than the repo: paging the whole history in to
+answer a keystroke would be a `git log` per character, so an empty result says
+so and points at Load more.
+
+The sub-tab row keeps only what belongs to the active view: the view-mode menu
+for Commit and Compare, the ref picker for History.
 
 History's picker has two independent axes. WHICH refs to walk (Auto = the
 checked-out branch, All = every ref, or any number of named ones) and HOW MUCH

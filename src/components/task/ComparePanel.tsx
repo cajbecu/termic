@@ -230,7 +230,12 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
               data-testid="compare-base"
               data-base={base}
               title={`Comparing against ${base || "nothing yet"}. Click to pick another branch.`}
-              className="flex h-6 min-w-0 max-w-[55%] items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 transition-colors hover:border-[var(--color-accent-soft)]"
+              // Sized to the ref it holds, not to a share of the row: a
+              // `max-w-[55%]` truncated "feature/new-claude-w…" while the
+              // three characters of "main" opposite it sat in open space.
+              // It still shrinks (min-w-0) when the two names together do not
+              // fit, which is the only time truncating is the right answer.
+              className="flex h-6 min-w-0 shrink items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 transition-colors hover:border-[var(--color-accent-soft)]"
             >
               <span className="truncate font-mono text-[var(--color-fg)]">{base || "Pick a branch"}</span>
               <ChevronDown className="h-3 w-3 shrink-0 text-[var(--color-fg-faint)]" />
@@ -267,14 +272,14 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
         </DropdownRoot>
         <ArrowRight className="h-3 w-3 shrink-0 text-[var(--color-fg-faint)]" />
         <span
-          className="min-w-0 flex-1 truncate font-mono text-[var(--color-fg-dim)]"
+          className="min-w-0 shrink truncate font-mono text-[var(--color-fg-dim)]"
           title={`${branchLabel}, including uncommitted changes`}
         >
           {branchLabel}
         </span>
         {!mergeBase && (
           <Tip content="Comparing the two branch tips directly, not from where they diverged" side="left">
-            <span className="shrink-0 rounded bg-[var(--color-bg-3)] px-1 text-[10px] text-[var(--color-fg-faint)]">direct</span>
+            <span className="ml-auto shrink-0 rounded bg-[var(--color-bg-3)] px-1 text-[10px] text-[var(--color-fg-faint)]">direct</span>
           </Tip>
         )}
       </div>

@@ -171,7 +171,7 @@ export function splitTrailers(body: string): { prose: string; coAuthors: string[
   return { prose: kept.join("\n").trim(), coAuthors };
 }
 
-export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirProp, scope }: {
+export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirProp, scope, search = "" }: {
   task: Task;
   /** Bumped by the panel header's refresh and by agent-settle / git ticks.
    *  Re-reads the pages already on screen without resetting the scroll. */
@@ -185,6 +185,15 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
   /** Scope, when the host renders the picker itself (the Git tab puts it on
    *  its sub-tab row). Given one, this panel drops its own scope row. */
   scope?: { allBranches: boolean; refs: string[]; firstParent: boolean };
+  /** The Git tab's filter box, shared with its file lists. Matches subject,
+   *  author and sha, case-insensitively.
+   *
+   *  It filters the commits ALREADY LOADED, not the repo: this is the same
+   *  box that narrows a file list, and paging in the whole history to answer
+   *  a keystroke would be a `git log` per character. "Load more" keeps
+   *  working while a filter is on, so a search that looks empty is usually a
+   *  search that needs more pages, not a repo without the commit. */
+  search?: string;
 }) {
   const nonGit = useApp(s => s.projects.find(p => p.id === task.project_id)?.non_git);
   const controlled = repoDirProp !== undefined;
@@ -269,7 +278,18 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refsKey is pickedRefs
   }, [task.id, repoDir, allBranches, refsKey, firstParent, commits.length]);
 
-  const rows = useMemo(() => layoutGraph(commits), [commits]);
+  // Filter BEFORE the layout, not after: lanes are computed from the rows
+  // being drawn, so laying out the full list and then hiding rows would leave
+  // gutter lines running past commits that are not there.
+  const shown = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return commits;
+    return commits.filter(c =>
+      c.subject.toLowerCase().includes(q)
+      || c.author.toLowerCase().includes(q)
+      || c.sha.toLowerCase().startsWith(q));
+  }, [commits, search]);
+  const rows = useMemo(() => layoutGraph(shown), [shown]);
   const lanes = Math.min(graphWidth(rows), MAX_LANES);
   const gutter = Math.max(lanes, 1) * LANE_W + 6;
 
@@ -335,11 +355,17 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
         {!err && !loading && commits.length === 0 && (
           <Empty>No commits yet. Anything an agent commits shows up here.</Empty>
         )}
+        {!err && !loading && commits.length > 0 && shown.length === 0 && (
+          <Empty>
+            No commit here matches "{search.trim()}".
+            {hasMore && " Older commits are not loaded yet, so try Load more below."}
+          </Empty>
+        )}
 
         {rows.map((row, i) => (
           <CommitRow
             key={row.sha}
-            commit={commits[i]}
+            commit={shown[i]}
             row={row}
             lanes={lanes}
             gutter={gutter}

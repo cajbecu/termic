@@ -551,7 +551,24 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
 
       {/* 1. Current branch + switcher (fork-style: stash, checkout, re-apply),
           for the repo selected above. */}
-      {!nonGit && <BranchBar task={task} branch={repo?.branch ?? task.branch} dir={dir} />}
+      {!nonGit && (
+        <BranchBar
+          task={task}
+          branch={repo?.branch ?? task.branch}
+          dir={dir}
+          right={<div className="relative ml-auto flex min-w-0 flex-1 items-center">
+            <Search className="pointer-events-none absolute left-2 h-3.5 w-3.5 text-[var(--color-fg-faint)]" />
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Filter"
+              title="Filters files in Commit and Compare, and the commits already loaded in History"
+              spellCheck={false} autoCorrect="off" autoCapitalize="off" autoComplete="off"
+              className="h-6 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] pl-7 pr-2 text-[12px] text-[var(--color-fg)] outline-none placeholder:text-[var(--color-fg-faint)] focus:border-[var(--color-accent)]"
+            />
+          </div>}
+        />
+      )}
 
       {/* 2. Sub-tabs, plus whatever chrome the active one needs on the SAME
           row. Two rows of tabs would be a lot for a panel that drags down to
@@ -590,22 +607,12 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
               onChange={(all, refs, fp) => { setGraphAll(all); setGraphRefs(refs); setGraphFirstParent(fp); }}
             />
           </div>
-        ) : (<>
-          <div className="relative flex min-w-0 flex-1 items-center">
-            <Search className="pointer-events-none absolute left-2 h-3.5 w-3.5 text-[var(--color-fg-faint)]" />
-            <input
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              placeholder="Filter files"
-              spellCheck={false} autoCorrect="off" autoCapitalize="off" autoComplete="off"
-              className="h-6 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] pl-7 pr-2 text-[12px] text-[var(--color-fg)] outline-none placeholder:text-[var(--color-fg-faint)] focus:border-[var(--color-accent)]"
-            />
-          </div>
+        ) : (
           <DropdownRoot>
             <DropdownTrigger asChild>
               <button
                 title="View options"
-                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]"
+                className="ml-auto flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]"
               >
                 {viewMode === "tree" ? <ListTree className="h-4 w-4" /> : viewMode === "combined" ? <Rows3 className="h-4 w-4" /> : <List className="h-4 w-4" />}
               </button>
@@ -618,7 +625,7 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
               <ViewItem label="Hide untracked files" active={hideUntracked} onSelect={toggleHide} />
             </DropdownMenu>
           </DropdownRoot>
-        </>)}
+        )}
       </div>
 
       {/* 3-5. The body: whichever view is active, at full height. The graph
@@ -637,6 +644,7 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
             task={task}
             repoDir={dir}
             scope={{ allBranches: graphAll, refs: graphRefs, firstParent: graphFirstParent }}
+            search={search}
             reloadToken={reloadToken}
             onOpenDiff={(path, sha, title) => onOpenCommitDiff?.(path, sha, title)}
           />
@@ -803,10 +811,14 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
 // rebase) via task_git_update. Conflicts are surfaced as error toasts, not
 // swallowed - the op is left in progress for the user to resolve in the
 // terminal.
-function BranchBar({ task, branch, dir }: {
+function BranchBar({ task, branch, dir, right }: {
   task: Task;
   branch: string;
   dir: string;
+  /** Rendered on the right of the same row. The branch chip is one short
+   *  control on a full-width row, so the filter rides with it rather than
+   *  spending a row of its own in a panel that drags down to 220px. */
+  right?: React.ReactNode;
 }) {
   const pushToast = useUI(s => s.pushToast);
   const [branches, setBranches] = useState<string[] | null>(null);
@@ -892,7 +904,7 @@ function BranchBar({ task, branch, dir }: {
   };
 
   return (
-    <div className="flex h-8 shrink-0 items-center border-b border-[var(--color-border-soft)] px-2">
+    <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-[var(--color-border-soft)] px-2">
       {/* Load on OPEN, not on the trigger's onClick: Radix opens the menu on
           pointerdown and its modal layer sets pointer-events:none on the rest
           of the page before the mouse button is released, so with a REAL
@@ -973,6 +985,7 @@ function BranchBar({ task, branch, dir }: {
           )}
         </DropdownMenu>
       </DropdownRoot>
+      {right}
     </div>
   );
 }

@@ -673,9 +673,9 @@ describe("git compare mode", () => {
   });
 
   it("narrows the list with the filter", async () => {
-    // The filter is GitPanel's, shared by both modes, so it is outside the
-    // compare panel in the DOM now.
-    const input = await $('[data-testid="git-panel"] input[placeholder="Filter files"], input[placeholder="Filter files"]');
+    // The filter is GitPanel's, on the branch row and shared by all three
+    // sub-tabs, so it is outside the compare panel in the DOM.
+    const input = await $('input[placeholder="Filter"]');
     await input.setValue("committed");
     await browser.waitUntil(
       async () => {
