@@ -404,12 +404,6 @@ pub struct PersistedTab {
     /// clobbers a freshly minted session.
     #[serde(default)]
     pub session_id: Option<String>,
-    /// The uuid a resume attempt just failed on, stashed here instead of
-    /// discarded so the user can one-click recover it. A transient
-    /// `--resume` fast-exit would otherwise lose the conversation for good
-    /// even though its transcript still exists on disk.
-    #[serde(default)]
-    pub previous_session_id: Option<String>,
     /// Leaf ID of the split pane this tab belongs to (None for main panel tabs).
     #[serde(default)]
     pub pane_leaf_id: Option<String>,
@@ -442,8 +436,6 @@ pub struct PersistedTabInput {
     pub command: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
-    #[serde(default)]
-    pub previous_session_id: Option<String>,
     #[serde(default)]
     pub pane_leaf_id: Option<String>,
     #[serde(default)]
@@ -4374,23 +4366,22 @@ fn task_set_resume_override(id: String, command: String) -> Result<Task, String>
 fn task_set_tabs(id: String, tabs: Vec<PersistedTabInput>) -> Result<(), String> {
     let mut list = load_tasks();
     let w = list.iter_mut().find(|w| w.id == id).ok_or("no such task")?;
-    // Carry forward each surviving tab's session uuids by id (both the live
-    // uuid and the stashed previous one, owned by the dedicated commands).
-    let prior: std::collections::HashMap<String, (Option<String>, Option<String>)> = w
+    // Carry forward each surviving tab's session uuid by id (owned by
+    // task_set_tab_session_id, not by this payload).
+    let prior: std::collections::HashMap<String, Option<String>> = w
         .persisted_tabs
         .iter()
-        .map(|t| (t.id.clone(), (t.session_id.clone(), t.previous_session_id.clone())))
+        .map(|t| (t.id.clone(), t.session_id.clone()))
         .collect();
     let next: Vec<PersistedTab> = tabs
         .into_iter()
         .map(|t| {
-            let p = prior.get(&t.id).cloned().unwrap_or((None, None));
+            let p = prior.get(&t.id).cloned().flatten();
             PersistedTab {
                 // Stored uuid wins; only fall back to the payload's session_id
                 // for a tab we've never seen (migrating a legacy per-cli uuid
                 // onto the default tab on its first persist).
-                session_id: p.0.or(t.session_id),
-                previous_session_id: p.1.or(t.previous_session_id),
+                session_id: p.or(t.session_id),
                 id: t.id,
                 cli: t.cli,
                 title: t.title,
@@ -4415,7 +4406,6 @@ fn task_set_tabs(id: String, tabs: Vec<PersistedTabInput>) -> Result<(), String>
                 && a.is_default == b.is_default
                 && a.command == b.command
                 && a.session_id == b.session_id
-                && a.previous_session_id == b.previous_session_id
                 && a.pane_leaf_id == b.pane_leaf_id
                 && a.run_member == b.run_member
                 && a.pinned == b.pinned
@@ -4454,27 +4444,6 @@ fn task_set_tab_session_id(id: String, tab_id: String, uuid: String) -> Result<(
     Ok(())
 }
 
-/// Stash (or clear) the session uuid a resume attempt just failed on, so a
-/// transient `--resume` fast-exit is recoverable instead of permanently
-/// lost. Mirrors `task_set_tab_session_id`; an empty uuid clears the slot
-/// (the user dismissed the offer, or the recover succeeded).
-#[tauri::command]
-fn task_set_tab_previous_session_id(id: String, tab_id: String, uuid: String) -> Result<(), String> {
-    let mut list = load_tasks();
-    let w = list.iter_mut().find(|w| w.id == id).ok_or("no such task")?;
-    let tab = match w.persisted_tabs.iter_mut().find(|t| t.id == tab_id) {
-        Some(t) => t,
-        None => return Ok(()),
-    };
-    let next = if uuid.is_empty() { None } else { Some(uuid) };
-    if tab.previous_session_id == next {
-        return Ok(());
-    }
-    tab.previous_session_id = next;
-    save_task(w).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 /// Persist the JSON-encoded SplitTree for a task so the split layout
 /// can be restored on the next relaunch. Pass `None` to clear (no splits).
 #[tauri::command]
@@ -4496,18 +4465,17 @@ fn task_set_split_layout(id: String, layout: Option<String>) -> Result<(), Strin
 fn task_set_right_tabs(id: String, tabs: Vec<PersistedTabInput>) -> Result<(), String> {
     let mut list = load_tasks();
     let w = list.iter_mut().find(|w| w.id == id).ok_or("no such task")?;
-    let prior: std::collections::HashMap<String, (Option<String>, Option<String>)> = w
+    let prior: std::collections::HashMap<String, Option<String>> = w
         .right_split_tabs
         .iter()
-        .map(|t| (t.id.clone(), (t.session_id.clone(), t.previous_session_id.clone())))
+        .map(|t| (t.id.clone(), t.session_id.clone()))
         .collect();
     let next: Vec<PersistedTab> = tabs
         .into_iter()
         .map(|t| {
-            let p = prior.get(&t.id).cloned().unwrap_or((None, None));
+            let p = prior.get(&t.id).cloned().flatten();
             PersistedTab {
-                session_id: p.0.or(t.session_id),
-                previous_session_id: p.1.or(t.previous_session_id),
+                session_id: p.or(t.session_id),
                 id: t.id,
                 cli: t.cli,
                 title: t.title,
@@ -4529,7 +4497,6 @@ fn task_set_right_tabs(id: String, tabs: Vec<PersistedTabInput>) -> Result<(), S
                 && a.is_default == b.is_default
                 && a.command == b.command
                 && a.session_id == b.session_id
-                && a.previous_session_id == b.previous_session_id
         });
     if same {
         return Ok(());
@@ -12232,7 +12199,7 @@ pub fn run() {
 
             task_reorder,
             task_restore, task_delete, task_run_script, task_run_script_stream, task_stop_script, task_record_spawn, task_set_has_history, task_set_agent_session_id,
-            task_set_tabs, task_set_tab_session_id, task_set_tab_previous_session_id,
+            task_set_tabs, task_set_tab_session_id,
             task_set_split_layout,
             task_set_right_tabs, task_set_right_tab_session_id,
             task_grep_start, task_grep_cancel, task_find_backend,

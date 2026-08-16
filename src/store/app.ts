@@ -155,9 +155,9 @@ export interface AppState {
   /** Stop a task without archiving it (GH #119): evict it from mountedTasks
    *  so its TaskView unmounts and every PTY dies (TerminalPane/AuxTerminal
    *  cleanup), then clear the runtime-only tab fields so the task looks like
-   *  one not yet visited this session. The resume keys (sessionId /
-   *  previousSessionId) survive, so opening the task again respawns the
-   *  agents with their conversations resumed. */
+   *  one not yet visited this session. The resume key (sessionId) survives,
+   *  so opening the task again respawns the agents with their conversations
+   *  resumed. */
   stopTask: (taskId: string) => void;
   setView: (page: View["page"]) => void;
   openSettings: (tab?: View["settingsTab"], repoId?: string, highlight?: string) => void;
@@ -266,9 +266,6 @@ export interface AppState {
    *  to disk. Keyed by tab id so agents in one task resume
    *  independently. */
   setTabSessionId: (taskId: string, tabId: string, uuid: string) => void;
-  /** Stash (or clear, with "") the uuid a `--resume` just fast-exited on, so
-   *  a transient failure is one-click recoverable instead of lost. */
-  setTabPreviousSessionId: (taskId: string, tabId: string, uuid: string) => void;
   /** Mirror a just-persisted custom launch command into the in-memory
    *  task AND any open custom-command tabs so the next PTY respawn
    *  runs the new script (the disk write alone doesn't refresh either). */
@@ -428,7 +425,6 @@ function durablePersistedTabs(tabs: Tab[] | undefined): PersistedTab[] {
       is_default: !!t.is_default,
       command: t.command ?? null,
       session_id: t.sessionId ?? null,
-      previous_session_id: t.previousSessionId ?? null,
       pane_leaf_id: t.paneId ?? null,
       // Run pop-out tabs persist WITH their marker so the RunPane comes back
       // in its pane on relaunch (the run script re-fires, like custom tabs).
@@ -1543,7 +1539,6 @@ export const useApp = create<AppState>((set, get) => ({
         is_default: !!pt.is_default,
         ...(pt.command ? { command: pt.command } : {}),
         ...(pt.session_id ? { sessionId: pt.session_id } : {}),
-        ...(pt.previous_session_id ? { previousSessionId: pt.previous_session_id } : {}),
         ...(unattendedRestore && pt.is_default ? { unattended: true } : {}),
         ...(pt.pinned ? { pinned: true } : {}),
         // idle: restored run tabs keep their spot but never auto-fire the
@@ -1591,8 +1586,7 @@ export const useApp = create<AppState>((set, get) => ({
               ...(pt.pinned ? { pinned: true } : {}),
               ...(pt.command ? { command: pt.command } : {}),
               ...(pt.session_id ? { sessionId: pt.session_id } : {}),
-              ...(pt.previous_session_id ? { previousSessionId: pt.previous_session_id } : {}),
-              ...(pt.run_member != null ? { runTab: { member: pt.run_member, previewUrl: null, idle: true } } : {}),
+                    ...(pt.run_member != null ? { runTab: { member: pt.run_member, previewUrl: null, idle: true } } : {}),
             });
           }
           // The saved tree can reference tabs that weren't restored (edit /
@@ -1751,28 +1745,6 @@ export const useApp = create<AppState>((set, get) => ({
     ipc.taskSetTabSessionId(taskId, tabId, uuid).catch(() => {});
   },
 
-  setTabPreviousSessionId: (taskId, tabId, uuid) => {
-    const val = uuid || undefined;
-    set(s => {
-      const list = s.tabs[taskId];
-      const nextTabs = list
-        ? list.map(t => (t.id === tabId && t.type === "terminal" ? { ...t, previousSessionId: val } as Tab : t))
-        : list;
-      const taskUpdate = {
-        tasks: s.tasks.map(w => w.id !== taskId ? w : {
-          ...w,
-          persisted_tabs: (w.persisted_tabs ?? []).map(pt =>
-            pt.id === tabId ? { ...pt, previous_session_id: uuid || null } : pt,
-          ),
-        }),
-      };
-      return {
-        ...(nextTabs ? { tabs: { ...s.tabs, [taskId]: nextTabs } } : {}),
-        ...taskUpdate,
-      };
-    });
-    ipc.taskSetTabPreviousSessionId(taskId, tabId, uuid).catch(() => {});
-  },
 
   setTaskYolo: (taskId, yolo) => set(s => ({
     tasks: s.tasks.map(w => w.id === taskId ? { ...w, yolo } : w),

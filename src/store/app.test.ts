@@ -1212,7 +1212,6 @@ describe("stopTask", () => {
       id: "t1",
       ptyId: "pty-live",
       sessionId: "sess-uuid",
-      previousSessionId: "prev-uuid",
       lastInputAt: 111,
       lastOutputAt: 222,
       workState: "working",
@@ -1232,7 +1231,6 @@ describe("stopTask", () => {
     expect(tab.workState).toBeUndefined();
     // The whole point of Stop vs Archive: the session survives.
     expect(tab.sessionId).toBe("sess-uuid");
-    expect(tab.previousSessionId).toBe("prev-uuid");
   });
 
   it("falls back to the dashboard when stopping the active task", () => {

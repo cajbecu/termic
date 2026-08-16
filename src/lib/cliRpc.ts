@@ -644,7 +644,7 @@ export async function sendPromptHandler(raw: unknown): Promise<{ mode: string; c
     // --resume: a prior session must exist, else --fresh is the answer.
     const hasSession =
       !!task.has_resumable_history
-      || (task.persisted_tabs ?? []).some(pt => pt.session_id || pt.previous_session_id);
+      || (task.persisted_tabs ?? []).some(pt => pt.session_id);
     if (!hasSession) {
       throw sendErr(
         "no_session",
