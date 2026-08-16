@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { clampLane, commitAge, parseRefs, textIndent } from "./HistoryPanel";
+import { clampLane, commitAge, detailIndent, parseRefs, textIndent } from "./HistoryPanel";
 
 // A fixed "now" so these never depend on the clock.
 const NOW = Date.UTC(2026, 7, 15, 12, 0, 0); // 2026-08-15T12:00:00Z
@@ -113,5 +113,31 @@ describe("textIndent", () => {
   it("survives a degenerate graph width without going negative", () => {
     expect(textIndent(0, 0)).toBeGreaterThan(0);
     expect(textIndent(4, 1)).toBe(textIndent(0, 1));
+  });
+});
+
+// ── detailIndent ──
+//
+// The expanded commit's file list used to be indented by the FULL gutter, so
+// its depth tracked how many lanes the graph happened to have rather than
+// which lane the commit sat on. On a busy repo that pushed the block far
+// enough right to take the header out of the panel and put a horizontal
+// scrollbar under the whole list.
+
+describe("detailIndent", () => {
+  it("follows the commit's own lane, not the lane count", () => {
+    expect(detailIndent(0, 8)).toBe(detailIndent(0, 2));
+    expect(detailIndent(1, 8)).toBeGreaterThan(detailIndent(0, 8));
+  });
+
+  it("lines the block up with the subject it belongs to", () => {
+    expect(detailIndent(0, 6)).toBe(textIndent(0, 6));
+    expect(detailIndent(1, 6)).toBe(textIndent(1, 6));
+  });
+
+  it("stops growing past two lanes, so filenames keep their width", () => {
+    const cap = detailIndent(2, 9);
+    expect(detailIndent(5, 9)).toBe(cap);
+    expect(detailIndent(9, 9)).toBe(cap);
   });
 });

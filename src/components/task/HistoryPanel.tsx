@@ -28,7 +28,7 @@ import { cn } from "@/lib/utils";
 import * as RT from "@radix-ui/react-tooltip";
 import { Tip } from "@/components/ui/Tooltip";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuLabel } from "@/components/ui/ContextMenu";
-import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownLabel } from "@/components/ui/Dropdown";
+import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownLabel, DropdownSeparator } from "@/components/ui/Dropdown";
 import { fileIconUrl } from "@/lib/explorer/iconResolver";
 
 /** Commits per page. VS Code's graph loads 50 and pages on scroll; a page here
@@ -61,6 +61,16 @@ const TEXT_GAP = 8;
  *  way, and it is what makes a branch's rows visibly belong to it: an indented
  *  run of subjects IS the branch. Clipped lanes fold onto the last drawn one,
  *  exactly as the dot does, so text never parts company with its marker. */
+/** Where an expanded commit's detail block starts. Its OWN lane's text
+ *  indent, so the files line up under the subject they belong to, not the
+ *  full gutter (which is every lane in the graph: on a repo with six of them
+ *  that shoved the block 60px right no matter which lane the commit was on,
+ *  and pushed the header out of the panel). Capped at two lanes because a
+ *  deep lane would eat the width the filenames need. */
+export function detailIndent(lane: number, lanes: number): number {
+  return Math.min(textIndent(lane, lanes), textIndent(2, Math.max(lanes, 3)));
+}
+
 export function textIndent(lane: number, lanes: number): number {
   return clampLane(lane, lanes) * LANE_W + LANE_W / 2 + DOT_R + TEXT_GAP;
 }
@@ -173,8 +183,8 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
    *  showing a second set that can disagree with them. */
   repoDir?: string;
   /** Scope, when the host renders the picker itself (the Git tab puts it on
-   *  the Graph header). Given one, this panel drops its own scope row. */
-  scope?: { allBranches: boolean; refs: string[] };
+   *  its sub-tab row). Given one, this panel drops its own scope row. */
+  scope?: { allBranches: boolean; refs: string[]; firstParent: boolean };
 }) {
   const nonGit = useApp(s => s.projects.find(p => p.id === task.project_id)?.non_git);
   const controlled = repoDirProp !== undefined;
@@ -187,8 +197,10 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
    *  Auto: HEAD alone, the "what did the agent just do?" default. */
   const [ownAllBranches, setAllBranches] = useState(false);
   const [ownPickedRefs, setPickedRefs] = useState<string[]>([]);
+  const [ownFirstParent, setFirstParent] = useState(false);
   const allBranches = scope ? scope.allBranches : ownAllBranches;
   const pickedRefs = scope ? scope.refs : ownPickedRefs;
+  const firstParent = scope ? scope.firstParent : ownFirstParent;
   /** Stable dep for the fetch effects: a new array every render would refetch
    *  forever, and the ref list is short enough to compare as a string. */
   const refsKey = pickedRefs.join(" ");
@@ -206,13 +218,13 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
   loadedRef.current = Math.max(PAGE_SIZE, commits.length);
 
   // A different repo or scope is a different history, not more of this one.
-  useEffect(() => { setSelected(null); }, [repoDir, allBranches, refsKey, task.id]);
+  useEffect(() => { setSelected(null); }, [repoDir, allBranches, refsKey, firstParent, task.id]);
   // Refs belong to a repo. Carrying a selection across would ask for branches
   // the new repo does not have, which is answered with an empty graph. Only
   // ours to reset when we own it; the host clears its own on the same signal.
   useEffect(() => {
     if (scope) return;
-    setPickedRefs([]); setAllBranches(false);
+    setPickedRefs([]); setAllBranches(false); setFirstParent(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- scope identity is not the signal
   }, [repoDir, task.id]);
 
@@ -223,7 +235,7 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
     if (nonGit) { setLoading(false); return; }
     let alive = true;
     setLoading(true);
-    taskGitLog(task.id, repoDir, 0, loadedRef.current, allBranches, pickedRefs)
+    taskGitLog(task.id, repoDir, 0, loadedRef.current, allBranches, pickedRefs, firstParent)
       .then(page => {
         if (!alive) return;
         setCommits(page.commits);
@@ -236,7 +248,7 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refsKey is pickedRefs
-  }, [task.id, repoDir, allBranches, refsKey, reloadToken, nonGit]);
+  }, [task.id, repoDir, allBranches, refsKey, firstParent, reloadToken, nonGit]);
 
   /** Next page, appended. Uses the backend's `skip`, so paging back through a
    *  long history costs one page per click instead of re-walking everything
@@ -244,7 +256,7 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
    *  shifts the window, and the overlap would otherwise render twice. */
   const loadMore = useCallback(() => {
     setPaging(true);
-    taskGitLog(task.id, repoDir, commits.length, PAGE_SIZE, allBranches, pickedRefs)
+    taskGitLog(task.id, repoDir, commits.length, PAGE_SIZE, allBranches, pickedRefs, firstParent)
       .then(page => {
         setCommits(prev => {
           const seen = new Set(prev.map(c => c.sha));
@@ -255,7 +267,7 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
       .catch(e => setErr(String(e)))
       .finally(() => setPaging(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refsKey is pickedRefs
-  }, [task.id, repoDir, allBranches, refsKey, commits.length]);
+  }, [task.id, repoDir, allBranches, refsKey, firstParent, commits.length]);
 
   const rows = useMemo(() => layoutGraph(commits), [commits]);
   const lanes = Math.min(graphWidth(rows), MAX_LANES);
@@ -298,7 +310,8 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
             branch={branch}
             allBranches={allBranches}
             picked={pickedRefs}
-            onChange={(all, refs) => { setAllBranches(all); setPickedRefs(refs); }}
+            firstParent={firstParent}
+            onChange={(all, refs, fp) => { setAllBranches(all); setPickedRefs(refs); setFirstParent(fp); }}
           />
         </div>
       )}
@@ -312,7 +325,7 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
           cursor has to be able to enter it. That is also why it sits flush
           against the row (`sideOffset={0}`) with no gap to cross. */}
       <RT.Provider delayDuration={CARD_DELAY_MS} skipDelayDuration={CARD_SKIP_MS}>
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
         {err && <Empty tone="err">{err}</Empty>}
         {!err && loading && commits.length === 0 && (
           <div className="flex items-center gap-2 px-3 py-3 text-[12px] text-[var(--color-fg-faint)]">
@@ -379,7 +392,7 @@ function Empty({ children, tone }: { children: React.ReactNode; tone?: "err" }) 
  *  Refs load when the menu OPENS, not on mount: this component lives for the
  *  panel's whole life, and a branch created in the terminal must appear
  *  without a reload. */
-export function ScopePicker({ taskId, repoDir, branch, allBranches, picked, onChange }: {
+export function ScopePicker({ taskId, repoDir, branch, allBranches, picked, firstParent, onChange }: {
   taskId: string;
   repoDir: string;
   /** Checked-out branch, so the Auto state can say its NAME. "Auto" alone told
@@ -387,7 +400,11 @@ export function ScopePicker({ taskId, repoDir, branch, allBranches, picked, onCh
   branch: string;
   allBranches: boolean;
   picked: string[];
-  onChange: (allBranches: boolean, refs: string[]) => void;
+  /** Follow only first parents: merged side branches collapse into the merge
+   *  that brought them in. Orthogonal to WHICH refs are walked, so it is a
+   *  separate toggle rather than a fourth mutually exclusive scope. */
+  firstParent: boolean;
+  onChange: (allBranches: boolean, refs: string[], firstParent: boolean) => void;
 }) {
   const [refs, setRefs] = useState<GitRef[] | null>(null);
   const [filter, setFilter] = useState("");
@@ -425,7 +442,7 @@ export function ScopePicker({ taskId, repoDir, branch, allBranches, picked, onCh
     // Unchecking the last one lands back on Auto rather than on an empty
     // graph, which is the only state here that shows nothing and explains
     // nothing.
-    onChange(false, next);
+    onChange(false, next, firstParent);
   };
 
   return (
@@ -462,12 +479,25 @@ export function ScopePicker({ taskId, repoDir, branch, allBranches, picked, onCh
         <ScopeRow
           label="All" hint="every ref in this repo" closeOnSelect
           checked={allBranches}
-          onSelect={() => onChange(!allBranches, [])}
+          onSelect={() => onChange(!allBranches, [], firstParent)}
         />
         <ScopeRow
           label="Auto" hint={branch || "detached HEAD"} closeOnSelect
           checked={!allBranches && picked.length === 0}
-          onSelect={() => onChange(false, [])}
+          onSelect={() => onChange(false, [], firstParent)}
+        />
+        <DropdownSeparator />
+        {/* Not a fourth scope: it answers "how much of the topology", where
+            the rows above answer "starting from which refs". A merge brings a
+            whole side branch in as ancestors, so a plain walk of one branch
+            still draws every lane that was ever merged into it, which reads as
+            "why am I seeing other branches when I picked main". Meaningless
+            under All, where seeing every tip is the point. */}
+        <ScopeRow
+          label="First parent only"
+          hint={allBranches ? "not with All" : "merges stay one row"}
+          checked={firstParent && !allBranches}
+          onSelect={() => { if (!allBranches) onChange(allBranches, picked, !firstParent); }}
         />
         {refs === null && (
           <div className="px-2 py-1.5 text-[11.5px] text-[var(--color-fg-faint)]">Reading refs…</div>
@@ -742,7 +772,7 @@ const CommitRow = memo(function CommitRow({
           commit={commit}
           taskId={taskId}
           repoDir={repoDir}
-          indent={gutter}
+          indent={detailIndent(row.lane, lanes)}
           onOpenDiff={onOpenDiff}
         />
       )}
@@ -801,7 +831,7 @@ function CommitDetail({ commit, taskId, repoDir, indent, onOpenDiff }: {
   return (
     <div
       data-testid="history-commit-detail"
-      className="border-b border-[var(--color-border-soft)] bg-[var(--color-bg)] pb-1.5"
+      className="min-w-0 overflow-hidden border-b border-[var(--color-border-soft)] bg-[var(--color-bg)] pb-1.5"
       style={{ paddingLeft: indent }}
     >
       <div className="flex items-center gap-1.5 py-1 pr-2 text-[11px] text-[var(--color-fg-faint)]">
@@ -818,8 +848,10 @@ function CommitDetail({ commit, taskId, repoDir, indent, onOpenDiff }: {
           {copied ? <Check className="h-3 w-3 text-[var(--color-ok)]" /> : <Copy className="h-3 w-3" />}
           {commit.short}
         </button>
-        <span className="min-w-0 truncate" title={commit.email}>{commit.author}</span>
-        <span className="ml-auto shrink-0" title={when.toString()}>{when.toLocaleString()}</span>
+        <span className="min-w-0 flex-1 truncate" title={commit.email}>{commit.author}</span>
+        <span className="min-w-0 shrink truncate text-right" title={when.toString()}>
+          {when.toLocaleDateString()}
+        </span>
       </div>
 
       {err && <div className="px-1 py-1 text-[11px] text-[var(--color-err)]">{err}</div>}
@@ -851,7 +883,7 @@ function CommitDetail({ commit, taskId, repoDir, indent, onOpenDiff }: {
             {f.path.split("/").pop()}
           </span>
           {f.path.includes("/") && (
-            <span className="max-w-[45%] shrink-0 truncate text-[10.5px] text-[var(--color-fg-faint)]">
+            <span className="min-w-0 max-w-[45%] shrink truncate text-[10.5px] text-[var(--color-fg-faint)]">
               {f.path.slice(0, f.path.lastIndexOf("/"))}
             </span>
           )}

@@ -447,7 +447,11 @@ export const taskGitStatus = (id: string) => invoke<GitStatus>("task_git_status"
 export const taskGitLog = (
   id: string, dirName: string, skip: number, limit: number, allBranches: boolean,
   refs: string[] = [],
-) => invoke<GitLogPage>("task_git_log", { id, dirName, skip, limit, allBranches, refs });
+  /** Follow only the first parent of each merge, so a merged side branch
+   *  collapses into the merge that brought it in ("what landed here, in
+   *  order") instead of opening a lane. Ignored under allBranches. */
+  firstParent = false,
+) => invoke<GitLogPage>("task_git_log", { id, dirName, skip, limit, allBranches, refs, firstParent });
 /** Every ref the scope picker may offer: local branches, remote-tracking
  *  branches and tags, freshest first. */
 export const taskGitRefs = (id: string, dirName: string) =>

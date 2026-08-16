@@ -62,14 +62,27 @@ const LS_RATIO  = "gitSplitRatio";
 const LS_PUSH   = "gitPushDefault";
 const LS_UCOL   = "gitUnstagedCollapsed";
 const LS_SCOL   = "gitStagedCollapsed";
-/** Graph section: collapsed by default (the working tree is why you opened
- *  this tab), and its own share of the body once expanded. */
-const LS_GCOL   = "gitGraphCollapsed";
-/** Changes (the working tree) vs Compare (this branch against a ref, GH #208).
- *  Persisted: someone reviewing a feature flips to Compare and stays there for
- *  the length of the review, across task switches and relaunches. */
-const LS_MODE   = "gitPanelMode";
-const LS_GRATIO = "gitGraphRatio";
+/** Which of the three views the Git tab is on. Persisted: someone reviewing a
+ *  feature sits in Compare or History for the length of the review, across
+ *  task switches and relaunches. */
+const LS_VIEWTAB = "gitPanelView";
+
+/** The three questions this tab answers, as one control. Commit is the only
+ *  one you ACT in (stage, discard, commit, push); the other two are read-only
+ *  views of what the branch has already done. */
+export type GitView = "commit" | "compare" | "history";
+const GIT_VIEWS: { id: GitView; label: string; title: string }[] = [
+  { id: "commit",  label: "Commit",  title: "What you can stage right now" },
+  { id: "compare", label: "Compare", title: "Everything this branch differs by against another ref, committed or not" },
+  { id: "history", label: "History", title: "The commit graph for this repo" },
+];
+function readGitView(): GitView {
+  try {
+    const v = localStorage.getItem(LS_VIEWTAB);
+    if (v === "compare" || v === "history") return v;
+  } catch {}
+  return "commit";
+}
 
 /** Every button on the commit footer, so Push and Commit cannot drift apart.
  *  `box-border` and `leading-none` are the load-bearing half: Push carries a
@@ -139,21 +152,14 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
   // reset by the task-switch effect below.
   const [unstagedCollapsed, setUnstagedCollapsed] = useState<boolean>(() => readBool(LS_UCOL));
   const [stagedCollapsed, setStagedCollapsed] = useState<boolean>(() => readBool(LS_SCOL));
-  // Graph starts collapsed: this tab is opened to stage and commit, and the
-  // graph costs a `git log` per repo. One line of chrome until asked for.
-  const [graphCollapsed, setGraphCollapsed] = useState<boolean>(() => {
-    try { return localStorage.getItem(LS_GCOL) !== "0"; } catch { return true; }
-  });
-  const [graphRatio, setGraphRatio] = useState<number>(() => readRatio(LS_GRATIO, 0.5));
-  const [mode, setMode] = useState<"changes" | "compare">(() => {
-    try { return localStorage.getItem(LS_MODE) === "compare" ? "compare" : "changes"; } catch { return "changes"; }
-  });
-  const changeMode = (m: "changes" | "compare") => { setMode(m); persist(LS_MODE, m); };
-  // Graph scope lives here, not in HistoryPanel: the picker rides the Graph
-  // header (this component's markup), so this is where the value it edits has
-  // to sit. Reset per repo, since refs belong to one.
+  const [view, setView] = useState<GitView>(() => readGitView());
+  const changeView = (v: GitView) => { setView(v); persist(LS_VIEWTAB, v); };
+  // History's scope lives here, not in HistoryPanel: the picker rides this
+  // component's sub-tab row, so this is where the value it edits has to sit.
+  // Reset per repo, since refs belong to one.
   const [graphAll, setGraphAll] = useState(false);
   const [graphRefs, setGraphRefs] = useState<string[]>([]);
+  const [graphFirstParent, setGraphFirstParent] = useState(false);
   // Collapsed tree folders, keyed `${pane}\0${dirPath}`.
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   // Selected row, keyed `${pane}\0${path}` (a file can sit in both panes
@@ -202,14 +208,13 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
   // Refs belong to one repo, so a repo (or task) switch drops the graph's
   // scope back to Auto. Carrying it would ask for branches the new repo does
   // not have, which the backend answers with an empty graph.
-  useEffect(() => { setGraphAll(false); setGraphRefs([]); }, [activeRepoDir, task.id]);
+  useEffect(() => { setGraphAll(false); setGraphRefs([]); setGraphFirstParent(false); }, [activeRepoDir, task.id]);
 
   const persist = (key: string, val: string) => { try { localStorage.setItem(key, val); } catch {} };
-  const changeView = (v: ViewMode) => { setViewMode(v); persist(LS_VIEW, v); };
+  const changeViewMode = (v: ViewMode) => { setViewMode(v); persist(LS_VIEW, v); };
   const toggleHide = () => setHideUntracked(h => { const n = !h; persist(LS_HIDE, n ? "1" : "0"); return n; });
   const toggleUnstagedCollapsed = () => setUnstagedCollapsed(c => { const n = !c; persist(LS_UCOL, n ? "1" : "0"); return n; });
   const toggleStagedCollapsed   = () => setStagedCollapsed(c => { const n = !c; persist(LS_SCOL, n ? "1" : "0"); return n; });
-  const toggleGraphCollapsed    = () => setGraphCollapsed(c => { const n = !c; persist(LS_GCOL, n ? "1" : "0"); return n; });
 
   const repo: GitRepo | undefined = repos.find(r => r.dir_name === activeRepoDir) ?? repos[0];
   // Every group is diffable: the backend's resolve_task_git_path runs
@@ -405,18 +410,6 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
     setRatio(r => Math.min(0.9, Math.max(0.1, r + dy / h)));
   };
 
-  // Same accumulate-from-live-value rule as the staged/unstaged divider, for
-  // the one between the working tree and the graph. Measured against the whole
-  // body, since that is what the two of them share.
-  const graphRatioRef = useRef(graphRatio);
-  graphRatioRef.current = graphRatio;
-  const onGraphDrag = (dy: number) => {
-    const h = bodyRef.current?.clientHeight ?? 0;
-    if (h <= 0) return;
-    // Dragging DOWN (dy > 0) grows the file lists and shrinks the graph.
-    setGraphRatio(r => Math.min(0.9, Math.max(0.1, r - dy / h)));
-  };
-
   // Keyboard shortcuts for the selected file:
   //   ⌘S / Ctrl+S        → stage (if unstaged) / unstage (if staged)
   //   ⇧⌘D / Ctrl+Shift+D → discard changes (confirm first)
@@ -512,9 +505,9 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
 
   return (
     <div className="flex h-full flex-col">
-      {/* 0. Current branch + switcher (fork-style: stash, checkout, re-apply) */}
-      {!nonGit && <BranchBar task={task} branch={repo?.branch ?? task.branch} dir={dir} />}
-      {/* 1. Repo sub-tabs (wrapping pills) */}
+      {/* 0. Repo sub-tabs (wrapping pills). OUTERMOST of the three controls
+          here: which repo you are looking at is what the branch bar and all
+          three sub-tabs below are ABOUT, so it cannot sit inside them. */}
       {showSubTabs && (
         <div className="flex shrink-0 flex-wrap gap-1 border-b border-[var(--color-border-soft)] px-2 py-1.5">
           {visibleRepos.map(r => (
@@ -556,82 +549,98 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
         </div>
       )}
 
-      {/* 2. Toolbar: mode switch + search + view-mode menu. The filter and the
-          view mode are shared by both modes deliberately, so flipping between
-          them keeps what you typed and where a folder sits. */}
+      {/* 1. Current branch + switcher (fork-style: stash, checkout, re-apply),
+          for the repo selected above. */}
+      {!nonGit && <BranchBar task={task} branch={repo?.branch ?? task.branch} dir={dir} />}
+
+      {/* 2. Sub-tabs, plus whatever chrome the active one needs on the SAME
+          row. Two rows of tabs would be a lot for a panel that drags down to
+          220px, and the file filter is meaningless in History, so History
+          hands that half of the row to the ref picker instead. */}
       <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-[var(--color-border-soft)] px-2">
-        {!nonGit && (
-          <div className="flex shrink-0 items-stretch rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-[2px]">
-            {(["changes", "compare"] as const).map(m => (
-              <button
-                key={m}
-                type="button"
-                data-testid={`git-mode-${m}`}
-                data-active={mode === m ? "true" : "false"}
-                onClick={() => changeMode(m)}
-                title={m === "changes"
-                  ? "What you can stage right now"
-                  : "Everything this branch differs by, committed and not"}
-                className={cn(
-                  "flex h-[18px] items-center rounded-[4px] px-1.5 text-[11px] leading-none transition-colors",
-                  mode === m
-                    ? "bg-[var(--color-bg-3)] text-[var(--color-fg)]"
-                    : "text-[var(--color-fg-dim)] hover:text-[var(--color-fg)]",
-                )}
-              >
-                {m === "changes" ? "Changes" : "Compare"}
-              </button>
-            ))}
-          </div>
-        )}
-        <div className="relative flex flex-1 items-center">
-          <Search className="pointer-events-none absolute left-2 h-3.5 w-3.5 text-[var(--color-fg-faint)]" />
-          <input
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Filter files"
-            spellCheck={false} autoCorrect="off" autoCapitalize="off" autoComplete="off"
-            className="h-6 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] pl-7 pr-2 text-[12px] text-[var(--color-fg)] outline-none placeholder:text-[var(--color-fg-faint)] focus:border-[var(--color-accent)]"
-          />
-        </div>
-        <DropdownRoot>
-          <DropdownTrigger asChild>
+        <div className="flex shrink-0 items-stretch gap-0.5">
+          {GIT_VIEWS.map(v => (
             <button
-              title="View options"
-              className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]"
+              key={v.id}
+              type="button"
+              data-testid={`git-view-${v.id}`}
+              data-active={view === v.id ? "true" : "false"}
+              onClick={() => changeView(v.id)}
+              title={v.title}
+              className={cn(
+                "flex h-6 items-center rounded-md px-1.5 text-[11.5px] leading-none transition-colors",
+                view === v.id
+                  ? "bg-[var(--color-bg-3)] text-[var(--color-fg)]"
+                  : "text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
+              )}
             >
-              {viewMode === "tree" ? <ListTree className="h-4 w-4" /> : viewMode === "combined" ? <Rows3 className="h-4 w-4" /> : <List className="h-4 w-4" />}
+              {v.label}
             </button>
-          </DropdownTrigger>
-          <DropdownMenu align="end">
-            <ViewItem label="View as Tree"          active={viewMode === "tree"}     onSelect={() => changeView("tree")} />
-            <ViewItem label="View as Combined List" active={viewMode === "combined"} onSelect={() => changeView("combined")} />
-            <ViewItem label="View as List"          active={viewMode === "list"}     onSelect={() => changeView("list")} />
-            <DropdownSeparator />
-            <ViewItem label="Hide untracked files" active={hideUntracked} onSelect={toggleHide} />
-          </DropdownMenu>
-        </DropdownRoot>
+          ))}
+        </div>
+        {view === "history" ? (
+          <div className="ml-auto flex min-w-0 items-center text-[11.5px]">
+            <ScopePicker
+              taskId={task.id}
+              repoDir={dir}
+              branch={repo?.branch ?? task.branch}
+              allBranches={graphAll}
+              picked={graphRefs}
+              firstParent={graphFirstParent}
+              onChange={(all, refs, fp) => { setGraphAll(all); setGraphRefs(refs); setGraphFirstParent(fp); }}
+            />
+          </div>
+        ) : (<>
+          <div className="relative flex min-w-0 flex-1 items-center">
+            <Search className="pointer-events-none absolute left-2 h-3.5 w-3.5 text-[var(--color-fg-faint)]" />
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Filter files"
+              spellCheck={false} autoCorrect="off" autoCapitalize="off" autoComplete="off"
+              className="h-6 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] pl-7 pr-2 text-[12px] text-[var(--color-fg)] outline-none placeholder:text-[var(--color-fg-faint)] focus:border-[var(--color-accent)]"
+            />
+          </div>
+          <DropdownRoot>
+            <DropdownTrigger asChild>
+              <button
+                title="View options"
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]"
+              >
+                {viewMode === "tree" ? <ListTree className="h-4 w-4" /> : viewMode === "combined" ? <Rows3 className="h-4 w-4" /> : <List className="h-4 w-4" />}
+              </button>
+            </DropdownTrigger>
+            <DropdownMenu align="end">
+              <ViewItem label="View as Tree"          active={viewMode === "tree"}     onSelect={() => changeViewMode("tree")} />
+              <ViewItem label="View as Combined List" active={viewMode === "combined"} onSelect={() => changeViewMode("combined")} />
+              <ViewItem label="View as List"          active={viewMode === "list"}     onSelect={() => changeViewMode("list")} />
+              <DropdownSeparator />
+              <ViewItem label="Hide untracked files" active={hideUntracked} onSelect={toggleHide} />
+            </DropdownMenu>
+          </DropdownRoot>
+        </>)}
       </div>
 
-      {/* 3-5. The upper half (Changes: Unstaged / handle / Staged, or Compare:
-          one list against a ref), then the Graph section under it. The two
-          split the body: expanded, the graph takes `graphRatio` and the upper
-          half the rest, both sides resizable by the divider between them.
-          Compare occupies the same slot rather than adding a third section:
-          it answers the same question as the staging panes, over a wider
-          window, so showing both at once would be two views of one thing. */}
+      {/* 3-5. The body: whichever view is active, at full height. The graph
+          used to live in a collapsible section under the file lists, sharing
+          the body by a draggable ratio. It is the one view here that wants
+          vertical space and it was getting whatever two file lists left over,
+          so it is a sub-tab now and the collapse flag, the ratio, the divider
+          and their two localStorage keys are gone with it. */}
       <div ref={bodyRef} className="relative flex min-h-0 flex-1 flex-col">
-      <div
-        className="relative flex min-h-0 flex-col"
-        style={graphCollapsed
-          ? { flex: "1 1 0%", minHeight: 0 }
-          : { flexBasis: `${(1 - graphRatio) * 100}%`, flexGrow: 0, flexShrink: 1, minHeight: 0 }}
-      >
-        {clean && mode === "changes" ? (
+        {clean && view === "commit" ? (
           <div className="px-3 py-3 text-[13.5px] text-[var(--color-fg-faint)]">
             No changes. Working tree is clean.
           </div>
-        ) : mode === "compare" ? (
+        ) : view === "history" ? (
+          <HistoryPanel
+            task={task}
+            repoDir={dir}
+            scope={{ allBranches: graphAll, refs: graphRefs, firstParent: graphFirstParent }}
+            reloadToken={reloadToken}
+            onOpenDiff={(path, sha, title) => onOpenCommitDiff?.(path, sha, title)}
+          />
+        ) : view === "compare" ? (
           <ComparePanel
             task={task}
             repoDir={dir}
@@ -678,70 +687,10 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
         </>)}
       </div>
 
-      {/* Divider between the working tree and the graph. Only draggable while
-          the graph is open; collapsed, its header is the whole section. */}
-      <div className="relative h-px shrink-0 bg-[var(--color-border-soft)]">
-        {!graphCollapsed && (
-          <ResizeHandle direction="y" className="top-0" onDrag={onGraphDrag} onEnd={() => persist(LS_GRATIO, String(graphRatioRef.current))} />
-        )}
-      </div>
-
-      <div
-        className={cn("flex min-h-0 flex-col", graphCollapsed && "shrink-0")}
-        style={graphCollapsed ? undefined : { flexBasis: `${graphRatio * 100}%`, flexGrow: 0, flexShrink: 1, minHeight: 0 }}
-        data-testid="git-graph-section"
-        data-collapsed={graphCollapsed ? "true" : "false"}
-      >
-        {/* Header row: the disclosure, and the scope picker beside it once
-            open. The picker had its own row inside the panel, under a branch
-            chip repeating what the BranchBar at the top of this tab already
-            says; that was two rows spent on one control. Collapsed, there is
-            no graph to scope, so it is not drawn. */}
-        <div className="flex h-[26px] w-full shrink-0 items-center gap-1 pr-1.5">
-          <button
-            data-testid="git-graph-toggle"
-            onClick={toggleGraphCollapsed}
-            aria-expanded={!graphCollapsed}
-            className="flex h-full min-w-0 flex-1 items-center gap-1 px-2 text-left text-[11px] font-semibold tracking-wide text-[var(--color-fg-dim)] uppercase hover:bg-[var(--color-hover)]"
-          >
-            {graphCollapsed
-              ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />
-              : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />}
-            Graph
-          </button>
-          {!graphCollapsed && (
-            <div className="text-[11.5px]">
-              <ScopePicker
-                taskId={task.id}
-                repoDir={dir}
-                branch={repo?.branch ?? task.branch ?? ""}
-                allBranches={graphAll}
-                picked={graphRefs}
-                onChange={(all, refs) => { setGraphAll(all); setGraphRefs(refs); }}
-              />
-            </div>
-          )}
-        </div>
-        {/* Unmounted while collapsed, not hidden: mounted it holds a git log
-            per repo and re-reads on every refresh tick. */}
-        {!graphCollapsed && (
-          <div className="min-h-0 flex-1">
-            <HistoryPanel
-              task={task}
-              repoDir={dir}
-              scope={{ allBranches: graphAll, refs: graphRefs }}
-              reloadToken={reloadToken}
-              onOpenDiff={(path, sha, title) => onOpenCommitDiff?.(path, sha, title)}
-            />
-          </div>
-        )}
-      </div>
-      </div>
-
       {/* 6. Commit form. Changes only: the compare list holds committed work
           too, so a "Commit N files" button under it would be counting a
           staging area that is not on screen. */}
-      {mode === "changes" && !clean && (
+      {view === "commit" && !clean && (
       <div className="flex shrink-0 flex-col gap-1.5 border-t border-[var(--color-border-soft)] p-2">
         <input
           value={subject}

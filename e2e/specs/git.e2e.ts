@@ -228,18 +228,18 @@ describe("git history tab", () => {
       el.click();
     }, label);
 
-  /** Open Commit, then expand its Graph section. The graph used to be its own
-   *  tab (GH #199); it lives at the foot of Commit now (GH #208) and starts
-   *  collapsed, so reaching it is two clicks, not one. */
+  /** Open the Git tab's History sub-tab. The graph was its own top-level tab
+   *  (GH #199), then a collapsible section at the foot of the staging view;
+   *  it is one of three sub-tabs now (Commit / Compare / History), full
+   *  height, so reaching it is the tab plus one sub-tab click. */
   const openGraph = async () => {
     await openRightTab("Git");
     await browser.execute(() => {
-      const sec = document.querySelector('[data-testid="git-graph-section"]');
-      if (sec?.getAttribute("data-collapsed") === "false") return;
-      const btn = document.querySelector('[data-testid="git-graph-toggle"]') as HTMLElement | null;
-      if (!btn) throw new Error("no Graph toggle in the Commit tab");
+      const btn = document.querySelector('[data-testid="git-view-history"]') as HTMLElement | null;
+      if (!btn) throw new Error("the Git tab has no History sub-tab");
       btn.click();
     });
+    await waitVisible('[data-testid="history-panel"]');
   };
 
   /** Subjects of the commit rows currently rendered, newest first. */
@@ -417,6 +417,30 @@ describe("git history tab", () => {
     await browser.keys(["Escape"]);
   });
 
+  it("collapses merged branches with First parent only", async () => {
+    // The confusion it answers: picking one branch still drew a lane per
+    // merged branch, because those commits ARE its ancestors. This is not a
+    // fourth scope, it is how much of the topology to walk, so it stacks on
+    // whatever scope is active and the menu stays open.
+    await openGraph();
+    const before = (await commitSubjects()).length;
+    await openMenu();
+    await pick("First parent only");
+    await browser.waitUntil(
+      async () => (await commitSubjects()).length > 0,
+      { timeout: 10_000, timeoutMsg: "the first-parent view came back empty" },
+    );
+    // The fixture may have no merges, in which case the two walks agree; what
+    // must never happen is the option emptying the graph or growing it.
+    expect((await commitSubjects()).length).toBeLessThanOrEqual(before);
+    await pick("First parent only");
+    await browser.waitUntil(
+      async () => (await commitSubjects()).length === before,
+      { timeout: 10_000, timeoutMsg: "turning first-parent off did not restore the walk" },
+    );
+    await browser.keys(["Escape"]);
+  });
+
   it("indents a commit's subject to its own lane", async () => {
     await openGraph();
     // The graph reads as VS Code's does: a row's text starts just past ITS
@@ -462,8 +486,8 @@ describe("git compare mode", () => {
     execSync(`git -C "${fixture}" branch -f ${baseBranch} ${headSha}`);
   });
   after(async () => {
-    // The Git tab's mode is persisted, so leaving it on Compare would hand the
-    // next spec a panel with no staging panes in it.
+    // The Git tab's sub-tab is persisted, so leaving it on Compare would hand
+    // the next spec a panel with no staging panes in it.
     await openChanges().catch(() => {});
     if (taskId) await archiveTask(taskId);
     // This spec COMMITS to the shared fixture checkout, so it has to put the
@@ -476,8 +500,8 @@ describe("git compare mode", () => {
     } catch { /* never created */ }
   });
 
-  /** Compare is a MODE of the Git tab, not a tab of its own, so getting to it
-   *  is the Git tab plus the Changes / Compare switch on its toolbar. */
+  /** Compare is one of the Git tab's three sub-tabs (Commit / Compare /
+   *  History), so getting to it is the Git tab plus one sub-tab click. */
   const openRightTab = (label: "All files" | "Git") =>
     browser.execute((l) => {
       const el = document.querySelector(
@@ -491,7 +515,7 @@ describe("git compare mode", () => {
     await openRightTab("Git");
     await browser.execute(() => {
       const el = document.querySelector(
-        '[data-testid="git-mode-compare"]',
+        '[data-testid="git-view-compare"]',
       ) as HTMLElement | null;
       if (!el) throw new Error("the Git tab has no Compare mode switch");
       el.click();
@@ -500,10 +524,10 @@ describe("git compare mode", () => {
   };
 
   /** Back to the staging view, so a later spec does not inherit Compare (the
-   *  mode is persisted on purpose: a review outlives one task switch). */
+   *  sub-tab is persisted on purpose: a review outlives one task switch). */
   const openChanges = async () => {
     await browser.execute(() => {
-      (document.querySelector('[data-testid="git-mode-changes"]') as HTMLElement | null)?.click();
+      (document.querySelector('[data-testid="git-view-commit"]') as HTMLElement | null)?.click();
     });
   };
 
@@ -707,12 +731,12 @@ describe("git compare mode", () => {
     expect(chip).toBe(false);
   });
 
-  it("flips to Changes and back without losing the chosen base", async () => {
+  it("flips to Commit and back without losing the chosen base", async () => {
     await openChanges();
     await browser.waitUntil(
       async () => browser.execute(() =>
         document.querySelector('[data-testid="compare-panel"]') === null),
-      { timeout: 5_000, timeoutMsg: "Compare stayed mounted after switching to Changes" },
+      { timeout: 5_000, timeoutMsg: "Compare stayed mounted after switching to Commit" },
     );
 
     // Back to Compare: the mode switch UNMOUNTS this panel, so a deliberately

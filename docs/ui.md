@@ -78,21 +78,40 @@ The webview stays ALIVE while windowless — it owns PTY lifetime and every work
 
 ## Right-panel tabs (All files / Git)
 
-**Git** is one surface with three parts: the working tree at the top (Fork-style staging), a **Changes / Compare** switch on its toolbar, and at its foot a collapsible **Graph** section holding what has already been committed (issue #199). Changes answers "what can I stage right now". Compare answers "what does all of it add up to next to another branch" (issue #208): one list of every path that differs between a chosen ref and the working tree, committed and uncommitted alike, because an agent that split a feature over six commits leaves nothing in the staging view to read.
+**Git** is one tab with three sub-tabs, because they are three questions about
+one repo rather than three places:
 
-The graph was its own third tab when it landed, and the staging tab was renamed "Commit" then because two git surfaces made "Git" ambiguous. Folding them back together (GH #208) makes "Git" right again. The graph moved inside it because the two answer halves of one question, "what is in this branch", and a tab switch made it impossible to read a commit and its uncommitted follow-up at the same time. It starts collapsed (one header row): this tab is opened to stage and commit, and an expanded graph costs a `git log` per repo. Expanded, it takes half the body and the two file lists share the rest, with a drag handle between them; the split and the collapse both persist (`gitGraphCollapsed`, `gitGraphRatio`).
+- **Commit** — what you can stage right now (Fork-style staging, the only one
+  of the three you ACT in: stage, discard, commit, push).
+- **Compare** — what this branch adds up to next to another ref (issue #208):
+  one list of every path that differs between a chosen ref and the working
+  tree, committed and uncommitted alike, because an agent that split a feature
+  over six commits leaves nothing in the staging view to read.
+- **History** — the commit graph (issue #199), full height.
 
-The graph follows the Git tab's repo pills rather than drawing its own, so a multi-repo task cannot end up with two repo selectors disagreeing. Its scope picker rides the Graph header rather than a row of its own: the branch is already on the BranchBar at the top of the tab, so a second chip repeating it spent a row saying nothing new. The picker's label is what is being SHOWN (the branch name under Auto, "All", or the picked ref / count), not the name of a mode.
+Order of the chrome above them, outermost first: repo pills (multi-repo tasks),
+then the branch bar, then the sub-tabs. Which repo you are looking at is what
+the branch and all three sub-tabs are ABOUT, so it cannot sit inside them.
 
-The graph is modelled on VS Code's Source Control Graph: one dense row per commit — lane gutter, ref chips, subject, age — clicking a row expands it into the files that commit touched, and clicking a file opens a diff of THAT revision (`scope: "commit:<sha>"`, both sides read out of the object store). Lane maths is a pure function in [`lib/gitGraph.ts`](../src/lib/gitGraph.ts) (unit-tested; the panel only renders what it returns), lane colours come from the `--color-palette-*` tokens so every theme recolours the graph for free, and the gutter is clipped at 6 lanes because a 220px panel cannot spend its width on a wide graph. A row's subject is indented to its OWN lane (`textIndent`, clamped the same way the dot is), so a branch's rows read as one indented run instead of a column of text detached from the lines beside it.
+The sub-tabs share their row with whatever the active one needs: Commit and
+Compare put the file filter and the view-mode menu on the right of it (shared
+deliberately, so switching keeps what you typed and where a folder sits),
+History puts the ref picker there instead, a filter over files being
+meaningless in a list of commits. Two rows of tabs would be a lot for a panel
+that drags down to 220px.
 
-**Scope** is a ref picker, not a toggle: All, Auto (the checked-out branch alone, the default, labelled with that branch's name), then the repo's branches, remote branches and tags, each with the sha it points at, multi-select and filterable. It replaced a single button reading "This branch", which was both a state and an invitation to click with no way to tell which, and which could not express "these two branches together" at all. Picked refs are allowlisted against the repo's real refs before they reach a `git log` argv (see [ipc.md](ipc.md)).
+History's picker has two independent axes. WHICH refs to walk (Auto = the
+checked-out branch, All = every ref, or any number of named ones) and HOW MUCH
+of the topology: **First parent only** collapses a merged side branch into the
+merge commit that brought it in. Without it, picking one branch still draws a
+lane per merged branch, because those commits genuinely are its ancestors,
+which reads as "why am I seeing other branches when I picked main".
 
-Two things the graph deliberately does NOT do: it shows no review affordances on a historical diff (both "Mark as viewed" and review comments address the file an agent is about to edit, and neither side of a commit diff is that file), and it hides the unpushed markers entirely when the branch has no upstream, where "not pushed" would be true of every commit and mean nothing. An unpushed commit is marked with a small filled dot before its subject, the way Fork does it: at this row height an arrow glyph read as a clickable control, and a column of them read as a toolbar.
-
-Compare exists because neither of the other two could answer the question an agent's work actually raises: split a feature across six commits and the Commit tab goes empty while History shows six rows nobody wants to read one at a time. It is one flat list of every path differing between a chosen ref and the working tree — committed, staged, unstaged and untracked together — because "how does this branch read next to that one" does not care which of those a change happens to be in. It is a GENERIC ref-to-ref compare, not a PR view: any local or remote-tracking ref can be the base, and the task's own `base_branch` is only what the picker opens on.
-
-Three deliberate choices there. The comparison runs from the **merge base** by default (`base → branch` in the bar, a "direct" chip when that is switched off), because a two-dot diff renders every commit the base gained since the branch point as a deletion the task never made — the most confusing thing a compare view can do. The rows are the Commit tab's rows minus the stage arrow and plus a churn column, sharing its stored view mode via `flattenRows`, so moving between the two tabs never asks you to relearn a row; folders carry no stage/discard action, since half of what the list shows is already committed and a control applying to only the other half would be a trap. And unlike History it KEEPS the review affordances (viewed marks, inline comments): the right side of a `base:<sha>` diff is the live file, so a fingerprint is real and a comment lands on the version about to be edited. There is no changed-file badge on the tab, and that is a perf choice — a badge would mean running the comparison on every status poll for every task, including the tabs nobody has open.
+The graph used to be a collapsible section at the foot of the staging view,
+sharing the body by a draggable ratio. It is the one view here that wants
+vertical space and was getting whatever two file lists left over, so it became
+a sub-tab and the collapse flag, the ratio, the divider and their localStorage
+keys went with it.
 
 ## Right-panel footer (Setup / Run / Terminal)
 
