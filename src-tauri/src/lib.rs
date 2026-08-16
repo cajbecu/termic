@@ -6886,6 +6886,7 @@ fn git_log_page(
     limit: usize,
     all_branches: bool,
     first_parent: bool,
+    grep: &str,
     refs: &[String],
 ) -> GitLogPage {
     // Bounded: a page is a screenful-ish, and an unbounded limit from a buggy
@@ -6932,6 +6933,22 @@ fn git_log_page(
     if first_parent && !all_branches {
         args.push("--first-parent");
     }
+    // Message search, done by git rather than by filtering the page already on
+    // screen: "does this branch have a commit about X" is a question about the
+    // history, and answering it from the loaded rows would make it a question
+    // about how far the user had scrolled.
+    //
+    // FIXED-STRINGS, not a regex: this is a filter box, so `[` or `*` in it is
+    // a character someone typed, not a pattern, and a half-typed regex must
+    // not turn into an error toast mid-keystroke. The query cannot reach argv
+    // as a flag either, being glued to `--grep=` in one element.
+    let grep_arg;
+    if !grep.trim().is_empty() {
+        grep_arg = format!("--grep={}", grep.trim());
+        args.push("--regexp-ignore-case");
+        args.push("--fixed-strings");
+        args.push(&grep_arg);
+    }
     // Allowlisted before it can reach argv, and appended last so a ref can
     // never be read as one of the flags above.
     let picked = if all_branches { Vec::new() } else { allowed_refs(cwd, refs) };
@@ -6970,6 +6987,7 @@ async fn task_git_log(
     limit: usize,
     all_branches: bool,
     first_parent: Option<bool>,
+    grep: Option<String>,
     refs: Option<Vec<String>>,
 ) -> Result<GitLogPage, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<GitLogPage, String> {
@@ -6978,6 +6996,7 @@ async fn task_git_log(
         Ok(git_log_page(
             &cwd, skip, limit, all_branches,
             first_parent.unwrap_or(false),
+            grep.as_deref().unwrap_or(""),
             &refs.unwrap_or_default(),
         ))
     })
@@ -14476,7 +14495,7 @@ mod tests {
         git_run(&repo, &["checkout", "-q", &main]);
         git_run(&repo, &["merge", "--no-ff", "-m", "merge topic", "topic"]);
 
-        let page = git_log_page(&repo, 0, 50, false, false, &[]);
+        let page = git_log_page(&repo, 0, 50, false, false, "", &[]);
         assert_eq!(page.branch, main);
         assert!(page.upstream.is_empty(), "a local-only repo has no upstream");
         let subjects: Vec<&str> = page.commits.iter().map(|c| c.subject.as_str()).collect();
@@ -14489,6 +14508,58 @@ mod tests {
         assert!(page.commits.iter().all(|c| !c.unpushed));
     }
 
+
+    #[test]
+    fn grep_searches_the_whole_history_not_the_first_page() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_init_with_commit(&repo);
+        git_set_identity(&repo);
+        git_commit_file(&repo, "needle.txt", "x\n", "Fix the LOGIN bug");
+        for i in 0..12 {
+            git_commit_file(&repo, &format!("f{i}.txt"), "y\n", &format!("filler {i}"));
+        }
+        // A page this small would not reach the match by paging.
+        let page = git_log_page(&repo, 0, 3, false, false, "login", &[]);
+        let subjects: Vec<String> = page.commits.iter().map(|c| c.subject.clone()).collect();
+        assert_eq!(subjects, vec!["Fix the LOGIN bug".to_string()], "case-insensitive, from anywhere in the history");
+        assert!(!page.has_more);
+    }
+
+    #[test]
+    fn grep_is_a_literal_string_not_a_regex() {
+        // The filter box is a filter box: a bracket in it is a character
+        // someone typed, and a half-typed regex must not become an error.
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_init_with_commit(&repo);
+        git_set_identity(&repo);
+        git_commit_file(&repo, "a.txt", "a\n", "fix(git): a [bracketed] subject");
+        git_commit_file(&repo, "b.txt", "b\n", "unrelated");
+
+        let hit = git_log_page(&repo, 0, 50, false, false, "[bracketed]", &[]);
+        assert_eq!(hit.commits.len(), 1);
+        // An unbalanced bracket is a query with no matches, never a crash.
+        let none = git_log_page(&repo, 0, 50, false, false, "[unclosed", &[]);
+        assert!(none.commits.is_empty());
+    }
+
+    #[test]
+    fn grep_matches_the_body_too_and_stacks_with_a_scope() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_init_with_commit(&repo);
+        git_set_identity(&repo);
+        std::fs::write(repo.join("c.txt"), "c\n").unwrap();
+        git_run(&repo, &["add", "-A"]);
+        git_run(&repo, &["commit", "-q", "-m", "terse subject", "-m", "the reason lives in the BODY"]);
+
+        assert_eq!(git_log_page(&repo, 0, 50, false, false, "body", &[]).commits.len(), 1);
+        // Search narrows a scope, it does not replace it: an empty ref list is
+        // still HEAD, and --all is still every ref.
+        assert_eq!(git_log_page(&repo, 0, 50, true, false, "body", &[]).commits.len(), 1);
+        assert!(git_log_page(&repo, 0, 50, false, false, "nothing matches this", &[]).commits.is_empty());
+    }
 
     #[test]
     fn first_parent_collapses_a_merged_branch_into_its_merge() {
@@ -14506,11 +14577,11 @@ mod tests {
         git_run(&repo, &["checkout", "-q", &main]);
         git_run(&repo, &["merge", "--no-ff", "-m", "merge topic", "topic"]);
 
-        let full = git_log_page(&repo, 0, 50, false, false, &[]);
+        let full = git_log_page(&repo, 0, 50, false, false, "", &[]);
         let subjects = |p: &GitLogPage| p.commits.iter().map(|c| c.subject.clone()).collect::<Vec<_>>();
         assert!(subjects(&full).contains(&"only on topic".to_string()));
 
-        let fp = git_log_page(&repo, 0, 50, false, true, &[]);
+        let fp = git_log_page(&repo, 0, 50, false, true, "", &[]);
         assert!(subjects(&fp).contains(&"merge topic".to_string()), "the merge itself must stay");
         assert!(
             !subjects(&fp).contains(&"only on topic".to_string()),
@@ -14532,7 +14603,7 @@ mod tests {
         git_commit_file(&repo, "t.txt", "t\n", "only on topic");
         git_run(&repo, &["checkout", "-q", &main]);
 
-        let all = git_log_page(&repo, 0, 50, true, true, &[]);
+        let all = git_log_page(&repo, 0, 50, true, true, "", &[]);
         assert!(all.commits.iter().any(|c| c.subject == "only on topic"));
     }
 
@@ -14545,14 +14616,14 @@ mod tests {
         for i in 0..5 {
             git_commit_file(&repo, &format!("f{i}.txt"), "x\n", &format!("commit {i}"));
         }
-        let first = git_log_page(&repo, 0, 2, false, false, &[]);
+        let first = git_log_page(&repo, 0, 2, false, false, "", &[]);
         assert_eq!(first.commits.len(), 2, "a page must not leak the lookahead row");
         assert!(first.has_more);
-        let second = git_log_page(&repo, 2, 2, false, false, &[]);
+        let second = git_log_page(&repo, 2, 2, false, false, "", &[]);
         assert_eq!(second.commits.len(), 2);
         assert_ne!(first.commits[0].sha, second.commits[0].sha, "skip must advance the page");
         // The tail page knows it is the tail.
-        let tail = git_log_page(&repo, 0, 500, false, false, &[]);
+        let tail = git_log_page(&repo, 0, 500, false, false, "", &[]);
         assert!(!tail.has_more);
     }
 
@@ -14673,24 +14744,24 @@ mod tests {
         };
 
         // Default: HEAD only. The unmerged side commit is not this branch's.
-        let head = git_log_page(&repo, 0, 50, false, false, &[]);
+        let head = git_log_page(&repo, 0, 50, false, false, "", &[]);
         assert!(subjects(&head).contains(&"on main".to_string()));
         assert!(!subjects(&head).contains(&"only on side".to_string()));
 
         // --all wins over everything and brings the sibling in.
-        let all = git_log_page(&repo, 0, 50, true, false, &[]);
+        let all = git_log_page(&repo, 0, 50, true, false, "", &[]);
         assert!(subjects(&all).contains(&"only on side".to_string()));
 
         // Picked: just the side branch, which does NOT contain main's tip.
-        let picked = git_log_page(&repo, 0, 50, false, false, &[side.clone()]);
+        let picked = git_log_page(&repo, 0, 50, false, false, "", &[side.clone()]);
         assert!(subjects(&picked).contains(&"only on side".to_string()));
 
         // Picked both = the union, which is what --all shows in this repo.
-        let both = git_log_page(&repo, 0, 50, false, false, &[main.clone(), side.clone()]);
+        let both = git_log_page(&repo, 0, 50, false, false, "", &[main.clone(), side.clone()]);
         assert_eq!(both.commits.len(), all.commits.len());
 
         // all_branches beats a refs list rather than intersecting with it.
-        let all_wins = git_log_page(&repo, 0, 50, true, false, &[side.clone()]);
+        let all_wins = git_log_page(&repo, 0, 50, true, false, "", &[side.clone()]);
         assert_eq!(all_wins.commits.len(), all.commits.len());
     }
 
@@ -14701,7 +14772,7 @@ mod tests {
         let (main, _side) = repo_with_side_branch(&repo);
         // A branch deleted while the picker still lists it. Falling back to
         // HEAD would answer a different question under the old scope's label.
-        let page = git_log_page(&repo, 0, 50, false, false, &["deleted-branch".to_string()]);
+        let page = git_log_page(&repo, 0, 50, false, false, "", &["deleted-branch".to_string()]);
         assert!(page.commits.is_empty());
         assert!(!page.has_more);
         // The header still knows where it is, so the panel keeps its chrome.
@@ -14715,7 +14786,7 @@ mod tests {
         git_run(&repo, &["init", "-q", "-b", "main"]);
         // No commits yet: `git log` FAILS here. That must read as an empty
         // history, not an error dialog.
-        let page = git_log_page(&repo, 0, 50, false, false, &[]);
+        let page = git_log_page(&repo, 0, 50, false, false, "", &[]);
         assert!(page.commits.is_empty());
         assert!(!page.has_more);
     }

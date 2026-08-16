@@ -93,13 +93,15 @@ Order of the chrome above them, outermost first: repo pills (multi-repo tasks),
 then the branch bar, then the sub-tabs. Which repo you are looking at is what
 the branch and all three sub-tabs are ABOUT, so it cannot sit inside them.
 
-One filter box serves all three, on the branch row (the branch chip is one
-short control on a full-width row, so the filter rides with it rather than
-spending a row of its own). It narrows files in Commit and Compare and commit
-rows in History, matching subject, author or sha. In History it filters the
-commits ALREADY LOADED rather than the repo: paging the whole history in to
-answer a keystroke would be a `git log` per character, so an empty result says
-so and points at Load more.
+One box serves all three, on the branch row (the branch chip is one short
+control on a full-width row, so it rides with it rather than spending a row of
+its own). In Commit and Compare it filters the file list. In History it is a
+MESSAGE SEARCH run by git (`--grep`, literal and case-insensitive, subject and
+body) over the whole scope rather than over the rows on screen: "does this
+branch have a commit about X" is a question about the history, and answering it
+from the loaded page would make it a question about how far you had scrolled.
+Debounced at 250ms, so it is one `git log` per pause. It narrows whatever scope
+is active rather than replacing it, so a search under All searches every ref.
 
 The sub-tab row keeps only what belongs to the active view: the view-mode menu
 for Commit and Compare, the ref picker for History.

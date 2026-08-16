@@ -561,8 +561,8 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
             <input
               value={search}
               onChange={e => setSearch(e.target.value)}
-              placeholder="Filter"
-              title="Filters files in Commit and Compare, and the commits already loaded in History"
+              placeholder={view === "history" ? "Search messages" : "Filter"}
+              title="Filters files in Commit and Compare. In History it searches commit messages across the whole branch, not just the rows on screen."
               spellCheck={false} autoCorrect="off" autoCapitalize="off" autoComplete="off"
               className="h-6 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] pl-7 pr-2 text-[12px] text-[var(--color-fg)] outline-none placeholder:text-[var(--color-fg-faint)] focus:border-[var(--color-accent)]"
             />

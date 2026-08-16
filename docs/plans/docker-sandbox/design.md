@@ -1,6 +1,6 @@
 # Docker sandbox (design + Phase 1 plan)
 
-Status: proposed, not started. Opt-in, experimental.
+Status: approved, implementation underway. Opt-in, experimental.
 
 A second, more brutal sandboxing mode that runs the agent CLI inside a
 Docker container instead of macOS Seatbelt. The container is the isolation

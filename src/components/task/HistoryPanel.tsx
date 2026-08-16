@@ -185,14 +185,13 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
   /** Scope, when the host renders the picker itself (the Git tab puts it on
    *  its sub-tab row). Given one, this panel drops its own scope row. */
   scope?: { allBranches: boolean; refs: string[]; firstParent: boolean };
-  /** The Git tab's filter box, shared with its file lists. Matches subject,
-   *  author and sha, case-insensitively.
-   *
-   *  It filters the commits ALREADY LOADED, not the repo: this is the same
-   *  box that narrows a file list, and paging in the whole history to answer
-   *  a keystroke would be a `git log` per character. "Load more" keeps
-   *  working while a filter is on, so a search that looks empty is usually a
-   *  search that needs more pages, not a repo without the commit. */
+  /** The Git tab's filter box, shared with its file lists. Here it is a
+   *  message search run BY GIT (`--grep`, literal and case-insensitive) over
+   *  the whole history, not a filter over the page on screen: "does this
+   *  branch have a commit about X" is a question about the history, and
+   *  answering it from the loaded rows would make it a question about how far
+   *  the user had scrolled. Debounced, so it is one `git log` per pause, not
+   *  per keystroke. */
   search?: string;
 }) {
   const nonGit = useApp(s => s.projects.find(p => p.id === task.project_id)?.non_git);
@@ -213,6 +212,15 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
   /** Stable dep for the fetch effects: a new array every render would refetch
    *  forever, and the ref list is short enough to compare as a string. */
   const refsKey = pickedRefs.join(" ");
+  /** The search actually sent to git. Trailing-edge debounce: typing "login"
+   *  is one walk on the pause, not five walks and four wasted ones. */
+  const [grep, setGrep] = useState("");
+  const query = search.trim();
+  useEffect(() => {
+    if (query === grep) return;
+    const t = window.setTimeout(() => setGrep(query), 250);
+    return () => window.clearTimeout(t);
+  }, [query, grep]);
   const [commits, setCommits] = useState<GitCommit[]>([]);
   const [branch, setBranch] = useState("");
   const [upstream, setUpstream] = useState("");
@@ -227,7 +235,7 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
   loadedRef.current = Math.max(PAGE_SIZE, commits.length);
 
   // A different repo or scope is a different history, not more of this one.
-  useEffect(() => { setSelected(null); }, [repoDir, allBranches, refsKey, firstParent, task.id]);
+  useEffect(() => { setSelected(null); }, [repoDir, allBranches, refsKey, firstParent, grep, task.id]);
   // Refs belong to a repo. Carrying a selection across would ask for branches
   // the new repo does not have, which is answered with an empty graph. Only
   // ours to reset when we own it; the host clears its own on the same signal.
@@ -244,7 +252,7 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
     if (nonGit) { setLoading(false); return; }
     let alive = true;
     setLoading(true);
-    taskGitLog(task.id, repoDir, 0, loadedRef.current, allBranches, pickedRefs, firstParent)
+    taskGitLog(task.id, repoDir, 0, loadedRef.current, allBranches, pickedRefs, firstParent, grep)
       .then(page => {
         if (!alive) return;
         setCommits(page.commits);
@@ -257,7 +265,7 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refsKey is pickedRefs
-  }, [task.id, repoDir, allBranches, refsKey, firstParent, reloadToken, nonGit]);
+  }, [task.id, repoDir, allBranches, refsKey, firstParent, grep, reloadToken, nonGit]);
 
   /** Next page, appended. Uses the backend's `skip`, so paging back through a
    *  long history costs one page per click instead of re-walking everything
@@ -265,7 +273,7 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
    *  shifts the window, and the overlap would otherwise render twice. */
   const loadMore = useCallback(() => {
     setPaging(true);
-    taskGitLog(task.id, repoDir, commits.length, PAGE_SIZE, allBranches, pickedRefs, firstParent)
+    taskGitLog(task.id, repoDir, commits.length, PAGE_SIZE, allBranches, pickedRefs, firstParent, grep)
       .then(page => {
         setCommits(prev => {
           const seen = new Set(prev.map(c => c.sha));
@@ -276,20 +284,9 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
       .catch(e => setErr(String(e)))
       .finally(() => setPaging(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refsKey is pickedRefs
-  }, [task.id, repoDir, allBranches, refsKey, firstParent, commits.length]);
+  }, [task.id, repoDir, allBranches, refsKey, firstParent, grep, commits.length]);
 
-  // Filter BEFORE the layout, not after: lanes are computed from the rows
-  // being drawn, so laying out the full list and then hiding rows would leave
-  // gutter lines running past commits that are not there.
-  const shown = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return commits;
-    return commits.filter(c =>
-      c.subject.toLowerCase().includes(q)
-      || c.author.toLowerCase().includes(q)
-      || c.sha.toLowerCase().startsWith(q));
-  }, [commits, search]);
-  const rows = useMemo(() => layoutGraph(shown), [shown]);
+  const rows = useMemo(() => layoutGraph(commits), [commits]);
   const lanes = Math.min(graphWidth(rows), MAX_LANES);
   const gutter = Math.max(lanes, 1) * LANE_W + 6;
 
@@ -353,19 +350,15 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
           </div>
         )}
         {!err && !loading && commits.length === 0 && (
-          <Empty>No commits yet. Anything an agent commits shows up here.</Empty>
-        )}
-        {!err && !loading && commits.length > 0 && shown.length === 0 && (
-          <Empty>
-            No commit here matches "{search.trim()}".
-            {hasMore && " Older commits are not loaded yet, so try Load more below."}
-          </Empty>
+          grep
+            ? <Empty>No commit message in this scope matches "{grep}".</Empty>
+            : <Empty>No commits yet. Anything an agent commits shows up here.</Empty>
         )}
 
         {rows.map((row, i) => (
           <CommitRow
             key={row.sha}
-            commit={shown[i]}
+            commit={commits[i]}
             row={row}
             lanes={lanes}
             gutter={gutter}

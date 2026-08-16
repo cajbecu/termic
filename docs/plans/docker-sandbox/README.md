@@ -1,8 +1,8 @@
-# Docker sandbox (research bundle)
+# Docker sandbox
 
 Self-contained design + research for an opt-in Docker sandboxing mode: run
 the agent CLI inside a container instead of macOS Seatbelt, so it can only
-touch the paths we mount. Status: **proposed, not started.**
+touch the paths we mount. Status: **approved, implementation underway.**
 
 Contents:
 

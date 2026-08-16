@@ -1,7 +1,11 @@
-# termic MCP endpoint (design)
+# termic MCP endpoint
 
-MCP updated its specification (revision 2026-07-28), and we should
-reevaluate our stance on MCP. Two things make the case.
+Status: approved, not started. Tracked in
+[#176](https://github.com/simion/termic/issues/176).
+
+Build a scoped MCP control plane an agent can call without being handed a
+terminal, using the 2026-07-28 spec revision. Two things made this
+buildable now, where earlier MCP designs were parked.
 
 First, the new revision made the protocol stateless. No handshake, no
 sessions; every request authenticates itself. A per-task bearer token
@@ -23,15 +27,14 @@ drive subtasks, period.
 So: sandboxed agents get a scoped control plane for the first time
 (a caged orchestrator farming out subtasks to caged workers, without
 holding an escape), and outside MCP clients get the surface the
-parked `termic mcp` shim was for, at no extra cost. This doc reopens
-that parked question and settles the architecture and security
-constraints before any code.
+parked `termic mcp` shim was for, at no extra cost. This doc settles
+the architecture and security constraints before any code.
 
 Non-goals: a separate daemon (this is an in-process loopback listener,
 like the automation bridge and proxy), remote access, replacing the
 CLI, or any event/notification stream in v1.
 
-## Why reopen this
+## Why now
 
 The stdio shim was parked because its only audience was outside
 orchestrators nobody had, MCP tool definitions cost context tokens in

@@ -451,7 +451,10 @@ export const taskGitLog = (
    *  collapses into the merge that brought it in ("what landed here, in
    *  order") instead of opening a lane. Ignored under allBranches. */
   firstParent = false,
-) => invoke<GitLogPage>("task_git_log", { id, dirName, skip, limit, allBranches, refs, firstParent });
+  /** Literal, case-insensitive message search (`git log --grep`), run over the
+   *  whole history rather than over the page already on screen. */
+  grep = "",
+) => invoke<GitLogPage>("task_git_log", { id, dirName, skip, limit, allBranches, refs, firstParent, grep });
 /** Every ref the scope picker may offer: local branches, remote-tracking
  *  branches and tags, freshest first. */
 export const taskGitRefs = (id: string, dirName: string) =>

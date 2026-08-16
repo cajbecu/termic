@@ -441,6 +441,32 @@ describe("git history tab", () => {
     await browser.keys(["Escape"]);
   });
 
+  it("searches commit messages across the branch, not just the loaded rows", async () => {
+    await openGraph();
+    const box = await $('input[placeholder="Search messages"]');
+    await box.setValue(subject.slice(0, 12));
+    await browser.waitUntil(
+      async () => {
+        const s = await commitSubjects();
+        return s.length > 0 && s.every(t => t.includes("e2e history probe"));
+      },
+      { timeout: 10_000, timeoutMsg: "the message search never narrowed the graph" },
+    );
+    // A query nothing matches is an empty graph with an explanation, not the
+    // unfiltered list and not an error (the box takes literal text, so an
+    // unbalanced bracket is a query with no hits).
+    await box.setValue("[no-such-commit");
+    await browser.waitUntil(
+      async () => (await commitSubjects()).length === 0,
+      { timeout: 10_000, timeoutMsg: "a no-match search still listed commits" },
+    );
+    await box.setValue("");
+    await browser.waitUntil(
+      async () => (await commitSubjects()).length > 1,
+      { timeout: 10_000, timeoutMsg: "clearing the search did not restore the graph" },
+    );
+  });
+
   it("indents a commit's subject to its own lane", async () => {
     await openGraph();
     // The graph reads as VS Code's does: a row's text starts just past ITS
