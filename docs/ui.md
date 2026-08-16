@@ -76,16 +76,6 @@ This is a deliberate behavior CHANGE, not a bug fix. Previously closing the last
 
 The webview stays ALIVE while windowless — it owns PTY lifetime and every work-state signal, so tearing it down would kill the agents. It is not suspended (WebKit only clamps timers to 1 Hz). What windowless mode DOES have to do is collapse the task panes to zero geometry, or xterm keeps drawing for an invisible window: see docs/performance.md bear trap 2b and `src/lib/windowlessMode.ts`.
 
-## "Don't ask again" on a confirm
-
-`ConfirmDialog` takes `dontAskAgain: true` to render a second checkbox under the request's own `checkbox` (they answer different questions and are reported back separately, as `{ confirmed, checked, dontAskAgain }`). The dialog only REPORTS the tick; persisting it is the caller's job, and three rules apply to every use:
-
-- **Persist only when `confirmed` is also true.** The dialog reports the checkbox state at dismissal, so ticking a box and then hitting Escape still arrives as `true`. Storing that would let a cancelled action disable its own confirmation. Both current users (`closeTab.ts`, `archiveTask.ts`) gate on `confirmed`.
-- **Settings is the way back**, and the sub-label says so ("Change it later in Settings > Tasks"). An opt-out with no visible home is a one-way door — the same reason the close prompt's `close_action` select has to include "Ask me each time".
-- **Anything the skipped dialog used to ask, the pref has to answer.** Archiving is the case with a second question: the dialog's delete-branch checkbox has no silent equivalent, so ticking "Don't ask again" freezes that answer into `archiveDeleteBranch` and every silent archive reuses it (never for a main checkout, which has no worktree branch and never showed the checkbox). Settings › Tasks shows that stored answer as its own toggle, but **only while the confirmation is off** — with the dialog on, its checkbox is the answer, and a settings row claiming otherwise would contradict it.
-
-Archive entry points (sidebar row menu, unified bar button, command palette) all route through `confirmAndArchive` in `src/lib/archiveTask.ts`, which owns the copy, both checkboxes and the fast path.
-
 ## Right-panel footer (Setup / Run / Terminal)
 
 Three tabs. Setup + Run stream via `useScriptRuns`. Terminal is opt-in: click `+` → `useApp.enableFooterTerm(wsId)` → AuxTerminal mounts. RunToolbar: Open (expands `project.preview_url` with `$TERMIC_PORT`/`$CONDUCTOR_PORT`/`$PORT`/`$TERMIC_WORKSPACE_NAME`) + Run/Stop (SIGTERMs process group). Default: tab=Run, expanded.
