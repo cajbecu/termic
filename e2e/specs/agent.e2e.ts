@@ -14,6 +14,7 @@
 
 import {
   archiveTask,
+  clickByText,
   ensureActiveTask,
   openTask,
   queuedCount,
@@ -223,11 +224,14 @@ describe("agent extras", () => {
     expect(await browser.execute(() => !!window.__termic!.useUI.getState().confirm)).toBe(false);
   });
 
-  it("opens an aux (bottom) terminal", async () => {
-    await browser.execute(
-      (id) => window.__termic!.useApp.getState().addBottomTab(id),
-      taskId,
-    );
+  // Driven through the REAL footer button, not through `addBottomTab`. The
+  // button used to call `toggleTerminalSplit` alone, which opens the split and
+  // lets TaskView seed an UNFOCUSED shell, so the user had to click the
+  // terminal before typing. A store-level drive cannot see that wiring.
+  it("opens an aux (bottom) terminal from the footer button and focuses it", async () => {
+    await ensureActiveTask(taskId!);
+    await clickByText("Terminal");
+
     await browser.waitUntil(
       () =>
         browser.execute(
@@ -236,7 +240,40 @@ describe("agent extras", () => {
         ),
       { timeout: 8_000, timeoutMsg: "aux terminal was not added" },
     );
+
+    // AuxTerminal focuses itself only once its PTY is live and the grid has
+    // rendered, so this is a wait, not an immediate read.
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          () => !!document.activeElement?.closest("[data-bottom-split]"),
+        ),
+      { timeout: 20_000, interval: 250, timeoutMsg: "aux terminal never took focus" },
+    );
+
     await snap("agent-extras.png");
+  });
+
+  // Closing the last shell closes the split, so the footer button comes back
+  // and the next open starts from the same state as the first.
+  it("closes the split when the last shell closes", async () => {
+    const tabId = await browser.execute(
+      (id) => window.__termic!.useApp.getState().bottomTabs[id][0].id,
+      taskId,
+    );
+    await browser.execute(
+      (id, tid) => window.__termic!.useApp.getState().closeBottomTab(id, tid),
+      taskId,
+      tabId,
+    );
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          (id) => !window.__termic!.useApp.getState().terminalSplit[id],
+          taskId,
+        ),
+      { timeout: 8_000, timeoutMsg: "split stayed open after the last shell closed" },
+    );
   });
 });
 
