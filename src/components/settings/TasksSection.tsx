@@ -259,19 +259,22 @@ export function TasksSection() {
         />
       </Block>
 
-      {/* Only shown while archiving skips its confirmation: with the dialog
-          on, its own checkbox answers this per archive, and a second control
-          saying something different would just contradict it. */}
-      {!confirmBeforeArchiveTask && (
-        <Block>
-          <Toggle
-            label="Delete the branch when archiving"
-            hint="Archiving also deletes the task's branch. A project's main checkout is never affected."
-            value={archiveDeleteBranch}
-            onChange={setArchiveDeleteBranch}
-          />
-        </Block>
-      )}
+      {/* Always shown, whichever way the confirmation toggle is set. With the
+          dialog on it seeds that dialog's checkbox, which is still the answer
+          for that one archive; with the dialog off it IS the answer. Hiding it
+          while confirmation was on meant a user who deletes branches every
+          time had to re-tick the box on every single archive, with no way to
+          change the default. */}
+      <Block>
+        <Toggle
+          label="Delete the branch when archiving"
+          hint={confirmBeforeArchiveTask
+            ? "Start the archive dialog's \"Delete the git branch\" box ticked. You can still untick it for any single archive. A project's main checkout is never affected."
+            : "Archiving also deletes the task's branch. A project's main checkout is never affected."}
+          value={archiveDeleteBranch}
+          onChange={setArchiveDeleteBranch}
+        />
+      </Block>
     </div>
   );
 }

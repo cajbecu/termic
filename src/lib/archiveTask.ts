@@ -39,8 +39,14 @@ export async function archiveAndRefresh(taskId: string, deleteBranch: boolean): 
 /** The prompt copy for archiving `w`, split out so the three shapes an archive
  *  can take (main checkout, multi-repo composition, plain worktree) are
  *  readable side by side. Main-checkout entries get NO checkbox: nothing about
- *  them is a worktree branch, so there is no branch to offer deleting. */
-function archivePrompt(w: Task): { message: string; confirmLabel: string; checkbox?: ConfirmCheckbox } {
+ *  them is a worktree branch, so there is no branch to offer deleting.
+ *
+ *  `deleteBranchDefault` is the Settings toggle. It seeds the checkbox rather
+ *  than deciding anything: the dialog is still the answer for THIS archive, so
+ *  a user who keeps branches by default can tick the box once without changing
+ *  the setting, and one who deletes them by default does not have to re-tick it
+ *  every time. */
+function archivePrompt(w: Task, deleteBranchDefault: boolean): { message: string; confirmLabel: string; checkbox?: ConfirmCheckbox } {
   if (w.is_main_checkout) {
     return {
       message: "This removes the Termic entry for the project's main checkout. The repo on disk is NOT touched, so you can re-open it any time. Any agent running here will be terminated.",
@@ -52,13 +58,13 @@ function archivePrompt(w: Task): { message: string; confirmLabel: string; checkb
     return {
       message: `Branches stay in git, so you can recreate the task later. This removes: the host worktree + every member worktree (${members.join(", ") || "none"}), plus any member symlinks to live checkouts (those live repos are NOT touched). Any running agent will be terminated.`,
       confirmLabel: "Archive",
-      checkbox: { label: "Delete the git branches", defaultValue: false },
+      checkbox: { label: "Delete the git branches", defaultValue: deleteBranchDefault },
     };
   }
   return {
     message: "The branch stays in git, so you can spin up a fresh worktree on it later. This removes only the on-disk worktree directory (build artifacts: node_modules, .venv, untracked files) and terminates any running agent. Can't be undone from inside Termic.",
     confirmLabel: "Archive",
-    checkbox: { label: "Delete the git branch:", branchName: w.branch || undefined, defaultValue: false },
+    checkbox: { label: "Delete the git branch:", branchName: w.branch || undefined, defaultValue: deleteBranchDefault },
   };
 }
 
@@ -69,12 +75,11 @@ function archivePrompt(w: Task): { message: string; confirmLabel: string; checkb
 export async function confirmAndArchive(w: Task): Promise<void> {
   const ui = useUI.getState();
   const prefs = usePrefs.getState();
-  const { message, confirmLabel, checkbox } = archivePrompt(w);
+  const { message, confirmLabel, checkbox } = archivePrompt(w, prefs.archiveDeleteBranch);
 
-  // Fast path: the user ticked "Don't ask again" on a previous archive. The
-  // branch decision they made in that same dialog is what applies from here
-  // on (prefs.archiveDeleteBranch) - never for a main checkout, which has no
-  // worktree branch and never showed the checkbox.
+  // Fast path: confirmation is off, so the Settings toggle IS the answer -
+  // never for a main checkout, which has no worktree branch and never showed
+  // the checkbox.
   if (!prefs.confirmBeforeArchiveTask) {
     await runArchive(w, !w.is_main_checkout && prefs.archiveDeleteBranch);
     return;

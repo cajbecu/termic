@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { archiveTask, dismissOverlays, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitVisible } from "../helpers";
+import { archiveTask, dismissOverlays, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitVisible } from "../helpers";
 
 /** Click the [role="switch"] in the settings row whose label matches exactly.
  *  Toggle rows are label + switch inside one .justify-between wrapper
@@ -732,7 +732,7 @@ describe("archive confirmation settings", () => {
     await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
   });
 
-  it("hides the branch toggle while the confirmation is on", async () => {
+  it("shows the branch toggle while the confirmation is on", async () => {
     await waitForAppShell();
     await requireTermicApi();
     orig = await prefs();
@@ -742,12 +742,14 @@ describe("archive confirmation settings", () => {
       window.__termic!.useApp.getState().openSettings("tasks");
     });
     await waitForText(CONFIRM_LABEL);
-    // With the dialog on, its own checkbox answers the branch question per
-    // archive - a second control here would just contradict it.
-    await waitForTextGone(BRANCH_LABEL);
+    // The branch toggle used to be hidden here. It seeds the dialog's checkbox
+    // now, so hiding it left someone who deletes branches every time re-ticking
+    // the box on every archive with no way to change the default.
+    await waitForText(BRANCH_LABEL);
+    expect(await ariaChecked(CONFIRM_LABEL)).toBe("true");
   });
 
-  it("reveals the branch toggle once archiving stops asking", async () => {
+  it("keeps the branch toggle when archiving stops asking", async () => {
     // The state the dialog's opt-out leaves behind.
     await browser.execute(() => {
       const p = window.__termic!.usePrefs.getState();
@@ -759,7 +761,7 @@ describe("archive confirmation settings", () => {
     expect(await ariaChecked(BRANCH_LABEL)).toBe("true");
   });
 
-  it("flips the remembered branch answer while it is visible", async () => {
+  it("flips the remembered branch answer", async () => {
     const before = (await prefs()).deleteBranch;
     await clickToggleByLabel(BRANCH_LABEL);
 
@@ -771,13 +773,17 @@ describe("archive confirmation settings", () => {
     await snap("archive-settings.png");
   });
 
-  it("turns the confirmation back on, taking the branch toggle away again", async () => {
+  it("turns the confirmation back on with the branch toggle still there", async () => {
+    const branchBefore = (await prefs()).deleteBranch;
     await clickToggleByLabel(CONFIRM_LABEL);
 
     await browser.waitUntil(async () => (await prefs()).confirm === true,
       { timeout: 5_000, timeoutMsg: "confirmBeforeArchiveTask never came back on" });
     expect(await ariaChecked(CONFIRM_LABEL)).toBe("true");
-    await waitForTextGone(BRANCH_LABEL);
+    // Both stay reachable, and turning confirmation on does not silently
+    // rewrite the branch answer the dialog is about to be seeded with.
+    await waitForText(BRANCH_LABEL);
+    expect(await ariaChecked(BRANCH_LABEL)).toBe(String(branchBefore));
   });
 });
 

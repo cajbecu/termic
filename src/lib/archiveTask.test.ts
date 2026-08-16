@@ -176,6 +176,39 @@ describe("confirmAndArchive", () => {
     spy.mockRestore();
   });
 
+  it("seeds the dialog checkbox from the Settings toggle", async () => {
+    // The toggle is a default, not a decision: with confirmation ON the dialog
+    // still answers for THIS archive, so someone who deletes branches every
+    // time does not re-tick the box on every single archive.
+    h.prefs.archiveDeleteBranch = true;
+    await confirmAndArchive(task());
+    expect(h.askConfirm.mock.calls[0][0].checkbox.defaultValue).toBe(true);
+  });
+
+  it("leaves the dialog checkbox unticked when the toggle is off", async () => {
+    h.prefs.archiveDeleteBranch = false;
+    await confirmAndArchive(task());
+    expect(h.askConfirm.mock.calls[0][0].checkbox.defaultValue).toBe(false);
+  });
+
+  it("lets the dialog override the seeded default for one archive", async () => {
+    // Seeded on, unticked in the dialog: this archive keeps the branch, and
+    // the stored default is NOT rewritten, because "Don't ask again" was off.
+    h.prefs.archiveDeleteBranch = true;
+    h.askConfirm.mockResolvedValue({ confirmed: true, checked: false, dontAskAgain: false });
+    await confirmAndArchive(task());
+    expect(h.taskArchive).toHaveBeenCalledWith("w1", false);
+    expect(h.setArchiveDeleteBranch).not.toHaveBeenCalled();
+  });
+
+  it("seeds the plural checkbox for a multi-repo task too", async () => {
+    h.prefs.archiveDeleteBranch = true;
+    await confirmAndArchive(task({
+      composition: [{ mode: "worktree", dir_name: "api" }] as Task["composition"],
+    }));
+    expect(h.askConfirm.mock.calls[0][0].checkbox.defaultValue).toBe(true);
+  });
+
   it("offers the plural branch checkbox for a multi-repo task", async () => {
     await confirmAndArchive(task({
       composition: [
