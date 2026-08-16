@@ -36,6 +36,8 @@ const LS_THEME         = "themeMode";
 const LS_DESKTOPNOTIF  = "desktopNotifications";
 const LS_SETTLED_HIGHLIGHT = "settledHighlight";
 const LS_CONFIRM_CLOSE_AGENT_TAB = "confirmBeforeCloseAgentTab";
+const LS_CONFIRM_ARCHIVE_TASK = "confirmBeforeArchiveTask";
+const LS_ARCHIVE_DELETE_BRANCH = "archiveDeleteBranch";
 const LS_WORKING_INDICATOR = "workingIndicator";
 const LS_DEFAULT_SANDBOX = "globalDefaultSandbox";
 const LS_SANDBOX_BYPASS  = "sandboxBypassPermissions";
@@ -468,6 +470,19 @@ interface PrefsState {
    *  happens immediately, with a toast pointing back at Resume. Dirty
    *  edit-tab closes are never gated by this; that confirm always fires. */
   confirmBeforeCloseAgentTab: boolean;
+  /** Whether archiving a task asks for confirmation first. ON by default.
+   *  Turned off by ticking "Don't ask again" in the archive dialog, which
+   *  ALSO freezes `archiveDeleteBranch` to whatever the delete-branch
+   *  checkbox said at that moment — so a silent archive still honours the
+   *  last explicit branch decision. Archiving can't be undone from inside
+   *  Termic, so both halves are re-exposed in Settings, Tasks. */
+  confirmBeforeArchiveTask: boolean;
+  /** Whether a silent archive (see `confirmBeforeArchiveTask`) also deletes
+   *  the task's git branch. OFF by default, matching the dialog checkbox's
+   *  default. Ignored while the confirm dialog is on: there the checkbox is
+   *  the answer. Never applies to main-checkout entries, which have no
+   *  worktree branch to delete. */
+  archiveDeleteBranch: boolean;
   /** Show a spinner on an agent's tab (and sidebar icon) WHILE it's
    *  working. ON by default (an explicit off in localStorage is kept). The
    *  "working" workState is always tracked internally to drive work-done
@@ -655,6 +670,8 @@ interface PrefsState {
   setCompletionSoundId: (id: CompletionSoundId) => void;
   setSettledHighlight: (v: boolean) => void;
   setConfirmBeforeCloseAgentTab: (v: boolean) => void;
+  setConfirmBeforeArchiveTask: (v: boolean) => void;
+  setArchiveDeleteBranch: (v: boolean) => void;
   setWorkingIndicator: (v: boolean) => void;
   setLoadRemoteImages: (v: boolean) => void;
   setFindInFilesRegex: (v: boolean) => void;
@@ -775,6 +792,8 @@ const initialCompletionSoundId = readCompletionSoundId();
 // stored value when present).
 const initialSettledHighlight = lsGetBool(LS_SETTLED_HIGHLIGHT, true);
 const initialConfirmCloseAgentTab = lsGetBool(LS_CONFIRM_CLOSE_AGENT_TAB, true);
+const initialConfirmArchiveTask = lsGetBool(LS_CONFIRM_ARCHIVE_TASK, true);
+const initialArchiveDeleteBranch = lsGetBool(LS_ARCHIVE_DELETE_BRANCH, false);
 // OFF by default — experimental re-introduction of the work-in-progress
 // spinner. Opt in via Settings → General.
 const initialWorkingIndicator = lsGetBool(LS_WORKING_INDICATOR, true);
@@ -814,6 +833,8 @@ export const usePrefs = create<PrefsState>(set => ({
   completionSoundId: initialCompletionSoundId,
   settledHighlight: initialSettledHighlight,
   confirmBeforeCloseAgentTab: initialConfirmCloseAgentTab,
+  confirmBeforeArchiveTask: initialConfirmArchiveTask,
+  archiveDeleteBranch: initialArchiveDeleteBranch,
   workingIndicator: initialWorkingIndicator,
   loadRemoteImages: initialLoadRemoteImages,
   findInFilesRegex: initialFindInFilesRegex,
@@ -1004,6 +1025,14 @@ export const usePrefs = create<PrefsState>(set => ({
   setConfirmBeforeCloseAgentTab: (v) => {
     try { localStorage.setItem(LS_CONFIRM_CLOSE_AGENT_TAB, v ? "1" : "0"); } catch {}
     set({ confirmBeforeCloseAgentTab: v });
+  },
+  setConfirmBeforeArchiveTask: (v) => {
+    try { localStorage.setItem(LS_CONFIRM_ARCHIVE_TASK, v ? "1" : "0"); } catch {}
+    set({ confirmBeforeArchiveTask: v });
+  },
+  setArchiveDeleteBranch: (v) => {
+    try { localStorage.setItem(LS_ARCHIVE_DELETE_BRANCH, v ? "1" : "0"); } catch {}
+    set({ archiveDeleteBranch: v });
   },
   setWorkingIndicator: (v) => {
     try { localStorage.setItem(LS_WORKING_INDICATOR, v ? "1" : "0"); } catch {}

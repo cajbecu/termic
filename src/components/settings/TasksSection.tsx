@@ -46,6 +46,10 @@ export function TasksSection() {
   const setQueueMinIntervalMs = usePrefs(s => s.setQueueMinIntervalMs);
   const confirmBeforeCloseAgentTab = usePrefs(s => s.confirmBeforeCloseAgentTab);
   const setConfirmBeforeCloseAgentTab = usePrefs(s => s.setConfirmBeforeCloseAgentTab);
+  const confirmBeforeArchiveTask = usePrefs(s => s.confirmBeforeArchiveTask);
+  const setConfirmBeforeArchiveTask = usePrefs(s => s.setConfirmBeforeArchiveTask);
+  const archiveDeleteBranch = usePrefs(s => s.archiveDeleteBranch);
+  const setArchiveDeleteBranch = usePrefs(s => s.setArchiveDeleteBranch);
 
   const hydrated = useRef(false);
   useEffect(() => {
@@ -242,6 +246,32 @@ export function TasksSection() {
           onChange={setConfirmBeforeCloseAgentTab}
         />
       </Block>
+
+      {/* Archiving can't be undone from inside Termic, so the confirmation
+          needs a visible way back for anyone who turned it off from the
+          dialog. */}
+      <Block>
+        <Toggle
+          label="Confirm before archiving a task"
+          hint="Ask before archiving a task. With this off, archiving happens straight away."
+          value={confirmBeforeArchiveTask}
+          onChange={setConfirmBeforeArchiveTask}
+        />
+      </Block>
+
+      {/* Only shown while archiving skips its confirmation: with the dialog
+          on, its own checkbox answers this per archive, and a second control
+          saying something different would just contradict it. */}
+      {!confirmBeforeArchiveTask && (
+        <Block>
+          <Toggle
+            label="Delete the branch when archiving"
+            hint="Archiving also deletes the task's branch. A project's main checkout is never affected."
+            value={archiveDeleteBranch}
+            onChange={setArchiveDeleteBranch}
+          />
+        </Block>
+      )}
     </div>
   );
 }
