@@ -751,11 +751,16 @@ const CommitRow = memo(function CommitRow({
 });
 
 function RefBadge({ chip }: { chip: RefChip }) {
-  const style =
-    chip.kind === "head"   ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]" :
-    chip.kind === "tag"    ? "bg-[var(--color-bg-3)] text-[var(--color-warn)]" :
-    chip.kind === "remote" ? "bg-[var(--color-bg-3)] text-[var(--color-fg-faint)]" :
-                             "bg-[var(--color-bg-3)] text-[var(--color-fg-dim)]";
+  // Every BRANCH reads the same, local or remote. They were three shades of
+  // grey-on-grey against one accent-filled pill for HEAD, and "how far back
+  // is origin" is one of the two things this graph is read for: the chip
+  // answering it cannot be the faintest thing on the row. The label already
+  // carries `origin/`, so the prefix distinguishes them and the colour does
+  // not have to. Tags keep their own colour and glyph, being a different kind
+  // of thing rather than a quieter one.
+  const style = chip.kind === "tag"
+    ? "bg-[var(--color-bg-3)] text-[var(--color-warn)]"
+    : "bg-[var(--color-accent-soft)] text-[var(--color-accent)]";
   return (
     <span
       data-testid="history-ref"
