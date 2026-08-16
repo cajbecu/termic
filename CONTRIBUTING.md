@@ -72,9 +72,25 @@ docs/
   *.md         # reference and operational docs
 ```
 
+A doc's directory is a claim about its status, not a filing preference. `docs/plans/` means approved and buildable; `docs/research/` means the question is still open.
+
 If you want something to work on, `docs/plans/` is the place to look. Every file there is scoped and approved — no design work needed, just implementation. Pick one, open an issue to claim it, and go.
 
-AI contributions are more than welcome. One important caveat: must be manually tested, thoroughly.
+The [README roadmap](./README.md#roadmap) is the other list. Every item there is tracked by an issue labelled [`planned`](https://github.com/simion/termic/issues?q=is%3Aissue+label%3Aplanned), and that issue, not the item's position in the list, is its identity — the numbering shifts every time something ships, so don't cite a roadmap item by number anywhere.
+
+### Docs are part of the diff
+
+**A PR that changes behaviour is not finished until the docs tree matches it**, in the same PR:
+
+- **Implemented a plan?** Delete it. It describes work that no longer needs doing, and a stale plan is worse than none because someone will pick it up. Move anything still true (a measurement, a trap, a decision and why) into the matching `docs/*.md` reference doc first.
+- **Implemented part of one?** Narrow the plan to what's left, and say what shipped.
+- **Research became a decision?** Move it `research/ → plans/` and rewrite the header into a spec: what to build, not whether to.
+- **A plan's premise changed?** Move it `plans/ → research/` and say why at the top.
+- **Changed something a reference doc describes?** Update that doc. `ipc.md`, `data-model.md`, `ui.md`, `shortcuts.md`, `sandbox.md`, `themes.md`, `performance.md` and `gotchas.md` are read by every contributor after you, and a wrong one costs more than a missing one.
+
+Two things are maintainer-only, so leave them alone: the README roadmap and `CHANGELOG.md`. If your change ships a roadmap item, say "closes #N" in the PR and stop there.
+
+AI contributions are more than welcome. One important caveat: must be manually tested, thoroughly. The same docs rule applies, and agents skip it by default unless told — [CLAUDE.md](./CLAUDE.md) carries the long-form version for them.
 
 ---
 

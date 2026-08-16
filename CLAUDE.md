@@ -45,6 +45,30 @@ Performance: `make perf` runs the nightly suite (startup, memory) and the local-
 
 `scratchpad/` at the repo root is gitignored and local-only. Put throwaway work there: market/competitor research, GTM notes, half-finished drafts, one-off analysis, anything that shouldn't ship or be reviewed. Nothing in it has to be release-quality. Working docs meant for contributors belong in the tracked `docs/` tree: `docs/research/` for ideas and explorations, `docs/plans/` for approved implementation-ready specs.
 
+## Docs tree: what goes where, and what you owe it when you ship
+
+Three tiers, and a doc's tier is a claim about its status, not a filing preference:
+
+```
+docs/*.md          reference + operational. True of the app as it exists today.
+docs/plans/        approved specs, scoped, ready to implement. No design work left.
+docs/research/     ideas and explorations. Nothing here is approved or committed to.
+```
+
+`scratchpad/` is the fourth tier and is gitignored: throwaway work that shouldn't ship or be reviewed. See ## Scratchpad.
+
+**Shipping a change is not done until the docs tree reflects it.** The doc move lands in the same commit as the code, exactly like its test. Which move depends on what you did:
+
+- **Implemented a `docs/plans/` spec.** Delete the plan. It described work that no longer needs doing, and a stale plan is worse than no plan because someone will pick it up. Fold anything still true (a measurement, a trap, a decision and its reasoning) into the matching `docs/*.md` reference doc first. Precedent: `plans/cli.md`, `plans/notarization.md` and `plans/workspace-to-task-rename.md` were deleted in a1d6759 once shipped.
+- **Implemented part of a plan.** Narrow the plan to what is left and say what shipped. Do not leave it describing the whole thing.
+- **A research doc became a decision.** Move `research/ → plans/` and rewrite the header to a spec: what to build, not whether to. Moving a "Status: proposed, not started" file into `plans/` without rewriting it breaks the tier's contract.
+- **A plan turned out to be unapproved, or its premise changed.** Move it `plans/ → research/` and say why at the top. Precedent: `mcp.md` was demoted in the same restructure when the 2026-07-28 spec revision reopened the question.
+- **Changed behaviour a `docs/*.md` reference doc describes.** Update that doc. `ipc.md`, `data-model.md`, `ui.md`, `shortcuts.md`, `sandbox.md`, `themes.md`, `performance.md` and `gotchas.md` are load-bearing for the next agent, and a wrong one costs more than a missing one.
+- **Removed scaffolding.** Update `tech-debt.md`, which indexes it.
+- **Shipped a roadmap item.** Don't touch the README roadmap or `CHANGELOG.md`; both are maintainer-only (## Releasing). Say in your summary that it closes issue #N, and stop.
+
+Cross-doc references: link by **path**, and never cite a README roadmap item by its list position. The numbering shifts every time something ships, and `docs/research/perf-ci.md` cited "roadmap item 12" until the item above it shipped and the reference silently became wrong. Roadmap items are identified by their `planned`-labelled issue.
+
 ## Releasing
 
 **Maintainer-only. Do NOT cut releases or write changelog entries as part of a contribution or agent task.** Never run `make release` / `make release-patch`, never bump the version, and never add or edit a `CHANGELOG.md` entry (or `changelog.json`) unless the maintainer explicitly asks you to in that request. A PR that fixes a bug or adds a feature must NOT touch `CHANGELOG.md` — the maintainer authors the entry when they cut the release. If you think a change is release-worthy, say so and stop; leave the versioning to them.

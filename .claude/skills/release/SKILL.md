@@ -57,6 +57,8 @@ that CI is running.
 ## Path A — normal release (`make release`)
 
 ```sh
+# 0. Prune the README roadmap (see "Roadmap upkeep"):
+gh issue list --label planned --state closed
 # 1. Author the changelog entry for the new version (see "Changelog entry").
 #    Add a new "## [x.y.z] - " section at the TOP of CHANGELOG.md.
 # 2. Cut the release:
@@ -79,6 +81,34 @@ git push && git push --tags
 3. Bumps the four version files in lockstep.
 4. Commits the version files **+ `CHANGELOG.md` + `changelog.json`** as
    `release: vX` and tags `vX`.
+
+---
+
+## Roadmap upkeep (Path A, step 0)
+
+The README roadmap goes stale silently: nothing in the build, the tests or
+the release flow reads it, so a shipped item sits in the list until someone
+notices by eye. This step is the only thing that catches it.
+
+Every roadmap item is tracked by an issue labelled `planned`, and that issue
+number, not the position in the list, is the item's identity. The numbering
+shifts every time something ships, so **never cite a roadmap item by its
+position** in a doc, a commit message or a comment. Cite the issue.
+
+```sh
+gh issue list --label planned --state closed    # shipped, still in the README
+gh issue list --label planned --state open      # should match the README list
+```
+
+For each closed one: delete its README item (do not mark it done, the
+roadmap is what is *not* built), and if it shipped in this release make sure
+the changelog entry covers it. If an item shipped only in part, narrow the
+README text to the remaining half rather than deleting it, and say so.
+
+For each open one with no README item, either add it or drop the label.
+
+Anything new that lands on the roadmap needs an issue with the `planned`
+label first, so this query stays the whole truth.
 
 ---
 

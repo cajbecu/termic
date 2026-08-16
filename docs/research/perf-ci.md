@@ -1,8 +1,9 @@
 # Performance benchmarks in CI (investigation)
 
 **Status: research, now partly built.** This doc answers one question,
-README roadmap item 12: can "performance trumps polish" be enforced by
-CI instead of by review and habit, and if so, which parts of it. It was
+from a README roadmap item that has since shipped and been pruned: can
+"performance trumps polish" be enforced by CI instead of by review and
+habit, and if so, which parts of it. It was
 written before any of it existed and is kept as the reasoning behind
 what shipped, so a future reader can tell which parts were argued for
 and which were only assumed.
@@ -152,7 +153,8 @@ and **whether the platform can be Linux** (everything Orca gates, is).
 
 Note in particular that their one runtime PR gate, Zustand selector
 fan-out, is *termic's bear trap 5*, and that the metrics they never run
-in CI are exactly the four our roadmap item names.
+in CI are exactly the four the roadmap item named (listed under
+"Recommendation" below).
 
 ## Finding: why termic cannot copy the runner strategy
 
@@ -325,9 +327,9 @@ better argument for the tiered approach than the current framing.
 
 ## Recommendation
 
-Feasible, with the scope inverted from how the roadmap item states it.
+Feasible, with the scope inverted from how the roadmap item stated it.
 
-The four targets the roadmap names (idle CPU, cold start to first paint,
+The four targets it named (idle CPU, cold start to first paint,
 main-thread jank, RSS growth) are three durations and a percentage.
 Those are exactly the category that cannot be gated on a virtualised
 3-core runner without manufacturing false confidence. Do not build them
