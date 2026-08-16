@@ -36,6 +36,7 @@ export function DockerSection() {
   const themeComp = useRef(new Compartment());
   const [dockerfile, setDockerfile] = useState("");
   const [savedDockerfile, setSavedDockerfile] = useState("");
+  const [dfLoaded, setDfLoaded] = useState(false);
   const [dfBusy, setDfBusy] = useState(false);
 
   // Build state.
@@ -60,13 +61,18 @@ export function DockerSection() {
     dockerImageStatus().then(setImage).catch(() => {});
   };
   useEffect(() => {
-    dockerGetDockerfile().then(df => { setDockerfile(df); setSavedDockerfile(df); }).catch(() => {});
+    dockerGetDockerfile()
+      .then(df => { setDockerfile(df); setSavedDockerfile(df); })
+      .catch(() => {})
+      .finally(() => setDfLoaded(true));
     refresh();
   }, []);
 
-  // ── CodeMirror init (once) ────────────────────────────────────────
+  // ── CodeMirror init (once, after the Dockerfile has loaded so the
+  // editor is built with its real content in one shot, no throwaway
+  // empty-doc instance swapped out a tick later) ──────────────────────
   useEffect(() => {
-    if (!hostRef.current || viewRef.current) return;
+    if (!dfLoaded || !hostRef.current || viewRef.current) return;
     const view = new EditorView({
       state: EditorState.create({
         doc: dockerfile,
@@ -89,7 +95,7 @@ export function DockerSection() {
     viewRef.current = view;
     return () => { view.destroy(); viewRef.current = null; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dockerfile.length > 0]);
+  }, [dfLoaded]);
 
   useEffect(() => {
     viewRef.current?.dispatch({
@@ -140,7 +146,13 @@ export function DockerSection() {
 
   async function build(noCache: boolean) {
     // Persist any pending edits first so the build matches the editor.
-    if (dirty) { await dockerSetDockerfile(dockerfile); setSavedDockerfile(dockerfile); }
+    // Goes through the same dfBusy flag as the explicit Save button so
+    // the two can't race and write the Dockerfile out of order.
+    if (dirty) {
+      setDfBusy(true);
+      try { await dockerSetDockerfile(dockerfile); setSavedDockerfile(dockerfile); }
+      finally { setDfBusy(false); }
+    }
     setBuildLog([]);
     setShowLog(true);
     setBuilding(true);
@@ -155,9 +167,10 @@ export function DockerSection() {
     <div className="flex flex-col gap-7">
       <SectionTitle title="Docker" badge="Experimental" />
       <p className="max-w-2xl text-[12.5px] text-[var(--color-fg-dim)]">
-        A stronger cage than Seatbelt: the agent runs inside a Docker container and can only touch the
-        folders termic mounts (the worktree and its git metadata). Everything else on your Mac is invisible
-        to it. One image is shared by every Docker task; pick Docker per task from its sandbox dialog.
+        A filesystem cage: the agent runs inside a Docker container and can only touch the folders termic
+        mounts (the worktree and its git metadata). Everything else on your Mac is invisible to it. Network
+        access inside the container is unrestricted, unlike Seatbelt's host allowlist. One image is shared
+        by every Docker task; pick Docker per task from its sandbox dialog.
       </p>
 
       {/* Master toggle */}
@@ -195,10 +208,10 @@ export function DockerSection() {
               className="mt-2 max-h-[420px] overflow-auto rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg)]"
             />
             <div className="mt-3 flex items-center gap-2">
-              <Button variant="primary" disabled={!dirty || dfBusy} onClick={saveDockerfile}>
+              <Button variant="primary" disabled={!dirty || dfBusy || building} onClick={saveDockerfile}>
                 {dfBusy ? "Saving…" : "Save"}
               </Button>
-              <Button variant="secondary" disabled={image?.is_default && !dirty} onClick={resetDockerfile}>
+              <Button variant="secondary" disabled={(image?.is_default && !dirty) || dfBusy || building} onClick={resetDockerfile}>
                 Reset to default
               </Button>
               {dirty && <span className="text-[12px] text-[var(--color-fg-faint)]">Unsaved edits</span>}
@@ -212,16 +225,16 @@ export function DockerSection() {
             <div className="mt-3 flex items-center gap-2">
               <Button
                 variant="primary"
-                disabled={building || !status?.daemon}
+                disabled={building || dfBusy || !status?.daemon}
                 onClick={() => build(false)}
               >
                 {building ? <span className="flex items-center gap-1.5"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Building…</span> : "Build image"}
               </Button>
-              <Button variant="secondary" disabled={building || !status?.daemon} onClick={() => build(true)}>
+              <Button variant="secondary" disabled={building || dfBusy || !status?.daemon} onClick={() => build(true)}>
                 Update agents (rebuild)
               </Button>
               {!status?.daemon && (
-                <span className="text-[12px] text-[var(--color-warn,#d08b3a)]">Start Docker to build.</span>
+                <span className="text-[12px] text-[var(--color-warn)]">Start Docker to build.</span>
               )}
               {buildLog.length > 0 && (
                 <Button variant="ghost" onClick={() => setShowLog(s => !s)}>
@@ -246,21 +259,21 @@ function DockerAvailability({ status }: { status: DockerStatus | null }) {
   if (!status) return <div className="mt-1 text-[12.5px] text-[var(--color-fg-faint)]">Checking…</div>;
   if (!status.binary) {
     return (
-      <div className="mt-1 flex items-center gap-1.5 text-[12.5px] text-[var(--color-warn,#d08b3a)]">
+      <div className="mt-1 flex items-center gap-1.5 text-[12.5px] text-[var(--color-warn)]">
         <CircleAlert className="h-3.5 w-3.5" /> `docker` not found on PATH. Install Docker Desktop, OrbStack, or colima.
       </div>
     );
   }
   if (!status.daemon) {
     return (
-      <div className="mt-1 flex items-center gap-1.5 text-[12.5px] text-[var(--color-warn,#d08b3a)]">
+      <div className="mt-1 flex items-center gap-1.5 text-[12.5px] text-[var(--color-warn)]">
         <CircleAlert className="h-3.5 w-3.5" /> Docker is installed but the daemon is not running. Start it to build / run.
       </div>
     );
   }
   return (
     <div className="mt-1 flex items-center gap-1.5 text-[12.5px] text-[var(--color-fg-dim)]">
-      <CircleCheck className="h-3.5 w-3.5 text-[var(--color-ok,#4caf50)]" /> Ready{status.version ? ` · ${status.version}` : ""}
+      <CircleCheck className="h-3.5 w-3.5 text-[var(--color-ok)]" /> Ready{status.version ? ` · ${status.version}` : ""}
     </div>
   );
 }
@@ -271,7 +284,7 @@ function ImageStatusLine({ image, dirty }: { image: DockerImageStatus | null; di
     <div className="mt-1 flex flex-col gap-1 text-[12.5px]">
       {image.available ? (
         <span className="flex items-center gap-1.5 text-[var(--color-fg-dim)]">
-          <CircleCheck className="h-3.5 w-3.5 text-[var(--color-ok,#4caf50)]" />
+          <CircleCheck className="h-3.5 w-3.5 text-[var(--color-ok)]" />
           Built · <code className="font-mono">{image.last_built_tag ?? image.current_tag}</code>
         </span>
       ) : (
@@ -280,7 +293,7 @@ function ImageStatusLine({ image, dirty }: { image: DockerImageStatus | null; di
         </span>
       )}
       {(image.stale || dirty) && image.available && (
-        <span className="flex items-center gap-1.5 text-[var(--color-warn,#d08b3a)]">
+        <span className="flex items-center gap-1.5 text-[var(--color-warn)]">
           <CircleAlert className="h-3.5 w-3.5" />
           Dockerfile edited since the last build. Rebuild to apply your changes (tasks keep using the last built image until then).
         </span>

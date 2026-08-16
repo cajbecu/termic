@@ -265,9 +265,10 @@ export function TaskSandboxDialog() {
                 <span className="rounded bg-[var(--color-bg-2)] px-1.5 py-0.5 text-[11px] font-normal text-[var(--color-fg-dim)]">experimental</span>
               </div>
               <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
-                A stronger cage: the agent runs inside a Docker container and can only touch the worktree +
-                its persistent config dir. Overrides the mode above - a task can be sandboxed with Docker
-                or Seatbelt, not both. Manage the image in Settings → Docker.
+                Filesystem isolation: the agent runs inside a Docker container and can only touch the worktree +
+                its persistent config dir. Network is unrestricted inside the container, unlike Seatbelt's
+                host allowlist. Overrides the mode above - a task can be sandboxed with Docker or Seatbelt,
+                not both. Manage the image in Settings → Docker.
               </div>
             </div>
           </label>

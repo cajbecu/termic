@@ -281,6 +281,50 @@ pub fn build_spec(
     }
 }
 
+/// Flag prefixes that would let a task's own `docker_extra_args` widen or
+/// disable the cage the container is supposed to provide (root-equivalent
+/// capabilities, host networking/PID/IPC namespaces, arbitrary extra bind
+/// mounts, or swapping the entrypoint/user). Checked case-insensitively
+/// against each argument on its own — these are argv elements, not a shell
+/// string, so there's no injection risk, just a policy gate on which
+/// `docker run` flags a task is allowed to add for itself.
+const UNSAFE_EXTRA_ARG_PREFIXES: &[&str] = &[
+    "--privileged",
+    "--cap-add",
+    "--network",
+    "--net",
+    "--pid",
+    "--ipc",
+    "--uts",
+    "--userns",
+    "--security-opt",
+    "--device",
+    "--volume",
+    "-v",
+    "--mount",
+    "--entrypoint",
+    "--user",
+    "-u",
+    "--cap-drop",
+    "--pids-limit",
+];
+
+/// Reject any `docker_extra_args` entry that could weaken the container
+/// boundary `render_argv` builds. Returns the offending argument in the
+/// error so the caller (`task_set_docker`) can surface it to the user.
+pub fn validate_extra_args(args: &[String]) -> Result<(), String> {
+    for a in args {
+        let lower = a.to_ascii_lowercase();
+        let flag = lower.split('=').next().unwrap_or(&lower);
+        if UNSAFE_EXTRA_ARG_PREFIXES.iter().any(|p| flag == *p) {
+            return Err(format!(
+                "\"{a}\" isn't allowed in Docker extra args: it can widen or disable the container's isolation boundary."
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ──────────────────────────── render_argv ──────────────────────────────
 
 /// Render the spec to the exact argv we spawn. THE single source of truth:
@@ -308,6 +352,18 @@ pub fn render_argv(spec: &DockerSpec, cmd: &str, args: &[String]) -> Vec<String>
         argv.push("-e".into());
         argv.push(format!("{k}={v}"));
     }
+    // Harden the container itself: no Linux capabilities beyond the
+    // agent's baseline needs, no privilege escalation via setuid
+    // binaries, and a cap on forkbomb-style PID exhaustion. This is
+    // orthogonal to the (currently unrestricted) network egress — see
+    // the "Known gap" callout in docs/sandbox.md — but it meaningfully
+    // narrows what a container-escape exploit can reach even so.
+    argv.push("--cap-drop".into());
+    argv.push("ALL".into());
+    argv.push("--security-opt".into());
+    argv.push("no-new-privileges:true".into());
+    argv.push("--pids-limit".into());
+    argv.push("512".into());
     argv.extend(spec.extra_args.iter().cloned());
     argv.push(spec.image.clone());
     argv.push(cmd.to_string());
@@ -532,5 +588,48 @@ fn rm_by_filter(filter: &str) {
         .unwrap_or_default();
     for id in ids.lines().filter(|l| !l.trim().is_empty()) {
         let _ = Command::new("docker").args(["rm", "-f", id]).output();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extra_args_rejects_cage_widening_flags() {
+        for bad in [
+            "--privileged",
+            "--cap-add=ALL",
+            "--network=host",
+            "--net=host",
+            "--pid=host",
+            "-v",
+            "--volume",
+            "--mount",
+            "--entrypoint",
+            "--user=root",
+            "-u",
+        ] {
+            let err = validate_extra_args(&[bad.to_string()]);
+            assert!(err.is_err(), "expected {bad:?} to be rejected");
+        }
+    }
+
+    #[test]
+    fn extra_args_rejects_case_insensitively() {
+        assert!(validate_extra_args(&["--Privileged".to_string()]).is_err());
+    }
+
+    #[test]
+    fn extra_args_allows_benign_flags() {
+        for ok in ["--memory", "4g", "--cpus=2", "--label=foo=bar"] {
+            assert!(validate_extra_args(&[ok.to_string()]).is_ok(), "expected {ok:?} to be allowed");
+        }
+    }
+
+    #[test]
+    fn extra_args_checks_every_element() {
+        let args = vec!["--memory".to_string(), "4g".to_string(), "--privileged".to_string()];
+        assert!(validate_extra_args(&args).is_err());
     }
 }

@@ -337,7 +337,7 @@ export function onDockerBuildDone(cb: (d: { success: boolean; tag: string; error
  *  Mirrors `taskSetSandbox`: pinned per task, SIGKILLs live PTYs so they
  *  relaunch under (or out of) the container. */
 export const taskSetDocker = (id: string, enabled: boolean, extraArgs: string[]) =>
-  invoke<void>("task_set_docker", { id, enabled, extraArgs });
+  invoke<number>("task_set_docker", { id, enabled, extraArgs });
 
 /** "Allow for this repo" — append a host to the repo's committed
  *  `.termic.yaml` (shared with the team, read by the termic CLI).

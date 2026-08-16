@@ -2812,11 +2812,27 @@ fn pty_spawn(
     // `docker run ...` and skip the Seatbelt path entirely (the two are
     // mutually exclusive). Build is NEVER triggered here — if no usable
     // image is built, refuse loudly rather than spawning unsandboxed.
-    let docker_task = args
+    let spawn_task = args
         .task_id
         .as_deref()
-        .and_then(|tid| load_tasks().into_iter().find(|t| t.id == tid))
-        .filter(|t| t.docker_sandbox_enabled && load_settings_inner().docker_sandbox_enabled);
+        .and_then(|tid| load_tasks().into_iter().find(|t| t.id == tid));
+    let docker_globally_enabled = load_settings_inner().docker_sandbox_enabled;
+    // Fail closed, not open: a task that opted into Docker isolation must
+    // never silently fall through to an unsandboxed spawn just because an
+    // admin flipped the global switch off later (or Seatbelt's own
+    // `sandbox_enabled` was left off, since Docker was doing the caging).
+    // Refuse loudly instead of pretending the cage is still there.
+    if let Some(task) = &spawn_task {
+        if task.docker_sandbox_enabled && !docker_globally_enabled {
+            return Err(
+                "This task has \"Run in Docker\" enabled, but Docker sandboxing is turned off globally (Settings → Docker). Re-enable it there, or turn off \"Run in Docker\" for this task, before launching."
+                    .to_string(),
+            );
+        }
+    }
+    let docker_task = spawn_task
+        .clone()
+        .filter(|t| t.docker_sandbox_enabled && docker_globally_enabled);
     let docker_argv: Option<Vec<String>> = if let Some(task) = docker_task {
         let agent = args.agent_id.clone().unwrap_or_else(|| task.cli.clone());
         let image = docker::spawn_image_tag().ok_or_else(|| {
@@ -5906,6 +5922,7 @@ fn task_set_docker(
     enabled: bool,
     extra_args: Vec<String>,
 ) -> Result<usize, String> {
+    docker::validate_extra_args(&extra_args)?;
     let mut list = load_tasks();
     let w = list.iter_mut().find(|w| w.id == id).ok_or("no such task")?;
     w.docker_sandbox_enabled = enabled;
@@ -16946,6 +16963,18 @@ pub fn run() {
                 );
                 std::process::exit(0);
             }
+            // Reap any Docker-sandbox containers left behind by a crash or
+            // force-quit of a PREVIOUS launch. `docker run` is attached
+            // foreground (no `-d`), so killing termic's process doesn't
+            // stop the container server-side, and `--rm` only fires on the
+            // container's own clean exit — an abandoned task's container
+            // (with its worktree + credential mounts) would otherwise leak
+            // until that same task happened to respawn or get archived.
+            // We just launched, so no Docker-sandboxed PTY from THIS
+            // session can be live yet: every termic-labeled container found
+            // now is provably a leftover. Off the main thread since it
+            // shells out to `docker ps`.
+            tauri::async_runtime::spawn_blocking(docker::cleanup_all);
             // `termic://` deep links (GH #192). Registered here, before the
             // window is built, so a link that LAUNCHED the app is already
             // queued by the time the webview asks for it. Two sources, both
