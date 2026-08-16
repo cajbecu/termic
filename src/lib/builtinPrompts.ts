@@ -148,6 +148,16 @@ Pick up the in-flight work in this workspace and continue it.
 3. Continue that work. Do not start something new, re-do finished parts, or "clean up" unrelated code along the way.
 4. If the trail is ambiguous (multiple unfinished threads, contradictory state), list the threads and ask which one to continue instead of guessing.`;
 
+export const HANDOFF_PROMPT = `# Hand off to another agent
+
+Hand this work off to a different agent in this same task, using the termic CLI (\`$TERMIC_CLI\`; if unset, tell me it's disabled and stop).
+
+1. Run \`"$TERMIC_CLI" agents --json\`, show me the usable ones, and ask which to use and what it should do.
+2. Write \`handoff-$TERMIC_TASK_ID.md\` in the repo root: what I asked you to do, your plan, what you changed and why, and what the next agent should do. Point it at \`git diff\` / \`git log\` rather than pasting the diff.
+3. \`"$TERMIC_CLI" tab "$TERMIC_TASK_ID" --agent <cli> -p "Read handoff-$TERMIC_TASK_ID.md, then <task>. When done, write your result to result-$TERMIC_TASK_ID.md and nowhere else."\`
+4. Poll for \`result-$TERMIC_TASK_ID.md\`, then read it, that's the deliverable, not its last chat message.
+5. Report what it says and the tab id. Don't close your own tab or exit.`;
+
 export const SIMPLIFY_PROMPT = `# Simplify
 
 Simplify the changes on this branch without changing behavior.

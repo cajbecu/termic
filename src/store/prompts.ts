@@ -18,6 +18,7 @@ import {
   WRITE_TESTS_PROMPT, SECURITY_REVIEW_PROMPT, EXPLAIN_CHANGES_PROMPT, COMMIT_PROMPT,
   COMMIT_PUSH_PROMPT, VERIFY_PROMPT, FIX_BUG_PROMPT, STATUS_PROMPT,
   UPDATE_DOCS_PROMPT, RESEARCH_PROMPT, CONTINUE_PROMPT, SIMPLIFY_PROMPT,
+  HANDOFF_PROMPT,
 } from "@/lib/builtinPrompts";
 
 export interface Prompt {
@@ -49,6 +50,7 @@ export const DEFAULT_PROMPTS: readonly BuiltinDef[] = [
   { id: "builtin:simplify",        title: "Simplify",             body: SIMPLIFY_PROMPT },
   { id: "builtin:status",          title: "What is the state?",   body: STATUS_PROMPT },
   { id: "builtin:continue",        title: "Continue from last",   body: CONTINUE_PROMPT },
+  { id: "builtin:handoff",         title: "Hand off to another agent", body: HANDOFF_PROMPT },
   { id: "builtin:update-docs",     title: "Update the docs",      body: UPDATE_DOCS_PROMPT },
   { id: "builtin:research",        title: "Research first",       body: RESEARCH_PROMPT },
 ];
