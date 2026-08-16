@@ -958,8 +958,12 @@ describe("tab context menu", () => {
     // content-sized one would re-measure on every OSC title the agent emits and
     // shove the whole scrolling remainder sideways with it.
     const before = await pillWidth(s2);
-    // Same width as an unpinned neighbour when the row is not crowded.
-    expect(before).toBe(await pillWidth(s0));
+    const looseBefore = await pillWidth(s0);
+    // The fixed width equals the unpinned max-width, so the pinned pill matches
+    // an uncrowded neighbour and holds while a crowded one shrinks below it.
+    // Asserted as "never the narrower one" because which of the two reads is
+    // true depends on the window width, and the suite pins no window size.
+    expect(before).toBeGreaterThanOrEqual(looseBefore);
 
     for (const title of ["x", "a considerably longer live title than before", "y"]) {
       await browser.execute((wid, id, t) => {
@@ -970,6 +974,9 @@ describe("tab context menu", () => {
         { timeout: 5_000, timeoutMsg: `live title never became "${title}"` },
       );
       expect(await pillWidth(s2)).toBe(before);
+      // The point of the fixed width: a title change must not shove the
+      // scrolling remainder sideways either.
+      expect(await pillWidth(s0)).toBe(looseBefore);
     }
   });
 

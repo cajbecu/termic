@@ -2439,7 +2439,7 @@ export function FooterBar({ task, sandboxWarning }: {
 }) {
   const splitOpen     = useApp(s => !!s.terminalSplit[task.id]);
   const splitCollapsed = useApp(s => !!s.terminalSplitCollapsed[task.id]);
-  const toggleSplit = useApp(s => s.toggleTerminalSplit);
+  const toggleBottomTerminal = useApp(s => s.toggleBottomTerminal);
   const mode = effectiveSandboxMode(task);
 
   // no right-split agent queue state needed; split panes show their own queue via SplitView
@@ -2501,11 +2501,13 @@ export function FooterBar({ task, sandboxWarning }: {
           affordance reachable from any tab regardless of split state. */}
       <ReviewCommentsBar taskId={task.id} />
       {/* +Terminal opens the bottom split. Hidden when the split is already
-          open — no point offering to add what's there. */}
+          open — no point offering to add what's there. Goes through
+          toggleBottomTerminal (the ⌘J action) so the new shell also takes
+          focus; a raw toggleTerminalSplit leaves the seeded shell unfocused. */}
       {!splitOpen && (
         <button
           type="button"
-          onClick={() => toggleSplit(task.id)}
+          onClick={() => toggleBottomTerminal(task.id)}
           title="Open a bottom terminal split"
           className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[12.5px] text-[var(--color-fg-faint)] hover:bg-[var(--color-bg-2)] hover:text-[var(--color-fg)]"
         >

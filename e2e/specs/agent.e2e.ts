@@ -14,6 +14,8 @@
 
 import {
   archiveTask,
+  clickByText,
+  clickWhenVisible,
   ensureActiveTask,
   openTask,
   queuedCount,
@@ -223,11 +225,14 @@ describe("agent extras", () => {
     expect(await browser.execute(() => !!window.__termic!.useUI.getState().confirm)).toBe(false);
   });
 
-  it("opens an aux (bottom) terminal", async () => {
-    await browser.execute(
-      (id) => window.__termic!.useApp.getState().addBottomTab(id),
-      taskId,
-    );
+  // Driven through the REAL footer button, not through `addBottomTab`. The
+  // button used to call `toggleTerminalSplit` alone, which opens the split and
+  // lets TaskView seed an UNFOCUSED shell, so the user had to click the
+  // terminal before typing. A store-level drive cannot see that wiring.
+  it("opens an aux (bottom) terminal from the footer button and focuses it", async () => {
+    await ensureActiveTask(taskId!);
+    await clickByText("Terminal");
+
     await browser.waitUntil(
       () =>
         browser.execute(
@@ -236,7 +241,124 @@ describe("agent extras", () => {
         ),
       { timeout: 8_000, timeoutMsg: "aux terminal was not added" },
     );
+
+    // AuxTerminal focuses itself only once its PTY is live and the grid has
+    // rendered, so this is a wait, not an immediate read.
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          () => !!document.activeElement?.closest("[data-bottom-split]"),
+        ),
+      { timeout: 20_000, interval: 250, timeoutMsg: "aux terminal never took focus" },
+    );
+
     await snap("agent-extras.png");
+  });
+
+  // The chevron drives `toggleTerminalSplitCollapsed` directly, so the focus
+  // move has to live in that action. Collapsing hides the shell with
+  // display:none, which drops focus to <body> and swallows every keystroke.
+  it("hands focus back on collapse and takes it again on expand", async () => {
+    await clickWhenVisible(
+      `[data-task-id="${taskId}"] button[title="Collapse terminal"]`,
+    );
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          () => !document.activeElement?.closest("[data-bottom-split]"),
+        ),
+      { timeout: 10_000, interval: 250, timeoutMsg: "focus stayed in the collapsed split" },
+    );
+
+    await clickWhenVisible(
+      `[data-task-id="${taskId}"] button[title="Expand terminal"]`,
+    );
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          () => !!document.activeElement?.closest("[data-bottom-split]"),
+        ),
+      { timeout: 10_000, interval: 250, timeoutMsg: "expanding did not focus the shell" },
+    );
+  });
+
+  // Clicking a pill only set the active tab; AuxTerminal never self-focuses on
+  // becoming active, so focus stayed in the shell the user just left.
+  it("focuses the shell whose pill is clicked", async () => {
+    const first = await browser.execute(
+      (id) => window.__termic!.useApp.getState().bottomTabs[id][0].id,
+      taskId,
+    );
+    // A second shell, so the click is a real switch. addBottomTab focuses it.
+    await browser.execute(
+      (id) => window.__termic!.useApp.getState().addBottomTab(id),
+      taskId,
+    );
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          (id, f) => window.__termic!.useApp.getState().activeBottomTab[id] !== f,
+          taskId,
+          first,
+        ),
+      { timeout: 8_000, timeoutMsg: "the second shell never became active" },
+    );
+
+    await clickWhenVisible(
+      `[data-bottom-split] [data-scroll-strip] [data-tab-id="${first}"]`,
+    );
+    await browser.waitUntil(
+      () =>
+        // The pill carries the same data-tab-id as the terminal host, so the
+        // assertion pins the xterm textarea specifically, not just the id.
+        browser.execute(
+          (f) =>
+            !!document.activeElement?.classList.contains("xterm-helper-textarea") &&
+            document.activeElement.closest("[data-tab-id]")?.getAttribute("data-tab-id") === f,
+          first,
+        ),
+      { timeout: 10_000, interval: 250, timeoutMsg: "clicking the pill did not focus its shell" },
+    );
+
+    // Back to one shell, so the next case closes the last one.
+    await browser.execute(
+      (id) => {
+        const st = window.__termic!.useApp.getState();
+        const extra = st.bottomTabs[id].filter((t: any) => t.id !== st.bottomTabs[id][0].id);
+        extra.forEach((t: any) => st.closeBottomTab(id, t.id));
+      },
+      taskId,
+    );
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          (id) => window.__termic!.useApp.getState().bottomTabs[id].length === 1,
+          taskId,
+        ),
+      { timeout: 8_000, timeoutMsg: "the extra shell never closed" },
+    );
+  });
+
+  // Closing the last shell closes the split, so the footer button comes back
+  // and the next open starts from the same state as the first.
+  it("closes the split when the last shell closes", async () => {
+    const tabId = await browser.execute(
+      (id) => window.__termic!.useApp.getState().bottomTabs[id][0].id,
+      taskId,
+    );
+    await browser.execute(
+      (id, tid) => window.__termic!.useApp.getState().closeBottomTab(id, tid),
+      taskId,
+      tabId,
+    );
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          (id) => !window.__termic!.useApp.getState().terminalSplit[id],
+          taskId,
+        ),
+      { timeout: 8_000, timeoutMsg: "split stayed open after the last shell closed" },
+    );
   });
 });
 
