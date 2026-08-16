@@ -26,6 +26,7 @@ import { requestClosePaneTab, requestClosePaneTabs } from "@/lib/closeTab";
 import { TabContextMenu } from "./TabContextMenu";
 import { showDragGhost, moveDragGhost, hideDragGhost } from "@/lib/dragGhost";
 import { detectDropZone, setDropHighlight, clearDropHighlight, type DropZone } from "@/lib/dropZones";
+import { startMenuDrag } from "@/lib/menuDrag";
 
 interface PaneHeaderProps {
   leaf: PaneLeaf;
@@ -172,6 +173,29 @@ export function PaneHeader({ leaf, task, onClose }: PaneHeaderProps) {
     window.addEventListener("pointercancel", onCancel);
   }
 
+  // Menu-triggered equivalent of startTabDrag: no mousedown to anchor to, so
+  // it starts from the pill's own position and arms a cursor-following
+  // session via startMenuDrag instead of a real pointer capture.
+  function startMenuMove(tabId: string) {
+    const pill = document.querySelector(
+      `[data-pane-header][data-pane-id="${CSS.escape(paneId)}"] [data-tab-id="${CSS.escape(tabId)}"]`,
+    ) as HTMLElement | null;
+    const rect = pill?.getBoundingClientRect();
+    const x = rect ? rect.left + rect.width / 2 : window.innerWidth / 2;
+    const y = rect ? rect.top + rect.height / 2 : 0;
+    const t = paneTabs.find(tt => tt.id === tabId);
+    startMenuDrag({
+      label: t ? (((t as { liveTitle?: string }).liveTitle) || t.title) : "Tab",
+      x, y,
+      hitTest: hitTestDropTarget,
+      onDrop: (target) => {
+        if (target.zone !== "center") moveTabToSplit(task.id, tabId, target.toPaneId, target.zone);
+        else if (target.toPaneId) moveTabToPane(task.id, tabId, target.toPaneId);
+        else moveTabToMain(task.id, tabId);
+      },
+    });
+  }
+
   useEffect(() => () => { dragTeardownRef.current?.(); clearDropTarget(); }, []);
 
   // ⌘T from inside this pane opens this pane's "+" dropdown.
@@ -238,6 +262,10 @@ export function PaneHeader({ leaf, task, onClose }: PaneHeaderProps) {
       onUnpin={() => unpinTab(task.id, tab.id)}
       onClose={() => closePaneTabAt(tab.id)}
       onCloseMany={(ids) => requestClosePaneTabs(task.id, paneId, ids)}
+      onSplitRight={() => moveTabToSplit(task.id, tab.id, paneId, 'right')}
+      onSplitDown={() => moveTabToSplit(task.id, tab.id, paneId, 'bottom')}
+      canSplitOut={paneTabs.length > 1}
+      onMoveToSplit={() => startMenuMove(tab.id)}
     >
       <TabPill
         task={task}

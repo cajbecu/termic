@@ -4,14 +4,18 @@
 // and the "which siblings does this close" rules live here.
 
 import type { ReactNode } from "react";
-import { Pin, PinOff, X } from "lucide-react";
+import { Pin, PinOff, X, SquareSplitHorizontal, SquareSplitVertical, Move } from "lucide-react";
 import {
   ContextMenuRoot, ContextMenuTrigger, ContextMenuContent,
   ContextMenuItem, ContextMenuSeparator,
 } from "@/components/ui/ContextMenu";
 import { closableSiblings, type StripTab } from "@/lib/tabActions";
 
-export function TabContextMenu({ tabs, tabId, pinned, onPin, onUnpin, onClose, onCloseMany, children }: {
+export function TabContextMenu({
+  tabs, tabId, pinned, onPin, onUnpin, onClose, onCloseMany,
+  onSplitRight, onSplitDown, canSplitOut = true, onMoveToSplit,
+  children,
+}: {
   /** This strip's tabs, in display order. */
   tabs: StripTab[];
   tabId: string;
@@ -20,6 +24,20 @@ export function TabContextMenu({ tabs, tabId, pinned, onPin, onUnpin, onClose, o
   onUnpin: () => void;
   onClose: () => void;
   onCloseMany: (tabIds: string[]) => void;
+  /** Split the tab's own pane (main included) and move it into the new
+   *  half. Omitted where splitting doesn't apply, e.g. the bottom scratch
+   *  strip, which isn't part of the split tree. */
+  onSplitRight?: () => void;
+  onSplitDown?: () => void;
+  /** False when the tab is alone in its pane/main: splitting would just
+   *  leave an empty neighbor and move nothing. Split Right/Down and Move to
+   *  Split stay visible but disabled rather than vanish, same as Close
+   *  others/Close to the right above. */
+  canSplitOut?: boolean;
+  /** Arm a cursor-following move: same drag ghost and edge highlight as a
+   *  real pointer drag, just started from the menu instead of a grab.
+   *  Present only when another pane already exists to move into. */
+  onMoveToSplit?: () => void;
   children: ReactNode;
 }) {
   const others = closableSiblings(tabs, tabId, "others");
@@ -45,6 +63,22 @@ export function TabContextMenu({ tabs, tabId, pinned, onPin, onUnpin, onClose, o
         <ContextMenuItem disabled={!right.length} onSelect={() => onCloseMany(right)}>
           Close to the right
         </ContextMenuItem>
+        {(onSplitRight || onSplitDown || onMoveToSplit) && <ContextMenuSeparator />}
+        {onSplitRight && (
+          <ContextMenuItem disabled={!canSplitOut} onSelect={onSplitRight}>
+            <SquareSplitHorizontal /> Split right
+          </ContextMenuItem>
+        )}
+        {onSplitDown && (
+          <ContextMenuItem disabled={!canSplitOut} onSelect={onSplitDown}>
+            <SquareSplitVertical /> Split down
+          </ContextMenuItem>
+        )}
+        {onMoveToSplit && (
+          <ContextMenuItem onSelect={onMoveToSplit}>
+            <Move /> Move to split&hellip;
+          </ContextMenuItem>
+        )}
       </ContextMenuContent>
     </ContextMenuRoot>
   );

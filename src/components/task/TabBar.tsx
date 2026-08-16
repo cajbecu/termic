@@ -62,8 +62,15 @@ export function TabBar({ task }: { task: Task }) {
   const mainFocused = !hasSplitTree || !activePaneId || activePaneId === mainPaneId;
 
   const moveTabToPane = useApp(s => s.moveTabToPane);
+  const moveTabToSplit = useApp(s => s.moveTabToSplit);
+  // Move to Split only makes sense once another pane already exists to move
+  // into or split off of; a bare main strip has nothing to offer.
+  const paneCount = useApp(s => {
+    const t = s.splitTree[task.id];
+    return t ? getAllLeaves(t).length : 1;
+  });
 
-  const { dragId, dragTx, suppressClickRef, startDrag } = useTabStripDrag({
+  const { dragId, dragTx, suppressClickRef, startDrag, startMenuMove } = useTabStripDrag({
     taskId: task.id, stripRef, stripTabs: tabs, allTabs: allTabsRaw, reorderTab,
     currentPaneId: null,
     onDropToPane: (tabId, toPaneId) => moveTabToPane(task.id, tabId, toPaneId),
@@ -138,6 +145,10 @@ export function TabBar({ task }: { task: Task }) {
       onUnpin={() => unpinTab(task.id, t.id)}
       onClose={() => requestCloseTab(task.id, t.id)}
       onCloseMany={(ids) => requestCloseTabs(task.id, ids)}
+      onSplitRight={() => moveTabToSplit(task.id, t.id, null, 'right')}
+      onSplitDown={() => moveTabToSplit(task.id, t.id, null, 'bottom')}
+      canSplitOut={tabs.length > 1}
+      onMoveToSplit={paneCount > 1 && tabs.length > 1 ? () => startMenuMove(t.id) : undefined}
     >
       <TabPill
         task={task} tab={t} active={t.id === activeId} paneFocused={mainFocused}

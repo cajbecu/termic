@@ -551,6 +551,147 @@ describe("tab drag", () => {
   });
 });
 
+// Right-click "Split right" / "Split down" / "Move to split…" are the menu
+// equivalents of the toolbar split buttons and drag-and-drop, wired straight
+// to the same store actions (moveTabToSplit / moveTabToMain). "Move to
+// split" specifically arms a cursor-following drag with no button held
+// (src/lib/menuDrag.ts): the ghost follows the pointer from wherever the menu
+// closed, and the next click commits wherever it lands — mirroring
+// pointerDrag's real drag without a real grab to start it.
+describe("split from the tab context menu", () => {
+  let taskId: string | undefined;
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+  });
+
+  const tabs = () =>
+    browser.execute(
+      (id) =>
+        (window.__termic!.useApp.getState().tabs[id] ?? []).map((t: any) => ({
+          id: t.id as string,
+          paneId: (t.paneId ?? null) as string | null,
+        })),
+      taskId,
+    );
+  const leafCount = () =>
+    browser.execute((id) => {
+      const tree = window.__termic!.useApp.getState().splitTree[id];
+      const walk = (n: any): number =>
+        !n ? 0 : n.type === "pane" ? 1 : walk(n.a) + walk(n.b);
+      return walk(tree);
+    }, taskId);
+
+  const addShells = (prefix: string, n: number) =>
+    browser.execute(
+      (id, p, count) => {
+        const app = window.__termic!.useApp.getState();
+        const ids: string[] = [];
+        for (let i = 0; i < count; i++) {
+          const tabId = `${p}-${i}`;
+          ids.push(tabId);
+          app.addTab(id, { id: tabId, type: "terminal", cli: "shell", title: tabId } as any);
+        }
+        return ids;
+      },
+      taskId, prefix, n,
+    );
+
+  // Same dispatched-contextmenu approach as the "tab context menu" describe
+  // above: a WebDriver right-click gesture doesn't reach Radix in this
+  // WKWebView, so the MouseEvent goes in through the real trigger instead.
+  const openTabMenu = async (tabId: string) => {
+    await browser.execute((id) => {
+      const el = document.querySelector(`[data-tab-id="${id}"]`) as HTMLElement;
+      if (!el) throw new Error(`no tab pill ${id}`);
+      const r = el.getBoundingClientRect();
+      el.dispatchEvent(new MouseEvent("contextmenu", {
+        bubbles: true, cancelable: true, button: 2,
+        clientX: r.left + 10, clientY: r.top + 10,
+      }));
+    }, tabId);
+    await waitVisible('[role="menu"]');
+  };
+
+  const clickTabMenuItem = (label: string) =>
+    browser.execute((text) => {
+      const menu = [...document.querySelectorAll('[role="menu"]')].pop() as HTMLElement | undefined;
+      if (!menu) throw new Error("the tab context menu is not open");
+      const item = [...menu.children].find(
+        (i) => (i as HTMLElement).innerText?.trim() === text,
+      ) as HTMLElement | undefined;
+      if (!item) throw new Error(`no menu item "${text}"`);
+      item.click();
+    }, label);
+
+  it("split right moves the tab into a fresh pane to the right", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask("e2e-menusplit");
+    await browser.waitUntil(async () => (await tabs()).length === 1, {
+      timeout: 20_000, timeoutMsg: "agent tab never appeared",
+    });
+    // Extra main tabs: Split right/down and Move to split stay disabled (or
+    // hidden, for Move to split) while a main tab is alone in the strip.
+    await addShells("e2e-menusplit-shell", 3);
+    await browser.waitUntil(async () => (await tabs()).length === 4, {
+      timeout: 8_000, timeoutMsg: "shell tabs never appeared",
+    });
+    await ensureActiveTask(taskId);
+    await dismissOverlays();
+
+    const [target] = await tabs();
+    await openTabMenu(target.id);
+    await clickTabMenuItem("Split right");
+    await browser.waitUntil(async () => (await leafCount()) === 2, {
+      timeout: 8_000, timeoutMsg: "split right never produced a second pane",
+    });
+    const moved = (await tabs()).find((t) => t.id === target.id)!;
+    expect(moved.paneId).toBeTruthy();
+  });
+
+  it("split down grows the tree further", async () => {
+    await ensureActiveTask(taskId!);
+    const mainTab = (await tabs()).find((t) => !t.paneId)!;
+    await openTabMenu(mainTab.id);
+    await clickTabMenuItem("Split down");
+    await browser.waitUntil(async () => (await leafCount()) === 3, {
+      timeout: 8_000, timeoutMsg: "split down never produced a third pane",
+    });
+  });
+
+  it("move to split arms a cursor-following drag that commits on the next click", async () => {
+    await ensureActiveTask(taskId!);
+    const paneTab = (await tabs()).find((t) => t.paneId)!;
+    await openTabMenu(paneTab.id);
+    await clickTabMenuItem("Move to split…");
+
+    // The menu closes and a drag ghost appears immediately, following the
+    // cursor with no button held — that's the whole point of the feature.
+    await browser.waitUntil(
+      async () => browser.execute(() => !!document.querySelector(".termic-drag-ghost")),
+      { timeout: 4_000, timeoutMsg: "move to split never armed a drag ghost" },
+    );
+
+    // There's no button held from a real grab to release, so a fresh
+    // pointerdown anywhere stands in for the drop. Land it on the main
+    // strip's header, which always resolves to "move to main" regardless of
+    // where in the header it lands.
+    await browser.execute((scopeSel) => {
+      const strip = document.querySelector(`${scopeSel} [data-main-strip]`) as HTMLElement;
+      const r = strip.getBoundingClientRect();
+      const x = r.left + r.width / 2, y = r.top + r.height / 2;
+      window.dispatchEvent(new PointerEvent("pointermove", { clientX: x, clientY: y, bubbles: true }));
+      window.dispatchEvent(new PointerEvent("pointerdown", { clientX: x, clientY: y, bubbles: true, cancelable: true }));
+    }, `[data-task-id="${taskId}"]`);
+
+    await browser.waitUntil(
+      async () => !(await tabs()).find((t) => t.id === paneTab.id)!.paneId,
+      { timeout: 8_000, timeoutMsg: "move to split never landed the tab back on main" },
+    );
+    expect(await browser.execute(() => !!document.querySelector(".termic-drag-ghost"))).toBe(false);
+  });
+});
+
 // Theme switching is a visible, frequently-used preference. Guards that
 // picking a theme updates the prefs store AND applies the palette class to
 // <html> (the actual rendering surface).
