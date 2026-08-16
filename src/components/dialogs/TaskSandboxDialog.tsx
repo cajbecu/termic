@@ -67,10 +67,17 @@ export function TaskSandboxDialog() {
   const [dockerSettings, setDockerSettings] = useState<Settings | null>(null);
   const [dockerImage, setDockerImage] = useState<DockerImageStatus | null>(null);
   const [dockerBusy, setDockerBusy] = useState(false);
+  // Re-fetch every time the dialog opens for a task, not just once at app
+  // boot - the global Docker switch (Settings) or the image build can both
+  // change while the app stays open, and this dialog instance never
+  // unmounts (it renders null when taskId is falsy rather than being
+  // removed), so a mount-only effect would go stale for the rest of the
+  // session.
   useEffect(() => {
+    if (!taskId) return;
     settingsLoad().then(setDockerSettings).catch(() => {});
     dockerImageStatus().then(setDockerImage).catch(() => {});
-  }, []);
+  }, [taskId]);
   const dockerOffered = !!dockerSettings?.docker_sandbox_enabled && !!dockerImage?.available;
   const dockerOn = !!task?.docker_sandbox_enabled;
 
