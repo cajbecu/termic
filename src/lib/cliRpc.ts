@@ -236,6 +236,7 @@ async function importTask(p: NewTaskParams): Promise<Task> {
         cli,
         sandbox,
         typeof p.resume === "string" && p.resume ? p.resume : undefined,
+        undefined, // resume-args override: dialog-only, no CLI flag for it yet
         p.yolo === true ? true : undefined,
       );
     } catch (e) {

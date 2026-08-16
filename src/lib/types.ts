@@ -295,6 +295,9 @@ export interface CreateMultiArgs {
   sandbox_mode?: SandboxMode;
   sandbox_rw_paths?: string[];
   sandbox_allowed_hosts?: string[];
+  /** Resume-args override for the host task, applied from the first spawn.
+   *  Same field as the task menu's "Resume override". */
+  resume_override?: string;
 }
 
 export interface CreateTaskArgs {
@@ -327,6 +330,11 @@ export interface CreateTaskArgs {
   /** Externally-started session id the agent resumes on its first spawn
    *  (GH #169): seeds `agent_session_ids[cli]`, same as an import. */
   resume_session_id?: string;
+  /** Resume-args override, applied from the FIRST spawn. Same field and
+   *  semantics as the task menu's "Resume override" (Task.resume_override):
+   *  replaces termic's default resume block, placeholders expanded per
+   *  launch. Empty / unset leaves the default logic in place. */
+  resume_override?: string;
 }
 
 export interface Agent {

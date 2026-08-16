@@ -566,6 +566,13 @@ pub struct CreateTaskArgs {
     /// is unvalidated by design; the agent owns "session not found".
     #[serde(default)]
     pub resume_session_id: Option<String>,
+    /// Resume-args override, set at create so the FIRST spawn already
+    /// carries it. Identical storage and semantics to
+    /// `task_set_resume_override` (Task.resume_override): the string
+    /// replaces termic's default resume block, placeholders expanded per
+    /// launch. Empty / unset → default resume logic.
+    #[serde(default)]
+    pub resume_override: Option<String>,
 }
 
 // ───────────────────────────── paths ─────────────────────────────
@@ -3005,6 +3012,15 @@ fn seeded_session_ids(
     ids
 }
 
+/// Normalize a create-time resume-args override the same way
+/// `task_set_resume_override` does: trimmed, and empty means "no override"
+/// rather than "override with nothing" (which would strip the resume block
+/// entirely). Kept as one function so the create paths and the edit command
+/// can't disagree about what blank means.
+fn normalized_resume_override(raw: Option<String>) -> Option<String> {
+    raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 /// Open the project's main repo checkout as a task (no git worktree).
 /// NOT idempotent: several repo-root sessions may share one checkout, so
 /// every call seeds a new task pointing at `project.root_path`. A
@@ -3027,6 +3043,7 @@ fn task_open_repo(
     sandbox_rw_paths: Option<Vec<String>>,
     sandbox_allowed_hosts: Option<Vec<String>>,
     resume_session_id: Option<String>,
+    resume_override: Option<String>,
 ) -> Result<Task, String> {
     let proj = load_projects().into_iter().find(|p| p.id == project_id)
         .ok_or("project not found")?;
@@ -3183,7 +3200,7 @@ fn task_open_repo(
         sandbox_allowed_hosts,
         composition,
         custom_command,
-        resume_override: None,
+        resume_override: normalized_resume_override(resume_override),
         persisted_tabs: Vec::new(),
         right_split_tabs: Vec::new(),
                 split_layout: None,
@@ -3285,6 +3302,7 @@ fn task_import_worktree(
     sandbox_rw_paths: Option<Vec<String>>,
     sandbox_allowed_hosts: Option<Vec<String>>,
     resume_session_id: Option<String>,
+    resume_override: Option<String>,
     yolo: Option<bool>,
 ) -> Result<Task, String> {
     let proj = load_projects().into_iter().find(|p| p.id == project_id)
@@ -3392,7 +3410,7 @@ fn task_import_worktree(
         sandbox_allowed_hosts,
         composition: Vec::new(),
         custom_command: None,
-        resume_override: None,
+        resume_override: normalized_resume_override(resume_override),
         persisted_tabs: Vec::new(),
         right_split_tabs: Vec::new(),
                 split_layout: None,
@@ -3682,7 +3700,7 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
         // Set only for `cli == "custom"` worktree tasks (quick "Custom
         // command" in worktree mode); None for agent / shell worktrees.
         custom_command,
-        resume_override: None,
+        resume_override: normalized_resume_override(args.resume_override.clone()),
         persisted_tabs: Vec::new(),
         right_split_tabs: Vec::new(),
                 split_layout: None,
@@ -3730,6 +3748,10 @@ pub struct CreateMultiArgs {
     pub sandbox_rw_paths: Option<Vec<String>>,
     #[serde(default)]
     pub sandbox_allowed_hosts: Option<Vec<String>>,
+    /// Resume-args override for the host task, set at create so the first
+    /// spawn already carries it. Same storage as `task_set_resume_override`.
+    #[serde(default)]
+    pub resume_override: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -4062,7 +4084,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         sandbox_allowed_hosts,
         composition,
         custom_command: None,
-        resume_override: None,
+        resume_override: normalized_resume_override(args.resume_override.clone()),
         persisted_tabs: Vec::new(),
         right_split_tabs: Vec::new(),
                 split_layout: None,
@@ -12550,6 +12572,33 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    // ── create-time resume-args override ──
+    //
+    // The New Task dialog sets the same field the task menu's "Resume
+    // override" edits, so the two paths have to agree on what a blank box
+    // means: no override, NOT an override that resumes with nothing.
+
+    #[test]
+    fn blank_resume_override_means_no_override() {
+        assert_eq!(normalized_resume_override(None), None);
+        assert_eq!(normalized_resume_override(Some(String::new())), None);
+        assert_eq!(normalized_resume_override(Some("   \n\t ".into())), None);
+    }
+
+    #[test]
+    fn resume_override_is_stored_trimmed_and_verbatim() {
+        // Verbatim to the token: placeholders expand at spawn, and quoting
+        // is the caller's business, so nothing here may rewrite the string.
+        assert_eq!(
+            normalized_resume_override(Some("  --resume {WORKSPACE_NAME}  ".into())),
+            Some("--resume {WORKSPACE_NAME}".to_string()),
+        );
+        assert_eq!(
+            normalized_resume_override(Some("resume --last".into())),
+            Some("resume --last".to_string()),
+        );
+    }
 
     // ── find-in-files backends (GH #181) ──
     //

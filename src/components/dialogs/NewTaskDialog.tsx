@@ -10,7 +10,7 @@ import { AppDialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
-import { cliSupportsResumeById, visibleCliIds, isTerminalCli, agentDisplayName } from "@/lib/agents";
+import { visibleCliIds, isTerminalCli, agentDisplayName } from "@/lib/agents";
 import { taskCreate, taskCreateMulti, settingsLoad, taskImportableWorktrees, taskImportWorktree, sandboxAvailable, taskOpenRepo, projectGitBranches, projectBranchContext } from "@/lib/ipc";
 import { launchSetupTab } from "@/lib/runTabs";
 import { seedPromptWhenReady } from "@/lib/seedPrompt";
@@ -18,7 +18,7 @@ import { MAX_PROMPT_CHARS } from "@/lib/deepLink";
 import { withCreateLock } from "@/lib/createLock";
 import { uniqueBranch, derivedBranch } from "@/lib/quickTask";
 import { cn } from "@/lib/utils";
-import { Check, Loader2, AlertTriangle, GitBranch, Link2, FolderGit2, Plus } from "lucide-react";
+import { Check, Loader2, AlertTriangle, GitBranch, Link2, FolderGit2, Plus, History } from "lucide-react";
 import { SandboxModeSelector } from "@/components/SandboxModeSelector";
 import { SANDBOX_PRESETS } from "@/lib/sandboxPresets";
 import type { MemberMode, ImportableWorktree, SandboxMode } from "@/lib/types";
@@ -146,11 +146,17 @@ export function NewTaskDialog() {
   const [importList, setImportList] = useState<ImportableWorktree[]>([]);
   const [importLoading, setImportLoading] = useState(false);
   const [importSelected, setImportSelected] = useState<string | null>(null);
-  // Attach an externally-started agent session (GH #169): the id seeds the
-  // first spawn's resume args. Offered in every single-repo mode (create,
-  // main checkout, import) for id-resume-capable agents; one shared field
-  // element serves both spots in the form.
-  const [resumeSession, setResumeSession] = useState("");
+  // Resume-args override, set at create so it applies from the FIRST spawn.
+  // Exactly the field the task menu's "Resume override" edits
+  // (Task.resume_override, task_set_resume_override): same storage, same
+  // placeholder expansion, same "the agent owns a missing session" stance.
+  //
+  // It replaced a "Resume session ID" box that only accepted a bare uuid and
+  // only appeared for agents declaring `resume_id_args` (claude, opencode,
+  // copilot). Codex, gemini and agy resume with `--continue` / `resume
+  // --last`, which take no id, so those agents got no field at all even
+  // though raw resume args work fine for them (GH #169).
+  const [resumeOverride, setResumeOverride] = useState("");
   // Optional first message, typed into the agent once it finishes booting
   // (GH #192). Blank by default and blank for every existing entry point —
   // this exists so a `termic://` link can arrive with a summarized ticket
@@ -173,18 +179,44 @@ export function NewTaskDialog() {
     el.style.height = `${el.scrollHeight}px`;
   }
   useEffect(() => { growPrompt(promptRef.current); }, [prompt]);
-  const resumeSessionField = (
+  // A plain shell or a registry terminal entry (docker, ssh) has no agent
+  // session to resume, so there is nothing for an override to replace. Every
+  // real agent takes resume args, whether or not it can address a session by
+  // id, which is the whole point of this being an args override.
+  const canResumeOverride = cli !== "shell" && !isTerminalCli(cli);
+  /** The override as sent to Rust: capability-gated, trimmed, blank → unset. */
+  const resumeOverrideArg = () =>
+    canResumeOverride ? resumeOverride.trim() || undefined : undefined;
+  // Collapsed by default: a label + hint + input is three lines of a form
+  // that already scrolls, spent on something almost nobody sets at create
+  // time (the task menu edits it afterwards for the rest). Expanded state is
+  // per-open, not remembered: typing a value keeps it visible on its own.
+  const [resumeOpen, setResumeOpen] = useState(false);
+  // Same copy as ResumeOverrideDialog, trimmed to one line: this one is a
+  // field in a long form, not a dialog whose whole subject is the override.
+  const resumeOverrideField = resumeOpen ? (
     <Field
-      label="Resume session ID (optional)"
-      hint="A session started outside Termic. The agent resumes it on its first spawn here; leave empty to start fresh."
+      label="Resume args override (optional)"
+      hint={`Replaces ${agentLabel}'s default resume arguments. {WORKSPACE_NAME}, {WORKSPACE_SLUG} and {BRANCH} expand at launch. Editable later from the task menu.`}
     >
       <Input
-        value={resumeSession}
-        onChange={e => setResumeSession(e.target.value)}
-        placeholder="e.g. 018f2c1e-6f7a-7c2e-9c1a-2f3b4c5d6e7f"
-        spellCheck={false}
+        value={resumeOverride}
+        onChange={e => setResumeOverride(e.target.value)}
+        placeholder="--resume {WORKSPACE_NAME}"
+        className="font-mono"
+        autoFocus
       />
     </Field>
+  ) : (
+    <button
+      type="button"
+      data-testid="resume-override-toggle"
+      onClick={() => setResumeOpen(true)}
+      className="-mb-1 inline-flex items-center gap-1.5 self-start text-[12.5px] text-[var(--color-fg-dim)] hover:text-[var(--color-accent)]"
+    >
+      <History className="h-3.5 w-3.5" />
+      Override resume args
+    </button>
   );
   // Existing local branch names in the project's repo, loaded on open so the
   // auto-filled branch can dodge one still hanging around from an archived
@@ -366,7 +398,7 @@ export function NewTaskDialog() {
     const canImp = (p?.type ?? "single") !== "multi" && !p?.non_git;
     const wantImport = !!seed?.importMode && canImp;
     setImportSelected(null); setImportList([]); setImportLoading(false);
-    setResumeSession("");
+    setResumeOverride(""); setResumeOpen(false);
     setPrompt(seed?.prompt ?? "");
     setImportMode(wantImport);
     // Load existing branches so `derived` can auto-number past a collision
@@ -470,10 +502,11 @@ export function NewTaskDialog() {
       const w = await withCreateLock(() => taskImportWorktree(
         projectId, importSelected, name.trim(), cli,
         { enabled: sandbox, mode: sandboxMode, rwPaths: splitLines(sbRw), allowedHosts: splitLines(sbHosts) },
+        undefined, // no externally-started session id from this dialog
         // Gated on capability, not just field state: the input hides when
-        // the agent switches to one that cannot resume by id, but the
-        // typed value would otherwise still ride along.
-        cliSupportsResumeById(cli) ? resumeSession.trim() || undefined : undefined,
+        // the agent switches to one with nothing to resume, but the typed
+        // value would otherwise still ride along.
+        resumeOverrideArg(),
       ));
       await loadAll();
       setActive(w.id);
@@ -503,7 +536,8 @@ export function NewTaskDialog() {
         projectId, cli, name.trim(),
         { enabled: sandbox, mode: sandboxMode, rwPaths: splitLines(sbRw), allowedHosts: splitLines(sbHosts) },
         undefined,
-        cliSupportsResumeById(cli) ? resumeSession.trim() || undefined : undefined,
+        undefined, // no externally-started session id from this dialog
+        resumeOverrideArg(),
       ));
       await loadAll();
       setActive(w.id);
@@ -594,6 +628,7 @@ export function NewTaskDialog() {
           sandbox_mode: sandboxMode,
           sandbox_rw_paths:       sandbox ? splitLines(sbRw)    : undefined,
           sandbox_allowed_hosts:  sandbox ? splitLines(sbHosts) : undefined,
+          resume_override: resumeOverrideArg(),
         }));
         await loadAll();
         setPhase("setup");
@@ -608,10 +643,9 @@ export function NewTaskDialog() {
         cli,
         base_branch: base.trim() || null,
         branch: branch.trim(),
-        // Capability-gated like import: the field hides when the agent
-        // cannot resume by id, but typed state would otherwise ride along.
-        resume_session_id:
-          cliSupportsResumeById(cli) ? resumeSession.trim() || undefined : undefined,
+        // Capability-gated like import: the field hides when the agent has
+        // nothing to resume, but typed state would otherwise ride along.
+        resume_override: resumeOverrideArg(),
         sandbox_enabled: sandbox,
         sandbox_mode: sandboxMode,
         // Only send lists when sandbox is on - keeps the JSON tidy
@@ -708,7 +742,7 @@ export function NewTaskDialog() {
         {canImport && importMode && (
           <button
             type="button"
-            onClick={() => { setImportMode(false); setImportSelected(null); setResumeSession(""); setErr(null); }}
+            onClick={() => { setImportMode(false); setImportSelected(null); setResumeOverride(""); setResumeOpen(false); setErr(null); }}
             className="-mb-1 inline-flex items-center gap-1.5 self-start text-[12.5px] text-[var(--color-fg-dim)] hover:text-[var(--color-accent)]"
           >
             <Plus className="h-3.5 w-3.5" />
@@ -922,14 +956,13 @@ export function NewTaskDialog() {
           </Field>
         )}
 
-        {/* Attach an externally-started agent session (GH #169): the id
-            seeds the first spawn's resume args. Sits BELOW the first message
-            because it is the rarer field of the two: almost every task types
-            a first message, almost none adopt an outside session. Hidden for
-            agents that cannot resume a specific session by id, and for
-            multi-repo (import mode is single-repo only, so both the create
-            and the import flow are covered by !isMulti). */}
-        {!isMulti && cliSupportsResumeById(cli) && resumeSessionField}
+        {/* Resume-args override: the same field the task menu's "Resume
+            override" edits, just available before the first spawn instead of
+            after it. Sits BELOW the first message because it is the rarer of
+            the two: almost every task types a first message, almost none
+            override resume args at create. Shown for multi as well, where it
+            lands on the host task. */}
+        {canResumeOverride && resumeOverrideField}
 
         {/* Multi-repo: per-member mode + branch picker. Each member
             row renders a small toggle (Worktree | Repo root) and, when
