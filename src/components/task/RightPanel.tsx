@@ -511,6 +511,10 @@ export function RightPanel() {
             reloadToken={fileTreeReload + fsRevision + gitRevision}
             onOpenCommitDiff={(path, sha, title) =>
               useApp.getState().openPreviewTab(task.id, { type: "diff", path, scope: `commit:${sha}`, title })}
+            // `base:` not `commit:`: the compare diff's right side is the live
+            // file, which is what keeps mark-as-viewed and inline comments on.
+            onOpenCompareDiff={(path, sha, title) =>
+              useApp.getState().openPreviewTab(task.id, { type: "diff", path, scope: `base:${sha}`, title })}
             onOpenDiff={(path, pane) => useApp.getState().openPreviewTab(task.id, { type: "diff", path, scope: pane, title: `Δ ${path.split("/").pop()}` })}
             onDoubleClickDiff={(path) => {
               const currentTabs = useApp.getState().tabs[task.id] || [];

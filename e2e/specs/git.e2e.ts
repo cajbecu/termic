@@ -364,15 +364,24 @@ describe("git history tab", () => {
         const el = document.querySelector(sel);
         return { all: el?.getAttribute("data-all"), picked: el?.getAttribute("data-picked") };
       }, trigger);
-    const openMenu = () =>
-      browser.execute((sel) => (document.querySelector(sel) as HTMLElement).click(), trigger);
-    /** Click a row in the open picker by the ref name it carries. */
-    const pick = (name: string) =>
-      browser.execute((n) => {
-        const row = document.querySelector(`[data-testid="history-scope-row"][data-ref="${n}"]`) as HTMLElement | null;
-        if (!row) throw new Error(`no picker row for ${n}`);
-        row.click();
+    // A REAL WebDriver click, not `el.click()`: Radix opens the menu on
+    // pointerdown, which a scripted click event does not produce at all.
+    const openMenu = async () => {
+      await (await $(trigger)).click();
+      await waitVisible('[data-testid="history-scope-row"]');
+    };
+    /** Click a row in the open picker by the ref name it carries. The menu
+     *  portals in asynchronously, so wait for the row rather than assuming. */
+    const pick = async (name: string) => {
+      await browser.waitUntil(
+        async () => browser.execute((n) =>
+          document.querySelector(`[data-testid="history-scope-row"][data-ref="${n}"]`) !== null, name),
+        { timeout: 5_000, timeoutMsg: `no picker row for ${name}` },
+      );
+      await browser.execute((n) => {
+        (document.querySelector(`[data-testid="history-scope-row"][data-ref="${n}"]`) as HTMLElement).click();
       }, name);
+    };
 
     // Auto is the default: HEAD alone, nothing picked.
     expect(await scope()).toEqual({ all: "false", picked: "0" });
@@ -698,28 +707,18 @@ describe("git compare mode", () => {
     expect(chip).toBe(false);
   });
 
-  it("flips to the commit graph and back without losing the chosen base", async () => {
-    const clickSub = (label: "Commits" | "Compare") =>
-      browser.execute((l) => {
-        const el = document.querySelector(
-          `[data-testid="history-subtab"][data-subtab="${l}"]`,
-        ) as HTMLElement | null;
-        if (!el) throw new Error(`no History sub-tab: ${l}`);
-        el.click();
-      }, label);
+  it("flips to Changes and back without losing the chosen base", async () => {
+    await openChanges();
+    await browser.waitUntil(
+      async () => browser.execute(() =>
+        document.querySelector('[data-testid="compare-panel"]') === null),
+      { timeout: 5_000, timeoutMsg: "Compare stayed mounted after switching to Changes" },
+    );
 
-    await clickSub("Commits");
-    await waitVisible('[data-testid="history-panel"]');
-    expect(
-      await browser.execute(() =>
-        document.querySelector('[data-testid="compare-panel"]') !== null),
-    ).toBe(false);
-
-    // Back to Compare: the sub-view remounts, so the deliberately chosen base
-    // has to be remembered outside the component or it snaps to the task
-    // default on every round trip.
-    await clickSub("Compare");
-    await waitVisible('[data-testid="compare-panel"]');
+    // Back to Compare: the mode switch UNMOUNTS this panel, so a deliberately
+    // chosen base has to be remembered outside the component or it snaps to
+    // the task default on every round trip.
+    await openCompare();
     await waitForRow("committed.txt", "the compare list never came back");
     expect(await currentBase()).toBe(baseBranch);
   });

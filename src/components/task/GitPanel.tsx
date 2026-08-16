@@ -90,7 +90,7 @@ function readRatio(key = LS_RATIO, fallback = 0.5): number {
   return fallback;
 }
 
-export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff, onOpenCommitDiff, reloadToken = 0 }: {
+export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff, onOpenCommitDiff, onOpenCompareDiff, reloadToken = 0 }: {
   task: Task;
   status: GitStatus | null;
   refresh: () => void;
@@ -99,8 +99,16 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
    *  unstaged → index→worktree. */
   onOpenDiff: (path: string, pane: "unstaged" | "staged") => void;
   onDoubleClickDiff: (path: string) => void;
-  /** Opens a diff of one file at one revision, for the Graph section. */
+  /** Opens a diff of one file at one revision, for the Graph section:
+   *  `sha^` against `sha`, no working-tree side. */
   onOpenCommitDiff?: (path: string, sha: string, title: string) => void;
+  /** Opens a compare diff: the base commit against the LIVE file. A separate
+   *  prop from onOpenCommitDiff because the two produce different SIDES from
+   *  the same-looking (path, sha, title) call. Routing Compare through the
+   *  commit opener made every compare diff read as a historical one, losing
+   *  the working-tree right side and with it the review affordances that are
+   *  the whole reason to review from here. */
+  onOpenCompareDiff?: (path: string, baseSha: string, title: string) => void;
   /** Same refresh signals the status poll rides, forwarded to the Graph. */
   reloadToken?: number;
 }) {
@@ -630,7 +638,7 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
             search={search}
             viewMode={viewMode}
             reloadToken={reloadToken}
-            onOpenDiff={(path, sha, title) => onOpenCommitDiff?.(path, sha, title)}
+            onOpenDiff={(path, sha, title) => onOpenCompareDiff?.(path, sha, title)}
           />
         ) : (<>
         <Pane
