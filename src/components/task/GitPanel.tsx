@@ -35,7 +35,7 @@ import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownSepa
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from "@/components/ui/ContextMenu";
 import { Tip } from "@/components/ui/Tooltip";
 import { CopyPathItems } from "./CopyPathItems";
-import { HistoryPanel } from "./HistoryPanel";
+import { HistoryPanel, ScopePicker } from "./HistoryPanel";
 import { fileIconUrl, folderIconUrl } from "@/lib/explorer/iconResolver";
 
 // Per-side status → glyph / color / label. `?` is untracked (rendered as
@@ -116,6 +116,11 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
     try { return localStorage.getItem(LS_GCOL) !== "0"; } catch { return true; }
   });
   const [graphRatio, setGraphRatio] = useState<number>(() => readRatio(LS_GRATIO, 0.5));
+  // Graph scope lives here, not in HistoryPanel: the picker rides the Graph
+  // header (this component's markup), so this is where the value it edits has
+  // to sit. Reset per repo, since refs belong to one.
+  const [graphAll, setGraphAll] = useState(false);
+  const [graphRefs, setGraphRefs] = useState<string[]>([]);
   // Collapsed tree folders, keyed `${pane}\0${dirPath}`.
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   // Selected row, keyed `${pane}\0${path}` (a file can sit in both panes
@@ -160,6 +165,11 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
     setSubject(""); setBody(""); setSearch("");
     setActiveRepoDir(""); setSelected(null); setPinnedRepoDir(null);
   }, [task.id]);
+
+  // Refs belong to one repo, so a repo (or task) switch drops the graph's
+  // scope back to Auto. Carrying it would ask for branches the new repo does
+  // not have, which the backend answers with an empty graph.
+  useEffect(() => { setGraphAll(false); setGraphRefs([]); }, [activeRepoDir, task.id]);
 
   const persist = (key: string, val: string) => { try { localStorage.setItem(key, val); } catch {} };
   const changeView = (v: ViewMode) => { setViewMode(v); persist(LS_VIEW, v); };
@@ -597,17 +607,36 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
         data-testid="git-graph-section"
         data-collapsed={graphCollapsed ? "true" : "false"}
       >
-        <button
-          data-testid="git-graph-toggle"
-          onClick={toggleGraphCollapsed}
-          aria-expanded={!graphCollapsed}
-          className="flex h-[26px] w-full shrink-0 items-center gap-1 px-2 text-left text-[11px] font-semibold tracking-wide text-[var(--color-fg-dim)] uppercase hover:bg-[var(--color-hover)]"
-        >
-          {graphCollapsed
-            ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />
-            : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />}
-          Graph
-        </button>
+        {/* Header row: the disclosure, and the scope picker beside it once
+            open. The picker had its own row inside the panel, under a branch
+            chip repeating what the BranchBar at the top of this tab already
+            says; that was two rows spent on one control. Collapsed, there is
+            no graph to scope, so it is not drawn. */}
+        <div className="flex h-[26px] w-full shrink-0 items-center gap-1 pr-1.5">
+          <button
+            data-testid="git-graph-toggle"
+            onClick={toggleGraphCollapsed}
+            aria-expanded={!graphCollapsed}
+            className="flex h-full min-w-0 flex-1 items-center gap-1 px-2 text-left text-[11px] font-semibold tracking-wide text-[var(--color-fg-dim)] uppercase hover:bg-[var(--color-hover)]"
+          >
+            {graphCollapsed
+              ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />
+              : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />}
+            Graph
+          </button>
+          {!graphCollapsed && (
+            <div className="text-[11.5px]">
+              <ScopePicker
+                taskId={task.id}
+                repoDir={dir}
+                branch={repo?.branch ?? task.branch ?? ""}
+                allBranches={graphAll}
+                picked={graphRefs}
+                onChange={(all, refs) => { setGraphAll(all); setGraphRefs(refs); }}
+              />
+            </div>
+          )}
+        </div>
         {/* Unmounted while collapsed, not hidden: mounted it holds a git log
             per repo and re-reads on every refresh tick. */}
         {!graphCollapsed && (
@@ -615,6 +644,7 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
             <HistoryPanel
               task={task}
               repoDir={dir}
+              scope={{ allBranches: graphAll, refs: graphRefs }}
               reloadToken={reloadToken}
               onOpenDiff={(path, sha, title) => onOpenCommitDiff?.(path, sha, title)}
             />
@@ -656,7 +686,7 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
               ? `Push ${ahead} commit${ahead === 1 ? "" : "s"} to the remote`
               : "Push this branch to the remote"}
             className={cn(
-              "mr-auto flex h-7 items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 text-[12.5px] font-medium transition-colors",
+              "mr-auto flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-[var(--color-border)] px-2.5 text-[12.5px] font-medium transition-colors",
               pushDisabled
                 ? "cursor-not-allowed text-[var(--color-fg-faint)] opacity-50"
                 : "text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
@@ -670,11 +700,18 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
               </span>
             )}
           </button>
+          {/* Commit + its caret are one split button, so they sit in their own
+              flex box with no gap. The pair is what gives way when the panel is
+              narrow: the label truncates on one line instead of wrapping, which
+              broke "Commit 0 Files" across two lines and pushed the row past
+              the panel's edge. */}
+          <div className="flex min-w-0 items-center">
           <button
             disabled={commitDisabled}
             onClick={() => doCommit(pushDefault)}
+            title={commitLabel}
             className={cn(
-              "flex h-7 items-center rounded-l-md bg-[var(--color-accent)] px-3 text-[12.5px] font-medium text-[var(--color-accent-fg)] transition-colors",
+              "flex h-7 min-w-0 items-center truncate whitespace-nowrap rounded-l-md bg-[var(--color-accent)] px-3 text-[12.5px] font-medium text-[var(--color-accent-fg)] transition-colors",
               commitDisabled ? "cursor-not-allowed opacity-40" : "hover:brightness-110",
             )}
           >
@@ -686,7 +723,7 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
                 disabled={commitDisabled}
                 title="Commit options"
                 className={cn(
-                  "flex h-7 w-6 items-center justify-center rounded-r-md border-l border-black/15 bg-[var(--color-accent)] text-[var(--color-accent-fg)] transition-colors",
+                  "flex h-7 w-6 shrink-0 items-center justify-center rounded-r-md border-l border-black/15 bg-[var(--color-accent)] text-[var(--color-accent-fg)] transition-colors",
                   commitDisabled ? "cursor-not-allowed opacity-40" : "hover:brightness-110",
                 )}
               >
@@ -704,6 +741,7 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
               </DropdownItem>
             </DropdownMenu>
           </DropdownRoot>
+          </div>
         </div>
       </div>
     </div>

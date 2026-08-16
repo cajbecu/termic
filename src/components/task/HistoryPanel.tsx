@@ -1,5 +1,7 @@
 // Committed history with a commit graph — the Graph section at the foot of
-// the right panel's Commit tab (issue #199, moved there by GH #208). The Commit tab only ever shows the working tree, so once an
+// the right panel's Git tab (issue #199, moved there by GH #208).
+//
+// The staging half of that tab only ever shows the working tree, so once an
 // agent committed, its work vanished from the UI and people left for VS Code
 // or Fork to see what had just happened.
 //
@@ -9,14 +11,14 @@
 // (pure + unit-tested); this file is the rendering and the IPC.
 //
 // Layout, top to bottom:
-//   1. Repo pills   — only when uncontrolled; inside Commit its pills win.
-//   2. Scope row    — branch chip + the ref picker (All / Auto / refs).
+//   1. Repo pills   — only when uncontrolled; inside Git, that tab's win.
+//   2. Scope row    — likewise: embedded, the picker rides the Graph header.
 //   3. Commit rows  — graph gutter, chips, subject, age. Selected row expands
 //                     into its meta line + file list.
 //   4. Load more    — pages of PAGE_SIZE, appended.
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { GitBranch, Tag, ArrowUp, Loader2, Copy, Check, ChevronDown } from "lucide-react";
+import { GitBranch, Tag, Loader2, Copy, Check, ChevronDown } from "lucide-react";
 import type { GitCommit, GitFile, GitRef, Task } from "@/lib/types";
 import { taskGitLog, taskGitRefs, taskGitCommitFiles } from "@/lib/ipc";
 import { layoutGraph, graphWidth, type GraphRow } from "@/lib/gitGraph";
@@ -77,7 +79,7 @@ const LANE_COLORS = [
 ];
 const laneColor = (i: number) => LANE_COLORS[i % LANE_COLORS.length];
 
-/** Same status → glyph/colour mapping the Commit tab uses, so a file reads the
+/** Same status → glyph/colour mapping the staging list uses, so a file reads the
  *  same whether it is pending or historical. */
 const SC: Record<string, string> = { M: "M", A: "+", D: "D", R: "R", C: "C" };
 const COL: Record<string, string> = {
@@ -127,7 +129,7 @@ export function parseRefs(refs: string[]): RefChip[] {
   return out.sort((a, b) => rank[a.kind] - rank[b.kind]);
 }
 
-export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirProp }: {
+export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirProp, scope }: {
   task: Task;
   /** Bumped by the panel header's refresh and by agent-settle / git ticks.
    *  Re-reads the pages already on screen without resetting the scroll. */
@@ -135,22 +137,29 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
   /** Open a diff tab for one file of one commit (sides = sha^ → sha). */
   onOpenDiff: (path: string, sha: string, title: string) => void;
   /** Repo to read, when the host already has a repo selector of its own (the
-   *  Commit tab's pills). Given one, this panel drops its own pills instead of
+   *  Git tab's pills). Given one, this panel drops its own pills instead of
    *  showing a second set that can disagree with them. */
   repoDir?: string;
+  /** Scope, when the host renders the picker itself (the Git tab puts it on
+   *  the Graph header). Given one, this panel drops its own scope row. */
+  scope?: { allBranches: boolean; refs: string[] };
 }) {
   const nonGit = useApp(s => s.projects.find(p => p.id === task.project_id)?.non_git);
   const controlled = repoDirProp !== undefined;
   const members = controlled ? [] : (task.composition ?? []);
   const [ownRepoDir, setRepoDir] = useState("");
   const repoDir = controlled ? repoDirProp : ownRepoDir;
-  const [allBranches, setAllBranches] = useState(false);
-  /** Refs the picker selected. Empty and not `allBranches` = Auto: HEAD alone,
-   *  which is the "what did the agent just do?" default the tab exists for. */
-  const [pickedRefs, setPickedRefs] = useState<string[]>([]);
+  /** Scope, owned here when the panel stands alone and by the host when it is
+   *  embedded (the Git tab renders the picker on its Graph header, so it has
+   *  to hold the value the picker edits). Empty refs and not `allBranches` =
+   *  Auto: HEAD alone, the "what did the agent just do?" default. */
+  const [ownAllBranches, setAllBranches] = useState(false);
+  const [ownPickedRefs, setPickedRefs] = useState<string[]>([]);
+  const allBranches = scope ? scope.allBranches : ownAllBranches;
+  const pickedRefs = scope ? scope.refs : ownPickedRefs;
   /** Stable dep for the fetch effects: a new array every render would refetch
    *  forever, and the ref list is short enough to compare as a string. */
-  const refsKey = pickedRefs.join(" ");
+  const refsKey = pickedRefs.join(" ");
   const [commits, setCommits] = useState<GitCommit[]>([]);
   const [branch, setBranch] = useState("");
   const [upstream, setUpstream] = useState("");
@@ -167,8 +176,13 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
   // A different repo or scope is a different history, not more of this one.
   useEffect(() => { setSelected(null); }, [repoDir, allBranches, refsKey, task.id]);
   // Refs belong to a repo. Carrying a selection across would ask for branches
-  // the new repo does not have, which is answered with an empty graph.
-  useEffect(() => { setPickedRefs([]); setAllBranches(false); }, [repoDir, task.id]);
+  // the new repo does not have, which is answered with an empty graph. Only
+  // ours to reset when we own it; the host clears its own on the same signal.
+  useEffect(() => {
+    if (scope) return;
+    setPickedRefs([]); setAllBranches(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- scope identity is not the signal
+  }, [repoDir, task.id]);
 
   // Refresh: re-read from the top, as many rows as are showing. It has to be a
   // fresh window rather than a patch, because a commit landing at HEAD shifts
@@ -236,20 +250,26 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
         </div>
       )}
 
-      {/* Scope: which branch's history, in the panel's own voice. */}
-      <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-[var(--color-border-soft)] px-2 text-[11.5px]">
-        <GitBranch className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />
-        <span className="min-w-0 flex-1 truncate text-[var(--color-fg-dim)]" title={branch || "detached HEAD"}>
-          {branch || "detached HEAD"}
-        </span>
-        <ScopePicker
-          taskId={task.id}
-          repoDir={repoDir}
-          allBranches={allBranches}
-          picked={pickedRefs}
-          onChange={(all, refs) => { setAllBranches(all); setPickedRefs(refs); }}
-        />
-      </div>
+      {/* Scope row, only when this panel stands alone. Inside the Git tab the
+          picker rides the Graph header instead: the branch is already on the
+          BranchBar at the top of that tab, so repeating it here spent a whole
+          row saying something the user could already see. */}
+      {!controlled && (
+        <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-[var(--color-border-soft)] px-2 text-[11.5px]">
+          <GitBranch className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />
+          <span className="min-w-0 flex-1 truncate text-[var(--color-fg-dim)]" title={branch || "detached HEAD"}>
+            {branch || "detached HEAD"}
+          </span>
+          <ScopePicker
+            taskId={task.id}
+            repoDir={repoDir}
+            branch={branch}
+            allBranches={allBranches}
+            picked={pickedRefs}
+            onChange={(all, refs) => { setAllBranches(all); setPickedRefs(refs); }}
+          />
+        </div>
+      )}
 
       <div className="min-h-0 flex-1 overflow-auto">
         {err && <Empty tone="err">{err}</Empty>}
@@ -317,9 +337,12 @@ function Empty({ children, tone }: { children: React.ReactNode; tone?: "err" }) 
  *  Refs load when the menu OPENS, not on mount: this component lives for the
  *  panel's whole life, and a branch created in the terminal must appear
  *  without a reload. */
-function ScopePicker({ taskId, repoDir, allBranches, picked, onChange }: {
+export function ScopePicker({ taskId, repoDir, branch, allBranches, picked, onChange }: {
   taskId: string;
   repoDir: string;
+  /** Checked-out branch, so the Auto state can say its NAME. "Auto" alone told
+   *  the user nothing about what they were looking at. */
+  branch: string;
   allBranches: boolean;
   picked: string[];
   onChange: (allBranches: boolean, refs: string[]) => void;
@@ -342,11 +365,17 @@ function ScopePicker({ taskId, repoDir, allBranches, picked, onChange }: {
     ].filter(g => g.items.length > 0);
   }, [refs, filter]);
 
-  const label = allBranches ? "All" : picked.length === 0 ? "Auto" : `${picked.length} refs`;
+  // The label is what is being SHOWN, not the name of a mode: the branch when
+  // scope is Auto, "All", or the count when refs are picked.
+  const label = allBranches
+    ? "All"
+    : picked.length === 0
+      ? (branch || "detached HEAD")
+      : picked.length === 1 ? picked[0] : `${picked.length} refs`;
   const title = allBranches
     ? "Showing every ref in this repo"
     : picked.length === 0
-      ? "Showing the checked-out branch and its history"
+      ? `Showing ${branch || "detached HEAD"} and its history`
       : `Showing ${picked.join(", ")}`;
 
   const toggleRef = (name: string) => {
@@ -366,14 +395,14 @@ function ScopePicker({ taskId, repoDir, allBranches, picked, onChange }: {
           data-picked={picked.length}
           title={title}
           className={cn(
-            "flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 transition-colors",
+            "flex min-w-0 max-w-[140px] shrink items-center gap-1 rounded px-1.5 py-0.5 transition-colors",
             allBranches || picked.length > 0
               ? "bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
               : "text-[var(--color-fg-faint)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
           )}
         >
-          {label}
-          <ChevronDown className="h-3 w-3" />
+          <span className="min-w-0 truncate">{label}</span>
+          <ChevronDown className="h-3 w-3 shrink-0" />
         </button>
       </DropdownTrigger>
       <DropdownMenu align="end" className="max-h-[60vh] w-[280px] overflow-auto">
@@ -389,12 +418,12 @@ function ScopePicker({ taskId, repoDir, allBranches, picked, onChange }: {
           />
         </div>
         <ScopeRow
-          label="All" hint="every ref in this repo"
+          label="All" hint="every ref in this repo" closeOnSelect
           checked={allBranches}
           onSelect={() => onChange(!allBranches, [])}
         />
         <ScopeRow
-          label="Auto" hint="the checked-out branch"
+          label="Auto" hint={branch || "detached HEAD"} closeOnSelect
           checked={!allBranches && picked.length === 0}
           onSelect={() => onChange(false, [])}
         />
@@ -424,18 +453,23 @@ function ScopePicker({ taskId, repoDir, allBranches, picked, onChange }: {
   );
 }
 
-/** One checkbox row in the scope picker. `onSelect` does NOT close the menu:
- *  picking refs is a multi-select, and a menu that shut after every tick would
- *  make selecting three branches three round trips. */
-function ScopeRow({ label, hint, checked, onSelect }: {
+/** One row in the scope picker.
+ *
+ *  A ref row does NOT close the menu: picking refs is a multi-select, and a
+ *  menu that shut after every tick would make selecting three branches three
+ *  round trips. All and Auto DO (`closeOnSelect`): each is a complete answer
+ *  on its own that clears everything else, so there is nothing left to pick
+ *  and holding the menu open would just be a click to dismiss. */
+function ScopeRow({ label, hint, checked, onSelect, closeOnSelect }: {
   label: string; hint: string; checked: boolean; onSelect: () => void;
+  closeOnSelect?: boolean;
 }) {
   return (
     <DropdownItem
       data-testid="history-scope-row"
       data-ref={label}
       data-checked={checked ? "true" : "false"}
-      onSelect={(e: Event) => { e.preventDefault(); onSelect(); }}
+      onSelect={(e: Event) => { if (!closeOnSelect) e.preventDefault(); onSelect(); }}
     >
       <Check className={cn("h-3.5 w-3.5 shrink-0", !checked && "opacity-0")} />
       <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -560,12 +594,20 @@ const CommitRow = memo(function CommitRow({
                 +{chips.length - MAX_CHIPS}
               </span>
             )}
-            {/* Outgoing marker: committed here, not on the remote yet. Hidden
-                entirely when the branch has no upstream, where "unpushed"
-                would describe every commit and mean nothing. */}
+            {/* Outgoing marker: committed here, not on the remote yet. A small
+                filled dot before the subject, the way Fork marks these, rather
+                than an arrow glyph: at this row height an arrow reads as a
+                control you could click, and a run of them down the column
+                reads as a toolbar. A dot is a state.
+
+                Hidden entirely when the branch has no upstream, where
+                "unpushed" would describe every commit and mean nothing. */}
             {showUnpushed && commit.unpushed && (
               <Tip content="Not pushed yet" side="left">
-                <ArrowUp className="h-3 w-3 shrink-0 text-[var(--color-warn)]" />
+                <span
+                  data-testid="history-unpushed"
+                  className="h-[6px] w-[6px] shrink-0 rounded-full bg-[var(--color-info)]"
+                />
               </Tip>
             )}
             <span data-testid="history-subject" className="min-w-0 flex-1 truncate text-[var(--color-fg)]" title={commit.subject}>

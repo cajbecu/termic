@@ -1,11 +1,13 @@
-// Right panel: tabs for All files (filesystem list) and Commit (Fork-style
+// Right panel: tabs for All files (filesystem list) and Git (Fork-style
 // staging of the working tree, with the commit graph as a collapsible Graph
 // section at its foot). Click a file → opens an Editor tab in the main area.
 // Click a change, or a file inside a commit → diff tab.
 //
-// History was its own third tab when #199 landed it. It is inside Commit now
+// History was its own third tab when #199 landed it. It is inside this one now
 // (GH #208): the graph and the working tree answer halves of one question,
 // "what is in this branch", and a tab switch made comparing them impossible.
+// The tab was renamed "Commit" by #199 because two git surfaces made "Git"
+// ambiguous; folding them back together makes "Git" right again.
 
 import React, { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
@@ -476,7 +478,7 @@ export function RightPanel() {
       />
       <header className="flex h-10 shrink-0 items-stretch border-b border-[var(--color-border-soft)]">
         <RTab label="All files" active={view === "files"} onClick={() => setView("files")} />
-        <RTab label="Commit" active={view === "changes"} onClick={() => setView("changes")}
+        <RTab label="Git" active={view === "changes"} onClick={() => setView("changes")}
           badge={(gitStatus?.total_changed ?? 0) > 0 ? gitStatus!.total_changed : undefined}
           repoBadge={(gitStatus?.repos_changed ?? 0) > 1 ? gitStatus!.repos_changed : undefined} />
         <div className="flex shrink-0 items-center px-1.5">

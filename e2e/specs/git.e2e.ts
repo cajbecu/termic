@@ -19,8 +19,8 @@ describe("git panel", () => {
     await requireTermicApi();
     taskId = await openTask("e2e-git");
 
-    // Switch the right panel from "All files" to "Commit" (a real click).
-    await clickByText("Commit");
+    // Switch the right panel from "All files" to "Git" (a real click).
+    await clickByText("Git");
 
     // The Git status is fetched async; the clean-tree copy appears once it
     // resolves. waitForText auto-retries, so no sleep and no flake.
@@ -90,7 +90,7 @@ describe("git dirty tree", () => {
     );
 
     // Open the Commit panel (starts clean).
-    await clickByText("Commit");
+    await clickByText("Git");
 
     // Dirty the tree, then force the panel's git poll to re-fetch.
     await browser.execute(async (id, c) => {
@@ -219,7 +219,7 @@ describe("git history tab", () => {
     } catch { /* the commit never landed */ }
   });
 
-  const openRightTab = (label: "All files" | "Commit") =>
+  const openRightTab = (label: "All files" | "Git") =>
     browser.execute((l) => {
       const el = document.querySelector(
         `[data-testid="right-tab"][data-tab="${l}"]`,
@@ -232,7 +232,7 @@ describe("git history tab", () => {
    *  tab (GH #199); it lives at the foot of Commit now (GH #208) and starts
    *  collapsed, so reaching it is two clicks, not one. */
   const openGraph = async () => {
-    await openRightTab("Commit");
+    await openRightTab("Git");
     await browser.execute(() => {
       const sec = document.querySelector('[data-testid="git-graph-section"]');
       if (sec?.getAttribute("data-collapsed") === "false") return;
@@ -378,6 +378,7 @@ describe("git history tab", () => {
     expect(await scope()).toEqual({ all: "false", picked: "0" });
 
     await openMenu();
+    // All is a complete answer on its own, so it closes the menu.
     await pick("All");
     await browser.waitUntil(async () => (await scope()).all === "true",
       { timeout: 5_000, timeoutMsg: "All never took effect" });
@@ -387,7 +388,7 @@ describe("git history tab", () => {
       { timeout: 10_000, timeoutMsg: "the all-refs view came back empty" });
 
     // A named branch is a different scope again, and it is a MULTI-select, so
-    // the menu stays open and the count is what changes.
+    // the menu STAYS open and the count is what changes.
     await openMenu();
     await pick(BRANCH);
     await browser.waitUntil(async () => {
@@ -397,7 +398,8 @@ describe("git history tab", () => {
     await browser.waitUntil(async () => (await commitSubjects()).length > 1,
       { timeout: 10_000, timeoutMsg: "the picked-branch view came back empty" });
 
-    // Unticking the last ref lands back on Auto, not on an empty graph.
+    // Unticking the last ref lands back on Auto, not on an empty graph. No
+    // reopen needed: a ref row leaves the menu up, which is the point.
     await pick(BRANCH);
     await browser.waitUntil(async () => {
       const s = await scope();
@@ -714,7 +716,7 @@ describe("review comment alignment", () => {
   after(async () => {
     // Restore README: without this the 30 appended align lines survive
     // the run, and the NEXT run's clean-tree spec boots against a dirty
-    // fixture whose "Commit" tab wears a count badge, so its exact-text
+    // fixture whose "Git" tab wears a count badge, so its exact-text
     // click misses (the suite then fails one file per run, one run late).
     if (taskId && original !== undefined) {
       await browser.execute(
@@ -907,8 +909,8 @@ describe("git multi-repo panel", () => {
     ) as Promise<string[]>;
 
   /** Click one of the right panel's own tabs. Not clickByText: the label grows
-   *  badge digits ("Commit" → "Commit21") the moment anything is changed. */
-  const openRightTab = (label: "All files" | "Commit") =>
+   *  badge digits ("Git" → "Git21") the moment anything is changed. */
+  const openRightTab = (label: "All files" | "Git") =>
     browser.execute((l) => {
       const el = document.querySelector(
         `[data-testid="right-tab"][data-tab="${l}"]`,
@@ -1002,7 +1004,7 @@ describe("git multi-repo panel", () => {
       { timeout: 10_000, timeoutMsg: "git status never reported the member change" },
     );
 
-    await openRightTab("Commit");
+    await openRightTab("Git");
 
     // Only the changed repo gets a pill, and it is selected without a click.
     await browser.waitUntil(
