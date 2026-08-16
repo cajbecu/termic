@@ -702,8 +702,13 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
           >
             {pushing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowUp className="h-3.5 w-3.5" />}
             {pushing ? "Pushing…" : "Push"}
+            {/* Sized as a pill, not as a text box: `h-4` + centering keeps it
+                on the button's optical centre line (a bare span inherits the
+                button's `leading-none`, so its height was whatever the digits
+                happened to be), and `min-w-4` stops "1" from rendering as a
+                sliver next to "15". */}
             {ahead > 0 && (
-              <span className="rounded bg-[var(--color-accent-soft)] px-1 text-[10.5px] tabular-nums text-[var(--color-accent)]">
+              <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--color-accent-soft)] px-1 text-[10.5px] leading-none tabular-nums text-[var(--color-accent)]">
                 {ahead}
               </span>
             )}
