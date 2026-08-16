@@ -811,11 +811,26 @@ export const useApp = create<AppState>((set, get) => ({
     try { localStorage.setItem(LS_SPLITH, JSON.stringify(next)); } catch {}
     return { terminalSplitHeight: next };
   }),
-  toggleTerminalSplitCollapsed: (taskId) => set(s => {
-    const next = { ...s.terminalSplitCollapsed, [taskId]: !s.terminalSplitCollapsed[taskId] };
-    try { localStorage.setItem(LS_SPLITC, JSON.stringify(next)); } catch {}
-    return { terminalSplitCollapsed: next };
-  }),
+  // Focus follows the collapse in BOTH directions, so the chevron in the strip
+  // and ⌘J behave the same. Collapsing hides the shell with display:none,
+  // which drops DOM focus to <body> and swallows every keystroke; expanding is
+  // an explicit request for the panel, so the shell takes focus.
+  toggleTerminalSplitCollapsed: (taskId) => {
+    const s = get();
+    const collapsed = !s.terminalSplitCollapsed[taskId];
+    set(st => {
+      const next = { ...st.terminalSplitCollapsed, [taskId]: collapsed };
+      try { localStorage.setItem(LS_SPLITC, JSON.stringify(next)); } catch {}
+      return { terminalSplitCollapsed: next };
+    });
+    if (!collapsed) { focusTerminalTab(s.activeBottomTab[taskId]); return; }
+    // Return focus to the active split pane or main pane, never <body>.
+    const tree = s.splitTree[taskId];
+    const activePaneId = tree ? s.activePaneId[taskId] : null;
+    const activePaneLeaf = (activePaneId && tree) ? findLeaf(tree, activePaneId) : null;
+    if (activePaneLeaf?.activeTabId) focusPaneTab(activePaneLeaf.activeTabId);
+    else focusMainTab(s.activeTab[taskId]);
+  },
   // ⌘J / command palette: VS Code-style 3-state cycle on the bottom-split
   // terminal. "Visible" = split open AND not collapsed.
   //   hidden/collapsed        → show, expand, seed a shell if empty, focus it.
@@ -836,21 +851,18 @@ export const useApp = create<AppState>((set, get) => ({
         focusTerminalTab(s.activeBottomTab[taskId]);
         return;
       }
+      // toggleTerminalSplitCollapsed hands focus back to the active pane.
       get().toggleTerminalSplitCollapsed(taskId);
-      // Return focus to the active split pane or main pane.
-      const tree = s.splitTree[taskId];
-      const activePaneId = tree ? s.activePaneId[taskId] : null;
-      const activePaneLeaf = (activePaneId && tree) ? findLeaf(tree, activePaneId) : null;
-      if (activePaneLeaf?.activeTabId) focusPaneTab(activePaneLeaf.activeTabId);
-      else focusMainTab(s.activeTab[taskId]);
       return;
     }
     if (!splitOpen) get().toggleTerminalSplit(taskId);
+    // Expanding already focuses the active shell, so only focus here when
+    // there was nothing to expand.
     if (isCollapsed) get().toggleTerminalSplitCollapsed(taskId);
     // addBottomTab focuses the new shell itself; TaskView's seed effect
     // sees the non-empty list and won't double-add.
     if ((get().bottomTabs[taskId]?.length ?? 0) === 0) get().addBottomTab(taskId);
-    else focusTerminalTab(get().activeBottomTab[taskId]);
+    else if (!isCollapsed) focusTerminalTab(get().activeBottomTab[taskId]);
   },
   enableFooterTerm:  (taskId) => set(s => ({ footerTerm: { ...s.footerTerm, [taskId]: true } })),
   disableFooterTerm: (taskId) => set(s => {
@@ -992,9 +1004,14 @@ export const useApp = create<AppState>((set, get) => ({
     });
     if (focusId) focusTerminalTab(focusId);
   },
-  setActiveBottomTab: (taskId, tabId) => set(s => ({
-    activeBottomTab: { ...s.activeBottomTab, [taskId]: tabId },
-  })),
+  // AuxTerminal deliberately doesn't grab focus when it becomes active (so
+  // opening the split / switching tasks doesn't steal focus from the agent),
+  // so the switch itself must move focus. Covers ⇧⌘[ / ⇧⌘] and clicking a
+  // pill in the strip.
+  setActiveBottomTab: (taskId, tabId) => {
+    set(s => ({ activeBottomTab: { ...s.activeBottomTab, [taskId]: tabId } }));
+    focusTerminalTab(tabId);
+  },
   pinBottomTab: (taskId, tabId) => {
     set(s => ({
       bottomTabs: {

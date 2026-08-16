@@ -20,7 +20,7 @@ vi.mock("@/lib/tabFocus", () => ({
 }));
 
 import { useApp } from "@/store/app";
-import { focusTerminalTab, focusMainTab } from "@/lib/tabFocus";
+import { focusTerminalTab, focusMainTab, focusPaneTab } from "@/lib/tabFocus";
 
 const bottom = (taskId = "ws1") => useApp.getState().bottomTabs[taskId] ?? [];
 
@@ -91,6 +91,70 @@ describe("toggleBottomTerminal", () => {
     expect(focusMainTab).toHaveBeenCalledWith("main-tab");
 
     document.body.removeChild(host);
+  });
+});
+
+// The chevron in the strip calls this action directly, so the focus move has
+// to live in the action rather than in ⌘J's own branch.
+describe("toggleTerminalSplitCollapsed", () => {
+  it("hands focus back to the main tab on collapse", () => {
+    useApp.getState().toggleBottomTerminal("ws1");
+    useApp.setState({ activeTab: { ws1: "main-tab" } });
+    vi.clearAllMocks();
+
+    useApp.getState().toggleTerminalSplitCollapsed("ws1");
+
+    expect(useApp.getState().terminalSplitCollapsed["ws1"]).toBe(true);
+    expect(focusMainTab).toHaveBeenCalledWith("main-tab");
+    expect(focusTerminalTab).not.toHaveBeenCalled();
+  });
+
+  it("prefers the active split pane over the main tab on collapse", () => {
+    useApp.getState().toggleBottomTerminal("ws1");
+    useApp.setState({
+      activeTab: { ws1: "main-tab" },
+      activePaneId: { ws1: "pane-b" },
+      splitTree: {
+        ws1: {
+          type: "split", dir: "row", ratio: 0.5,
+          a: { type: "pane", id: "pane-a", isMain: true, tabs: [], activeTabId: "main-tab" },
+          b: { type: "pane", id: "pane-b", tabs: [], activeTabId: "pane-b-tab" },
+        },
+      },
+    } as never);
+    vi.clearAllMocks();
+
+    useApp.getState().toggleTerminalSplitCollapsed("ws1");
+
+    expect(focusPaneTab).toHaveBeenCalledWith("pane-b-tab");
+    expect(focusMainTab).not.toHaveBeenCalled();
+  });
+
+  it("focuses the active shell on expand", () => {
+    useApp.getState().toggleBottomTerminal("ws1");
+    const id = bottom()[0].id;
+    useApp.getState().toggleTerminalSplitCollapsed("ws1");
+    vi.clearAllMocks();
+
+    useApp.getState().toggleTerminalSplitCollapsed("ws1");
+
+    expect(useApp.getState().terminalSplitCollapsed["ws1"]).toBe(false);
+    expect(focusTerminalTab).toHaveBeenCalledWith(id);
+  });
+});
+
+// Clicking a pill in the strip and ⇧⌘[ / ⇧⌘] both land here.
+describe("setActiveBottomTab", () => {
+  it("moves focus into the shell it selects", () => {
+    useApp.getState().toggleBottomTerminal("ws1");
+    useApp.getState().addBottomTab("ws1");
+    const first = bottom()[0].id;
+    vi.clearAllMocks();
+
+    useApp.getState().setActiveBottomTab("ws1", first);
+
+    expect(useApp.getState().activeBottomTab["ws1"]).toBe(first);
+    expect(focusTerminalTab).toHaveBeenCalledWith(first);
   });
 });
 
