@@ -768,10 +768,8 @@ fn project_tasks_root(default_path: &str, p: &Project) -> Result<PathBuf, String
 
 /// Crash-safe replacement of a file: write a sibling temp file, sync it, then
 /// atomically `rename()` it over the destination, so a reader never sees a
-/// partial file. Durability is `sync_data` (`F_BARRIERFSYNC` on macOS), NOT
-/// `sync_all`, which is the full-device-flush `F_FULLFSYNC` there (measured
-/// ~2.6ms vs ~0.09ms) and would stall the synchronous command path: a hard
-/// power cut can lose the last write but never the previous intact file.
+/// partial file. The parent dir is deliberately not fsynced: a hard power cut
+/// can lose the last write, but the file always reads as an intact version.
 pub(crate) fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     // Resolve symlinks: rename would replace the link itself with a regular
@@ -808,7 +806,7 @@ pub(crate) fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
             }
         }
         f.write_all(bytes)?;
-        // Bytes must be ordered before the rename is visible.
+        // Bytes must be durable before the rename is visible.
         f.sync_data()?;
         drop(f);
         fs::rename(&tmp, dest)
