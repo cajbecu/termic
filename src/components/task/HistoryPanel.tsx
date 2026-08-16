@@ -132,10 +132,10 @@ export function parseRefs(refs: string[]): RefChip[] {
 
 /** How long the cursor must rest on a row before its card appears. Long,
  *  because the card is a reward for stopping, not something to trip over while
- *  scanning the list. Once one HAS opened, moving to another row shows it at
+ *  scanning the list, but short enough that resting on a row feels answered. Once one HAS opened, moving to another row shows it at
  *  once (Radix's skipDelayDuration) — having paid the wait once, you are
  *  reading cards now, and re-charging the timer per row would be maddening. */
-const CARD_DELAY_MS = 2000;
+const CARD_DELAY_MS = 1500;
 /** Grace after a card closes during which the next opens instantly. */
 const CARD_SKIP_MS = 900;
 
@@ -305,8 +305,13 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
 
       {/* One Provider for the whole list: the wait-then-instant behaviour is
           shared state, so a per-row Provider (what `Tip` builds) would recharge
-          the 2s timer on every commit. */}
-      <RT.Provider delayDuration={CARD_DELAY_MS} skipDelayDuration={CARD_SKIP_MS} disableHoverableContent>
+          the timer on every commit.
+
+          Hoverable, unlike every other tooltip in the app: this one holds a
+          whole commit message, which is there to be read and scrolled, so the
+          cursor has to be able to enter it. That is also why it sits flush
+          against the row (`sideOffset={0}`) with no gap to cross. */}
+      <RT.Provider delayDuration={CARD_DELAY_MS} skipDelayDuration={CARD_SKIP_MS}>
       <div className="min-h-0 flex-1 overflow-auto">
         {err && <Empty tone="err">{err}</Empty>}
         {!err && loading && commits.length === 0 && (
@@ -695,7 +700,9 @@ const CommitRow = memo(function CommitRow({
                 />
               </Tip>
             )}
-            <span data-testid="history-subject" className="min-w-0 flex-1 truncate text-[var(--color-fg)]" title={commit.subject}>
+            {/* No `title`: the hover card already shows the full subject, and
+                the browser's own tooltip drew ON TOP of it a second later. */}
+            <span data-testid="history-subject" className="min-w-0 flex-1 truncate text-[var(--color-fg)]">
               {commit.subject}
             </span>
             <span className="shrink-0 tabular-nums text-[11px] text-[var(--color-fg-faint)]">
@@ -705,7 +712,7 @@ const CommitRow = memo(function CommitRow({
           </RT.Trigger>
           <RT.Portal>
             <RT.Content
-              side="left" align="start" sideOffset={8} collisionPadding={8}
+              side="left" align="start" sideOffset={0} collisionPadding={8}
               className="z-[100] rounded-md border border-[var(--color-border)] bg-[var(--color-bg-2)] p-2.5 shadow-lg data-[state=delayed-open]:animate-in data-[state=delayed-open]:fade-in-0"
             >
               <CommitCard commit={commit} />
