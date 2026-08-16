@@ -4,9 +4,9 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [0.27.0] - 
+## [0.27.0] - 2026-08-16
 
-A commit graph in the Git tab, comments on any file you read, ripgrep search, and a big idle-CPU fix.
+A commit graph, comments on any file, ripgrep search, and a big idle-CPU fix.
 
 ### Features
 - The Git tab gets a commit graph at its foot: a dense row per commit (lane gutter, ref chips, subject, age), click a row for the files it touched, click a file for that revision's diff. Hover a row for the author, date and full message. Choose what it shows (this branch, every branch, or specific refs) and drag it to the height you want. Committed work used to vanish from Termic the moment the tree went clean. Lane colours come from the theme palette. (#199)
