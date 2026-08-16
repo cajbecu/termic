@@ -44,7 +44,7 @@ export function expandPreviewUrl(project: Project | null, task: Task, yamlUrl = 
   // dead Open button is worse than none.
   if (!tmpl) return null;
   const port = String(task.port);
-  return tmpl
+  let out = tmpl
     .replaceAll("${TERMIC_PORT}",            port)
     .replaceAll("$TERMIC_PORT",              port)
     .replaceAll("${CONDUCTOR_PORT}",         port)
@@ -55,6 +55,18 @@ export function expandPreviewUrl(project: Project | null, task: Task, yamlUrl = 
     .replaceAll("$TERMIC_WORKSPACE_NAME",    task.name)
     .replaceAll("${CONDUCTOR_WORKSPACE_NAME}", task.name)
     .replaceAll("$CONDUCTOR_WORKSPACE_NAME",   task.name);
+  // Extra named ports (GH #196): frozen pairs, replaced longest name
+  // first so `$API_PORT` can't eat the front of `$API_PORT_EXT`.
+  // Reserved-name validation upstream guarantees no collision with
+  // the built-in tokens above.
+  const extras = [...(task.extra_named_ports ?? [])]
+    .sort((a, b) => b.name.length - a.name.length);
+  for (const np of extras) {
+    out = out
+      .replaceAll("${" + np.name + "}", String(np.port))
+      .replaceAll("$" + np.name,        String(np.port));
+  }
+  return out;
 }
 
 /** All run-kind tabs of a task ("run", not "setup"). */

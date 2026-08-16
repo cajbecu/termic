@@ -1519,6 +1519,12 @@ const captureArmedRef = useRef(false);
           // parent env, so anything set here always trumps a system env.
           env: {
             TERMIC_PORT: String(task.port),
+            // Extra named ports (GH #196): frozen name→port pairs under
+            // the exact names the user configured. Before the per-agent
+            // block below, so a power user's env overrides still win.
+            ...Object.fromEntries(
+              (task.extra_named_ports ?? []).map(np => [np.name, String(np.port)]),
+            ),
             TERMIC_WORKSPACE_NAME: task.name,
             COLORFGBG: currentColorFgBg(),
             // Registry entries (agents AND terminal-kind) carry a

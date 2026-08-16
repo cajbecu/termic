@@ -134,7 +134,7 @@ export function RunCommandsDialog() {
         <div>
           <div className="text-[13.5px] font-medium">Preview URL</div>
           <div className="mt-0.5 text-[12px] text-[var(--color-fg-dim)]">
-            Opened by the terminal panel's Open button. Supports <span className="font-mono">$TERMIC_PORT</span>, <span className="font-mono">$TERMIC_WORKSPACE_NAME</span>.
+            Opened by the terminal panel's Open button. Supports <span className="font-mono">$TERMIC_PORT</span>, <span className="font-mono">$TERMIC_WORKSPACE_NAME</span>, and any extra named port.
           </div>
           <Input
             value={cfg.preview}
@@ -152,7 +152,7 @@ export function RunCommandsDialog() {
         />
         <ScriptField
           label="Run script"
-          hint={<>Runs when you click the Run button. Use <span className="font-mono">$TERMIC_PORT</span> so each task gets its own port.</>}
+          hint={<>Runs when you click the Run button. Use <span className="font-mono">$TERMIC_PORT</span> so each task gets its own port. Extra named ports are available under their own names.</>}
           value={cfg.run}
           onChange={(v) => patch({ run: v })}
           placeholder="PORT=$TERMIC_PORT npm run dev"

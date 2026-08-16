@@ -1483,3 +1483,80 @@ describe("settings reorder drags", () => {
     });
   });
 });
+
+// Extra named ports (GH #196): the Repo Settings field writes the personal
+// (projects.json) list — the fixture repo has no .termic.yaml, so the
+// storage target auto-defaults to Personal — and flags invalid/reserved
+// names inline. Port ALLOCATION from this list is covered in task.e2e.ts.
+describe("extra named ports settings", () => {
+  let projectId: string;
+
+  const typePorts = (value: string) =>
+    browser.execute((v) => {
+      const input = document.querySelector(
+        '[data-testid="extra-named-ports-input"]',
+      ) as HTMLTextAreaElement;
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype, "value",
+      )!.set!;
+      setter.call(input, v);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, value);
+  const stored = () =>
+    browser.execute(
+      (id) => window.__termic!.useApp.getState()
+        .projects.find((p: any) => p.id === id)?.extra_named_ports ?? null,
+      projectId,
+    );
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    projectId = await browser.execute(() =>
+      window.__termic!.useApp.getState()
+        .projects.find((p: any) => p.name === "fixture-repo").id as string,
+    );
+  });
+
+  after(async () => {
+    // Reset the personal list so later spec files see a clean project.
+    await browser.execute(async (id) => {
+      const t = window.__termic!;
+      const p = t.useApp.getState().projects.find((x: any) => x.id === id);
+      await t.ipc.projectUpdate({ ...p, extra_named_ports: [] });
+      await t.useApp.getState().loadAll();
+    }, projectId);
+  });
+
+  it("persists typed names to the personal list", async () => {
+    await browser.execute(
+      (id) => window.__termic!.useApp.getState().openSettings("repositories", id),
+      projectId,
+    );
+    await waitVisible('[data-testid="extra-named-ports-input"]');
+    await typePorts("API_PORT\nDB_PORT");
+    // The field autosaves (500ms debounce) into projects.json.
+    await browser.waitUntil(
+      async () => JSON.stringify(await stored()) === JSON.stringify(["API_PORT", "DB_PORT"]),
+      { timeout: 8_000, timeoutMsg: "typed port names never autosaved to the project" },
+    );
+    await snap("extra-named-ports.png");
+  });
+
+  it("warns on invalid and reserved names and keeps them out of the saved list", async () => {
+    await typePorts("API_PORT\n2BAD\nPATH");
+    await waitVisible('[data-testid="extra-named-ports-warning"]');
+    const warning = await browser.execute(
+      () => document.querySelector('[data-testid="extra-named-ports-warning"]')!.textContent,
+    );
+    expect(warning).toContain("2BAD");
+    expect(warning).toContain("PATH");
+    // The raw lines still save (the freeze at task create drops them);
+    // the warning is the user-facing signal. Valid name stays present.
+    await browser.waitUntil(
+      async () => ((await stored()) ?? []).includes("API_PORT"),
+      { timeout: 8_000, timeoutMsg: "valid name missing from the saved list" },
+    );
+    await snap("extra-named-ports-warning.png");
+  });
+});

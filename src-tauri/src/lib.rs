@@ -145,6 +145,13 @@ pub struct Project {
     /// existing rows load with an empty list.
     #[serde(default)]
     pub run_scripts: Vec<crate::repo_config::RunCommand>,
+
+    /// Personal extra named ports (GH #196), the projects.json layer.
+    /// Unioned with the committed `.termic.yaml` `extra_named_ports`
+    /// (yaml order first, deduped by name) into the effective list a
+    /// new task freezes. Serde-default so existing rows load empty.
+    #[serde(default)]
+    pub extra_named_ports: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -241,6 +248,16 @@ pub enum SandboxMode {
     EnforceFs,
 }
 
+/// One frozen extra named port (GH #196): the env var name the user
+/// configured plus the port allocated from this task's block at
+/// creation. Frozen pairs, so editing the repo config later never
+/// shifts a live task's ports.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
+pub struct NamedPort {
+    pub name: String,
+    pub port: u16,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Task {
@@ -333,6 +350,11 @@ pub struct Task {
     /// + sandbox profile generator iterate this list when populated.
     #[serde(default)]
     pub composition: Vec<TaskMember>,
+    /// Extra named ports (GH #196), frozen at creation from the
+    /// project's effective list (`.termic.yaml` union personal).
+    /// Injected wherever TERMIC_PORT is set; expanded in the preview
+    /// URL. Empty on every task created before this shipped.
+    pub extra_named_ports: Vec<NamedPort>,
     /// Pre-set launch command for `cli == "custom"` repo-root tasks.
     /// The default tab runs this through a login shell instead of an
     /// agent binary (e.g. `ssh box`, `npm run dev`, `python`). None for
@@ -955,6 +977,62 @@ fn load_tasks() -> Vec<Task> {
     }
     sort_tasks(&mut out);
     out
+}
+
+// ── Port blocks (GH #196) ──
+// Each live task owns a consecutive block starting at its base port:
+//   1 ($TERMIC_PORT) + composition members + extra named ports
+//   + PORT_BLOCK_BUFFER (room for a future "add port to live task").
+// New tasks first-fit into the gaps left by non-archived tasks, so
+// archived blocks get reused. Replaces the old
+// `18100 + load_tasks().len()` formula, which could collide once a
+// multi-repo task's member ports (base+i+1) overlapped the next
+// count-derived base.
+const PORT_BASE: u16 = 18100;
+const PORT_BLOCK_BUFFER: u16 = 5;
+
+fn task_block_len(task: &Task) -> u16 {
+    1 + task.composition.len() as u16
+        + task.extra_named_ports.len() as u16
+        + PORT_BLOCK_BUFFER
+}
+
+fn next_base_port(existing: &[Task], needed: u16) -> Result<u16, String> {
+    let mut blocks: Vec<(u16, u16)> = existing.iter()
+        .filter(|t| !t.archived && t.port >= PORT_BASE)
+        .map(|t| (t.port, t.port.saturating_add(task_block_len(t))))
+        .collect();
+    blocks.sort_unstable();
+    let mut candidate = PORT_BASE;
+    for (start, end) in blocks {
+        if candidate.saturating_add(needed) <= start { break; }
+        if end > candidate { candidate = end; }
+    }
+    // Practically unreachable, but fail loudly instead of wrapping
+    // into a colliding or privileged port.
+    if candidate.checked_add(needed).is_none() {
+        return Err("no free port block below 65535".into());
+    }
+    Ok(candidate)
+}
+
+/// Allocate a new task's whole block: returns (base_port, frozen
+/// extra named ports). `member_count` members occupy base+1+i; the
+/// extras follow at base + 1 + member_count + j, in list order.
+fn allocate_task_ports(
+    existing: &[Task],
+    member_count: u16,
+    extra_names: &[String],
+) -> Result<(u16, Vec<NamedPort>), String> {
+    let needed = 1 + member_count + extra_names.len() as u16 + PORT_BLOCK_BUFFER;
+    let base = next_base_port(existing, needed)?;
+    let extras = extra_names.iter().enumerate()
+        .map(|(j, n)| NamedPort {
+            name: n.clone(),
+            port: base + 1 + member_count + j as u16,
+        })
+        .collect();
+    Ok((base, extras))
 }
 
 /// Sidebar order: manual position first, creation time as the tiebreak.
@@ -2118,6 +2196,42 @@ fn effective_files_to_copy(proj: &Project) -> Vec<String> {
     repo_config_for(proj).scripts.files_to_copy
 }
 
+/// Env var names an extra named port may NOT use (GH #196): termic's
+/// own vars plus common shell/system vars a numeric override would
+/// break. Mirrored in src/lib/namedPorts.ts for the Settings editor.
+const RESERVED_PORT_NAMES: &[&str] = &[
+    "TERMIC_PORT", "TERMIC_TASK", "TERMIC_TASK_ID", "TERMIC_WORKSPACE_NAME",
+    "TERMIC_CLI", "CONDUCTOR_PORT", "CONDUCTOR_WORKSPACE_NAME",
+    "PATH", "HOME", "SHELL", "USER", "TMPDIR", "PWD", "TERM", "LANG", "COLORFGBG",
+];
+
+/// A usable extra-named-port env var name: `[A-Za-z_][A-Za-z0-9_]*`
+/// and not reserved. Names are used verbatim (free text per GH #196,
+/// no case transformation).
+fn valid_port_name(name: &str) -> bool {
+    let first_ok = name.chars().next()
+        .map_or(false, |c| c.is_ascii_alphabetic() || c == '_');
+    first_ok
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !RESERVED_PORT_NAMES.contains(&name)
+}
+
+/// Effective extra named port NAMES for a project: the committed
+/// `.termic.yaml` list unioned with the personal projects.json list
+/// (yaml order first), deduped by exact name, invalid / reserved
+/// names dropped. Ports get allocated per task at creation.
+fn effective_extra_named_ports(proj: &Project) -> Vec<String> {
+    let cfg = repo_config_for(proj);
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for n in cfg.extra_named_ports.iter().chain(proj.extra_named_ports.iter()) {
+        let n = n.trim();
+        if !valid_port_name(n) { continue; }
+        if seen.insert(n.to_string()) { out.push(n.to_string()); }
+    }
+    out
+}
+
 /// Whether a PTY slot is still live. The CLI's delivery confirmation
 /// re-checks this after typing: pty_write silently no-ops on an id
 /// that has left the map, so "the writes resolved" does not mean "the
@@ -2625,6 +2739,7 @@ fn project_add(root_path: String, non_git: Option<bool>) -> Result<Project, Stri
         // New projects start ungrouped; grouping is a sidebar action.
         group: None,
         run_scripts: Vec::new(),
+        extra_named_ports: Vec::new(),
     };
     list.push(p.clone());
     save_projects(&list).map_err(|e| e.to_string())?;
@@ -2802,6 +2917,7 @@ fn project_add_multi(root_path: String, name: String, members: Vec<ProjectMember
         non_git,
         group: None,
         run_scripts: Vec::new(),
+        extra_named_ports: Vec::new(),
     };
     list.push(p.clone());
     save_projects(&list).map_err(|e| e.to_string())?;
@@ -2985,7 +3101,15 @@ fn task_open_repo(
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "HEAD".to_string())
     };
-    let port = 18100 + (load_tasks().len() as u16);
+    let extra_names = effective_extra_named_ports(&proj);
+    // Member count is an upper bound (invalid / duplicate member dirs
+    // are skipped below); skipped slots just leave unused ports inside
+    // the block, which is harmless.
+    let member_count = if proj.project_type == ProjectType::Multi {
+        proj.members.len() as u16
+    } else { 0 };
+    let (port, extra_named_ports) =
+        allocate_task_ports(&load_tasks(), member_count, &extra_names)?;
 
     // Multi-repo project opened in REPO mode: drop a symlink for
     // each member into the host's working dir so the agent at the
@@ -3122,6 +3246,7 @@ fn task_open_repo(
         sandbox_rw_paths,
         sandbox_allowed_hosts,
         composition,
+        extra_named_ports,
         custom_command,
         resume_override: None,
         persisted_tabs: Vec::new(),
@@ -3261,7 +3386,9 @@ fn task_import_worktree(
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
     let cli = cli.unwrap_or_else(|| proj.default_cli.clone());
-    let port = 18100 + (existing_tasks.len() as u16);
+    let extra_names = effective_extra_named_ports(&proj);
+    let (port, extra_named_ports) =
+        allocate_task_ports(&existing_tasks, 0, &extra_names)?;
     let explicit_name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
     let derived = explicit_name.is_none();
     let ws_name = explicit_name
@@ -3331,6 +3458,7 @@ fn task_import_worktree(
         sandbox_rw_paths,
         sandbox_allowed_hosts,
         composition: Vec::new(),
+        extra_named_ports,
         custom_command: None,
         resume_override: None,
         persisted_tabs: Vec::new(),
@@ -3542,8 +3670,10 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
         link_config_dir(&repo, &wt_path, name);
     }
 
-    // Allocate port (18100 + index).
-    let port = 18100 + (load_tasks().len() as u16);
+    // Allocate the task's port block (base + extras + buffer).
+    let extra_names = effective_extra_named_ports(&proj);
+    let (port, extra_named_ports) =
+        allocate_task_ports(&load_tasks(), 0, &extra_names)?;
 
     let cli = args.cli.unwrap_or_else(|| proj.default_cli.clone());
     // Only "custom" tasks carry a pre-set launch command; agent/shell tasks
@@ -3619,6 +3749,7 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
         // (task_create_multi) that populates this and re-uses
         // the same Task + sandbox plumbing.
         composition: Vec::new(),
+        extra_named_ports,
         // Set only for `cli == "custom"` worktree tasks (quick "Custom
         // command" in worktree mode); None for agent / shell worktrees.
         custom_command,
@@ -3835,11 +3966,13 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
     // can unwind a partial composition.
     let mut composition: Vec<TaskMember> = Vec::new();
     let mut done: Vec<(ProjectMember, CreateMultiMember, String, MemberMode, String)> = Vec::new();
-    // Per-member port counter — each member gets task.port+i+1
-    // so two members running PORT=$TERMIC_PORT npm run dev don't
-    // collide. We bumped 'port' below already by load_tasks().len()
-    // for the task itself; members live in the gap above it.
-    let ws_port = 18100 + (load_tasks().len() as u16);
+    // Allocate the task's whole port block up front (GH #196): base
+    // ($TERMIC_PORT) + one port per member + the host's extra named
+    // ports + buffer. Members get base+1+i via the counter below;
+    // the extras land right after the members.
+    let extra_names = effective_extra_named_ports(&host);
+    let (ws_port, extra_named_ports) =
+        allocate_task_ports(&load_tasks(), frozen.len() as u16, &extra_names)?;
     let mut next_member_port = ws_port + 1;
     for (mp, spec, dir_name) in frozen.into_iter() {
         let member_port = next_member_port;
@@ -3979,7 +4112,8 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
     let sandbox_allowed_hosts = args.sandbox_allowed_hosts.unwrap_or(base_hosts);
 
     let cli = args.cli.unwrap_or_else(|| host.default_cli.clone());
-    let port = 18100 + (load_tasks().len() as u16);
+    // Block base allocated above, before the members were created.
+    let port = ws_port;
     let task = Task {
         id: args.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
         project_id: host.id.clone(),
@@ -4001,6 +4135,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         sandbox_rw_paths,
         sandbox_allowed_hosts,
         composition,
+        extra_named_ports,
         custom_command: None,
         resume_override: None,
         persisted_tabs: Vec::new(),
@@ -4056,6 +4191,10 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
             (format!("TERMIC_PORT_{sanitized}"), p)
         })
         .collect();
+    // Extra named ports (GH #196), frozen on the task above.
+    let extra_ports: Vec<(String, u16)> = task.extra_named_ports.iter()
+        .map(|np| (np.name.clone(), np.port))
+        .collect();
     if member_setups.is_empty() {
         let _ = app.emit(&format!("setup-done://{}", task.id),
             serde_json::json!({ "code": 0, "success": true }));
@@ -4084,6 +4223,9 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
                     cmd.env(k, v);
                 }
                 for (k, v) in &sibling_ports {
+                    cmd.env(k, v.to_string());
+                }
+                for (k, v) in &extra_ports {
                     cmd.env(k, v.to_string());
                 }
                 let spawn_res = cmd.spawn();
@@ -5297,13 +5439,13 @@ fn task_archive_sync(id: String, delete_branch: bool) -> Result<(), String> {
             // via `.termic.yaml` still tears down.
             let script = member_effective_script(m, |s| s.archive.clone(), &m.archive_script);
             if !script.trim().is_empty() && Path::new(&m.path).exists() {
-                let _ = run_script(&script, Path::new(&m.path), w.port, &w.name);
+                let _ = run_script(&script, Path::new(&m.path), w.port, &w.name, &w.extra_named_ports);
             }
         }
     } else if let Some(p) = &proj {
         let archive = effective_scripts(p).2;
         if !archive.trim().is_empty() {
-            let _ = run_script(&archive, Path::new(&w.path), w.port, &w.name);
+            let _ = run_script(&archive, Path::new(&w.path), w.port, &w.name, &w.extra_named_ports);
         }
     }
 
@@ -5662,7 +5804,7 @@ fn task_restore_sync(app: AppHandle, id: String) -> Result<Task, String> {
     if task.composition.is_empty() {
         let (setup, _, _) = effective_scripts(&proj);
         if !setup.trim().is_empty() {
-            run_script_streaming(setup, wt_path, task.port, task.name.clone(), app, task.id.clone());
+            run_script_streaming(setup, wt_path, task.port, task.name.clone(), task.extra_named_ports.clone(), app, task.id.clone());
         }
     } else {
         for m in &task.composition {
@@ -5672,6 +5814,7 @@ fn task_restore_sync(app: AppHandle, id: String) -> Result<Task, String> {
                     PathBuf::from(&m.path),
                     if m.port > 0 { m.port } else { task.port },
                     task.name.clone(),
+                    task.extra_named_ports.clone(),
                     app.clone(),
                     task.id.clone(),
                 );
@@ -5696,7 +5839,7 @@ fn task_run_script(id: String, which: String) -> Result<String, String> {
     if script.trim().is_empty() {
         return Err("script empty".into());
     }
-    run_script(&script, Path::new(&w.path), w.port, &w.name).map_err(|e| e.to_string())
+    run_script(&script, Path::new(&w.path), w.port, &w.name, &w.extra_named_ports).map_err(|e| e.to_string())
 }
 
 /// The complete delta a task (worktree) produced vs its base, for the Agent
@@ -7790,7 +7933,7 @@ fn simple_glob_match(pat: &str, s: &str) -> bool {
 /// dev-loop moves (npm install, docker build, kubectl apply, etc.). The
 /// aux/scratch terminal is in the same bucket; sandbox specifically
 /// targets the agent PTY.
-fn run_script(script: &str, cwd: &Path, port: u16, name: &str) -> Result<String> {
+fn run_script(script: &str, cwd: &Path, port: u16, name: &str, extra: &[NamedPort]) -> Result<String> {
     // Same login-shell environment the PTY gets (see pty_spawn). `bash -l`
     // only sources bash's OWN profile, so a PATH/EDITOR/etc. the user set
     // in their real shell (fish/zsh rc) or a tool dir like ~/.bun/bin is
@@ -7804,6 +7947,11 @@ fn run_script(script: &str, cwd: &Path, port: u16, name: &str) -> Result<String>
         .env("TERMIC_PORT", port.to_string())
         .env("TERMIC_WORKSPACE_NAME", name)
         .env("TERMIC_TASK", name);
+    // Extra named ports (GH #196): frozen name→port pairs, exposed
+    // under the exact names the user configured.
+    for np in extra {
+        cmd.env(&np.name, np.port.to_string());
+    }
     for (k, v) in inject {
         cmd.env(k, v);
     }
@@ -7830,6 +7978,7 @@ fn run_script_streaming(
     cwd: PathBuf,
     port: u16,
     name: String,
+    extra: Vec<NamedPort>,
     app: AppHandle,
     ws_id: String,
 ) {
@@ -7856,6 +8005,11 @@ fn run_script_streaming(
             .env("PYTHONIOENCODING", "UTF-8")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Extra named ports (GH #196): frozen name→port pairs, exposed
+        // under the exact names the user configured.
+        for np in &extra {
+            cmd.env(&np.name, np.port.to_string());
+        }
         for (k, v) in setup_inject {
             cmd.env(k, v);
         }
@@ -8543,6 +8697,10 @@ fn task_run_script_stream(
             (format!("TERMIC_PORT_{sanitized}"), p)
         })
         .collect();
+    // Extra named ports (GH #196), frozen on the task at creation.
+    let extra_ports: Vec<(String, u16)> = w.extra_named_ports.iter()
+        .map(|np| (np.name.clone(), np.port))
+        .collect();
 
     thread::spawn(move || {
         // Kill any prior instance for (task, member, kind) — SIGTERM to the
@@ -8593,6 +8751,9 @@ fn task_run_script_stream(
             cmd.env(k, v);
         }
         for (k, v) in &sibling_ports {
+            cmd.env(k, v.to_string());
+        }
+        for (k, v) in &extra_ports {
             cmd.env(k, v.to_string());
         }
         let spawn_res = cmd.spawn();
@@ -13687,5 +13848,114 @@ mod tests {
                        "created":"2026-01-01T00:00:00Z","archived":false}"#;
         let t: Task = serde_json::from_str(json).expect("legacy task file still parses");
         assert_eq!(t.order, None);
+    }
+
+    // ── Extra named ports (GH #196) ─────────────────────────────────
+
+    #[test]
+    fn valid_names() {
+        assert!(valid_port_name("API_PORT"));
+        assert!(valid_port_name("_db"));
+        assert!(valid_port_name("frontendPort2"));
+    }
+
+    #[test]
+    fn invalid_names() {
+        assert!(!valid_port_name(""));          // empty
+        assert!(!valid_port_name("2PORT"));     // leading digit
+        assert!(!valid_port_name("MY-PORT"));   // dash
+        assert!(!valid_port_name("A B"));       // space
+    }
+
+    #[test]
+    fn reserved_names_rejected() {
+        for n in ["TERMIC_PORT", "PATH", "HOME", "CONDUCTOR_PORT", "TERM"] {
+            assert!(!valid_port_name(n), "{n} must be reserved");
+        }
+    }
+
+    #[test]
+    fn effective_list_unions_and_dedupes() {
+        // yaml first, personal appended, dupes and invalid dropped.
+        let dir = tempdir().unwrap();
+        let cfg = crate::repo_config::RepoConfig {
+            extra_named_ports: vec!["API_PORT".into(), "DB_PORT".into()],
+            ..Default::default()
+        };
+        crate::repo_config::save(dir.path(), &cfg).unwrap();
+        let proj = Project {
+            root_path: dir.path().to_string_lossy().into_owned(),
+            extra_named_ports: vec![
+                "DB_PORT".into(),      // dupe of yaml, dropped
+                "CACHE_PORT".into(),   // kept
+                "2BAD".into(),         // invalid, dropped
+                "PATH".into(),         // reserved, dropped
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_extra_named_ports(&proj),
+            vec!["API_PORT", "DB_PORT", "CACHE_PORT"],
+        );
+    }
+
+    fn stub_task(port: u16, members: usize, extras: usize, archived: bool) -> Task {
+        Task {
+            port,
+            archived,
+            composition: (0..members).map(|_| TaskMember::default()).collect(),
+            extra_named_ports: (0..extras)
+                .map(|j| NamedPort { name: format!("P{j}"), port: 0 })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn base_port_empty_state() {
+        assert_eq!(next_base_port(&[], 6).unwrap(), 18100);
+    }
+
+    #[test]
+    fn blocks_stack_consecutively() {
+        // Plain task block = 1 + 0 + 0 + 5 = 6 → next base is 18106.
+        let existing = vec![stub_task(18100, 0, 0, false)];
+        assert_eq!(next_base_port(&existing, 6).unwrap(), 18106);
+    }
+
+    #[test]
+    fn members_and_extras_widen_the_block() {
+        // 1 + 2 members + 3 extras + 5 buffer = 11 → next base 18111.
+        let existing = vec![stub_task(18100, 2, 3, false)];
+        assert_eq!(next_base_port(&existing, 6).unwrap(), 18111);
+    }
+
+    #[test]
+    fn archived_blocks_are_reused() {
+        let existing = vec![stub_task(18100, 0, 0, true)];
+        assert_eq!(next_base_port(&existing, 6).unwrap(), 18100);
+    }
+
+    #[test]
+    fn first_fit_takes_a_gap_that_fits() {
+        // Live at 18100 (len 6) and 18112 (len 6); the 18106..18112 gap
+        // fits needed=6 → reused.
+        let existing = vec![stub_task(18100, 0, 0, false), stub_task(18112, 0, 0, false)];
+        assert_eq!(next_base_port(&existing, 6).unwrap(), 18106);
+        // needed=8 does NOT fit the gap → lands after the last block.
+        assert_eq!(next_base_port(&existing, 8).unwrap(), 18118);
+    }
+
+    #[test]
+    fn allocate_assigns_consecutive_extras_after_members() {
+        let (base, extras) = allocate_task_ports(
+            &[], 2, &["API_PORT".to_string(), "DB_PORT".to_string()],
+        ).unwrap();
+        assert_eq!(base, 18100);
+        // base=TERMIC_PORT, members at base+1+i, extras after members.
+        assert_eq!(extras, vec![
+            NamedPort { name: "API_PORT".into(), port: 18103 },
+            NamedPort { name: "DB_PORT".into(),  port: 18104 },
+        ]);
     }
 }
