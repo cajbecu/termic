@@ -766,16 +766,29 @@ fn project_tasks_root(default_path: &str, p: &Project) -> Result<PathBuf, String
     Ok(root)
 }
 
-/// Crash-safe replacement of a file: write a sibling temp file, fsync it, then
+/// Crash-safe replacement of a file: write a sibling temp file, sync it, then
 /// atomically `rename()` it over the destination, so a reader never sees a
-/// partial file. Durability is deliberately plain `fsync(2)`, not `F_FULLFSYNC`:
-/// a hard power cut can lose the last write but never the previous intact file,
-/// and per-toggle `F_FULLFSYNC` stalls aren't worth more.
-fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// partial file. Durability is `sync_data` (`F_BARRIERFSYNC` on macOS), NOT
+/// `sync_all`, which is the full-device-flush `F_FULLFSYNC` there (measured
+/// ~2.6ms vs ~0.09ms) and would stall the synchronous command path: a hard
+/// power cut can lose the last write but never the previous intact file.
+pub(crate) fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     // Resolve symlinks: rename would replace the link itself with a regular
-    // file; we must write through to its target.
-    let resolved = fs::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf());
+    // file; we must write through to its target. canonicalize fails on a
+    // DANGLING link (dotfiles target not created yet), so follow links by
+    // hand in that case rather than clobbering the link.
+    let resolved = fs::canonicalize(dest).unwrap_or_else(|_| {
+        let mut cur = dest.to_path_buf();
+        for _ in 0..8 {
+            match fs::read_link(&cur) {
+                Ok(t) if t.is_absolute() => cur = t,
+                Ok(t) => cur = cur.parent().unwrap_or_else(|| Path::new(".")).join(t),
+                Err(_) => break,
+            }
+        }
+        cur
+    });
     let dest = resolved.as_path();
     let dir = dest.parent().unwrap_or_else(|| Path::new("."));
     let stem = dest.file_name().and_then(|n| n.to_str()).unwrap_or("out");
@@ -787,13 +800,16 @@ fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let write = || -> std::io::Result<()> {
         let mut f = fs::File::create(&tmp)?;
         // A fresh temp inode gets default perms; carry the old mode so a
-        // tightened (e.g. chmod 600) file stays tightened.
+        // tightened (e.g. chmod 600) file stays tightened. Log, don't fail:
+        // some mounts (FUSE/SMB) reject chmod but the write itself is fine.
         if let Ok(meta) = fs::metadata(dest) {
-            let _ = f.set_permissions(meta.permissions());
+            if let Err(e) = f.set_permissions(meta.permissions()) {
+                eprintln!("[write_atomic] could not carry mode onto {}: {e}", dest.display());
+            }
         }
         f.write_all(bytes)?;
-        // Bytes must be durable before the rename is visible.
-        f.sync_all()?;
+        // Bytes must be ordered before the rename is visible.
+        f.sync_data()?;
         drop(f);
         fs::rename(&tmp, dest)
     };
@@ -1151,7 +1167,8 @@ fn ensure_git_excluded(repo: &Path, name: &str) {
     }
     body.push_str(name);
     body.push('\n');
-    let _ = fs::write(&exclude, body);
+    // Atomic: a torn rewrite here would eat the user's own exclude entries.
+    let _ = write_atomic(&exclude, body.as_bytes());
 }
 
 /// Write `schema_version = TASKS_SCHEMA_VERSION` into settings.json directly
@@ -4202,7 +4219,8 @@ fn ensure_multirepo_gitignore(wrapper: &Path, member_dirs: &[String]) -> std::io
         next.push('\n');
     }
     next.push_str(END); next.push('\n');
-    fs::write(&path, next)
+    // Atomic: the file carries the user's own rules outside the managed block.
+    write_atomic(&path, next.as_bytes())
 }
 
 /// Persist the sidebar order of ONE project's tasks. `ids` is that
@@ -7093,7 +7111,9 @@ fn task_file_write(id: String, path: String, content: String) -> Result<(), Stri
     let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
     let (cwd, rel) = resolve_task_git_path(&w, &path)?;
     let abs = safe_task_path(&cwd, &rel)?;
-    fs::write(&abs, content).map_err(|e| format!("write failed: {e}"))
+    // Atomic: uncommitted source is unrecoverable if a truncate-write tears.
+    // Tradeoff accepted: the swap installs a new inode (breaks hardlinks).
+    write_atomic(&abs, content.as_bytes()).map_err(|e| format!("write failed: {e}"))
 }
 
 /// Rename a file or directory in the task (file-tree context menu).
@@ -13803,6 +13823,21 @@ mod tests {
         assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
             "the link itself must survive");
         assert_eq!(fs::read_to_string(&target).unwrap(), "new", "target must receive the write");
+    }
+
+    // Dangling link (dotfiles target not created yet): canonicalize fails, so
+    // the manual read_link fallback must still write the target, not clobber
+    // the link with a regular file.
+    #[test]
+    fn write_atomic_creates_the_target_of_a_dangling_symlink() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("dotfiles-settings.json");
+        let link = dir.path().join("settings.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        write_atomic(&link, b"new").unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+            "the link itself must survive");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new", "target must be created");
     }
 
     #[test]
