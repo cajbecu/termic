@@ -632,6 +632,10 @@ export interface GitCommit {
   /** Committed locally but not reachable from the upstream — VS Code calls
    *  these outgoing. Always false when the branch has no upstream. */
   unpushed: boolean;
+  /** Message below the subject, trailers included. "" for a one-line commit.
+   *  Feeds the row's hover card; co-authors are parsed out of it here rather
+   *  than in Rust, so the raw message is what crossed the wire. */
+  body?: string;
 }
 
 /** One page of `task_git_log`. */

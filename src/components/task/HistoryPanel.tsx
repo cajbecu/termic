@@ -25,6 +25,7 @@ import { layoutGraph, graphWidth, type GraphRow } from "@/lib/gitGraph";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useApp } from "@/store/app";
 import { cn } from "@/lib/utils";
+import * as RT from "@radix-ui/react-tooltip";
 import { Tip } from "@/components/ui/Tooltip";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuLabel } from "@/components/ui/ContextMenu";
 import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownLabel } from "@/components/ui/Dropdown";
@@ -127,6 +128,37 @@ export function parseRefs(refs: string[]): RefChip[] {
   // "origin/main" is the least surprising thing a commit can be labelled with.
   const rank = { head: 0, branch: 1, tag: 2, remote: 3 } as const;
   return out.sort((a, b) => rank[a.kind] - rank[b.kind]);
+}
+
+/** How long the cursor must rest on a row before its card appears. Long,
+ *  because the card is a reward for stopping, not something to trip over while
+ *  scanning the list. Once one HAS opened, moving to another row shows it at
+ *  once (Radix's skipDelayDuration) — having paid the wait once, you are
+ *  reading cards now, and re-charging the timer per row would be maddening. */
+const CARD_DELAY_MS = 2000;
+/** Grace after a card closes during which the next opens instantly. */
+const CARD_SKIP_MS = 900;
+
+/** Split a commit message body into its trailers and the prose above them.
+ *
+ *  Only `Co-authored-by:` is pulled out by name (it is the one every agent
+ *  writes, and the one worth a face in the card); the rest of the trailer
+ *  block is left in the prose, because a `Refs #12` line is part of what the
+ *  author wrote and dropping it would hide it.
+ *
+ *  Case-insensitive: git's own trailer matching is, and agents disagree about
+ *  the capital A. */
+export function splitTrailers(body: string): { prose: string; coAuthors: string[] } {
+  const coAuthors: string[] = [];
+  const kept: string[] = [];
+  for (const line of (body || "").split("\n")) {
+    const m = /^\s*co-authored-by:\s*(.+?)\s*$/i.exec(line);
+    if (!m) { kept.push(line); continue; }
+    // "Name <email>" → "Name". A bare email keeps its angle brackets off.
+    const name = m[1].replace(/\s*<[^>]*>\s*$/, "").trim();
+    if (name) coAuthors.push(name);
+  }
+  return { prose: kept.join("\n").trim(), coAuthors };
 }
 
 export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirProp, scope }: {
@@ -271,6 +303,10 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
         </div>
       )}
 
+      {/* One Provider for the whole list: the wait-then-instant behaviour is
+          shared state, so a per-row Provider (what `Tip` builds) would recharge
+          the 2s timer on every commit. */}
+      <RT.Provider delayDuration={CARD_DELAY_MS} skipDelayDuration={CARD_SKIP_MS} disableHoverableContent>
       <div className="min-h-0 flex-1 overflow-auto">
         {err && <Empty tone="err">{err}</Empty>}
         {!err && loading && commits.length === 0 && (
@@ -310,6 +346,7 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
           </button>
         )}
       </div>
+      </RT.Provider>
     </div>
   );
 }
@@ -541,6 +578,49 @@ function LaneGutter({ row, lanes, width }: { row: GraphRow; lanes: number; width
   );
 }
 
+/** The hover card for one commit: who wrote it, when, and the whole message.
+ *
+ *  A row is one truncated line, so the full subject, the body and the author
+ *  were unreachable without opening the commit. This is the read-only half of
+ *  what clicking gives you (which loads files over IPC), at no cost until the
+ *  cursor rests.
+ *
+ *  Rendered inside the shared Provider the list mounts, which is what makes
+ *  the first card wait and the rest instant. */
+function CommitCard({ commit }: { commit: GitCommit }) {
+  const { prose, coAuthors } = useMemo(() => splitTrailers(commit.body ?? ""), [commit.body]);
+  const when = new Date(commit.timestamp * 1000);
+  return (
+    <div className="flex max-w-[520px] min-w-0 flex-col gap-1.5" data-testid="history-commit-card">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[11.5px] text-[var(--color-fg-dim)]">
+        <span className="font-medium text-[var(--color-fg)]">{commit.author}</span>
+        <span className="text-[var(--color-fg-faint)]">{commit.email}</span>
+        <span className="text-[var(--color-fg-faint)]">·</span>
+        <span title={when.toISOString()}>{when.toLocaleString()}</span>
+      </div>
+      {coAuthors.length > 0 && (
+        <div className="text-[11.5px] text-[var(--color-fg-dim)]">
+          {coAuthors.join(", ")} <span className="text-[var(--color-fg-faint)]">
+            {coAuthors.length === 1 ? "(co-author)" : "(co-authors)"}
+          </span>
+        </div>
+      )}
+      {/* The subject in full: the row itself truncates, and a long one is
+          exactly the case this card exists for. */}
+      <div className="text-[12.5px] leading-snug font-medium text-[var(--color-fg)]">{commit.subject}</div>
+      {prose && (
+        // `whitespace-pre-wrap`: a commit message's own line breaks are part
+        // of it. Capped and scrollable so a 200-line message cannot grow a
+        // card taller than the window.
+        <div className="max-h-[320px] overflow-auto whitespace-pre-wrap text-[12px] leading-relaxed text-[var(--color-fg-dim)]">
+          {prose}
+        </div>
+      )}
+      <div className="font-mono text-[10.5px] text-[var(--color-fg-faint)]">{commit.short}</div>
+    </div>
+  );
+}
+
 /** memo: selecting a commit re-renders the list, and every OTHER row's props
  *  are unchanged — without this, a click repaints every SVG on screen. */
 const CommitRow = memo(function CommitRow({
@@ -562,6 +642,11 @@ const CommitRow = memo(function CommitRow({
     <div data-testid="history-commit" data-sha={commit.sha}>
       <ContextMenuRoot>
         <ContextMenuTrigger>
+          {/* Hover card. The Provider is mounted once around the whole list,
+              not here, because the wait-then-instant behaviour is shared
+              state: pay it on the first commit, read the rest at once. */}
+          <RT.Root>
+          <RT.Trigger asChild>
           <div
             data-testid="history-commit-row"
             onClick={onSelect}
@@ -617,6 +702,16 @@ const CommitRow = memo(function CommitRow({
               {commitAge(commit.timestamp)}
             </span>
           </div>
+          </RT.Trigger>
+          <RT.Portal>
+            <RT.Content
+              side="left" align="start" sideOffset={8} collisionPadding={8}
+              className="z-[100] rounded-md border border-[var(--color-border)] bg-[var(--color-bg-2)] p-2.5 shadow-lg data-[state=delayed-open]:animate-in data-[state=delayed-open]:fade-in-0"
+            >
+              <CommitCard commit={commit} />
+            </RT.Content>
+          </RT.Portal>
+          </RT.Root>
         </ContextMenuTrigger>
         <ContextMenuContent>
           <ContextMenuLabel>{commit.short}</ContextMenuLabel>

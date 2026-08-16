@@ -6733,6 +6733,11 @@ pub struct GitCommit {
     /// still local-only. Drives the "unpushed" marker (VS Code calls these
     /// outgoing changes). Always false when the branch has no upstream.
     pub unpushed: bool,
+    /// Message below the subject, trailers included, exactly as committed.
+    /// Empty for a one-line commit. Feeds the row's hover card; the frontend
+    /// pulls `Co-authored-by:` out of it rather than git doing it here, so the
+    /// raw message stays the thing that crossed the wire.
+    pub body: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -6777,6 +6782,8 @@ fn parse_git_log(out: &str, unpushed: &std::collections::HashSet<String>) -> Vec
                 .map(str::to_string)
                 .collect(),
             subject: f.get(7).copied().unwrap_or_default().to_string(),
+            // Trailing blank lines are git's, not the author's.
+            body: f.get(8).copied().unwrap_or_default().trim_end().to_string(),
             sha,
         });
     }
@@ -6907,8 +6914,9 @@ fn git_log_page(
     };
 
     // %H sha, %h short, %P parents, %an author, %ae email, %at date,
-    // %D refs, %s subject. RS-terminated so a record is unambiguous.
-    const FORMAT: &str = "--pretty=format:%H\u{1f}%h\u{1f}%P\u{1f}%an\u{1f}%ae\u{1f}%at\u{1f}%D\u{1f}%s\u{1e}";
+    // %D refs, %s subject, %b body. RS-terminated so a record is unambiguous,
+    // which is what lets the body carry newlines and still be one field.
+    const FORMAT: &str = "--pretty=format:%H\u{1f}%h\u{1f}%P\u{1f}%an\u{1f}%ae\u{1f}%at\u{1f}%D\u{1f}%s\u{1f}%b\u{1e}";
     // One extra row tells us whether a next page exists without a second
     // walk; it is dropped before returning.
     let max = (limit + 1).to_string();
@@ -12111,7 +12119,7 @@ pub fn run() {
             // into minimize-to-tray is the kind of default people hate. Those
             // platforms keep Tauri's native close. `--headless` still
             // goes windowless everywhere, because there the user asked for no
-            // window. See docs/research/windows.md.
+            // window. See docs/ideas/windows.md.
             #[cfg(target_os = "macos")]
             {
                 let handle = app.handle().clone();
@@ -13906,6 +13914,31 @@ mod tests {
         // A root commit has no parents and that is not a parse failure.
         assert!(commits[2].parents.is_empty());
         assert_eq!(commits[2].timestamp, 1700000000);
+    }
+
+    #[test]
+    fn parse_git_log_keeps_a_multiline_body_as_one_field() {
+        // The body is the last field and holds newlines. That only parses
+        // because records are RS-terminated, not newline-terminated: a
+        // line-based split would tear every multi-paragraph commit apart.
+        let body = "Why it changed.\n\nCo-authored-by: Ada <ada@example.com>";
+        let out = format!(
+            "abc123456789\u{1f}abc1234\u{1f}\u{1f}Ada\u{1f}ada@example.com\u{1f}1700000000\u{1f}\u{1f}the subject\u{1f}{body}\n\n\u{1e}",
+        );
+        let commits = parse_git_log(&out, &Default::default());
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "the subject");
+        // Trailing blank lines are git's, not the author's.
+        assert_eq!(commits[0].body, body);
+    }
+
+    #[test]
+    fn parse_git_log_leaves_a_one_line_commit_with_an_empty_body() {
+        let out = "abc123456789\u{1f}abc1234\u{1f}\u{1f}Ada\u{1f}ada@example.com\u{1f}1700000000\u{1f}\u{1f}subject only\u{1f}\u{1e}";
+        let commits = parse_git_log(out, &Default::default());
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "subject only");
+        assert!(commits[0].body.is_empty());
     }
 
     #[test]
