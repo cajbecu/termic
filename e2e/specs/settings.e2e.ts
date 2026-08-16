@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { archiveTask, dismissOverlays, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitVisible } from "../helpers";
+import { archiveTask, dismissOverlays, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitVisible } from "../helpers";
 
 /** Click the [role="switch"] in the settings row whose label matches exactly.
  *  Toggle rows are label + switch inside one .justify-between wrapper
@@ -701,7 +701,7 @@ describe("preferences", () => {
 // stored answer have to be visible and reversible there.
 describe("archive confirmation settings", () => {
   const CONFIRM_LABEL = "Confirm before archiving a task";
-  const BRANCH_LABEL = "Delete the git branch when archiving without asking";
+  const BRANCH_LABEL = "Delete the branch when archiving";
   let orig: { confirm: boolean; deleteBranch: boolean } | undefined;
 
   const prefs = () =>
@@ -732,43 +732,52 @@ describe("archive confirmation settings", () => {
     await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
   });
 
-  it("puts both archive toggles on the Tasks page", async () => {
+  it("hides the branch toggle while the confirmation is on", async () => {
     await waitForAppShell();
     await requireTermicApi();
     orig = await prefs();
 
-    await browser.execute(() => window.__termic!.useApp.getState().openSettings("tasks"));
+    await browser.execute(() => {
+      window.__termic!.usePrefs.getState().setConfirmBeforeArchiveTask(true);
+      window.__termic!.useApp.getState().openSettings("tasks");
+    });
     await waitForText(CONFIRM_LABEL);
-    await waitForText(BRANCH_LABEL);
+    // With the dialog on, its own checkbox answers the branch question per
+    // archive - a second control here would just contradict it.
+    await waitForTextGone(BRANCH_LABEL);
   });
 
-  it("turns the confirmation back on after a 'Don't ask again'", async () => {
+  it("reveals the branch toggle once archiving stops asking", async () => {
     // The state the dialog's opt-out leaves behind.
     await browser.execute(() => {
       const p = window.__termic!.usePrefs.getState();
       p.setConfirmBeforeArchiveTask(false);
       p.setArchiveDeleteBranch(true);
     });
-    await browser.waitUntil(async () => (await ariaChecked(CONFIRM_LABEL)) === "false",
-      { timeout: 5_000, timeoutMsg: "confirm switch never showed the opt-out" });
-
-    await clickToggleByLabel(CONFIRM_LABEL);
-
-    await browser.waitUntil(async () => (await prefs()).confirm === true,
-      { timeout: 5_000, timeoutMsg: "confirmBeforeArchiveTask never came back on" });
-    expect(await ariaChecked(CONFIRM_LABEL)).toBe("true");
+    await waitForText(BRANCH_LABEL);
+    expect(await ariaChecked(CONFIRM_LABEL)).toBe("false");
+    expect(await ariaChecked(BRANCH_LABEL)).toBe("true");
   });
 
-  it("flips the remembered delete-branch answer independently", async () => {
+  it("flips the remembered branch answer while it is visible", async () => {
     const before = (await prefs()).deleteBranch;
     await clickToggleByLabel(BRANCH_LABEL);
 
     await browser.waitUntil(async () => (await prefs()).deleteBranch !== before,
       { timeout: 5_000, timeoutMsg: "archiveDeleteBranch never changed" });
     // Flipping one must not disturb the other: they answer different questions.
-    expect((await prefs()).confirm).toBe(true);
+    expect((await prefs()).confirm).toBe(false);
     expect(await ariaChecked(BRANCH_LABEL)).toBe(String(!before));
     await snap("archive-settings.png");
+  });
+
+  it("turns the confirmation back on, taking the branch toggle away again", async () => {
+    await clickToggleByLabel(CONFIRM_LABEL);
+
+    await browser.waitUntil(async () => (await prefs()).confirm === true,
+      { timeout: 5_000, timeoutMsg: "confirmBeforeArchiveTask never came back on" });
+    expect(await ariaChecked(CONFIRM_LABEL)).toBe("true");
+    await waitForTextGone(BRANCH_LABEL);
   });
 });
 

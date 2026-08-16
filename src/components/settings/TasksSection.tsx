@@ -247,27 +247,31 @@ export function TasksSection() {
         />
       </Block>
 
-      {/* Archiving can't be undone from inside Termic, so the opt-out and the
-          branch decision it freezes both get a visible home here. Ticking
-          "Don't ask again" in the archive dialog flips the first toggle off
-          and writes the second from that dialog's checkbox. */}
+      {/* Archiving can't be undone from inside Termic, so the confirmation
+          needs a visible way back for anyone who turned it off from the
+          dialog. */}
       <Block>
         <Toggle
           label="Confirm before archiving a task"
-          hint="Ask before archiving a task. Turning this off (or ticking 'Don't ask again' in the archive dialog) archives immediately, using the branch setting below."
+          hint="Ask before archiving a task. With this off, archiving happens straight away."
           value={confirmBeforeArchiveTask}
           onChange={setConfirmBeforeArchiveTask}
         />
       </Block>
 
-      <Block>
-        <Toggle
-          label="Delete the git branch when archiving without asking"
-          hint="Only applies while the confirmation above is off: it decides whether a silent archive also runs 'git branch -D'. When the dialog is on, its own checkbox decides, and ticking 'Don't ask again' there stores that answer here. Never applies to a project's main checkout."
-          value={archiveDeleteBranch}
-          onChange={setArchiveDeleteBranch}
-        />
-      </Block>
+      {/* Only shown while archiving skips its confirmation: with the dialog
+          on, its own checkbox answers this per archive, and a second control
+          saying something different would just contradict it. */}
+      {!confirmBeforeArchiveTask && (
+        <Block>
+          <Toggle
+            label="Delete the branch when archiving"
+            hint="Archiving also deletes the task's branch. A project's main checkout is never affected."
+            value={archiveDeleteBranch}
+            onChange={setArchiveDeleteBranch}
+          />
+        </Block>
+      )}
     </div>
   );
 }
