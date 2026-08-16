@@ -281,6 +281,14 @@ export interface Task {
    *  tasks - matches the immutability promise of sandbox_enabled. */
   sandbox_rw_paths?: string[];
   sandbox_allowed_hosts?: string[];
+  /** Docker sandbox: PINNED at creation like `sandbox_enabled`, editable
+   *  post-create via `taskSetDocker` (mirrors the mode edit path). When
+   *  true AND the global `Settings.docker_sandbox_enabled` master switch
+   *  is also on and an image is built, the agent PTY runs inside
+   *  `docker run` instead of the Seatbelt path. See docs/plans/docker-sandbox. */
+  docker_sandbox_enabled?: boolean;
+  /** User-appended `docker run` args for this task (e.g. `--memory 4g`). */
+  docker_extra_args?: string[];
   /** Multi-repo composition. Empty for single-repo tasks. */
   composition?: TaskMember[];
   /** Extra named ports (GH #196), frozen at creation and topped up at
@@ -541,6 +549,10 @@ export interface Settings {
    *  Edit Sandbox dialog when the user enables the cage from scratch. */
   sandbox_default_rw_paths?: string[];
   sandbox_default_allowed_hosts?: string[];
+  /** Master switch for Docker sandbox mode (Settings → Docker). While off,
+   *  no Docker UI appears anywhere and Docker is never invoked, even if a
+   *  task has `docker_sandbox_enabled` set. */
+  docker_sandbox_enabled?: boolean;
   /** Personal (this-machine) glob patterns hidden from the "All files"
    *  tree across every project. Unioned with each project's committed
    *  `.termic.yaml` `exclude`. `.git` is always hidden regardless. */

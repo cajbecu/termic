@@ -291,6 +291,54 @@ export const agentSandboxAddAllowedPath = (agentId: string, path: string) =>
 export const agentSandboxAddAllowedHost = (agentId: string, host: string) =>
   invoke<void>("agent_sandbox_add_allowed_host", { agentId, host });
 
+// ───────────────────────────── docker sandbox ─────────────────────────
+// Stronger opt-in cage: the agent runs inside `docker run` instead of
+// Seatbelt. Global (image-level) config lives in Settings → Docker;
+// per-task enablement is `taskSetDocker` below. See docs/plans/docker-sandbox.
+
+export interface DockerStatus {
+  binary: boolean;
+  daemon: boolean;
+  version: string | null;
+}
+export interface DockerImageStatus {
+  current_tag: string;
+  current_built: boolean;
+  last_built_tag: string | null;
+  last_built_exists: boolean;
+  stale: boolean;
+  is_default: boolean;
+  available: boolean;
+}
+
+/** Probe for the `docker` binary + a running daemon. Cheap; no build. */
+export const dockerCheck = () => invoke<DockerStatus>("docker_check");
+/** Current image state: built / stale / available for the task dropdown. */
+export const dockerImageStatus = () => invoke<DockerImageStatus>("docker_image_status");
+/** Read the user-editable Dockerfile (seeded from the shipped default on
+ *  first run). */
+export const dockerGetDockerfile = () => invoke<string>("docker_get_dockerfile");
+/** The shipped default Dockerfile, for the "Reset to default" action. */
+export const dockerDefaultDockerfile = () => invoke<string>("docker_default_dockerfile");
+/** Persist an edited Dockerfile. Does not build - the image only updates
+ *  on an explicit "Build image" / "Update agents" action. */
+export const dockerSetDockerfile = (contents: string) => invoke<void>("docker_set_dockerfile", { contents });
+/** Kick off `docker build` on a background thread. Progress streams via
+ *  `onDockerBuildLog` / `onDockerBuildDone`; never call this on a hot path -
+ *  a multi-GB image build would freeze the webview if it were synchronous. */
+export const dockerBuildImage = (noCache: boolean) => invoke<void>("docker_build_image", { noCache });
+export function onDockerBuildLog(cb: (line: string) => void): Promise<UnlistenFn> {
+  return listen<{ line: string }>("docker-build://log", ev => cb(ev.payload.line));
+}
+export function onDockerBuildDone(cb: (d: { success: boolean; tag: string; error?: string }) => void): Promise<UnlistenFn> {
+  return listen<{ success: boolean; tag: string; error?: string }>("docker-build://done", ev => cb(ev.payload));
+}
+/** Toggle Docker sandboxing for one task + set its `docker run` extra args.
+ *  Mirrors `taskSetSandbox`: pinned per task, SIGKILLs live PTYs so they
+ *  relaunch under (or out of) the container. */
+export const taskSetDocker = (id: string, enabled: boolean, extraArgs: string[]) =>
+  invoke<void>("task_set_docker", { id, enabled, extraArgs });
+
 /** "Allow for this repo" — append a host to the repo's committed
  *  `.termic.yaml` (shared with the team, read by the termic CLI).
  *  Comment-preserving; takes effect on the next agent restart.

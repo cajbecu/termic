@@ -13,9 +13,9 @@ import { AppDialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/utils";
 import { taskLabel } from "@/lib/taskLabel";
-import { settingsLoad, taskSetSandbox, sandboxAvailable } from "@/lib/ipc";
-import { effectiveSandboxMode, type SandboxMode } from "@/lib/types";
-import { AlertTriangle, Shield, Zap, Save, RotateCw } from "lucide-react";
+import { settingsLoad, taskSetSandbox, sandboxAvailable, taskSetDocker, dockerImageStatus, type DockerImageStatus } from "@/lib/ipc";
+import { effectiveSandboxMode, type SandboxMode, type Settings } from "@/lib/types";
+import { AlertTriangle, Shield, Zap, Save, RotateCw, Container } from "lucide-react";
 import { SandboxModeSelector } from "@/components/SandboxModeSelector";
 import { SANDBOX_PRESETS } from "@/lib/sandboxPresets";
 
@@ -57,6 +57,44 @@ export function TaskSandboxDialog() {
   useEffect(() => {
     sandboxAvailable().then(setOsSandboxOk).catch(() => setOsSandboxOk(false));
   }, []);
+
+  // Docker sandbox: independent cage, mutually exclusive with Seatbelt
+  // (pty_spawn checks it first). Only offered once Settings → Docker has
+  // the master switch on AND an image is built - otherwise there's
+  // nothing for the toggle to do. `taskSetDocker` SIGKILLs + saves
+  // immediately, decoupled from the Seatbelt Save button above, so it
+  // doesn't get tangled in this dialog's "dirty" tracking.
+  const [dockerSettings, setDockerSettings] = useState<Settings | null>(null);
+  const [dockerImage, setDockerImage] = useState<DockerImageStatus | null>(null);
+  const [dockerBusy, setDockerBusy] = useState(false);
+  useEffect(() => {
+    settingsLoad().then(setDockerSettings).catch(() => {});
+    dockerImageStatus().then(setDockerImage).catch(() => {});
+  }, []);
+  const dockerOffered = !!dockerSettings?.docker_sandbox_enabled && !!dockerImage?.available;
+  const dockerOn = !!task?.docker_sandbox_enabled;
+
+  async function toggleDocker(next: boolean) {
+    if (!task || dockerBusy) return;
+    const ok = await useUI.getState().askConfirm({
+      title: next ? `Run "${task.name}" in Docker?` : `Stop running "${task.name}" in Docker?`,
+      message: next
+        ? "The agent will run inside a Docker container instead of the Seatbelt cage. Any agent currently running in this task will be terminated and relaunched inside the container."
+        : "Any agent currently running in this task will be terminated and relaunched outside the container.",
+      confirmLabel: next ? "Run in Docker" : "Stop using Docker",
+    });
+    if (!ok) return;
+    setDockerBusy(true);
+    try {
+      useUI.getState().markPendingPtyRestart(task.id);
+      await taskSetDocker(task.id, next, task.docker_extra_args ?? []);
+      await loadAll();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setDockerBusy(false);
+    }
+  }
 
   useEffect(() => {
     if (!task) return;
@@ -202,6 +240,37 @@ export function TaskSandboxDialog() {
               CLI agent still work, just without the filesystem cage.
             </span>
           </div>
+        )}
+
+        {/* Docker sandbox: alternate cage, offered only when Settings →
+            Docker is on and an image is built. Separate from the mode
+            selector above (mutually exclusive with Seatbelt, not a
+            fourth mode card) since it toggles + saves independently. */}
+        {dockerOffered && (
+          <label className={cn(
+            "flex items-start gap-3 rounded-md border px-3 py-2.5",
+            dockerOn ? "border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10" : "border-[var(--color-border-soft)]",
+          )}>
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={dockerOn}
+              disabled={dockerBusy}
+              onChange={e => toggleDocker(e.target.checked)}
+            />
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 text-[14px] font-medium">
+                <Container className="h-3.5 w-3.5 text-[var(--color-accent)]" />
+                Run in Docker
+                <span className="rounded bg-[var(--color-bg-2)] px-1.5 py-0.5 text-[11px] font-normal text-[var(--color-fg-dim)]">experimental</span>
+              </div>
+              <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+                A stronger cage: the agent runs inside a Docker container and can only touch the worktree +
+                its persistent config dir. Overrides the mode above - a task can be sandboxed with Docker
+                or Seatbelt, not both. Manage the image in Settings → Docker.
+              </div>
+            </div>
+          </label>
         )}
 
         {/* YOLO trade-off note. Sandboxed agents auto-skip their own

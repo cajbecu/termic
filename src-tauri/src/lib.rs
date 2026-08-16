@@ -55,6 +55,7 @@ mod procmon;
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[path = "procmon_other.rs"]
 mod procmon;
+mod docker;
 use sandbox::SandboxBundle;
 
 // ───────────────────────────── data model ─────────────────────────────
@@ -459,6 +460,16 @@ pub struct Task {
     pub sandbox_rw_paths: Vec<String>,
     #[serde(default)]
     pub sandbox_allowed_hosts: Vec<String>,
+    /// Docker sandbox: when true, the agent PTY runs inside `docker run`
+    /// instead of the Seatbelt path. Mutually exclusive with the seatbelt
+    /// cage; only takes effect when `Settings::docker_sandbox_enabled`
+    /// (the global master switch) is also on AND an image is built. See
+    /// docs/plans/docker-sandbox/design.md.
+    #[serde(default)]
+    pub docker_sandbox_enabled: bool,
+    /// User-appended `docker run` args for this task (e.g. `--memory 4g`).
+    #[serde(default)]
+    pub docker_extra_args: Vec<String>,
     /// Multi-repo composition. Empty for single-repo tasks (the
     /// usual case — `path` already points at the worktree of the one
     /// project this task belongs to). For tasks created
@@ -2795,12 +2806,44 @@ fn pty_spawn(
         })
         .map_err(|e| e.to_string())?;
 
+    // ── Docker sandbox branch ──────────────────────────────────────
+    // If the task is in Docker mode (and the global master switch is on),
+    // the container is the isolation boundary: rewrite the spawn to
+    // `docker run ...` and skip the Seatbelt path entirely (the two are
+    // mutually exclusive). Build is NEVER triggered here — if no usable
+    // image is built, refuse loudly rather than spawning unsandboxed.
+    let docker_task = args
+        .task_id
+        .as_deref()
+        .and_then(|tid| load_tasks().into_iter().find(|t| t.id == tid))
+        .filter(|t| t.docker_sandbox_enabled && load_settings_inner().docker_sandbox_enabled);
+    let docker_argv: Option<Vec<String>> = if let Some(task) = docker_task {
+        let agent = args.agent_id.clone().unwrap_or_else(|| task.cli.clone());
+        let image = docker::spawn_image_tag().ok_or_else(|| {
+            "Docker image not built. Open Settings → Docker and build it first.".to_string()
+        })?;
+        // Belt-and-suspenders: remove any stale same-named container left
+        // by an unclean shutdown so `--name` doesn't collide on respawn.
+        docker::cleanup_task(&task.id);
+        let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone());
+        let argv = docker::render_argv(&spec, &args.cmd, &args.args);
+        dlog(&format!("[pty_spawn] docker task={} agent={} image={} argv={argv:?}", task.id, agent, image));
+        Some(argv)
+    } else {
+        None
+    };
+    let is_docker = docker_argv.is_some();
+
     // ── Sandbox wrap, if applicable ────────────────────────────────
     // If the task is flagged sandbox_enabled, provision a fresh
     // seatbelt profile + network proxy and rewrite (cmd, args) to go through
     // `sandbox-exec`. The bundle gets parked on the PtySlot so its
     // Drop impl SIGKILLs the proxy when the PTY closes.
-    let (effective_cmd, effective_args, sandbox_bundle) = match args
+    // Docker mode short-circuits this: the container IS the cage, so the
+    // program becomes `docker` with the rendered run-argv, no seatbelt bundle.
+    let (effective_cmd, effective_args, sandbox_bundle) = if let Some(argv) = docker_argv {
+        ("docker".to_string(), argv, None)
+    } else { match args
         .task_id
         .as_deref()
         .and_then(|wid| load_tasks().into_iter().find(|w| w.id == wid))
@@ -2837,7 +2880,7 @@ fn pty_spawn(
             dlog(&format!("[pty_spawn] sandbox=OFF cmd={} args={:?}", args.cmd, args.args));
             (args.cmd.clone(), args.args.clone(), None)
         },
-    };
+    }};
 
     let mut cmd = CommandBuilder::new(&effective_cmd);
     for a in &effective_args {
@@ -2868,7 +2911,11 @@ fn pty_spawn(
     // tabs, or sandbox=off agents) the CLI is exec'd directly, so without
     // this it would miss $EDITOR etc. (#17). The per-spawn overlay below
     // still wins, so explicit overrides hold.
-    if sandbox_bundle.is_none() {
+    // Docker mode is excluded too: the container's `docker` process is the
+    // one being exec'd on the host, but the login-shell delta is meant for
+    // the AGENT's environment, and Docker mode has no proxy allowlist to
+    // filter what a compromised agent could exfiltrate with it.
+    if sandbox_bundle.is_none() && !is_docker {
         for (k, v) in login_inject {
             cmd.env(k, v);
         }
@@ -2960,8 +3007,10 @@ fn pty_spawn(
     // Register the PID with the sandbox's PID-ancestry tracker. The
     // path watcher uses this to filter system-wide deny noise: only
     // denies whose PID (or some ancestor) is in this set get counted
-    // against this task.
-    if let (Some(pid), Some(wid)) = (child_pid, args.task_id.as_deref()) {
+    // against this task. Skip for Docker too: the host `docker` process
+    // isn't the agent, and Docker mode has no Seatbelt profile to log
+    // denies against.
+    if let (Some(pid), Some(wid), false) = (child_pid, args.task_id.as_deref(), is_docker) {
         sandbox::register_root_pid(wid, pid);
     }
 
@@ -3874,6 +3923,8 @@ fn task_open_repo(
         yolo: false,
         sandbox_rw_paths,
         sandbox_allowed_hosts,
+        docker_sandbox_enabled: false,
+        docker_extra_args: Vec::new(),
         composition,
         extra_named_ports,
         port_block_len,
@@ -4098,6 +4149,8 @@ fn task_import_worktree(
         yolo: yolo.unwrap_or(false),
         sandbox_rw_paths,
         sandbox_allowed_hosts,
+        docker_sandbox_enabled: false,
+        docker_extra_args: Vec::new(),
         composition: Vec::new(),
         extra_named_ports,
         port_block_len,
@@ -4436,6 +4489,8 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
         yolo: false,
         sandbox_rw_paths,
         sandbox_allowed_hosts,
+        docker_sandbox_enabled: false,
+        docker_extra_args: Vec::new(),
         // Single-project tasks leave composition empty. Multi-
         // repo task creation runs through a separate code path
         // (task_create_multi) that populates this and re-uses
@@ -4902,6 +4957,8 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         yolo: false,
         sandbox_rw_paths,
         sandbox_allowed_hosts,
+        docker_sandbox_enabled: false,
+        docker_extra_args: Vec::new(),
         composition,
         extra_named_ports,
         port_block_len,
@@ -5835,6 +5892,31 @@ fn task_set_sandbox(
     Ok(kill_task_ptys(&state, &id))
 }
 
+/// Toggle Docker sandboxing for one task + set its `docker run` extra
+/// args. Mirrors `task_set_sandbox`: mutually exclusive with the Seatbelt
+/// cage (`pty_spawn` checks Docker first), and always SIGKILLs live PTYs
+/// so they relaunch under (or out of) the container — there is no
+/// "save without restart" escape hatch here, unlike the Seatbelt dialog,
+/// because leaving an old container running while the task believes
+/// Docker is off would leak a live untracked container.
+#[tauri::command]
+fn task_set_docker(
+    state: State<'_, PtyManager>,
+    id: String,
+    enabled: bool,
+    extra_args: Vec<String>,
+) -> Result<usize, String> {
+    let mut list = load_tasks();
+    let w = list.iter_mut().find(|w| w.id == id).ok_or("no such task")?;
+    w.docker_sandbox_enabled = enabled;
+    w.docker_extra_args = extra_args;
+    save_task(w).map_err(|e| e.to_string())?;
+    if !enabled {
+        docker::cleanup_task(&id);
+    }
+    Ok(kill_task_ptys(&state, &id))
+}
+
 /// (tasks with a live agent, live AGENT PTYs). Ground truth for what
 /// `termic quit` is about to SIGKILL, counted off the PTY map rather than
 /// the webview's cache: the cache can be stale and this is the number the
@@ -6310,6 +6392,11 @@ fn task_archive_sync(id: String, delete_branch: bool) -> Result<(), String> {
     // Stop spotlight for this task before tearing down — otherwise the
     // polling thread will keep trying to sync a worktree that no longer exists.
     spotlight_stop_for_ws(&id);
+
+    // Remove any Docker containers for this task (non-fatal). `--rm`
+    // handles the clean-exit case; this covers crashes / kills where it
+    // never fired, before we tear down the worktree the container mounts.
+    docker::cleanup_task(&id);
 
     let mut list = load_tasks();
     let w = list.iter_mut().find(|w| w.id == id).ok_or("task not found")?;
@@ -14720,6 +14807,10 @@ pub struct Settings {
     /// editing these later only affects NEW tasks.
     pub sandbox_default_rw_paths: Vec<String>,
     pub sandbox_default_allowed_hosts: Vec<String>,
+    /// Master switch for Docker sandbox mode (Settings → Docker). A task's
+    /// own `docker_sandbox_enabled` only takes effect when this is also on.
+    /// See docs/plans/docker-sandbox/design.md.
+    pub docker_sandbox_enabled: bool,
     /// Personal (this-machine) glob patterns hidden from the "All files"
     /// tree across every project. Unioned with each project's committed
     /// `.termic.yaml` `exclude` list. `.git` is always hidden regardless.
@@ -15475,6 +15566,99 @@ fn settings_load() -> Settings { load_settings_inner() }
 /// from `--continue` to `--resume <name>`).
 #[tauri::command]
 fn agents_defaults() -> Vec<Agent> { default_agents() }
+
+// ─────────────────────────── Docker sandbox ────────────────────────────
+
+/// Probe for the `docker` binary + a running daemon. Cheap; no build.
+#[tauri::command]
+fn docker_check() -> docker::DockerStatus {
+    docker::check()
+}
+
+/// Current image build state (current/last-built tags, stale flag,
+/// dropdown availability). Drives the Settings section + cage dropdown.
+#[tauri::command]
+fn docker_image_status() -> docker::DockerImageStatus {
+    docker::image_status()
+}
+
+/// The editable Dockerfile (falls back to the shipped default on first run).
+#[tauri::command]
+fn docker_get_dockerfile() -> String {
+    docker::read_dockerfile()
+}
+
+/// The shipped default Dockerfile (for "Reset to default").
+#[tauri::command]
+fn docker_default_dockerfile() -> String {
+    docker::DEFAULT_DOCKERFILE.to_string()
+}
+
+/// Persist an edited Dockerfile. Does NOT build — build is an explicit,
+/// separate action so the (slow, multi-GB) build never blocks the UI.
+#[tauri::command]
+fn docker_set_dockerfile(contents: String) -> Result<(), String> {
+    docker::write_dockerfile(&contents)
+}
+
+/// Build the image in the background. Streams build output line-by-line as
+/// `docker-build://log` and emits `docker-build://done` with `{ success,
+/// tag, error }` when finished. Returns immediately. `no_cache` =>
+/// `--no-cache --pull` ("Update agents": refresh base + re-fetch agents).
+///
+/// IO-heavy + slow, so it runs on a background thread (NEVER the sync Tauri
+/// path, which would freeze WKWebView per CLAUDE.md).
+#[tauri::command]
+fn docker_build_image(app: AppHandle, no_cache: bool) -> Result<(), String> {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    let dockerfile = docker::read_dockerfile();
+    let (mut cmd, tag) = docker::build_command(&dockerfile, no_cache)?;
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    thread::spawn(move || {
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                    "docker binary not found".to_string()
+                } else {
+                    e.to_string()
+                };
+                let _ = app.emit("docker-build://log", serde_json::json!({ "line": format!("[spawn error] {msg}") }));
+                let _ = app.emit("docker-build://done", serde_json::json!({ "success": false, "tag": tag, "error": msg }));
+                return;
+            }
+        };
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let app_o = app.clone();
+        let t_out = stdout.map(|s| thread::spawn(move || {
+            for line in BufReader::new(s).lines().map_while(|r| r.ok()) {
+                let _ = app_o.emit("docker-build://log", serde_json::json!({ "line": line }));
+            }
+        }));
+        let app_e = app.clone();
+        let t_err = stderr.map(|s| thread::spawn(move || {
+            // `docker build` writes its progress to stderr — stream it too.
+            for line in BufReader::new(s).lines().map_while(|r| r.ok()) {
+                let _ = app_e.emit("docker-build://log", serde_json::json!({ "line": line }));
+            }
+        }));
+        let status = child.wait();
+        if let Some(t) = t_out { let _ = t.join(); }
+        if let Some(t) = t_err { let _ = t.join(); }
+        let success = status.map(|s| s.success()).unwrap_or(false);
+        if success {
+            docker::record_built_tag(&tag);
+        }
+        let _ = app.emit("docker-build://done", serde_json::json!({
+            "success": success,
+            "tag": tag,
+            "error": if success { serde_json::Value::Null } else { serde_json::Value::String("build failed (see log)".into()) },
+        }));
+    });
+    Ok(())
+}
 
 /// Run a shell command in `cwd` and return trimmed stdout. Used by
 /// post_launch_capture to harvest a lazily-created CLI session ID
@@ -17027,7 +17211,7 @@ pub fn run() {
             perf_boot_elapsed_ms,
             deep_link_take_pending,
             projects_list, project_add, project_add_multi, project_set_members, project_update, project_remove, project_reorder, project_set_group,
-            tasks_list, task_create, task_create_multi, task_open_repo, task_importable_worktrees, task_import_worktree, task_archive, task_set_cli, task_set_custom_command, task_set_resume_override, task_set_sandbox, task_set_yolo,
+            tasks_list, task_create, task_create_multi, task_open_repo, task_importable_worktrees, task_import_worktree, task_archive, task_set_cli, task_set_custom_command, task_set_resume_override, task_set_sandbox, task_set_docker, task_set_yolo,
             sandbox_available, sandbox_deny_counts, sandbox_recent_denied_hosts, sandbox_recent_denied_paths, sandbox_access_counts, sandbox_recent_access_hosts, sandbox_recent_access_paths, sandbox_set_monitor_filters, task_sandbox_add_allowed_host, task_sandbox_add_allowed_path, task_sandbox_remove_allowed_path, agent_sandbox_add_allowed_path, agent_sandbox_add_allowed_host, task_recent_denials,
             repo_config_load, repo_config_load_at, repo_config_save, repo_config_scaffold, repo_config_add_allowed_host, repo_config_add_allowed_path,
 
@@ -17053,6 +17237,7 @@ pub fn run() {
             lsp_offer, lsp_catalog, lsp_install, lsp_install_zuban, lsp_check_update, lsp_update, lsp_start, lsp_send, lsp_stop, lsp_reap_foreign, lsp_list,
             notify, open_path, reveal_path, open_file_external, open_external_url, browser_command_check, home_dir, project_tasks_path_default, tasks_path_conflicts, default_shell, path_exists, path_is_git_repo, log_line, pty_debug_append, terminal_stage_file, install_notification_sound, play_completion_sound,
             settings_load, settings_save, discovery_dismiss, agents_save, agents_defaults, run_capture_command, discover_repos, detect_clis,
+            docker_check, docker_image_status, docker_get_dockerfile, docker_default_dockerfile, docker_set_dockerfile, docker_build_image,
             automation::automation_result,
             automation::automation_armed,
             pty_alive,
@@ -17124,6 +17309,10 @@ pub fn run() {
 /// so main is left clean.
 fn cleanup_children(app: &tauri::AppHandle) {
     use tauri::Manager;
+    // 0a. Docker containers — `docker rm -f` every termic-labeled container
+    //     (non-fatal). Belt-and-suspenders for the `--rm`-never-fired case
+    //     (crash / SIGKILL) so quitting never orphans a container.
+    docker::cleanup_all();
     // 0. Spotlight sessions — revert main for every active session so the
     //    user's repo is left in a clean state after the app exits.
     //    Drop each session (which stops its polling thread) and revert.

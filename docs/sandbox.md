@@ -27,6 +27,16 @@ Four states, set per-task at create + editable later. `Enforce` is the full cage
 - **Default sets** baked into Rust (`builtin_rw_paths`/`builtin_deny_paths`, per-CLI `render_filter` in `sandbox.rs`). Project `sandbox_*` fields are extras only, seeded at task creation.
 - **Recent denies**: `task_recent_denials(id, minutes?)` shells to `log show` filtered to task path + "deny". Surfaced in sandbox dialog under lazy `<details>`.
 
+## Docker sandbox (alternate mode, experimental)
+
+`src-tauri/src/docker.rs` + Settings → Docker (`DockerSection.tsx`) + a toggle in `TaskSandboxDialog`. A stronger, mutually-exclusive alternative to Seatbelt: the agent CLI runs inside `docker run` instead, and can only touch what termic bind-mounts. See `docs/plans/docker-sandbox/` for the full design + research.
+
+- **Gating**: two switches AND together. `Settings.docker_sandbox_enabled` is the global master switch (Settings → Docker); `Task.docker_sandbox_enabled` is the per-task pin (`task_set_docker`, toggled from `TaskSandboxDialog`, mirrors `task_set_sandbox`'s SIGKILL-live-PTYs behavior). `pty_spawn` checks Docker FIRST — when both are on and an image is built, it skips the Seatbelt path entirely.
+- **Image**: one generic image for every agent, built from an editable Dockerfile (`docker_get_dockerfile` / `docker_set_dockerfile`, ships `src-tauri/assets/Dockerfile.default`). Content-addressed tag (`termic-sandbox:{hash}`) so an edit is detected as stale; build is an explicit background action (`docker_build_image`, streams `docker-build://log` / `docker-build://done`), never triggered lazily on spawn (a multi-GB build would freeze the webview).
+- **Mounts**: the worktree, its parent `.git` (worktree pointer resolution), composition members, and a persistent per-agent config dir under `<data_dir>/docker-agents/<agent_id>` (login + sessions + MCP config, shared across every Docker task of that agent — never the host's real `~/.claude` etc). NEVER mounts the whole container HOME (would shadow agent binaries baked in at build time).
+- **Cleanup**: `docker::cleanup_task` runs on task archive and on toggling Docker off for a task (belt-and-suspenders for `--rm` not firing on a crash); `docker::cleanup_all` runs on app quit.
+- **Agent support**: `agent_config()` in `docker.rs` maps agent id → container config-dir wiring. grok is deferred (binary + skills + config all live under `~/.grok` with no clean relocation env — see `docs/plans/docker-sandbox/findings.md`).
+
 ## Known gap: the webview is outside the cage
 
 The seatbelt + CONNECT proxy cage the **agent process**. They do not cage the
