@@ -12,7 +12,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import { visibleCliIds } from "@/lib/agents";
-import { createQuickTask, importQuickWorktree, readNewTaskMode, writeNewTaskMode, type NewTaskMode } from "@/lib/quickTask";
+import { importQuickWorktree, readNewTaskMode, writeNewTaskMode, type NewTaskMode } from "@/lib/quickTask";
 import { taskImportableWorktrees, taskRestore, projectBranchContext, projectUpdate } from "@/lib/ipc";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { DropdownItem, DropdownLabel, DropdownSeparator, DropdownSub, DropdownSubTrigger, DropdownSubContent } from "@/components/ui/Dropdown";
@@ -281,16 +281,10 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
         </DropdownItem>
       ))}
 
-      {/* Plain login-shell variant. In main-checkout mode a shell has no
-          session to resume, so we skip the name prompt and create at once
-          (Rust auto-names to the branch). A worktree shell needs a name to
-          derive its branch, so it goes through the inline prompt like agents. */}
-      <DropdownItem onSelect={() => {
-        if (mode === "worktree") { pick("shell"); return; }
-        createQuickTask({ projectId, mode: "repo_root", cli: "shell", name: "" })
-          // A silent failure reads as a dead menu item; surface it.
-          .catch(err => useUI.getState().pushToast(String(err), "error"));
-      }}>
+      {/* Plain login-shell variant. Goes through the same inline name prompt
+          as agents in both modes, so a Main-checkout shell gets a real name
+          instead of silently landing on whatever Rust auto-assigns. */}
+      <DropdownItem onSelect={() => pick("shell")}>
         <TerminalSquare className="h-4 w-4 shrink-0 text-[var(--color-fg-dim)]" />
         <span className="truncate">Terminal</span>
       </DropdownItem>
