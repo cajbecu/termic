@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { archiveTask, clickByText, dismissOverlays, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitVisible } from "../helpers";
+import { archiveTask, clickByText, clickWhenVisible, dismissOverlays, ensureActiveTask, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitVisible } from "../helpers";
 
 // P0: create a task through the real NewTaskDialog wizard (the primary user
 // path; the other specs take the IPC shortcut). Uses the shell ("Terminal")
@@ -282,6 +282,155 @@ describe("task archive", () => {
     expect(stillActive).toBe(false);
 
     await snap("task-archive.png");
+  });
+});
+
+// P0: the archive confirmation's "Don't ask again" opt-out. Archiving can't be
+// undone from inside Termic, so all three halves are pinned here: backing out
+// must NOT store the opt-out, confirming with it ticked must store BOTH it and
+// the delete-branch answer, and a later archive must then run silently with
+// that stored branch answer.
+describe("archive confirmation", () => {
+  const ARCHIVE_REPO = path.join(process.cwd(), ".e2e", "fixture-repo");
+  const BRANCH_A = "e2e-archive-ask";
+  const BRANCH_B = "e2e-archive-silent";
+  let prefsOriginal: { confirm: boolean; deleteBranch: boolean } | undefined;
+  // The first case creates it and backs out of archiving it; the second one
+  // then archives that same task for real.
+  let askTaskId = "";
+
+  /** Create a worktree task on `branch` and make it the active one, so the
+   *  unified bar's archive button acts on it. A worktree task (not a repo-root
+   *  entry) is what puts the delete-branch checkbox in the dialog. */
+  const createWorktreeTask = (name: string, branch: string) =>
+    browser.execute(async (n, b) => {
+      const t = window.__termic!;
+      const proj = t.useApp.getState().projects.find((p: any) => p.name === "fixture-repo");
+      const task = await t.ipc.taskCreate({
+        project_id: proj.id, name: n, cli: "fakeagent", base_branch: "main", branch: b,
+      });
+      await t.useApp.getState().loadAll();
+      t.useApp.getState().setActiveTask((task as any).id);
+      return (task as any).id as string;
+    }, name, branch);
+
+  /** The archive dialog, found by its title. Never a bare [role="dialog"]:
+   *  a closing dialog from an earlier case can still be in the DOM. */
+  const dialogText = () =>
+    browser.execute(() =>
+      [...document.querySelectorAll('[role="dialog"]')]
+        .find((d) => d.textContent?.includes("Archive \""))?.textContent ?? "");
+
+  /** Click a control inside the archive dialog by testid. */
+  const clickInDialog = (testid: string) =>
+    browser.execute((id) => {
+      const dlg = [...document.querySelectorAll('[role="dialog"]')]
+        .find((d) => d.textContent?.includes("Archive \""));
+      if (!dlg) throw new Error("archive dialog not open");
+      const el = dlg.querySelector(`[data-testid="${id}"]`) as HTMLElement | null;
+      if (!el) throw new Error(`no ${id} in the archive dialog`);
+      el.click();
+    }, testid);
+
+  const waitForArchiveDialog = () =>
+    browser.waitUntil(async () => (await dialogText()).includes("Archive \""), {
+      timeout: 10_000, timeoutMsg: "archive dialog never opened",
+    });
+
+  const archivePrefs = () =>
+    browser.execute(() => {
+      const p = window.__termic!.usePrefs.getState();
+      return { confirm: p.confirmBeforeArchiveTask, deleteBranch: p.archiveDeleteBranch };
+    });
+
+  const isArchived = (id: string) =>
+    browser.execute((i) =>
+      window.__termic!.useApp.getState().tasks.find((t: any) => t.id === i)?.archived === true, id);
+
+  const branchExists = (branch: string) => {
+    try {
+      execSync(`git -C "${ARCHIVE_REPO}" rev-parse --verify refs/heads/${branch}`, { stdio: "ignore" });
+      return true;
+    } catch { return false; }
+  };
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    prefsOriginal = await archivePrefs();
+  });
+
+  after(async () => {
+    // Prefs persist to the shared profile — a leaked opt-out would make every
+    // later archive in the run skip its dialog.
+    if (prefsOriginal) {
+      await browser.execute((o) => {
+        const p = window.__termic!.usePrefs.getState();
+        p.setConfirmBeforeArchiveTask(o.confirm);
+        p.setArchiveDeleteBranch(o.deleteBranch);
+      }, prefsOriginal);
+    }
+    try { execSync(`git -C "${ARCHIVE_REPO}" worktree prune`); } catch { /* nothing to prune */ }
+    for (const b of [BRANCH_A, BRANCH_B]) {
+      try { execSync(`git -C "${ARCHIVE_REPO}" branch -D ${b}`, { stdio: "ignore" }); } catch { /* already gone */ }
+    }
+  });
+
+  it("keeps asking when the user ticks the box but then cancels", async () => {
+    await browser.execute(() => {
+      const p = window.__termic!.usePrefs.getState();
+      p.setConfirmBeforeArchiveTask(true);
+      p.setArchiveDeleteBranch(false);
+    });
+    askTaskId = await createWorktreeTask("e2e-archive-ask", BRANCH_A);
+
+    await clickWhenVisible('[data-testid="archive-task"]');
+    await waitForArchiveDialog();
+    // The worktree variant offers the branch by name, so the user can see
+    // exactly what "Delete the git branch" would remove.
+    expect(await dialogText()).toContain(BRANCH_A);
+
+    await clickInDialog("confirm-dont-ask");
+    await clickInDialog("confirm-checkbox");
+    await clickInDialog("confirm-cancel");
+
+    // Nothing was archived, and nothing was remembered: the dialog reports the
+    // checkbox state at dismissal, so a cancelled archive must not store it.
+    expect(await isArchived(askTaskId)).toBe(false);
+    expect(await archivePrefs()).toEqual({ confirm: true, deleteBranch: false });
+    await snap("archive-confirm-cancelled.png");
+  });
+
+  it("stores the opt-out and the branch answer when the archive goes through", async () => {
+    await ensureActiveTask(askTaskId);
+
+    await clickWhenVisible('[data-testid="archive-task"]');
+    await waitForArchiveDialog();
+    await clickInDialog("confirm-dont-ask");
+    await clickInDialog("confirm-checkbox");
+    await clickInDialog("confirm-ok");
+
+    await browser.waitUntil(() => isArchived(askTaskId), {
+      timeout: 15_000, timeoutMsg: "task never became archived",
+    });
+    expect(await archivePrefs()).toEqual({ confirm: false, deleteBranch: true });
+    expect(branchExists(BRANCH_A)).toBe(false);
+  });
+
+  it("archives with no dialog afterwards, honouring the stored branch answer", async () => {
+    const taskId = await createWorktreeTask("e2e-archive-silent", BRANCH_B);
+    expect(branchExists(BRANCH_B)).toBe(true);
+
+    await clickWhenVisible('[data-testid="archive-task"]');
+
+    await browser.waitUntil(() => isArchived(taskId), {
+      timeout: 15_000, timeoutMsg: "silent archive never landed",
+    });
+    // No confirmation was ever shown, and the branch went with it because
+    // that is what the user answered when they ticked "Don't ask again".
+    expect(await dialogText()).toBe("");
+    expect(branchExists(BRANCH_B)).toBe(false);
+    await snap("archive-silent.png");
   });
 });
 

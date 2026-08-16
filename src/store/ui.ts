@@ -10,6 +10,16 @@ export interface ConfirmCheckbox {
   branchName?: string;
 }
 
+/** Shape askConfirm resolves to once the request carries a `checkbox` or
+ *  `dontAskAgain` (a plain boolean otherwise). `checked` is the checkbox
+ *  state at dismissal, so it is meaningful ONLY when `confirmed` is true:
+ *  ticking a box and then hitting Escape still reports it as ticked. */
+export interface ConfirmResult {
+  confirmed: boolean;
+  checked: boolean;
+  dontAskAgain: boolean;
+}
+
 export interface ConfirmRequest {
   title: string;
   message: string;
@@ -20,6 +30,11 @@ export interface ConfirmRequest {
    *  delete / "ripping the cage" style actions. */
   destructive?: boolean;
   checkbox?: ConfirmCheckbox;
+  /** Renders a second, separate "Don't ask again" checkbox under
+   *  `checkbox`. The dialog only reports it back (as `dontAskAgain`); it is
+   *  the CALLER's job to persist the opt-out, and to do so only when
+   *  `confirmed` is also true. */
+  dontAskAgain?: boolean;
   /** Identifies a prompt whose asker can go away before it is answered (a
    *  terminal pane's "restart to apply YOLO?", say — the tab can be closed or
    *  the task archived while it stands). The asker passes a key here and calls
@@ -226,11 +241,12 @@ interface UIState {
    *  to true (user confirmed) or false (cancelled / dismissed). Drop-in
    *  replacement for `window.confirm()` with our own chrome + theming. */
   askConfirm: {
-    (req: ConfirmRequest & { checkbox: ConfirmCheckbox }): Promise<{ confirmed: boolean; checked: boolean }>;
+    (req: ConfirmRequest & { checkbox: ConfirmCheckbox }): Promise<ConfirmResult>;
+    (req: ConfirmRequest & { dontAskAgain: boolean }): Promise<ConfirmResult>;
     (req: ConfirmRequest & { checkbox: undefined }): Promise<boolean>;
-    (req: ConfirmRequest): Promise<boolean | { confirmed: boolean; checked: boolean }>;
+    (req: ConfirmRequest): Promise<boolean | ConfirmResult>;
   };
-  resolveConfirm: (ok: boolean, checked?: boolean) => void;
+  resolveConfirm: (ok: boolean, checked?: boolean, dontAskAgain?: boolean) => void;
   /** Take back a keyed confirm the asker no longer wants answered (its pane
    *  unmounted, its task was archived, or it is about to ask again). Resolves
    *  the pending promise as "cancelled" and closes the modal. Safe to call
@@ -271,6 +287,17 @@ export interface Toast {
 /** Keys withdrawn while their confirm was still inside askConfirm's macrotask
  *  deferral. Consumed by that deferred open, so entries never accumulate. */
 const withdrawnConfirms = new Set<string>();
+
+/** Shape the answer to match what the request asked for: a bare boolean for a
+ *  plain confirm, the full object once either checkbox is in play. Every exit
+ *  from a confirm (answered, dismissed, withdrawn) goes through here, so a
+ *  caller awaiting the object form can never be handed a boolean instead. */
+function confirmAnswer(
+  req: ConfirmRequest, confirmed: boolean, checked: boolean, dontAskAgain: boolean,
+): boolean | ConfirmResult {
+  if (!req.checkbox && !req.dontAskAgain) return confirmed;
+  return { confirmed, checked, dontAskAgain };
+}
 
 export const useUI = create<UIState>(set => ({
   newProjectOpen: false,
@@ -369,26 +396,20 @@ export const useUI = create<UIState>(set => ({
     new Promise<any>(resolve => setTimeout(() => {
       // Withdrawn during the deferral gap → never show it.
       if (req.key && withdrawnConfirms.delete(req.key)) {
-        resolve(req.checkbox ? { confirmed: false, checked: false } : false);
+        resolve(confirmAnswer(req, false, false, false));
         return;
       }
       set({ confirm: { req, resolve } });
     }, 0)),
-  resolveConfirm: (ok, checked) => {
+  resolveConfirm: (ok, checked, dontAskAgain) => {
     const c = useUI.getState().confirm;
-    if (c) {
-      if (c.req.checkbox) {
-        c.resolve({ confirmed: ok, checked: !!checked });
-      } else {
-        c.resolve(ok);
-      }
-    }
+    if (c) c.resolve(confirmAnswer(c.req, ok, !!checked, !!dontAskAgain));
     set({ confirm: null });
   },
   withdrawConfirm: (key) => {
     const c = useUI.getState().confirm;
     if (c?.req.key === key) {
-      c.resolve(c.req.checkbox ? { confirmed: false, checked: false } : false);
+      c.resolve(confirmAnswer(c.req, false, false, false));
       set({ confirm: null });
       return;
     }

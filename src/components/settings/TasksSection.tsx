@@ -46,6 +46,10 @@ export function TasksSection() {
   const setQueueMinIntervalMs = usePrefs(s => s.setQueueMinIntervalMs);
   const confirmBeforeCloseAgentTab = usePrefs(s => s.confirmBeforeCloseAgentTab);
   const setConfirmBeforeCloseAgentTab = usePrefs(s => s.setConfirmBeforeCloseAgentTab);
+  const confirmBeforeArchiveTask = usePrefs(s => s.confirmBeforeArchiveTask);
+  const setConfirmBeforeArchiveTask = usePrefs(s => s.setConfirmBeforeArchiveTask);
+  const archiveDeleteBranch = usePrefs(s => s.archiveDeleteBranch);
+  const setArchiveDeleteBranch = usePrefs(s => s.setArchiveDeleteBranch);
 
   const hydrated = useRef(false);
   useEffect(() => {
@@ -240,6 +244,28 @@ export function TasksSection() {
           hint="Ask before closing a non-shell terminal or agent tab. Turning this off (or unchecking it once from the close dialog) closes tabs immediately; a toast then points back to the '+' menu's Resume section to bring one back."
           value={confirmBeforeCloseAgentTab}
           onChange={setConfirmBeforeCloseAgentTab}
+        />
+      </Block>
+
+      {/* Archiving can't be undone from inside Termic, so the opt-out and the
+          branch decision it freezes both get a visible home here. Ticking
+          "Don't ask again" in the archive dialog flips the first toggle off
+          and writes the second from that dialog's checkbox. */}
+      <Block>
+        <Toggle
+          label="Confirm before archiving a task"
+          hint="Ask before archiving a task. Turning this off (or ticking 'Don't ask again' in the archive dialog) archives immediately, using the branch setting below."
+          value={confirmBeforeArchiveTask}
+          onChange={setConfirmBeforeArchiveTask}
+        />
+      </Block>
+
+      <Block>
+        <Toggle
+          label="Delete the git branch when archiving without asking"
+          hint="Only applies while the confirmation above is off: it decides whether a silent archive also runs 'git branch -D'. When the dialog is on, its own checkbox decides, and ticking 'Don't ask again' there stores that answer here. Never applies to a project's main checkout."
+          value={archiveDeleteBranch}
+          onChange={setArchiveDeleteBranch}
         />
       </Block>
     </div>

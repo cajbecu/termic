@@ -42,6 +42,7 @@ until `make e2e` is green and this file reflects it.
 | ✅ Run tabs | A custom run command opens a run tab whose PTY executes it | `run.e2e.ts` |
 | ✅ Task archive | Archived task leaves the active board | `task.e2e.ts` |
 | ✅ Task restore | Archived task shows in History; restore returns it to active | `task.e2e.ts` |
+| ✅ Archive confirmation | "Don't ask again" ticked then cancelled stores nothing; confirmed, it stores the opt-out AND the delete-branch answer; the next archive then runs with no dialog and deletes the branch. Settings › Tasks turns the confirmation back on and flips the branch answer independently | `task.e2e.ts`, `settings.e2e.ts` |
 | ✅ Multi-task | Two tasks, independent/distinct PTYs, survive going inactive, switching works | `task.e2e.ts` |
 | ✅ Editor open | Click a file → editor tab opens → CodeMirror loads the real contents | `editor.e2e.ts` |
 | ✅ Editor save | Edit in CodeMirror → dirty dot → Cmd+S → written to disk | `editor.e2e.ts` |

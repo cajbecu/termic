@@ -23,7 +23,7 @@ import { SandboxIcon } from "@/components/SandboxIcon";
 import { UpdaterBanner } from "@/components/UpdaterBanner";
 import { WaitingAgentsPill } from "@/components/WaitingAgentsPill";
 import { openPath, themesDir, taskSendDiffToMain } from "@/lib/ipc";
-import { archiveAndRefresh } from "@/lib/archiveTask";
+import { confirmAndArchive } from "@/lib/archiveTask";
 import {
   DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownSeparator,
 } from "@/components/ui/Dropdown";
@@ -282,41 +282,13 @@ export function UnifiedBar() {
               );
             })()}
             <Tip content="Archive task" side="bottom">
+              {/* Copy, delete-branch checkbox and the "Don't ask again"
+                  opt-out all live in confirmAndArchive - this button used to
+                  inline its own near-copy of the prompt, which then drifted
+                  from the sidebar's. */}
               <Button size="icon" variant="icon"
-                onClick={async () => {
-                  const ok = await useUI.getState().askConfirm({
-                    title: `Archive "${task.name}"?`,
-                    // Repo-root entries aren't worktrees - archiving
-                    // drops the Termic row only; the project checkout
-                    // on disk is untouched and can be re-opened later.
-                    message: task.is_main_checkout
-                      ? "This removes the Termic entry for the project's main checkout. The repo on disk is NOT touched, so you can re-open it any time. Any agent running here will be terminated."
-                      : (task.composition?.length ?? 0) > 0
-                      ? `Branches stay in git, so you can recreate the task later. This removes: the host worktree + every member worktree (${task.composition!.filter(m => m.mode === "worktree").map(m => m.dir_name).join(", ") || "none"}), plus any member symlinks to live checkouts (those live repos are NOT touched). Any running agent will be terminated.`
-                      : "The branch stays in git, so you can spin up a fresh worktree on it later. This removes only the on-disk worktree directory (build artifacts: node_modules, .venv, untracked files) and terminates any running agent. Can't be undone from inside Termic.",
-                    confirmLabel: task.is_main_checkout ? "Remove entry" : "Archive",
-                    destructive: true,
-                    checkbox: task.is_main_checkout
-                      ? undefined
-                      : (task.composition?.length ?? 0) > 0
-                      ? {
-                          label: "Delete the git branches",
-                          defaultValue: false,
-                        }
-                      : {
-                          label: "Delete the git branch:",
-                          branchName: task.branch || undefined,
-                          defaultValue: false,
-                        },
-                  });
-                  const confirmed = typeof ok === "boolean" ? ok : ok.confirmed;
-                  const deleteBranch = typeof ok === "boolean" ? false : ok.checked;
-                  if (!confirmed) return;
-                  try {
-                    useUI.getState().setBusy(`Archiving "${task.name}"…`);
-                    await archiveAndRefresh(task.id, deleteBranch);
-                  } finally { useUI.getState().setBusy(null); }
-                }}
+                onClick={() => { void confirmAndArchive(task); }}
+                data-testid="archive-task"
               ><Archive className="h-4 w-4" /></Button>
             </Tip>
             <Tip content="Open in Finder" side="bottom">

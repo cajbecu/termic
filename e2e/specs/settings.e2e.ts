@@ -695,6 +695,83 @@ describe("preferences", () => {
   });
 });
 
+// P1: the archive confirmation prefs. Ticking "Don't ask again" in the archive
+// dialog is otherwise a one-way door (archiving can't be undone from inside
+// Termic), so Settings → Tasks is the ONLY way back and both halves of the
+// stored answer have to be visible and reversible there.
+describe("archive confirmation settings", () => {
+  const CONFIRM_LABEL = "Confirm before archiving a task";
+  const BRANCH_LABEL = "Delete the git branch when archiving without asking";
+  let orig: { confirm: boolean; deleteBranch: boolean } | undefined;
+
+  const prefs = () =>
+    browser.execute(() => {
+      const p = window.__termic!.usePrefs.getState();
+      return { confirm: p.confirmBeforeArchiveTask, deleteBranch: p.archiveDeleteBranch };
+    });
+
+  const ariaChecked = (label: string) =>
+    browser.execute((lbl) => {
+      const labelEl = [...document.querySelectorAll("div")].find(
+        (d) => d.textContent?.trim() === lbl,
+      );
+      return labelEl?.closest(".justify-between")
+        ?.querySelector('[role="switch"]')?.getAttribute("aria-checked");
+    }, label);
+
+  after(async () => {
+    // The profile is shared with every later spec; a leaked opt-out would make
+    // their archives skip the dialog.
+    if (orig) {
+      await browser.execute((o) => {
+        const p = window.__termic!.usePrefs.getState();
+        p.setConfirmBeforeArchiveTask(o.confirm);
+        p.setArchiveDeleteBranch(o.deleteBranch);
+      }, orig);
+    }
+    await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
+  });
+
+  it("puts both archive toggles on the Tasks page", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    orig = await prefs();
+
+    await browser.execute(() => window.__termic!.useApp.getState().openSettings("tasks"));
+    await waitForText(CONFIRM_LABEL);
+    await waitForText(BRANCH_LABEL);
+  });
+
+  it("turns the confirmation back on after a 'Don't ask again'", async () => {
+    // The state the dialog's opt-out leaves behind.
+    await browser.execute(() => {
+      const p = window.__termic!.usePrefs.getState();
+      p.setConfirmBeforeArchiveTask(false);
+      p.setArchiveDeleteBranch(true);
+    });
+    await browser.waitUntil(async () => (await ariaChecked(CONFIRM_LABEL)) === "false",
+      { timeout: 5_000, timeoutMsg: "confirm switch never showed the opt-out" });
+
+    await clickToggleByLabel(CONFIRM_LABEL);
+
+    await browser.waitUntil(async () => (await prefs()).confirm === true,
+      { timeout: 5_000, timeoutMsg: "confirmBeforeArchiveTask never came back on" });
+    expect(await ariaChecked(CONFIRM_LABEL)).toBe("true");
+  });
+
+  it("flips the remembered delete-branch answer independently", async () => {
+    const before = (await prefs()).deleteBranch;
+    await clickToggleByLabel(BRANCH_LABEL);
+
+    await browser.waitUntil(async () => (await prefs()).deleteBranch !== before,
+      { timeout: 5_000, timeoutMsg: "archiveDeleteBranch never changed" });
+    // Flipping one must not disturb the other: they answer different questions.
+    expect((await prefs()).confirm).toBe(true);
+    expect(await ariaChecked(BRANCH_LABEL)).toBe(String(!before));
+    await snap("archive-settings.png");
+  });
+});
+
 // P1: per-task sandbox. Enable enforce mode then turn it off via taskSetSandbox
 // (killLive=false so the running PTY isn't disrupted) and assert the task's
 // sandbox mode follows.

@@ -11,7 +11,9 @@
 
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
+import { usePrefs } from "@/store/prefs";
 import { taskArchive } from "@/lib/ipc";
+import type { ConfirmCheckbox } from "@/store/ui";
 import type { Task } from "@/lib/types";
 
 /** Archive `taskId`, then ALWAYS refresh the store — even if the IPC rejects on
@@ -34,29 +36,78 @@ export async function archiveAndRefresh(taskId: string, deleteBranch: boolean): 
   await useApp.getState().loadAll();
 }
 
-/** Confirm + archive a task, with the SAME prompt copy + delete-branch
- *  checkbox the sidebar row's "Archive" menu item uses, plus the busy overlay.
- *  Shared so the command palette's "Archive <name>" can't drift from the
- *  sidebar. No-op if the user cancels. */
+/** The prompt copy for archiving `w`, split out so the three shapes an archive
+ *  can take (main checkout, multi-repo composition, plain worktree) are
+ *  readable side by side. Main-checkout entries get NO checkbox: nothing about
+ *  them is a worktree branch, so there is no branch to offer deleting. */
+function archivePrompt(w: Task): { message: string; confirmLabel: string; checkbox?: ConfirmCheckbox } {
+  if (w.is_main_checkout) {
+    return {
+      message: "This removes the Termic entry for the project's main checkout. The repo on disk is NOT touched, so you can re-open it any time. Any agent running here will be terminated.",
+      confirmLabel: "Remove entry",
+    };
+  }
+  if ((w.composition?.length ?? 0) > 0) {
+    const members = (w.composition ?? []).filter(m => m.mode === "worktree").map(m => m.dir_name);
+    return {
+      message: `Branches stay in git, so you can recreate the task later. This removes: the host worktree + every member worktree (${members.join(", ") || "none"}), plus any member symlinks to live checkouts (those live repos are NOT touched). Any running agent will be terminated.`,
+      confirmLabel: "Archive",
+      checkbox: { label: "Delete the git branches", defaultValue: false },
+    };
+  }
+  return {
+    message: "The branch stays in git, so you can spin up a fresh worktree on it later. This removes only the on-disk worktree directory (build artifacts: node_modules, .venv, untracked files) and terminates any running agent. Can't be undone from inside Termic.",
+    confirmLabel: "Archive",
+    checkbox: { label: "Delete the git branch:", branchName: w.branch || undefined, defaultValue: false },
+  };
+}
+
+/** Confirm + archive a task, with the busy overlay. The ONLY archive entry
+ *  point in the UI (sidebar row menu, unified bar button, command palette) so
+ *  the copy, the delete-branch checkbox and the "Don't ask again" opt-out
+ *  can't drift between them. No-op if the user cancels. */
 export async function confirmAndArchive(w: Task): Promise<void> {
   const ui = useUI.getState();
-  const memberWorktrees = (w.composition ?? []).filter(m => m.mode === "worktree");
+  const prefs = usePrefs.getState();
+  const { message, confirmLabel, checkbox } = archivePrompt(w);
+
+  // Fast path: the user ticked "Don't ask again" on a previous archive. The
+  // branch decision they made in that same dialog is what applies from here
+  // on (prefs.archiveDeleteBranch) - never for a main checkout, which has no
+  // worktree branch and never showed the checkbox.
+  if (!prefs.confirmBeforeArchiveTask) {
+    await runArchive(w, !w.is_main_checkout && prefs.archiveDeleteBranch);
+    return;
+  }
+
   const ok = await ui.askConfirm({
     title: `Archive "${w.name}"?`,
-    message: w.is_main_checkout
-      ? "This removes the Termic entry for the project's main checkout. The repo on disk is NOT touched, so you can re-open it any time. Any agent running here will be terminated."
-      : (w.composition?.length ?? 0) > 0
-      ? `Branches stay in git, so you can recreate the task later. This removes: the host worktree + every member worktree (${memberWorktrees.map(m => m.dir_name).join(", ") || "none"}), plus any member symlinks to live checkouts. Any running agent will be terminated.`
-      : "The branch stays in git, so you can spin up a fresh worktree on it later. This removes only the on-disk worktree directory and terminates any running agent. Can't be undone from inside Termic.",
-    confirmLabel: "Archive",
+    message,
+    confirmLabel,
     destructive: true,
-    checkbox: w.is_main_checkout ? undefined : (w.composition?.length ?? 0) > 0
-      ? { label: "Delete the git branches", defaultValue: false }
-      : { label: "Delete the git branch:", branchName: w.branch || undefined, defaultValue: false },
+    checkbox,
+    dontAskAgain: true,
   });
-  const confirmed = typeof ok === "boolean" ? ok : ok.confirmed;
-  const deleteBranch = typeof ok === "boolean" ? false : ok.checked;
-  if (!confirmed) return;
+  const res = typeof ok === "boolean" ? { confirmed: ok, checked: false, dontAskAgain: false } : ok;
+  // Persist the opt-out only when the user actually went through with the
+  // archive. ConfirmDialog reports the checkbox state at dismissal, so ticking
+  // a box and then hitting Escape / Cancel still arrives as checked=true;
+  // gating on `confirmed` stops a backed-out archive from silently disabling
+  // every future confirmation (and arming a branch delete with it).
+  if (res.confirmed && res.dontAskAgain) {
+    prefs.setConfirmBeforeArchiveTask(false);
+    // A main-checkout dialog has no checkbox, so its `checked` is a
+    // meaningless false - leave the remembered branch choice alone.
+    if (!w.is_main_checkout) prefs.setArchiveDeleteBranch(res.checked);
+  }
+  if (!res.confirmed) return;
+  await runArchive(w, res.checked);
+}
+
+/** Busy overlay + archive. Split out so the confirmed and the "don't ask
+ *  again" paths can't diverge on the overlay or the refresh. */
+async function runArchive(w: Task, deleteBranch: boolean): Promise<void> {
+  const ui = useUI.getState();
   ui.setBusy(`Archiving "${w.name}"…`);
   try { await archiveAndRefresh(w.id, deleteBranch); }
   finally { ui.setBusy(null); }

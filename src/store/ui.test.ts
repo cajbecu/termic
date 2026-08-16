@@ -68,6 +68,38 @@ describe("confirm modal", () => {
 
     useUI.getState().withdrawConfirm("k3");
 
-    await expect(p).resolves.toEqual({ confirmed: false, checked: false });
+    await expect(p).resolves.toEqual({ confirmed: false, checked: false, dontAskAgain: false });
+  });
+
+  it("reports the object shape for a dontAskAgain prompt with no checkbox", async () => {
+    const p = useUI.getState().askConfirm({ title: "T", message: "M", dontAskAgain: true });
+    await settle();
+
+    useUI.getState().resolveConfirm(true, false, true);
+
+    await expect(p).resolves.toEqual({ confirmed: true, checked: false, dontAskAgain: true });
+  });
+
+  it("carries both checkbox answers back independently", async () => {
+    const p = useUI.getState().askConfirm({
+      title: "T",
+      message: "M",
+      checkbox: { label: "Delete the git branch:" },
+      dontAskAgain: true,
+    });
+    await settle();
+
+    useUI.getState().resolveConfirm(true, true, false);
+
+    await expect(p).resolves.toEqual({ confirmed: true, checked: true, dontAskAgain: false });
+  });
+
+  it("still resolves a plain confirm as a bare boolean", async () => {
+    const p = useUI.getState().askConfirm({ title: "T", message: "M" });
+    await settle();
+
+    useUI.getState().resolveConfirm(true, true, true);
+
+    await expect(p).resolves.toBe(true);
   });
 });
