@@ -12,13 +12,23 @@
 
 import { clickByText, requireTermicApi, waitForAppShell, waitForText, waitForTextGone } from "../../../e2e/helpers";
 import { fact, record } from "../report.js";
-import { findAppPid, sampleRss, waitForStableRss } from "../proc.js";
+import { findAppPid, sampleRss, trend, waitForStableRss } from "../proc.js";
 
-/** View-churn cycles. Enough that a per-iteration leak clears the noise floor,
- *  few enough to stay well inside the spec timeout on a slow runner. Raise it
- *  via the workflow's `memory_cycles` input when chasing a suspected leak: a
- *  slow drip only separates from noise over more iterations. */
-const CYCLES = Number.parseInt(process.env.TERMIC_PERF_CYCLES ?? "", 10) || 12;
+/** View-churn cycles. A cycle is two clicks and two waits, ~0.5s on the runner,
+ *  so these are cheap and more of them is strictly better: the slope below
+ *  separates from noise roughly with the square root of the count. 12 was the
+ *  old default and too few to say anything. Raise further via the workflow's
+ *  `memory_cycles` input when chasing a slow drip. */
+const CYCLES = Number.parseInt(process.env.TERMIC_PERF_CYCLES ?? "", 10) || 30;
+/** Cycles dropped from the trend. The first passes through cold React trees,
+ *  lazy chunks and a JIT that has not seen this path, all of which allocate
+ *  once and would tilt a slope fitted from cycle 0 upwards forever. */
+const WARMUP = 5;
+/** Below this, |slope| is reported as noise rather than as a leak. A cycle
+ *  allocating a tenth of a MiB and never freeing it is 3 MiB per 30 cycles,
+ *  which is under the RSS jitter this samples through; anything at or above it
+ *  compounds into something a user would feel over a day's session. */
+const SLOPE_FLOOR_MIB = 0.1;
 
 describe("memory", () => {
   it("reports steady-state RSS and growth across view churn", async () => {
@@ -86,21 +96,52 @@ describe("memory", () => {
       samples: perCycle,
     });
 
+    // THE row: the slope of RSS against cycle number, over the samples taken
+    // DURING the churn.
+    //
+    // It used to be `after - baseline`, which is only meaningful if both ends
+    // were caught on a flat stretch. They were not: the first CI run settled
+    // its baseline 8s into a startup decay that was still shedding memory, so
+    // the "growth across 12 cycles" it reported was -88.8 MiB, i.e. the decay,
+    // measured with a leak's units and a leak's name. A trend fitted across
+    // the cycles cannot be fooled that way, because a one-off decay before the
+    // first cycle is not in the samples at all.
+    const measured = perCycle.slice(WARMUP);
+    const t = trend(measured);
+    const slope = Math.round(t.slope * 100) / 100;
+    const leaking = Math.abs(slope) >= SLOPE_FLOOR_MIB;
+    record({
+      metric: "memory.growth.slopeMiBPerCycle",
+      value: measured.length >= 2 ? slope : null,
+      unit: "MiB/cycle",
+      note: leaking
+        ? `THE row to watch. Fitted over ${t.n} cycles (first ${WARMUP} dropped as warm-up), r2 ${t.r2.toFixed(2)}. |slope| >= ${SLOPE_FLOOR_MIB}, so this is a trend to explain, not jitter`
+        : `THE row to watch. Fitted over ${t.n} cycles (first ${WARMUP} dropped as warm-up), r2 ${t.r2.toFixed(2)}. |slope| < ${SLOPE_FLOOR_MIB} MiB/cycle: no trend above the noise floor`,
+      samples: measured,
+    });
+    // r2 as its own row so a series can be read without re-parsing prose: a
+    // large slope with r2 near 0 is a line through scatter, and treating it as
+    // a leak is how a nightly earns a reputation for crying wolf.
+    record({
+      metric: "memory.growth.trendFit",
+      value: measured.length >= 2 ? Math.round(t.r2 * 100) / 100 : null,
+      unit: "r2",
+      note: "how much of the RSS variance the slope explains; near 0 means the slope is noise whatever its size",
+    });
+
+    // Kept, demoted: still the honest answer to "did it end heavier than it
+    // started", which is worth having next to the slope, and it is the row that
+    // exposes a baseline caught mid-decay (a large negative here with a flat
+    // slope means the settle gave up too early, not that memory was reclaimed).
     const delta =
       after.totalMiB !== null && baseline.totalMiB !== null
         ? Math.round((after.totalMiB - baseline.totalMiB) * 10) / 10
         : null;
     record({
-      metric: "memory.growth.totalMiB",
+      metric: "memory.endToEndDeltaMiB",
       value: delta,
       unit: "MiB",
-      note: `growth across ${CYCLES} cycles; THE row to watch, absolute RSS is runner-dependent`,
-    });
-    record({
-      metric: "memory.growth.perCycleMiB",
-      value: delta === null ? null : Math.round((delta / CYCLES) * 100) / 100,
-      unit: "MiB",
-      note: "per-cycle growth; a steady positive value is the leak signal",
+      note: `settled RSS after ${CYCLES} cycles minus settled RSS before; diagnostic, not the leak signal (see slopeMiBPerCycle)`,
     });
   });
 });

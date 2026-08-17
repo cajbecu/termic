@@ -308,13 +308,23 @@ runs":
 | --- | ---: | ---: |
 | `startup.bootToFirstPaintMs` | 7419 ms | 850 ms |
 | `startup.firstContentfulPaintMs` | 1663 ms | 206 ms |
-| `memory.growth.totalMiB` (12 cycles) | -88.8 | n/a |
+| `memory.growth.totalMiB` (12 cycles, since replaced) | -88.8 | n/a |
 
 Startup is ~9x slower on the runner, which is the concrete version of the
 argument above: a threshold loose enough to survive 7.4s cannot catch a
 regression that matters locally, and one tight enough to catch it fails every
 honest PR. It is one sample, so it bounds nothing yet; it does say the two
 environments are not measuring the same machine in the same units.
+
+The -88.8 was not a memory result at all, it was a broken metric: growth was
+`after - baseline` and the baseline had been accepted 8s into a startup decay.
+It is a slope across the churn cycles now, with an r² beside it and both
+functions unit-tested (`src/lib/rssTrend.test.ts`). First two local runs after
+the change: **+2.39 MiB/cycle at r² 0.90** and **+2.47 at r² 0.91** over 25
+cycles, end-to-end +87.6 and +88.2 MiB. That reproduces, fits well, and is the
+first thing this suite has ever said that is worth chasing: either the
+Dashboard/History view swap retains something per cycle, or the debug build
+does. Nobody has looked yet.
 
 - Cold start to first paint. Needs a first-paint marker; none exists.
 - Main-thread jank as frame-gap counts, bucketed over 50 ms and 250 ms.

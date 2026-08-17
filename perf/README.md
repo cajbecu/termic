@@ -42,17 +42,23 @@ A metric earns a threshold after its real spread is known, not before. The
 | `startup.webviewToFirstPaintMs` | `performance.timeOrigin` to first painted frame. The half termic owns: bundle parse, React mount, store hydration, lazy-chunk boundaries. |
 | `startup.bootToFirstPaintMs` | Process spawn to first painted frame, via the Rust `BOOT` instant. What a user waits through. Includes Tauri/WKWebView fixed cost. |
 | `memory.baseline.*` | App RSS, WebKit helper RSS, and their total, 5s after the shell appears. |
-| `memory.growth.totalMiB` | Growth across N view-churn cycles. **The row to watch.** Absolute RSS is runner-dependent; growth is a property of our code. |
-| `memory.growth.perCycleMiB` | Per-cycle growth. A steady positive value is the leak signal. |
+| `memory.growth.slopeMiBPerCycle` | **The row to watch.** Least-squares slope of RSS against cycle number, over the churn samples with the first 5 dropped as warm-up. Read it WITH the fit below. |
+| `memory.growth.trendFit` | r² of that slope. Near 0 means the slope is a line through scatter whatever its size, so a big slope with a poor fit is not a leak. |
+| `memory.endToEndDeltaMiB` | Settled RSS after the cycles minus settled RSS before. Diagnostic: a large negative here with a flat slope means the baseline was caught mid startup-decay, not that memory was reclaimed. |
 
-**One observed caveat, before you read either growth row as a signal.** The
-first successful CI run (2026-08-17, 12 cycles) came back at **-88.8 MiB total,
--7.4 per cycle**: the churn reclaims more than it allocates, so the run says
-nothing about whether anything leaks. A negative number is not reassurance,
-it is the metric failing to be sensitive at this cycle count. Treat both rows
-as uncalibrated until a series exists, and if you want them to mean something,
-raise the cycles (`workflow_dispatch` → `memory_cycles`) until the sign is
-stable rather than reading one run.
+**Why a slope and not a difference.** Growth used to be `after - baseline`,
+which only means anything if both ends were caught on a flat stretch. On the
+first successful CI run they were not: the settle check accepted a baseline 8
+seconds into a startup decay that was still shedding memory, and the run
+reported **-88.8 MiB of "growth"**, i.e. the decay, wearing a leak's units and
+a leak's name. A trend fitted across the cycles cannot be fooled that way,
+because a one-off decay before the first cycle is not among its samples.
+
+Two guards came with it, both unit-tested in `src/lib/rssTrend.test.ts`:
+`isFlat` now requires a settle window to be narrow AND to have small net drift
+(four samples falling 2 MiB each fit inside an 8 MiB spread while shedding
+~120 MiB/minute), and `trend` reports r² so a slope can be judged rather than
+believed.
 
 Both startup numbers are reported because either alone misleads: the
 webview-relative one flatters us by hiding platform cost, and the boot-relative
