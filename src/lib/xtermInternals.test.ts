@@ -42,6 +42,8 @@ const webglBundle = readFileSync(require.resolve("@xterm/addon-webgl"), "utf8");
 const WEBGL_REACH_INS: Record<string, string> = {
   // Addon's handle to its WebglRenderer (dumpRenderer + atlasCanvasGuard).
   _renderer: "terminalRenderer, atlasCanvasGuard",
+  // lib/terminalRenderer.ts — wake-guard probe for silently-lost GL contexts.
+  _gl: "terminalRenderer",
   // lib/atlasCanvasGuard.ts — glyph-atlas scratch canvas adoption.
   _charAtlas: "atlasCanvasGuard",
   _tmpCanvas: "atlasCanvasGuard",
