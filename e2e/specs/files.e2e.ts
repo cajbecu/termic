@@ -20,7 +20,7 @@ declare global {
 // unreliable and Tauri intercepts it for file drops), so the spec can drive it
 // with synthetic pointer events through the app's real handlers.
 describe("drag a file onto a terminal", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -180,7 +180,7 @@ describe("drag a file onto a terminal", () => {
 // P1: the file finder (⌘P). Cases: opens and lists the repo's files; selecting
 // a result opens an editor tab for that file.
 describe("file finder", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     await browser.execute(() =>
       window.__termic!.useUI.getState().closeFileFinder(),
@@ -237,7 +237,7 @@ describe("file finder", () => {
 // highlighted; the regexp toggle switches literal → pattern; Aa drops the
 // case folding.
 describe("find in files", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     await browser.execute(() => {
       window.__termic!.useUI.getState().closeFindInFiles();
@@ -402,7 +402,7 @@ describe("find in files", () => {
 const fixture = process.env.E2E_FIXTURE ?? path.join(process.cwd(), ".e2e", "fixture-repo");
 
 describe("file tree", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
     execSync(`git -C "${fixture}" clean -fd`);
@@ -560,7 +560,7 @@ describe("file tree", () => {
 // `open_file_external` in lib.rs): the suite must not launch Blender, and the
 // reveal fallback would pop a Finder window over the window under test.
 describe("open a file in its default app", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   const openedLog = path.join(process.cwd(), ".e2e", "profile", "e2e-opened.log");
 
   after(async () => {

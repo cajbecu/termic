@@ -41,7 +41,7 @@ describe("termic e2e pipeline", () => {
 // narrows the list; running a command performs its action and closes the
 // palette; Escape closes it.
 describe("command palette", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     await browser.execute(() => {
       window.__termic!.useUI.getState().closeCommandPalette?.();
@@ -141,7 +141,7 @@ describe("command palette", () => {
 // P2: assorted dialogs/palettes open + close. Guards the wiring of the
 // shortcuts help, prompt palette, and per-task broadcast dialog.
 describe("dialogs & palettes open", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     await browser.execute(() => {
       const ui = window.__termic!.useUI.getState();
@@ -271,7 +271,7 @@ describe("more dialogs open", () => {
 // geometry while windowless; agent output still flows while windowless
 // (the whole point of a daemon); raise restores window + panes.
 describe("windowless mode", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
 
   // Same constant wdio launches the app with, rather than a second hard-coded
   // copy of the path that could drift from it.

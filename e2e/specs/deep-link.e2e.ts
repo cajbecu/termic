@@ -399,7 +399,7 @@ describe("termic://open", () => {
 // the task exists with the CLI the link asked for. Kept separate because it
 // creates real state and has to clean up after itself.
 describe("termic:// deep link → create", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
 
   after(async () => {
     if (taskId) await archiveTask(taskId);

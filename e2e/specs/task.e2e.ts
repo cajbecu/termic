@@ -10,7 +10,7 @@ import { archiveTask, clickByText, clickWhenVisible, dismissOverlays, ensureActi
 // Everything is scoped to the dialog: the app footer also has a "Terminal"
 // button, so an unscoped text match would hit the wrong control.
 describe("create task wizard", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -111,7 +111,7 @@ describe("create task wizard", () => {
 // git-worktree/checkout setup, the Rust PTY spawn, and tab/store wiring.
 // Uses `fakeagent` (a claude-like fixture CLI, zero tokens).
 describe("task spawn", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
 
   // Keep the profile clean across repeated runs: archive the task we created
   // (kills its PTY, moves it off the active board). Repo-root task, so archive
@@ -501,7 +501,7 @@ describe("empty archive", () => {
 // Completes the task lifecycle: archive -> it appears in History -> restore ->
 // it's active again. Guards the History view's filtering and the restore path.
 describe("task restore", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     // Leave it archived (out of the active board) for the next run.
     if (taskId) await archiveTask(taskId);
@@ -804,7 +804,7 @@ const fixture = process.env.E2E_FIXTURE ?? path.join(process.cwd(), ".e2e", "fix
 const BRANCH = "e2e-wt-branch";
 
 describe("worktree task", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) {
       await browser.execute(async (id) => {
@@ -944,7 +944,7 @@ describe("worktree task", () => {
 // close path snapshots) and drives resumeClosedTab: it must reopen a tab and
 // consume the entry.
 describe("resume closed tab", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -953,8 +953,8 @@ describe("resume closed tab", () => {
     await waitForAppShell();
     await requireTermicApi();
     taskId = await openTask("e2e-resume");
-    const before = await browser.execute(
-      (id) => (window.__termic!.useApp.getState().tabs[id] ?? []).length,
+    const before: number = await browser.execute(
+      (id) => (window.__termic!.useApp.getState().tabs[id] ?? []).length as number,
       taskId,
     );
 

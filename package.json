@@ -2,7 +2,7 @@
   "name": "termic",
   "private": true,
   "version": "0.27.3",
-  "description": "Run claude, gemini, and codex in parallel — each in its own git worktree.",
+  "description": "Run claude, gemini, and codex in parallel \u2014 each in its own git worktree.",
   "license": "AGPL-3.0-or-later",
   "author": "Simion Agavriloaei",
   "homepage": "https://termic.dev",
@@ -20,6 +20,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "typecheck:e2e": "tsc -p e2e/tsconfig.json --noEmit",
     "preview": "vite preview",
     "test": "vitest run",
     "test:signals": "node scripts/dev.signals.test.mjs",

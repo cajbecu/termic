@@ -26,11 +26,15 @@ export const config: WebdriverIO.Config = {
   specs: [path.join(repoRoot, "e2e", "specs", "**", "*.e2e.ts")],
   maxInstances: 1,
 
+  // `tauri:options` is a VENDOR capability extension that the embedded
+  // WebDriver reads, and WebdriverIO's capability type does not know it. The
+  // cast is the whole reason this file was never typechecked cleanly, so it is
+  // narrowed to the one entry rather than loosening the config's type.
   capabilities: [
     {
       browserName: "tauri",
       "tauri:options": { application: appBinary },
-    },
+    } as WebdriverIO.Capabilities,
   ],
 
   services: [

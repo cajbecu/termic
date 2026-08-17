@@ -27,7 +27,10 @@ export const config: WebdriverIO.Config = {
   // app instances on one runner would contaminate every number here.
   maxInstances: 1,
 
-  capabilities: [{ browserName: "tauri", "tauri:options": { application: appBinary } }],
+  // Vendor capability extension, unknown to WebdriverIO's types. See wdio.conf.ts.
+  capabilities: [
+    { browserName: "tauri", "tauri:options": { application: appBinary } } as WebdriverIO.Capabilities,
+  ],
   services: [
     ["@wdio/tauri-service", { appBinaryPath: appBinary, driverProvider: "embedded" }],
   ],

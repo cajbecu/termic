@@ -791,7 +791,7 @@ describe("archive confirmation settings", () => {
 // (killLive=false so the running PTY isn't disrupted) and assert the task's
 // sandbox mode follows.
 describe("task sandbox", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) {
       await browser.execute(async (id) => {

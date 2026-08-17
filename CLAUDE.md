@@ -35,7 +35,7 @@ npm run build        # tsc -b && vite build
 
 ## Testing
 
-Unit/Rust: `npm test` (vitest) + `cargo test`. UI flows: the written e2e suite (`make e2e`, WebdriverIO on the real window). The e2e suite also runs in CI on `macos-14` (`.github/workflows/test.yml`), deliberately NOT a required check yet, it is there to surface flakiness before it gates merges. Run it locally anyway; do not treat the CI job as your test pass.
+Unit/Rust: `npm test` (vitest) + `cargo test`. `npm run typecheck:e2e` covers `e2e/` and `perf/`, which the app's `tsc -b` project does NOT reach: they went unchecked long enough to accumulate 71 errors, so run it after touching a spec. UI flows: the written e2e suite (`make e2e`, WebdriverIO on the real window). The e2e suite also runs in CI on `macos-14` (`.github/workflows/test.yml`), deliberately NOT a required check yet, it is there to surface flakiness before it gates merges. Run it locally anyway; do not treat the CI job as your test pass.
 
 Performance: `make perf` runs the nightly suite (startup, memory) and the local-only bench (idle CPU, GPU) and reports them separately. Neither gates. What DOES gate a PR is the count-and-invariant class (`src/store/selectorFanout.test.ts`) because counts survive a 3-core CI runner and timings do not. Read [docs/perf-ci.md](docs/perf-ci.md) before adding a perf check, especially before adding a threshold.
 

@@ -3,7 +3,7 @@ import { archiveTask, clickByText, clickMenuItem, dismissOverlays, ensureActiveT
 // Tabs are how a task holds multiple terminals/agents/editors. Guards adding a
 // tab through the "+" menu and switching the active tab by clicking it.
 describe("tab management", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -100,7 +100,7 @@ describe("tab management", () => {
 // into the row's task (not whichever task happens to be on screen), and
 // waking that task rather than replacing its restore seed.
 describe("sidebar task menu: New submenu", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   let otherId: string | undefined;
   after(async () => {
     if (taskId) await archiveTask(taskId);
@@ -263,7 +263,7 @@ describe("sidebar task menu: New submenu", () => {
 // exercises the controlled-input + persist path. Guards that the committed
 // name lands in the store.
 describe("tab rename", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -347,7 +347,7 @@ describe("tab rename", () => {
 // P1: splitting a task into multiple panes (Sublime-style). Cases: no split to
 // start, split right builds a 2-leaf tree, split below grows it to 3 leaves.
 describe("split pane", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -452,11 +452,15 @@ describe("split pane", () => {
 // (reorderTab / moveTabToSplit / moveTabToMain), so each is asserted on the
 // store, not on pixels.
 describe("tab drag", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
 
+  // Annotated, like the other list helpers in the suite: the store behind
+  // `window.__termic` is loosely typed, so without this the result lands as an
+  // `any`-derived union and every `.find((t) => ...)` below it is an implicit
+  // any that only a typecheck of this project would ever flag.
   const tabs = () =>
     browser.execute(
       (id) =>
@@ -466,7 +470,7 @@ describe("tab drag", () => {
           paneId: (t.paneId ?? null) as string | null,
         })),
       taskId,
-    );
+    ) as Promise<Array<{ id: string; title: string; paneId: string | null }>>;
   const leafCount = () =>
     browser.execute((id) => {
       const tree = window.__termic!.useApp.getState().splitTree[id];
@@ -559,7 +563,7 @@ describe("tab drag", () => {
 // closed, and the next click commits wherever it lands — mirroring
 // pointerDrag's real drag without a real grab to start it.
 describe("split from the tab context menu", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -572,7 +576,7 @@ describe("split from the tab context menu", () => {
           paneId: (t.paneId ?? null) as string | null,
         })),
       taskId,
-    );
+    ) as Promise<Array<{ id: string; paneId: string | null }>>;
   const leafCount = () =>
     browser.execute((id) => {
       const tree = window.__termic!.useApp.getState().splitTree[id];
@@ -815,7 +819,7 @@ describe("layout", () => {
 // in main persists nothing for main. Found on disk as a saved split_layout
 // referencing two tab ids beside an empty persisted tab list.
 describe("split restore", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -949,7 +953,7 @@ describe("split restore", () => {
 // at the head of the strip and the unpin drops back to the first slot after it,
 // so the cases assert tab order, and that both bulk closes spare pinned tabs.
 describe("tab context menu", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -1223,7 +1227,7 @@ describe("tab context menu", () => {
 // to sit OUTSIDE the scroller, so this drives the strip to a real overflow and
 // scrolls it to the end.
 describe("pinned tabs do not scroll away", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });

@@ -44,7 +44,7 @@ const quietFor = (taskId: string) =>
 // through the terminal's input path: it arms the detector the way a keystroke
 // does, so this covers the arming too.
 describe("agent working state", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -115,7 +115,7 @@ describe("agent attention", () => {
 // chip keeps counting it), then DRAINS once the agent goes idle (chip empties
 // + the PTY receives it).
 describe("message queue", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -173,7 +173,7 @@ describe("message queue", () => {
 // P2: per-task agent extras. Cases: toggling YOLO mode; opening an aux (bottom)
 // terminal for a task.
 describe("agent extras", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -285,8 +285,8 @@ describe("agent extras", () => {
   // Clicking a pill only set the active tab; AuxTerminal never self-focuses on
   // becoming active, so focus stayed in the shell the user just left.
   it("focuses the shell whose pill is clicked", async () => {
-    const first = await browser.execute(
-      (id) => window.__termic!.useApp.getState().bottomTabs[id][0].id,
+    const first: string = await browser.execute(
+      (id) => window.__termic!.useApp.getState().bottomTabs[id][0].id as string,
       taskId,
     );
     // A second shell, so the click is a real switch. addBottomTab focuses it.
@@ -421,7 +421,7 @@ describe("agent settings", () => {
 // three subagents worked. The only thing that says otherwise is the agent's own
 // status line, so the done is held back while that line is on screen.
 describe("pending work defers done", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -476,7 +476,7 @@ describe("pending work defers done", () => {
 // clicked it. Shortened here via the workDoneCeilingMs debug knob, since the
 // real one is ten minutes.
 describe("a hold that never clears still ends", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   const CEILING_MS = 8_000;
 
   after(async () => {
@@ -594,7 +594,7 @@ describe("a premature done is taken back", () => {
 // fired. It also sends a second, non-actionable notification a minute after any
 // turn you don't reply to; badging that would ring a bell for finished work.
 describe("agent notifications", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });

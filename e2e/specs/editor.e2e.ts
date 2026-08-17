@@ -15,7 +15,7 @@ declare global {
 // PREVIEW tab (italic, recyclable) with the file's real contents; double-click
 // PERSISTS it. Saving has its own spec (editor-save.e2e.ts).
 describe("editor open", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -130,7 +130,7 @@ describe("editor open", () => {
 // Cmd+S -> taskFileWrite path (termic never auto-saves). Restores README on
 // teardown so the fixture repo stays clean for the git specs.
 describe("editor save", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   let original: string | undefined;
 
   after(async () => {
@@ -230,7 +230,7 @@ describe("editor save", () => {
 const fixture = process.env.E2E_FIXTURE ?? path.join(process.cwd(), ".e2e", "fixture-repo");
 
 describe("code editor", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
     try {
@@ -405,7 +405,7 @@ describe("code editor", () => {
 // case that actually pins the split is the last one: editing the dark pref
 // while the app is light must change nothing on screen.
 describe("editor theme per app mode", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   let originals: { mode: string; dark: string; light: string } | undefined;
 
   after(async () => {
@@ -626,7 +626,7 @@ function twoPagePdf(pad = ""): string {
 //      still does.
 // The page number itself is a manual check.
 describe("pdf preview", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   const pdfName = "e2e-report.pdf";
   const pdfPath = path.join(fixture, pdfName);
 
@@ -904,7 +904,7 @@ describe("pdf preview", () => {
 // row opens as an ordinary edit tab; a folder with no README shows the list
 // alone with no error.
 describe("directory links", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
     try {
@@ -1094,7 +1094,7 @@ describe("directory links", () => {
     const survivor = await browser.execute(
       (id, lid) => (window.__termic!.useApp.getState().tabs[id] ?? []).find((t: any) => t.id === lid),
       taskId,
-      listing.id,
+      listing.id as string,
     );
     expect(survivor).toMatchObject({ type: "dir", path: "e2e-docs", preview: false });
   });
@@ -1161,7 +1161,7 @@ describe("directory links", () => {
     const survivor = await browser.execute(
       (id, lid) => (window.__termic!.useApp.getState().tabs[id] ?? []).find((t: any) => t.id === lid),
       taskId,
-      listing.id,
+      listing.id as string,
     );
     expect(survivor).toMatchObject({ type: "dir", path: "e2e-docs", preview: false });
 
@@ -1563,7 +1563,7 @@ const findBarCount = () =>
   }, FIND_INPUT);
 
 describe("find in markdown preview", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   const DOC = "find-doc.md";
 
   before(async () => {
@@ -1748,8 +1748,8 @@ describe("find in markdown preview", () => {
 // keystroke — no shared registry left to fight over.
 
 describe("⌘F ownership across previews", () => {
-  let taskA: string | undefined;
-  let taskB: string | undefined;
+  let taskA!: string;
+  let taskB!: string;
   let tabA = "";
   const DOC = "own-a.md";
   const DOC_B = "own-b.md";
@@ -1837,7 +1837,7 @@ describe("⌘F ownership across previews", () => {
 
     // Terminal into its own pane, and focus that pane. The preview is still on
     // screen in main, but the keyboard now belongs to the terminal.
-    const termId = await browser.execute((id) => {
+    const termId: string = await browser.execute((id) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const t = window.__termic!.useApp.getState().tabs[id].find((x: any) => x.type === "terminal");
       return t.id as string;
@@ -2096,7 +2096,7 @@ describe("⌘F ownership across previews", () => {
 // both entry points (selection tooltip, ⇧⌘L), the queue accumulating across
 // lines, and the batch actually landing in the agent's PTY.
 describe("comment on an editor selection for the agent", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   let editTabId: string | undefined;
   let agentTabId: string | undefined;
   const TASK = "e2e-send-ref";

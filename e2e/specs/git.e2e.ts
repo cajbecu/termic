@@ -9,7 +9,7 @@ import { archiveTask, clickByText, clickMenuItem, openTask, requireTermicApi, sn
 // The seeded fixture-repo has a single commit and no edits, so the state is
 // deterministically clean.
 describe("git panel", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -36,7 +36,7 @@ describe("git panel", () => {
 // git status reports the file. Restores README on teardown so the clean-tree
 // spec (git-panel) is unaffected.
 describe("git dirty tree", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   let original: string | undefined;
 
   after(async () => {
@@ -217,7 +217,7 @@ const fixture = process.env.E2E_FIXTURE ?? path.join(process.cwd(), ".e2e", "fix
 // The Graph section of the Commit tab is that view: real commits, each expandable into
 // the files it touched, each file opening a diff of THAT revision.
 describe("git history tab", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   /** Subject of the commit this spec makes, unique per run so a leftover
    *  fixture commit from an earlier run can't satisfy the assertions. */
   const subject = `e2e history probe ${Date.now()}`;
@@ -519,7 +519,7 @@ describe("git history tab", () => {
 // against a ref that genuinely predates the commit is the whole scenario, and
 // a repo-root task's default base cannot supply one.
 describe("git compare mode", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   let headSha = "";
   /** A ref parked at the pre-commit HEAD. Comparing against it is what makes
    *  committed work visible, which is the point of the tab. */
@@ -791,7 +791,7 @@ describe("git compare mode", () => {
 // lossy decode of `git show HEAD:shot.png` used to produce. The fixture repo
 // carries a committed 1x1 PNG (scripts/e2e-seed.mjs), so both sides exist.
 describe("image diff", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   // Different bytes, still a valid PNG (2x1 instead of 1x1) so the After side
   // decodes and reports its own dimensions.
   const EDITED_PNG_B64 =
@@ -905,7 +905,7 @@ describe("image diff", () => {
 // staged (moves to the staged list), and committing it leaves the tree clean.
 // Teardown hard-resets the fixture repo so its HEAD/tree are exactly restored.
 describe("git stage & commit", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   let headSha = "";
 
   before(() => {
@@ -991,7 +991,7 @@ describe("git stage & commit", () => {
 // the fixture (reset, remove remote, clean) on teardown.
 
 describe("git commit & push", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   let headSha = "";
   let bare = "";
 
@@ -1075,7 +1075,7 @@ describe("git commit & push", () => {
 // Only a real layout engine can see that, so it lives here rather than in
 // reviewCommentsExt.test.ts (happy-dom has no layout).
 describe("review comment alignment", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   let original: string | undefined;
   after(async () => {
     // Restore README: without this the 30 appended align lines survive
@@ -1236,8 +1236,8 @@ describe("review comment alignment", () => {
 // deleted) so the profile is left exactly as it was found.
 describe("git multi-repo panel", () => {
   let tmp = "";
-  let projectId: string | undefined;
-  let taskId: string | undefined;
+  let projectId!: string;
+  let taskId!: string;
 
   const member = (name: string) => path.join(tmp, name);
 
