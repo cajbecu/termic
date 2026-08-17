@@ -356,32 +356,41 @@ describe("git history tab", () => {
     expect(header).not.toContain("Comment");
   });
 
+  const trigger = '[data-testid="history-scope"]';
+  const scope = () =>
+    browser.execute((sel) => {
+      const el = document.querySelector(sel);
+      return { all: el?.getAttribute("data-all"), picked: el?.getAttribute("data-picked") };
+    }, trigger);
+  /** Radix opens on pointerdown, and WebKit's WebDriver click emits no
+   *  pointer events at all (verified: a wdio click leaves aria-expanded
+   *  false, a dispatched pointerdown/up pair flips it to true). So the pair
+   *  is the only thing that opens this menu. NO trailing `el.click()`: on
+   *  this trigger it toggles the menu straight back shut. */
+  const openMenu = async () => {
+    await browser.execute((sel) => {
+      const el = document.querySelector(sel) as HTMLElement;
+      const opts = { bubbles: true, cancelable: true, pointerType: "mouse", button: 0, isPrimary: true, pointerId: 1 } as any;
+      el.dispatchEvent(new PointerEvent("pointerdown", opts));
+      el.dispatchEvent(new PointerEvent("pointerup", opts));
+    }, trigger);
+    await waitVisible('[data-testid="history-scope-row"]');
+  };
+  /** Click a row in the open picker by the ref name it carries. The menu
+   *  portals in asynchronously, so wait for the row rather than assuming. */
+  const pick = async (name: string) => {
+    await browser.waitUntil(
+      async () => browser.execute((n) =>
+        document.querySelector(`[data-testid="history-scope-row"][data-ref="${n}"]`) !== null, name),
+      { timeout: 5_000, timeoutMsg: `no picker row for ${name}` },
+    );
+    await browser.execute((n) => {
+      (document.querySelector(`[data-testid="history-scope-row"][data-ref="${n}"]`) as HTMLElement).click();
+    }, name);
+  };
+
   it("scopes the graph from the ref picker: Auto, All, and a named branch", async () => {
     await openGraph();
-    const trigger = '[data-testid="history-scope"]';
-    const scope = () =>
-      browser.execute((sel) => {
-        const el = document.querySelector(sel);
-        return { all: el?.getAttribute("data-all"), picked: el?.getAttribute("data-picked") };
-      }, trigger);
-    // A REAL WebDriver click, not `el.click()`: Radix opens the menu on
-    // pointerdown, which a scripted click event does not produce at all.
-    const openMenu = async () => {
-      await (await $(trigger)).click();
-      await waitVisible('[data-testid="history-scope-row"]');
-    };
-    /** Click a row in the open picker by the ref name it carries. The menu
-     *  portals in asynchronously, so wait for the row rather than assuming. */
-    const pick = async (name: string) => {
-      await browser.waitUntil(
-        async () => browser.execute((n) =>
-          document.querySelector(`[data-testid="history-scope-row"][data-ref="${n}"]`) !== null, name),
-        { timeout: 5_000, timeoutMsg: `no picker row for ${name}` },
-      );
-      await browser.execute((n) => {
-        (document.querySelector(`[data-testid="history-scope-row"][data-ref="${n}"]`) as HTMLElement).click();
-      }, name);
-    };
 
     // Auto is the default: HEAD alone, nothing picked.
     expect(await scope()).toEqual({ all: "false", picked: "0" });
@@ -1191,6 +1200,20 @@ describe("review comment alignment", () => {
 
     // The cards push the code down; the numbers have to move with it. Before
     // the fix this was ~36px by the bottom of the file.
+    //
+    // Poll rather than measure the instant the third card mounts: each card is
+    // sized by a ResizeObserver and CodeMirror re-measures its height map on
+    // the following frame, so a single sample can land mid-layout and read a
+    // drift that is gone a frame later. The regression this guards is a
+    // PERMANENT offset, so settling for it is the honest wait; the assertions
+    // below still have to hold on the real sample.
+    await browser.waitUntil(
+      async () => {
+        const m = await gutterDrift();
+        return !!m && m.nums === m.lines && m.spread < 2;
+      },
+      { timeout: 10_000, timeoutMsg: "the gutter never settled level with the code" },
+    );
     const after = (await gutterDrift())!;
     expect(after.nums).toEqual(after.lines);
     expect(after.spread).toBeLessThan(2);

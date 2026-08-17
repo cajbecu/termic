@@ -3859,29 +3859,30 @@ fn resolve_tab_selector_with(
         .map(|e| e.tab_states.clone())
         .filter(|t| !t.is_empty());
 
-    let Some(tabs) = tabs else {
-        // Degraded: no per-tab snapshot yet (app just started, or the
-        // task never reported). An EXACT id can still resolve against
-        // the persisted strip set, so a script that recorded the id
-        // `termic tab` printed keeps working; index and title need the
-        // live list and honestly cannot.
-        if let Some(pt) = task
+    // An EXACT id resolved against the durable strip set. Used when there is
+    // no live snapshot yet AND when the snapshot is merely BEHIND: `termic
+    // tab` prints an id the moment the tab exists, and the webview's next
+    // report can be a second away, so `termic logs --tab <that id>` used to
+    // come back "no tab matches" for a tab the CLI had just handed out.
+    // Index and title still need the live list and honestly cannot.
+    let from_persisted = |selector: &str| -> Option<Result<ResolvedTab, proto::ErrorBody>> {
+        let pt = task
             .persisted_tabs
             .iter()
             .filter(|p| p.pane_leaf_id.is_none())
-            .find(|p| p.id == selector)
+            .find(|p| p.id == selector)?;
         {
             let terminal_kind = pt.cli == "custom"
                 || pt.cli == "shell"
                 || pt.run_member.is_some()
                 || host.agents().iter().any(|a| a.id == pt.cli && a.kind == "terminal");
             if terminal_kind && reach == TabReach::AgentsOnly {
-                return Err(err(
+                return Some(Err(err(
                     ErrorCode::Unsupported,
                     "that tab is not an agent tab; only agent tabs are reachable, the rest are write-only from the CLI".into(),
-                ));
+                )));
             }
-            return Ok(ResolvedTab {
+            return Some(Ok(ResolvedTab {
                 id: pt.id.clone(),
                 cli: pt.cli.clone(),
                 // The durable record's label, falling back to the cli id
@@ -3905,7 +3906,13 @@ fn resolve_tab_selector_with(
                 },
                 // No live strip to count.
                 strip_len: 0,
-            });
+            }));
+        }
+    };
+
+    let Some(tabs) = tabs else {
+        if let Some(r) = from_persisted(selector) {
+            return r;
         }
         return Err(err(
             ErrorCode::Internal,
@@ -3916,6 +3923,14 @@ fn resolve_tab_selector_with(
     // 1. The identity itself.
     if let Some((i, t)) = tabs.iter().enumerate().find(|(_, t)| t.id == selector) {
         return gate(i as u32 + 1, t, tabs.len());
+    }
+    // 1b. An id the live snapshot has not caught up with yet. The snapshot is
+    // "fresh" by age but is still whatever the webview last reported, so a tab
+    // created a moment ago is absent from it while being perfectly real on
+    // disk. Only exact ids take this path, so it cannot invent an index or a
+    // title that the strip does not have.
+    if let Some(r) = from_persisted(selector) {
+        return r;
     }
     // 2. A 1-based strip index (`status` prints the same numbering).
     if let Ok(n) = selector.parse::<usize>() {
@@ -7087,6 +7102,38 @@ mod tests {
         for needle in ["tab-a", "tab-b", "[1]", "[2]"] {
             assert!(e.message.contains(needle), "{}", e.message);
         }
+    }
+
+    #[test]
+    fn a_tab_id_the_snapshot_has_not_caught_up_with_still_resolves() {
+        // `termic tab` prints an id the moment the tab exists on disk, but the
+        // webview's per-tab snapshot is only whatever it last reported. A
+        // script doing `id=$(termic tab ...); termic logs --tab "$id"` used to
+        // get "no tab matches" for a tab the CLI had just handed it, because
+        // the snapshot was fresh by AGE while missing the new tab entirely.
+        let host = StubHost::default();
+        let mut t = w3(&host);
+        t.persisted_tabs.push(crate::PersistedTab {
+            id: "brand-new".into(),
+            cli: "shell".into(),
+            title: None,
+            custom_title: false,
+            is_default: false,
+            command: None,
+            session_id: None,
+            pane_leaf_id: None,
+            run_member: None,
+            pinned: false,
+        });
+        // Exact id resolves off the durable record...
+        let e = resolve_tab_selector(&host, &t, "brand-new").unwrap_err();
+        assert_eq!(e.code, ErrorCode::Unsupported, "a shell tab is reachable-but-write-only, not missing");
+        // ...while anything that is not an exact id still needs the live
+        // strip, and says which of the two it is missing rather than
+        // pretending the tab does not exist.
+        let miss = resolve_tab_selector(&host, &t, "no-such-tab").unwrap_err();
+        assert_eq!(miss.code, ErrorCode::Internal);
+        assert!(miss.message.contains("has not reported"));
     }
 
     #[test]
