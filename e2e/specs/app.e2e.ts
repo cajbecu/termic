@@ -136,6 +136,106 @@ describe("command palette", () => {
     });
     await snap("command-palette.png");
   });
+
+  // The reopen case: run something, come back, and it is the first row. The
+  // section is only meant to appear on an EMPTY query — while searching you
+  // want the best match, not a pinned row pushing it down.
+  const sectionLabels = () =>
+    browser.execute(() =>
+      [...document.querySelectorAll("[data-row]")]
+        .map(r => r.parentElement?.querySelector("div")?.textContent ?? "")
+        .filter(Boolean),
+    ) as Promise<string[]>;
+
+  const firstRowText = () =>
+    browser.execute(() =>
+      (document.querySelector('[data-row="0"]') as HTMLElement | null)?.innerText ?? "",
+    ) as unknown as Promise<string>;
+
+  it("puts the command you just ran in a Recent section on top", async () => {
+    // Self-contained: run a command through the palette HERE rather than
+    // leaning on an earlier case. The File-picker case defers its effect
+    // through requestAnimationFrame, which is frozen while this window is
+    // occluded and then fires late, reopening a dialog mid-assertion.
+    // Recording happens synchronously in runCmd, so a row whose deferred
+    // effect never lands still records — which is all this needs.
+    await browser.execute(() => {
+      const ui = window.__termic!.useUI.getState();
+      ui.closeFileFinder?.(); ui.closeShortcutsHelp?.();
+      localStorage.removeItem("commandPaletteRecent");
+    });
+    await open();
+    await waitVisible('input[placeholder*="Type a command"]', 8_000);
+    await browser.execute(() => {
+      const btn = [...document.querySelectorAll("[data-row]")].find(r =>
+        (r as HTMLElement).innerText.includes("Keyboard shortcuts"));
+      if (!btn) throw new Error("Keyboard shortcuts row not found");
+      (btn as HTMLElement).click();
+    });
+    await browser.waitUntil(async () => (await paletteOpen()) === false, {
+      timeout: 5_000, timeoutMsg: "the command did not close the palette",
+    });
+
+    await browser.execute(() => window.__termic!.useUI.getState().closeShortcutsHelp?.());
+    await open();
+    await waitVisible('input[placeholder*="Type a command"]', 8_000);
+
+    await browser.waitUntil(async () => (await firstRowText()).includes("Keyboard shortcuts"), {
+      timeout: 5_000,
+      timeoutMsg: "the just-run command was not the first row on reopen",
+    });
+    // The first row sits under the Recent header, not under Task/View.
+    expect((await sectionLabels())[0]).toContain("Recent");
+    // Lifted out of its home section rather than duplicated — the same command
+    // twice makes the arrow keys feel broken.
+    // Exact-ish match: "Keyboard shortcuts settings" is a DIFFERENT command
+    // (the Settings deep link), so a bare substring count sees two rows and
+    // reads as a dedupe failure when nothing is wrong.
+    const dupes = await browser.execute(() =>
+      [...document.querySelectorAll("[data-row]")]
+        .map(r => (r as HTMLElement).innerText)
+        .filter(t => t.includes("Keyboard shortcuts") && !t.includes("settings")).length);
+    expect(dupes).toBe(1);
+  });
+
+  it("hides Recent as soon as you type", async () => {
+    await setQuery("settings");
+    await browser.waitUntil(
+      async () => !(await sectionLabels()).some(l => l.startsWith("Recent")),
+      { timeout: 5_000, timeoutMsg: "Recent survived a query" },
+    );
+    await setQuery("");
+    await browser.waitUntil(
+      async () => (await sectionLabels()).some(l => l.startsWith("Recent")),
+      { timeout: 5_000, timeoutMsg: "Recent did not come back on an empty query" },
+    );
+  });
+
+  it("forgets a recent command after an hour", async () => {
+    // Age the stored entry past the TTL rather than waiting an hour. The expiry
+    // rule itself is unit-tested against an injected clock
+    // (lib/paletteRecent.test.ts); this only proves the palette consults it.
+    await browser.execute(() => {
+      const raw = localStorage.getItem("commandPaletteRecent");
+      if (!raw) throw new Error("no recents were recorded");
+      const aged = JSON.parse(raw).map((e: { id: string; at: number }) => ({
+        ...e, at: e.at - 61 * 60 * 1000,
+      }));
+      localStorage.setItem("commandPaletteRecent", JSON.stringify(aged));
+    });
+    // Reopen: recents are re-read per open, so the stale entry drops out.
+    await browser.execute(() => window.__termic!.useUI.getState().closeCommandPalette());
+    await open();
+    await waitVisible('input[placeholder*="Type a command"]', 8_000);
+    await browser.waitUntil(
+      async () => !(await sectionLabels()).some(l => l.startsWith("Recent")),
+      { timeout: 5_000, timeoutMsg: "an expired recent was still shown" },
+    );
+    await browser.execute(() => {
+      localStorage.removeItem("commandPaletteRecent");
+      window.__termic!.useUI.getState().closeCommandPalette();
+    });
+  });
 });
 
 // P2: assorted dialogs/palettes open + close. Guards the wiring of the
