@@ -194,8 +194,15 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
    *  per keystroke. */
   search?: string;
 }) {
-  const nonGit = useApp(s => s.projects.find(p => p.id === task.project_id)?.non_git);
+  // `Project.non_git` describes the HOST folder. A multi-repo project's host
+  // is routinely a plain folder holding real git repos, so it only answers for
+  // this panel when the panel is standing alone and reading the task's own
+  // path. Embedded, GitPanel has already resolved a repo and named it in
+  // `repoDir`, and asking the project instead told someone looking at a
+  // selected member repo that it was not a git repository.
+  const projectNonGit = useApp(s => s.projects.find(p => p.id === task.project_id)?.non_git);
   const controlled = repoDirProp !== undefined;
+  const nonGit = controlled ? false : !!projectNonGit;
   const members = controlled ? [] : (task.composition ?? []);
   const [ownRepoDir, setRepoDir] = useState("");
   const repoDir = controlled ? repoDirProp : ownRepoDir;
@@ -720,17 +727,29 @@ const CommitRow = memo(function CommitRow({
               className="shrink-0"
               style={{ marginLeft: textIndent(row.lane, lanes) - gutter }}
             />
-            {/* Capped: a commit that happens to carry four refs (a branch, its
-                remote, the remote HEAD, a tag) would otherwise push the
-                subject — the thing you are actually scanning for — off the
-                row. The rest live in the overflow chip's tooltip. */}
-            {chips.slice(0, MAX_CHIPS).map(c => <RefBadge key={c.label + c.kind} chip={c} />)}
-            {chips.length > MAX_CHIPS && (
-              <span
-                title={chips.slice(MAX_CHIPS).map(c => c.label).join(", ")}
-                className="shrink-0 rounded bg-[var(--color-bg-3)] px-1 text-[10.5px] leading-[16px] text-[var(--color-fg-faint)]"
-              >
-                +{chips.length - MAX_CHIPS}
+            {/* Chips are capped by WIDTH, not just by count, and they never
+                wrap. Two `max-w-[40%]` chips could take 80% of the row between
+                them and leave the subject as an ellipsis, which is what a
+                commit on a branch plus its remote looked like.
+                
+                One line per commit is deliberate: rows are a fixed ROW_H and
+                the lane gutter is drawn against that height, so a wrapping row
+                would desync the graph it sits in, and a column of uneven rows
+                is worse to scan than a truncated ref. Refs are decoration on a
+                handful of rows; the subject is what every row is read for, so
+                the group yields first and the full names live in the title and
+                the hover card. */}
+            {chips.length > 0 && (
+              <span className="flex min-w-0 shrink items-center gap-1.5 overflow-hidden" style={{ maxWidth: "45%" }}>
+                {chips.slice(0, MAX_CHIPS).map(c => <RefBadge key={c.label + c.kind} chip={c} />)}
+                {chips.length > MAX_CHIPS && (
+                  <span
+                    title={chips.slice(MAX_CHIPS).map(c => c.label).join(", ")}
+                    className="shrink-0 rounded bg-[var(--color-bg-3)] px-1 text-[10.5px] leading-[16px] text-[var(--color-fg-faint)]"
+                  >
+                    +{chips.length - MAX_CHIPS}
+                  </span>
+                )}
               </span>
             )}
             {/* Outgoing marker: committed here, not on the remote yet. A small
@@ -814,7 +833,7 @@ function RefBadge({ chip }: { chip: RefChip }) {
     <span
       data-testid="history-ref"
       title={chip.label}
-      className={cn("flex max-w-[40%] shrink-0 items-center gap-0.5 rounded px-1 text-[10.5px] leading-[16px]", style)}
+      className={cn("flex min-w-0 shrink items-center gap-0.5 rounded px-1 text-[10.5px] leading-[16px]", style)}
     >
       {chip.kind === "tag" && <Tag className="h-2.5 w-2.5 shrink-0" />}
       <span className="truncate">{chip.label}</span>

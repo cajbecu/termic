@@ -37,7 +37,6 @@ import {
 } from "lucide-react";
 import type { GitCompare, GitFile, Task } from "@/lib/types";
 import { taskGitCompare, taskGitRefs } from "@/lib/ipc";
-import { useApp } from "@/store/app";
 import { useFileViewed, useIsViewed } from "@/store/fileViewed";
 import { useReviewComments } from "@/store/reviewComments";
 import { cn } from "@/lib/utils";
@@ -98,7 +97,12 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   /** Open a diff for one file, sides = the compare base → the working tree. */
   onOpenDiff: (path: string, baseSha: string, title: string) => void;
 }) {
-  const nonGit = useApp(s => s.projects.find(p => p.id === task.project_id)?.non_git);
+  // No non-git check here on purpose. `Project.non_git` describes the HOST
+  // folder, and a multi-repo project's host is routinely a plain folder full
+  // of real git repos, so asking it "is this a git repository" answered for
+  // the wrong thing and told someone looking at a selected member repo that
+  // it was not one. GitPanel only mounts this once it has resolved a repo,
+  // and `repoDir` names which, so the question is already settled upstream.
   // The picker opens on whatever this task was last compared against, falling
   // back to its own base ("origin/main" for a normal worktree task), which is
   // the comparison people want ~every time. Only a default: any ref below can
@@ -134,7 +138,7 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   useEffect(() => { setSelected(null); setRefs(null); }, [repoDir]);
 
   useEffect(() => {
-    if (nonGit || !base) { setLoading(false); return; }
+    if (!base) { setLoading(false); return; }
     let alive = true;
     setLoading(true);
     taskGitCompare(task.id, repoDir, base, mergeBase)
@@ -142,7 +146,7 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
       .catch(e => { if (alive) { setErr(String(e)); setCmp(null); } })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [task.id, repoDir, base, mergeBase, reloadToken, nonGit]);
+  }, [task.id, repoDir, base, mergeBase, reloadToken]);
 
   /** Refs are only needed once the picker opens, and re-reading them on every
    *  compare would be a process per keystroke of the filter. */
@@ -208,10 +212,6 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
   const OVERSCAN = 5;
   const startIdx = Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN);
   const endIdx = Math.min(rows.length - 1, Math.ceil((scrollTop + containerH) / ROW_H) + OVERSCAN);
-
-  if (nonGit) {
-    return <Empty>This project is not a git repository, so there is nothing to compare.</Empty>;
-  }
 
   const branchLabel = cmp?.branch || task.branch || "working tree";
 

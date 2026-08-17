@@ -21,6 +21,7 @@ describe("git panel", () => {
 
     // Switch the right panel from "All files" to "Git" (a real click).
     await clickByText("Git");
+    await selectGitView("commit");
 
     // The Git status is fetched async; the clean-tree copy appears once it
     // resolves. waitForText auto-retries, so no sleep and no flake.
@@ -91,6 +92,7 @@ describe("git dirty tree", () => {
 
     // Open the Commit panel (starts clean).
     await clickByText("Git");
+    await selectGitView("commit");
 
     // Dirty the tree, then force the panel's git poll to re-fetch.
     await browser.execute(async (id, c) => {
@@ -192,6 +194,22 @@ describe("git dirty tree", () => {
 
 // Tasks here open the repo ROOT, so every case below edits this one working
 // tree and has to put it back.
+/** Select one of the Git tab's sub-tabs. The choice is PERSISTED (a review
+ *  outlives a task switch and a relaunch), and the e2e profile is reused
+ *  between runs, so a spec that needs the staging view has to ask for it
+ *  rather than assume the panel opens there. */
+async function selectGitView(view: "commit" | "compare" | "history"): Promise<void> {
+  await browser.waitUntil(
+    () => browser.execute((v) => {
+      const el = document.querySelector(`[data-testid="git-view-${v}"]`) as HTMLElement | null;
+      if (!el) return false;
+      el.click();
+      return true;
+    }, view),
+    { timeout: 10_000, timeoutMsg: `the Git tab never offered the ${view} sub-tab` },
+  );
+}
+
 const fixture = process.env.E2E_FIXTURE ?? path.join(process.cwd(), ".e2e", "fixture-repo");
 
 // GH #199: committed work used to vanish from termic the moment the tree went
@@ -234,11 +252,7 @@ describe("git history tab", () => {
    *  height, so reaching it is the tab plus one sub-tab click. */
   const openGraph = async () => {
     await openRightTab("Git");
-    await browser.execute(() => {
-      const btn = document.querySelector('[data-testid="git-view-history"]') as HTMLElement | null;
-      if (!btn) throw new Error("the Git tab has no History sub-tab");
-      btn.click();
-    });
+    await selectGitView("history");
     await waitVisible('[data-testid="history-panel"]');
   };
 
@@ -548,23 +562,13 @@ describe("git compare mode", () => {
 
   const openCompare = async () => {
     await openRightTab("Git");
-    await browser.execute(() => {
-      const el = document.querySelector(
-        '[data-testid="git-view-compare"]',
-      ) as HTMLElement | null;
-      if (!el) throw new Error("the Git tab has no Compare mode switch");
-      el.click();
-    });
+    await selectGitView("compare");
     await waitVisible('[data-testid="compare-panel"]');
   };
 
   /** Back to the staging view, so a later spec does not inherit Compare (the
    *  sub-tab is persisted on purpose: a review outlives one task switch). */
-  const openChanges = async () => {
-    await browser.execute(() => {
-      (document.querySelector('[data-testid="git-view-commit"]') as HTMLElement | null)?.click();
-    });
-  };
+  const openChanges = () => selectGitView("commit");
 
   /** The compare rows on screen, as path → status. */
   const rows = () =>
@@ -1444,5 +1448,47 @@ describe("git multi-repo panel", () => {
     expect(alpha.staged.map((f: any) => f.path)).toEqual(["README.md"]);
     expect(beta.staged).toEqual([]);
     expect(beta.unstaged.map((f: any) => f.path)).toEqual(["README.md"]);
+  });
+
+  // The host of a multi-repo project is routinely a PLAIN FOLDER holding real
+  // git repos, so `Project.non_git` is true while every pill above these views
+  // points at a genuine repository. Both used to ask the project that question
+  // and answer "this project is not a git repository" over a selected member's
+  // history.
+  it("shows History and Compare for the selected member, not a non-git notice", async () => {
+    const panelText = () =>
+      browser.execute(() =>
+        (document.querySelector('[data-testid="git-panel-body"]')
+          ?? document.querySelector('[role="tabpanel"]')
+          ?? document.body).textContent ?? "");
+
+    for (const view of ["history", "compare"] as const) {
+      await selectGitView(view);
+      await waitVisible(
+        view === "history"
+          ? '[data-testid="history-panel"]'
+          : '[data-testid="compare-panel"]',
+      );
+      await browser.waitUntil(
+        async () => !(await panelText()).includes("not a git repository"),
+        { timeout: 8_000, timeoutMsg: `${view} claimed the member repo is not a git repository` },
+      );
+    }
+
+    // History is the one that can prove it reached the right repo: the member
+    // fixtures carry exactly one commit, "init".
+    await selectGitView("history");
+    await browser.waitUntil(
+      async () => {
+        const subjects = await browser.execute(() =>
+          [...document.querySelectorAll('[data-testid="history-subject"]')].map(
+            (e) => (e as HTMLElement).innerText));
+        return subjects.includes("init");
+      },
+      { timeout: 10_000, timeoutMsg: "the member repo's history never listed its commit" },
+    );
+
+    // Leave the panel on Commit: the sub-tab is persisted.
+    await selectGitView("commit");
   });
 });
