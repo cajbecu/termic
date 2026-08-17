@@ -28,6 +28,24 @@
 - StrictMode is off. Audit before re-enabling.
 - **`visible` is not `ownsFind`, and a pane claiming anything global needs the stricter one (GH #71).** MainArea keeps every visited task mounted, and TaskView keeps every tab's content mounted, so "is this laid out" is a per-task answer that several components say yes to at once. A window keydown listener is the usual casualty: the markdown preview's ⌘F handler is capture-phase and stops propagation, so a background task's mounted preview claiming it doesn't just open a stray bar, it swallows the key from the terminal's search overlay and CodeMirror. `TaskView` computes both flavors: `tabActive` (per task, fine for a pane that only focuses itself) and `ownsFind`, which additionally ANDs in "this task is up front" and `focusedTabId()` for the focused split pane. Store state gets you only that far, and the naming matters — a prop called `active` on the preview next to an `active` on the sibling panes is an invitation to widen it back. Two things it cannot answer, both handled in the preview's own listener: (1) the bottom split (⌘J) and the right panel are not in the split tree at all, so a focused AuxTerminal or panel input is invisible to it — check `activeElement.closest(".xterm, .cm-editor, input, textarea")` and stand down; (2) a modal leaves the tab underneath still `ownsFind`. Modals need covering twice over: `document.activeElement.closest('[role="dialog"]')` catches Radix dialogs that trap focus (hence `!trap.contains(container)`, since the Changelog dialog hosts a preview of its own), but the hand-rolled Settings overlay traps nothing and autofocuses nothing, so `activeElement` never enters it and only the store flag sees it. `role="dialog"` on that overlay is still right for screen readers, it just isn't load-bearing here.
 
+## "Fresh" caches that are fresh by age and stale by content
+
+- **The CLI's per-tab snapshot (`resolve_tab_selector`).** The webview reports
+  tab state into an agent cache the CLI server reads, and the resolver treated
+  the snapshot as authoritative whenever `snap.age <= CACHE_STALE_AFTER`. Age is
+  not content: a tab created a second ago is inside the freshness window and
+  absent from the snapshot. So `id=$(termic tab ...); termic logs --tab "$id"`
+  answered "no tab matches" for an id the CLI had printed a moment earlier, and
+  the durable fallback that would have resolved it was only consulted when there
+  was NO snapshot at all. An exact id now falls back to `persisted_tabs` even
+  with a live snapshot present; index and title still require the live strip,
+  which is honest, because they cannot be reconstructed from the record.
+- **The general shape.** Any cache whose validity you express as an age answers
+  "is this recent" when the question was "does this contain X". If a caller can
+  learn an identity from one code path (a create that writes to disk) and then
+  use it through another (a read that consults a cache), the cache needs a miss
+  path to the durable source, not a longer TTL.
+
 ## Split restore invariants
 
 Two things must hold after `ensureDefaultTab` restores a task, and neither is guaranteed by the persistence rules on their own:

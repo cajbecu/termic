@@ -298,6 +298,24 @@ ever produced a screenshot. Both now pass `include-hidden-files: true`. Any
 upload of a dot-path needs it, and `if-no-files-found` at `warn` or `ignore`
 will not tell you.
 
+### The first real numbers from the runner (2026-08-17)
+
+The first scheduled-path run that actually completed, worth recording because
+this doc keeps deferring the gating question to "distribution data from real
+runs":
+
+| Metric | macos-14 runner | M1 Max local |
+| --- | ---: | ---: |
+| `startup.bootToFirstPaintMs` | 7419 ms | 850 ms |
+| `startup.firstContentfulPaintMs` | 1663 ms | 206 ms |
+| `memory.growth.totalMiB` (12 cycles) | -88.8 | n/a |
+
+Startup is ~9x slower on the runner, which is the concrete version of the
+argument above: a threshold loose enough to survive 7.4s cannot catch a
+regression that matters locally, and one tight enough to catch it fails every
+honest PR. It is one sample, so it bounds nothing yet; it does say the two
+environments are not measuring the same machine in the same units.
+
 - Cold start to first paint. Needs a first-paint marker; none exists.
 - Main-thread jank as frame-gap counts, bucketed over 50 ms and 250 ms.
 - Absolute RSS at steady state.

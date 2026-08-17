@@ -45,6 +45,15 @@ A metric earns a threshold after its real spread is known, not before. The
 | `memory.growth.totalMiB` | Growth across N view-churn cycles. **The row to watch.** Absolute RSS is runner-dependent; growth is a property of our code. |
 | `memory.growth.perCycleMiB` | Per-cycle growth. A steady positive value is the leak signal. |
 
+**One observed caveat, before you read either growth row as a signal.** The
+first successful CI run (2026-08-17, 12 cycles) came back at **-88.8 MiB total,
+-7.4 per cycle**: the churn reclaims more than it allocates, so the run says
+nothing about whether anything leaks. A negative number is not reassurance,
+it is the metric failing to be sensitive at this cycle count. Treat both rows
+as uncalibrated until a series exists, and if you want them to mean something,
+raise the cycles (`workflow_dispatch` → `memory_cycles`) until the sign is
+stable rather than reading one run.
+
 Both startup numbers are reported because either alone misleads: the
 webview-relative one flatters us by hiding platform cost, and the boot-relative
 one hides our own regressions inside platform cost.
