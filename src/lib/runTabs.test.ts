@@ -81,4 +81,14 @@ describe("expandPreviewUrl", () => {
     expect(expandPreviewUrl(project("http://localhost:$TERMIC_PORT"), task()))
       .toBe("http://localhost:18100");
   });
+
+  it("keeps built-in tokens from eating longer extras and vice versa", () => {
+    // TERMIC_WORKSPACE_NAME_2 is a legal extra sharing a built-in prefix;
+    // longest-first replacement must expand it as itself, and the plain
+    // built-ins must still work in the same template.
+    const t = task([{ name: "TERMIC_WORKSPACE_NAME_2", port: 18105 }]);
+    expect(
+      expandPreviewUrl(project("http://x/$TERMIC_WORKSPACE_NAME_2?p=$PORT&n=$TERMIC_WORKSPACE_NAME"), t),
+    ).toBe("http://x/18105?p=18100&n=montreal");
+  });
 });

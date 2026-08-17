@@ -575,8 +575,9 @@ fn parse_env_output(stdout: &str) -> Vec<(String, String)> {
 }
 
 /// A POSIX-ish env var name: leading letter/underscore, then
-/// alphanumerics/underscores.
-fn is_env_key(k: &str) -> bool {
+/// alphanumerics/underscores. Also used by the extra-named-ports
+/// validator in lib.rs (GH #196).
+pub(crate) fn is_env_key(k: &str) -> bool {
     let mut chars = k.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')

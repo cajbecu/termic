@@ -185,7 +185,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
               : String(next.files_to_copy).split("\n").map(s => s.trim()).filter(Boolean))
           : [],
         // Raw split lines from the textarea → trimmed, blanks dropped.
-        extra_named_ports: (next.extra_named_ports ?? []).map(s => s.trim()).filter(Boolean),
+        extra_named_ports: cleanLines(next.extra_named_ports ?? []),
       };
       await projectUpdate(cleaned);
       await loadAll();

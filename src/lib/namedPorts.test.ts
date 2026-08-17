@@ -19,7 +19,15 @@ describe("isValidPortName", () => {
     for (const n of RESERVED_PORT_NAMES) {
       expect(isValidPortName(n)).toBe(false);
     }
-    expect(RESERVED_PORT_NAMES.has("TERMIC_PORT")).toBe(true);
-    expect(RESERVED_PORT_NAMES.has("PATH")).toBe(true);
+    for (const n of ["TERMIC_PORT", "PATH", "PORT", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TERMIC_CLI_HELP"]) {
+      expect(RESERVED_PORT_NAMES.has(n)).toBe(true);
+    }
+  });
+
+  it("rejects the TERMIC_PORT_ sibling-port namespace", () => {
+    expect(isValidPortName("TERMIC_PORT_API")).toBe(false);
+    expect(isValidPortName("TERMIC_PORT_2")).toBe(false);
+    // Other TERMIC_-prefixed names stay legal.
+    expect(isValidPortName("TERMIC_EXTRA")).toBe(true);
   });
 });

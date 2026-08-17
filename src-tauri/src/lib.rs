@@ -1016,6 +1016,38 @@ fn next_base_port(existing: &[Task], needed: u16) -> Result<u16, String> {
     Ok(candidate)
 }
 
+/// GH #196: archived tasks' blocks are reusable, so a task created
+/// while this one was archived may have first-fit into its block.
+/// Called on restore: when the block overlaps any LIVE task's block,
+/// move the whole thing (base, member ports, extra named ports) to a
+/// fresh allocation — otherwise two live tasks would race for the
+/// same listening ports. Returns true when the ports moved.
+fn rehome_ports_if_stolen(task: &mut Task, others: &[Task]) -> bool {
+    if task.port < PORT_BASE { return false; } // legacy record, nothing to rehome
+    let start = task.port;
+    let end = start.saturating_add(task_block_len(task));
+    let stolen = others.iter().any(|t| {
+        if t.archived || t.id == task.id || t.port < PORT_BASE { return false; }
+        let os = t.port;
+        let oe = os.saturating_add(task_block_len(t));
+        os < end && start < oe
+    });
+    if !stolen { return false; }
+    let names: Vec<String> = task.extra_named_ports.iter().map(|np| np.name.clone()).collect();
+    let member_count = task.composition.len() as u16;
+    match allocate_task_ports(others, member_count, &names) {
+        Ok((base, extras)) => {
+            task.port = base;
+            for (i, m) in task.composition.iter_mut().enumerate() {
+                m.port = base + 1 + i as u16;
+            }
+            task.extra_named_ports = extras;
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// Allocate a new task's whole block: returns (base_port, frozen
 /// extra named ports). `member_count` members occupy base+1+i; the
 /// extras follow at base + 1 + member_count + j, in list order.
@@ -2190,30 +2222,40 @@ fn member_effective_script(
 /// override wins when non-empty, otherwise the repo's committed
 /// `.termic.yaml` list. Same override rule as `effective_scripts`.
 fn effective_files_to_copy(proj: &Project) -> Vec<String> {
+    effective_files_to_copy_from(&repo_config_for(proj), proj)
+}
+
+/// Same, against an already-loaded config — creation paths load
+/// `.termic.yaml` ONCE and thread it into every consumer instead of
+/// re-parsing the file per helper call.
+fn effective_files_to_copy_from(cfg: &repo_config::RepoConfig, proj: &Project) -> Vec<String> {
     if !proj.files_to_copy.is_empty() {
         return proj.files_to_copy.clone();
     }
-    repo_config_for(proj).scripts.files_to_copy
+    cfg.scripts.files_to_copy.clone()
 }
 
 /// Env var names an extra named port may NOT use (GH #196): termic's
-/// own vars plus common shell/system vars a numeric override would
-/// break. Mirrored in src/lib/namedPorts.ts for the Settings editor.
+/// own vars (incl. every var pty_spawn injects after the env overlay:
+/// COLORTERM, TERM_PROGRAM, ...), the preview-URL tokens ($PORT), and
+/// common shell/system vars a numeric override would break. Mirrored
+/// in src/lib/namedPorts.ts for the Settings editor.
 const RESERVED_PORT_NAMES: &[&str] = &[
     "TERMIC_PORT", "TERMIC_TASK", "TERMIC_TASK_ID", "TERMIC_WORKSPACE_NAME",
-    "TERMIC_CLI", "CONDUCTOR_PORT", "CONDUCTOR_WORKSPACE_NAME",
-    "PATH", "HOME", "SHELL", "USER", "TMPDIR", "PWD", "TERM", "LANG", "COLORFGBG",
+    "TERMIC_CLI", "TERMIC_CLI_HELP", "CONDUCTOR_PORT", "CONDUCTOR_WORKSPACE_NAME",
+    "PORT", "PATH", "HOME", "SHELL", "USER", "TMPDIR", "PWD", "TERM", "LANG",
+    "COLORFGBG", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION",
 ];
 
-/// A usable extra-named-port env var name: `[A-Za-z_][A-Za-z0-9_]*`
-/// and not reserved. Names are used verbatim (free text per GH #196,
-/// no case transformation).
+/// A usable extra-named-port env var name: a POSIX env key
+/// (shell_env::is_env_key), not reserved, and not in the
+/// `TERMIC_PORT_<DIR>` sibling-port namespace (a multi-repo member dir
+/// would collide with it, with opposite precedence per spawn site).
+/// Names are used verbatim (free text per GH #196, no case transform).
 fn valid_port_name(name: &str) -> bool {
-    let first_ok = name.chars().next()
-        .map_or(false, |c| c.is_ascii_alphabetic() || c == '_');
-    first_ok
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    shell_env::is_env_key(name)
         && !RESERVED_PORT_NAMES.contains(&name)
+        && !name.starts_with("TERMIC_PORT_")
 }
 
 /// Effective extra named port NAMES for a project: the committed
@@ -2221,7 +2263,12 @@ fn valid_port_name(name: &str) -> bool {
 /// (yaml order first), deduped by exact name, invalid / reserved
 /// names dropped. Ports get allocated per task at creation.
 fn effective_extra_named_ports(proj: &Project) -> Vec<String> {
-    let cfg = repo_config_for(proj);
+    effective_extra_named_ports_from(&repo_config_for(proj), proj)
+}
+
+/// Same, against an already-loaded config (see
+/// `effective_files_to_copy_from` for why the split exists).
+fn effective_extra_named_ports_from(cfg: &repo_config::RepoConfig, proj: &Project) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for n in cfg.extra_named_ports.iter().chain(proj.extra_named_ports.iter()) {
@@ -3102,14 +3149,20 @@ fn task_open_repo(
             .unwrap_or_else(|_| "HEAD".to_string())
     };
     let extra_names = effective_extra_named_ports(&proj);
-    // Member count is an upper bound (invalid / duplicate member dirs
-    // are skipped below); skipped slots just leave unused ports inside
-    // the block, which is harmless.
-    let member_count = if proj.project_type == ProjectType::Multi {
+    // Allocate the block against the member-count UPPER BOUND (the loop
+    // below may skip invalid / duplicate / symlink-conflicting members),
+    // but freeze the extras only AFTER the loop, offset by the ACTUAL
+    // composition length. task_block_len later derives the block from
+    // composition.len() + extras, so extras frozen at the upper-bound
+    // offset could land outside the recorded block and collide with the
+    // next task's base once skips exceed the buffer.
+    let member_count_hint = if proj.project_type == ProjectType::Multi {
         proj.members.len() as u16
     } else { 0 };
-    let (port, extra_named_ports) =
-        allocate_task_ports(&load_tasks(), member_count, &extra_names)?;
+    let port = next_base_port(
+        &load_tasks(),
+        1 + member_count_hint + extra_names.len() as u16 + PORT_BLOCK_BUFFER,
+    )?;
 
     // Multi-repo project opened in REPO mode: drop a symlink for
     // each member into the host's working dir so the agent at the
@@ -3169,6 +3222,15 @@ fn task_open_repo(
         // the user might prefer to track these. Non-fatal.
         let _ = ensure_multirepo_gitignore(host_dir, &dir_names);
     }
+
+    // Freeze extras right after the ACTUAL members (see the allocation
+    // comment above) so they sit inside the block task_block_len records.
+    let extra_named_ports: Vec<NamedPort> = extra_names.iter().enumerate()
+        .map(|(j, n)| NamedPort {
+            name: n.clone(),
+            port: port + 1 + composition.len() as u16 + j as u16,
+        })
+        .collect();
 
     let explicit_name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
     let derived = explicit_name.is_none();
@@ -3386,7 +3448,9 @@ fn task_import_worktree(
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
     let cli = cli.unwrap_or_else(|| proj.default_cli.clone());
-    let extra_names = effective_extra_named_ports(&proj);
+    // Parse `.termic.yaml` once for this creation (extras + sandbox below).
+    let repo_cfg = repo_config_for(&proj);
+    let extra_names = effective_extra_named_ports_from(&repo_cfg, &proj);
     let (port, extra_named_ports) =
         allocate_task_ports(&existing_tasks, 0, &extra_names)?;
     let explicit_name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
@@ -3420,7 +3484,7 @@ fn task_import_worktree(
         out
     };
     let sandbox_enabled = sandbox_enabled.unwrap_or(
-        proj.default_sandbox || repo_config_for(&proj).sandbox.enabled_by_default,
+        proj.default_sandbox || repo_cfg.sandbox.enabled_by_default,
     );
     let sandbox_mode = sandbox_mode.or(proj.default_sandbox_mode)
         .unwrap_or(if sandbox_enabled { SandboxMode::Enforce } else { SandboxMode::Off });
@@ -3657,7 +3721,10 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
 
     // Copy files_to_copy (glob patterns relative to repo root) —
     // the repo's `.termic.yaml` list merged with the project override.
-    for pat in &effective_files_to_copy(&proj) {
+    // Parse `.termic.yaml` once for this creation (files here, extras +
+    // sandbox default below).
+    let repo_cfg = repo_config_for(&proj);
+    for pat in &effective_files_to_copy_from(&repo_cfg, &proj) {
         copy_matching(&repo, &wt_path, pat);
     }
 
@@ -3671,7 +3738,7 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
     }
 
     // Allocate the task's port block (base + extras + buffer).
-    let extra_names = effective_extra_named_ports(&proj);
+    let extra_names = effective_extra_named_ports_from(&repo_cfg, &proj);
     let (port, extra_named_ports) =
         allocate_task_ports(&load_tasks(), 0, &extra_names)?;
 
@@ -3693,7 +3760,7 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
     // team-shared default; the project's local `default_sandbox`
     // (projects.json) is the personal one. Either flips it on.
     let sandbox_enabled = args.sandbox_enabled.unwrap_or(
-        proj.default_sandbox || repo_config_for(&proj).sandbox.enabled_by_default,
+        proj.default_sandbox || repo_cfg.sandbox.enabled_by_default,
     );
     let sandbox_mode = args.sandbox_mode.or(proj.default_sandbox_mode)
         .unwrap_or(if sandbox_enabled { SandboxMode::Enforce } else { SandboxMode::Off });
@@ -5618,6 +5685,8 @@ fn task_restore_sync(app: AppHandle, id: String) -> Result<Task, String> {
     // Repo-root tasks have no dedicated worktree to recreate — the task
     // IS the main checkout. Just unarchive the record and return.
     if list[idx].is_main_checkout {
+        let snapshot = list.clone();
+        rehome_ports_if_stolen(&mut list[idx], &snapshot);
         list[idx].archived = false;
         list[idx].archived_at = None;
         save_task(&list[idx]).map_err(|e| e.to_string())?;
@@ -5795,7 +5864,10 @@ fn task_restore_sync(app: AppHandle, id: String) -> Result<Task, String> {
         }
     }
 
-    // Unarchive and persist.
+    // Unarchive and persist. A task created while this one was archived
+    // may have reused its port block (GH #196) — rehome before going live.
+    let snapshot = list.clone();
+    rehome_ports_if_stolen(&mut list[idx], &snapshot);
     list[idx].archived = false;
     save_task(&list[idx]).map_err(|e| e.to_string())?;
     let task = list[idx].clone();
@@ -7947,13 +8019,15 @@ fn run_script(script: &str, cwd: &Path, port: u16, name: &str, extra: &[NamedPor
         .env("TERMIC_PORT", port.to_string())
         .env("TERMIC_WORKSPACE_NAME", name)
         .env("TERMIC_TASK", name);
-    // Extra named ports (GH #196): frozen name→port pairs, exposed
-    // under the exact names the user configured.
-    for np in extra {
-        cmd.env(&np.name, np.port.to_string());
-    }
     for (k, v) in inject {
         cmd.env(k, v);
+    }
+    // Extra named ports (GH #196): frozen name→port pairs, exposed
+    // under the exact names the user configured. AFTER the login-shell
+    // inject so a same-named var exported in the user's shell rc can't
+    // shadow the allocated port — matching task_run_script_stream.
+    for np in extra {
+        cmd.env(&np.name, np.port.to_string());
     }
     let out = cmd.output().with_context(|| "run script")?;
     let mut s = String::new();
@@ -8005,13 +8079,15 @@ fn run_script_streaming(
             .env("PYTHONIOENCODING", "UTF-8")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // Extra named ports (GH #196): frozen name→port pairs, exposed
-        // under the exact names the user configured.
-        for np in &extra {
-            cmd.env(&np.name, np.port.to_string());
-        }
         for (k, v) in setup_inject {
             cmd.env(k, v);
+        }
+        // Extra named ports (GH #196): frozen name→port pairs, exposed
+        // under the exact names the user configured. AFTER the login-
+        // shell inject so a shell-rc export of the same name can't
+        // shadow the allocated port — matching task_run_script_stream.
+        for np in &extra {
+            cmd.env(&np.name, np.port.to_string());
         }
         let spawn_res = cmd.spawn();
         let mut child = match spawn_res {
@@ -13869,9 +13945,22 @@ mod tests {
 
     #[test]
     fn reserved_names_rejected() {
-        for n in ["TERMIC_PORT", "PATH", "HOME", "CONDUCTOR_PORT", "TERM"] {
+        for n in ["TERMIC_PORT", "PATH", "HOME", "CONDUCTOR_PORT", "TERM",
+                  "PORT", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION",
+                  "TERMIC_CLI_HELP"] {
             assert!(!valid_port_name(n), "{n} must be reserved");
         }
+    }
+
+    #[test]
+    fn sibling_port_namespace_rejected() {
+        // TERMIC_PORT_<DIR> belongs to multi-repo sibling discovery; an
+        // extra in that namespace would collide with opposite precedence
+        // per spawn site.
+        assert!(!valid_port_name("TERMIC_PORT_API"));
+        assert!(!valid_port_name("TERMIC_PORT_2"));
+        // Other TERMIC_-prefixed names stay legal.
+        assert!(valid_port_name("TERMIC_EXTRA"));
     }
 
     #[test]
@@ -13944,6 +14033,41 @@ mod tests {
         assert_eq!(next_base_port(&existing, 6).unwrap(), 18106);
         // needed=8 does NOT fit the gap → lands after the last block.
         assert_eq!(next_base_port(&existing, 8).unwrap(), 18118);
+    }
+
+    #[test]
+    fn restore_rehomes_a_stolen_block() {
+        // A archived at 18100, B created while A was archived reused the
+        // slot; restoring A must move A's whole block past B's.
+        let mut archived = stub_task(18100, 0, 2, true);
+        archived.id = "a".into();
+        archived.extra_named_ports = vec![
+            NamedPort { name: "API_PORT".into(), port: 18101 },
+            NamedPort { name: "DB_PORT".into(),  port: 18102 },
+        ];
+        let mut thief = stub_task(18100, 0, 0, false);
+        thief.id = "b".into();
+        let list = vec![archived.clone(), thief];
+        let mut restoring = archived;
+        assert!(rehome_ports_if_stolen(&mut restoring, &list));
+        // Thief block = 1 + 0 + 0 + 5 = 6 → new base 18106, extras follow.
+        assert_eq!(restoring.port, 18106);
+        assert_eq!(restoring.extra_named_ports, vec![
+            NamedPort { name: "API_PORT".into(), port: 18107 },
+            NamedPort { name: "DB_PORT".into(),  port: 18108 },
+        ]);
+    }
+
+    #[test]
+    fn restore_keeps_an_unstolen_block() {
+        let mut archived = stub_task(18100, 0, 0, true);
+        archived.id = "a".into();
+        let mut other = stub_task(18106, 0, 0, false);
+        other.id = "b".into();
+        let list = vec![archived.clone(), other];
+        let mut restoring = archived;
+        assert!(!rehome_ports_if_stolen(&mut restoring, &list));
+        assert_eq!(restoring.port, 18100);
     }
 
     #[test]
