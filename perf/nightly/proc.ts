@@ -52,7 +52,7 @@ function pidsMatching(pattern: string): number[] {
 
 /** The app binary the perf run launched. Debug build, driven by wdio.
  *
- *  Anchored with `$`, matching bench/measure.sh. This is DEFENSIVE, not a fix
+ *  Anchored with `$`, matching perf/local/measure.sh. This is DEFENSIVE, not a fix
  *  for an observed bug: measured on a real run, the unanchored pattern also
  *  matched exactly one process, so nothing was being misattributed. The anchor
  *  guards against a future caller whose argv happens to contain the same path
@@ -91,7 +91,7 @@ function helperPidsFor(appPid: number): number[] {
  *  minute, and "growth across 12 cycles" came out at -355 MiB. A negative leak
  *  number is a nonsense metric, and it was measuring startup decay rather than
  *  anything the cycles did. This is GH #140 trap 6 ("poll until quiet instead")
- *  in a different costume, documented in bench/README.md.
+ *  in a different costume, documented in perf/local/README.md.
  *
  *  Settled = `streak` consecutive samples within `tolMiB` of each other. Gives
  *  up after `maxMs` and returns the last sample, with `settled: false` so the

@@ -10,7 +10,7 @@
 // The delta is the interesting row, not the absolute. Absolute RSS depends on
 // the runner image; growth-per-iteration is a property of our code.
 
-import { clickByText, requireTermicApi, waitForAppShell, waitForText, waitForTextGone } from "../../e2e/helpers";
+import { clickByText, requireTermicApi, waitForAppShell, waitForText, waitForTextGone } from "../../../e2e/helpers";
 import { fact, record } from "../report.js";
 import { findAppPid, sampleRss, waitForStableRss } from "../proc.js";
 

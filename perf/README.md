@@ -1,10 +1,18 @@
-# perf/ — the nightly performance suite
+# perf/ — the two performance suites
 
-Startup timing and memory growth, measured against the real macOS window by
-the same WebdriverIO stack the e2e suite uses.
+Two halves, split by what can be honestly measured where. Neither gates a PR.
+
+- **[`nightly/`](nightly/)** — startup timing and memory growth, measured
+  against the real macOS window by the same WebdriverIO stack the e2e suite
+  uses. Runs in CI nightly; reports, does not gate.
+- **[`local/`](local/README.md)** — CPU, GPU and compositor cost, as shell
+  scripts you run on your own Mac. Never in CI, because a virtualised runner
+  cannot measure any of it without producing confidently wrong numbers.
+
+Everything below is about `nightly/`.
 
 ```sh
-make perf       # both sections: this suite, then the local-only bench/
+make perf       # both sections: nightly/, then local/
 make perf-ci    # this suite only (what the nightly workflow runs)
 ```
 
@@ -82,8 +90,8 @@ is dead weight.
 
 Idle CPU, WindowServer cost and GPU utilisation. Those need a real GPU, a real
 display and an undisturbed desktop; on a runner each of the seven traps in
-[`bench/README.md`](../bench/README.md) produces a plausible wrong number
-rather than an error. They live in `bench/` and run as section 2 of
+[`perf/local/README.md`](../perf/local/README.md) produces a plausible wrong number
+rather than an error. They live in `perf/local/` and run as section 2 of
 `make perf`. Orca reaches the same conclusion: its `bench:idle-cpu`,
 `bench:startup` and `bench:main-thread-jank` are invoked by none of its 28
 workflows.

@@ -18,7 +18,7 @@ What exists now, and where the argument for each lives below:
 | 0 — counts, PR-gating | yes | `src/store/selectorFanout.test.ts` |
 | 1 — e2e invariants, PR-gating | no | still proposal |
 | 2 — nightly, ungated | yes | `perf/`, `.github/workflows/perf.yml` |
-| 3 — local only | yes | `bench/`, section 2 of `make perf` |
+| 3 — local only | yes | `perf/local/`, section 2 of `make perf` |
 
 Idle CPU was deliberately left out of the nightly, per the Tier 3
 argument below and Orca's own practice of never running theirs in CI.

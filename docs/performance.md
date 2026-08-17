@@ -34,14 +34,14 @@ cannot.**
   `.github/workflows/perf.yml` at 03:30 UTC and never on a PR. Durations and
   RSS: measurable on a runner, too noisy there to gate a merge. Reports to the
   run's step summary and a 90-day JSON artifact.
-- **Local only (CPU, GPU, compositor).** [`bench/`](../bench/README.md).
+- **Local only (CPU, GPU, compositor).** [`perf/local/`](../perf/local/README.md).
   Requires a real GPU, a real display and an undisturbed desktop. Read
-  `bench/README.md` before trusting any number it prints: seven documented
+  `perf/local/README.md` before trusting any number it prints: seven documented
   traps, every one of which produces a plausible wrong number rather than an
   error.
 
 ```sh
-make perf       # nightly suite, then the local-only bench, reported separately
+make perf       # perf/nightly, then the local-only perf/local, reported separately
 make perf-ci    # nightly suite only
 ```
 
