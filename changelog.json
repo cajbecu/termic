@@ -1,7 +1,7 @@
 {
   "versions": [
     {
-      "version": "0.27.2",
+      "version": "0.27.3",
       "date": "2026-08-17",
       "summary": "A commit graph, branch compare, comments on any file, and a big idle-CPU fix."
     },

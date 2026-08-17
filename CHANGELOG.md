@@ -4,7 +4,7 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [0.27.2] - 2026-08-17
+## [0.27.3] - 2026-08-17
 
 A commit graph, branch compare, comments on any file, and a big idle-CPU fix.
 
@@ -31,6 +31,7 @@ A commit graph, branch compare, comments on any file, and a big idle-CPU fix.
 - A `termic://` link's name fills the branch field too, instead of waiting for you to edit the name first.
 - The "Couldn't resume your previous session" banner is gone. It outlived the failure it described and came back on every relaunch reworded as if nothing had happened. A failed resume now says so once and starts fresh; the agent's own picker (`claude --resume`) is the way back to the old session, which was never deleted.
 - In a multi-repo task the Git tab opens on a repo that actually changed, instead of the empty wrapper.
+- Terminal panes no longer go black after the Mac sleeps or the window sits in the background for hours. WKWebView reclaims the GPU context of a webview it thinks is idle, and every terminal kept compositing its last, empty frame, so restarting each tab by hand was the only way back even though the shell and the scrollback were fine the whole time. The renderer re-attaches on a fresh context now, and if the GPU is genuinely gone it stays on the DOM renderer with a forced repaint rather than black-flashing on a retry loop. It also checks on window focus, for the case where the loss never fires an event at all. (#232)
 - `termic logs --tab <id>` no longer answers "no tab matches" for an id `termic tab` printed a second earlier. Tab lookup consulted only what the window had last reported, which a brand-new tab is not in yet; an exact id now falls back to the durable record. (#185)
 - Clicking a desktop notification only brings the window forward. It used to yank you to that task on any refocus within 15 seconds.
 - The bottom terminal takes focus when you open it, and collapsing the split hands focus back to the pane you came from.
@@ -43,6 +44,7 @@ A commit graph, branch compare, comments on any file, and a big idle-CPU fix.
 - Preeti Yuankrathok (@earthpyy) for the worktree path settings, atomic writes, and the archive confirmation opt-out.
 - Bohdan Shulha (@bohdan-shulha) for tab pinning and close actions, collapsible git sections, the regexp and match-case toggles, and the terminal focus fixes.
 - Michael Hohlios (@MHohlios) for `termic tab close`, the CLI prompt library, and both shell environment fixes.
+- Adrian Cristea (@cajbecu) for the WebGL context-loss recovery.
 
 ## [0.26.0] - 2026-08-11
 
