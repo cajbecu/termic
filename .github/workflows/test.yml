@@ -75,3 +75,7 @@ jobs:
             .e2e/artifacts
             /var/folders/**/termic-debug.log
           if-no-files-found: ignore
+          # Same trap as perf.yml: `.e2e/` is hidden, so every screenshot and
+          # debug log from a failing run was silently dropped. With
+          # `if-no-files-found: ignore` there was not even a warning.
+          include-hidden-files: true

@@ -290,6 +290,14 @@ nobody had a reason to open, and the metric it was supposed to report
 (`bootToFirstPaintMs`) has no history for those five days. If a nightly's
 failure is not routed anywhere, budget the attention to read it.
 
+Its artifact was empty for the same reason, independently: `.perf/` is a dot
+directory and `actions/upload-artifact` treats hidden paths as excluded, so
+the step uploaded nothing directly under a log line reading "wrote 10 rows".
+`.e2e/artifacts` in `test.yml` had it too, which is why no failing e2e run
+ever produced a screenshot. Both now pass `include-hidden-files: true`. Any
+upload of a dot-path needs it, and `if-no-files-found` at `warn` or `ignore`
+will not tell you.
+
 - Cold start to first paint. Needs a first-paint marker; none exists.
 - Main-thread jank as frame-gap counts, bucketed over 50 ms and 250 ms.
 - Absolute RSS at steady state.

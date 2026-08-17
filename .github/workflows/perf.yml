@@ -97,3 +97,8 @@ jobs:
           path: .perf/
           retention-days: 90
           if-no-files-found: warn
+          # `.perf/` is a DOT directory and upload-artifact treats hidden paths
+          # as excluded, so the step uploaded nothing while the suite happily
+          # reported "wrote 10 rows" beside it. `if-no-files-found: warn` is a
+          # warning nobody reads on a green job.
+          include-hidden-files: true
