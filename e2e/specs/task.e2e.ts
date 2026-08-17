@@ -1514,4 +1514,25 @@ describe("extra named ports allocation", () => {
     const task: any = await taskById(id);
     expect(task.extra_named_ports).toEqual([]);
   });
+
+  // On-the-fly top-up: names configured AFTER a task exists reach it on
+  // its next spawn via task_ensure_extra_ports (the command every tab
+  // spawn calls). Asserted through the command + record because the env
+  // itself lives inside the PTY (no DOM) and PTY spawn is rAF-gated on
+  // occluded CI windows (see run.e2e.ts).
+  it("tops up an existing task with newly configured names on spawn", async () => {
+    const id = created[2]; // the extras-free task from the previous case
+    await setPorts(["LATE_PORT"]);
+    const fresh: any = await browser.execute(
+      (tid) => window.__termic!.invoke("task_ensure_extra_ports", { id: tid }),
+      id,
+    );
+    // The new name lands in the task's own buffer (base+1 for a
+    // single-repo task with no prior extras) and persists on the record.
+    expect(fresh.extra_named_ports).toEqual([{ name: "LATE_PORT", port: fresh.port + 1 }]);
+    await browser.execute(() => window.__termic!.useApp.getState().loadAll());
+    const stored: any = await taskById(id);
+    expect(stored.extra_named_ports).toEqual([{ name: "LATE_PORT", port: stored.port + 1 }]);
+    await setPorts([]);
+  });
 });

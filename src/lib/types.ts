@@ -231,9 +231,15 @@ export interface Task {
   sandbox_allowed_hosts?: string[];
   /** Multi-repo composition. Empty for single-repo tasks. */
   composition?: TaskMember[];
-  /** Extra named ports (GH #196), frozen at creation. Injected next to
-   *  TERMIC_PORT everywhere, and expanded in the preview URL. */
+  /** Extra named ports (GH #196), frozen at creation and topped up at
+   *  spawn time from the current config (buffer slots, oldest names
+   *  keep their ports). Injected next to TERMIC_PORT everywhere, and
+   *  expanded in the preview URL. */
   extra_named_ports?: NamedPort[];
+  /** Length of the task's port block, stored at allocation so a top-up
+   *  never grows the block into the neighbor task. 0/undefined on
+   *  records predating on-the-fly ports. */
+  port_block_len?: number;
   /** Pre-set launch command for `cli === "custom"` repo-root tasks.
    *  The default tab runs this through a login shell instead of an agent
    *  binary (e.g. `ssh box`, `npm run dev`). Null/undefined for every

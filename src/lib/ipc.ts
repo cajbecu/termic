@@ -448,6 +448,10 @@ export const taskRunScript= (id: string, which: "setup" | "run" = "run") =>
  *  event topic because Tauri rejects dots and other punctuation. */
 export const taskRunScriptStream = (id: string, kind: "setup" | "run", member?: string) =>
   invoke<void>("task_run_script_stream", { id, kind, member: member ?? null });
+/** GH #196 on-the-fly ports: freeze newly configured names into the task's
+ *  buffer and return the fresh record. Called right before spawning a tab. */
+export const taskEnsureExtraPorts = (id: string) =>
+  invoke<Task>("task_ensure_extra_ports", { id });
 export const taskStopScript = (id: string, kind: "setup" | "run", member?: string) =>
   invoke<void>("task_stop_script", { id, kind, member: member ?? null });
 

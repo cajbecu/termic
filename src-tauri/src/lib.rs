@@ -351,10 +351,20 @@ pub struct Task {
     #[serde(default)]
     pub composition: Vec<TaskMember>,
     /// Extra named ports (GH #196), frozen at creation from the
-    /// project's effective list (`.termic.yaml` union personal).
-    /// Injected wherever TERMIC_PORT is set; expanded in the preview
-    /// URL. Empty on every task created before this shipped.
+    /// project's effective list (`.termic.yaml` union personal) and
+    /// TOPPED UP at spawn time: names added to the config later are
+    /// frozen into this task's buffer slots on its next run / terminal
+    /// spawn (`top_up_extra_ports`). Once frozen a pair never moves;
+    /// names removed from the config keep injecting. Injected wherever
+    /// TERMIC_PORT is set; expanded in the preview URL.
     pub extra_named_ports: Vec<NamedPort>,
+    /// Length of this task's port block, stored at allocation. The
+    /// block must NOT grow when a top-up consumes buffer slots (the
+    /// next task may sit right after the end), so accounting reads
+    /// THIS, never the live extras count. 0 on records predating
+    /// on-the-fly ports — `task_block_len` falls back to the computed
+    /// shape there, and the first top-up stamps it.
+    pub port_block_len: u16,
     /// Pre-set launch command for `cli == "custom"` repo-root tasks.
     /// The default tab runs this through a login shell instead of an
     /// agent binary (e.g. `ssh box`, `npm run dev`, `python`). None for
@@ -992,6 +1002,12 @@ const PORT_BASE: u16 = 18100;
 const PORT_BLOCK_BUFFER: u16 = 5;
 
 fn task_block_len(task: &Task) -> u16 {
+    // Stored at allocation; the computed fallback covers records
+    // written before `port_block_len` existed (their extras count
+    // still equals the at-create shape until a top-up stamps it).
+    if task.port_block_len > 0 {
+        return task.port_block_len;
+    }
     1 + task.composition.len() as u16
         + task.extra_named_ports.len() as u16
         + PORT_BLOCK_BUFFER
@@ -1036,26 +1052,57 @@ fn rehome_ports_if_stolen(task: &mut Task, others: &[Task]) -> bool {
     let names: Vec<String> = task.extra_named_ports.iter().map(|np| np.name.clone()).collect();
     let member_count = task.composition.len() as u16;
     match allocate_task_ports(others, member_count, &names) {
-        Ok((base, extras)) => {
+        Ok((base, extras, block_len)) => {
             task.port = base;
             for (i, m) in task.composition.iter_mut().enumerate() {
                 m.port = base + 1 + i as u16;
             }
             task.extra_named_ports = extras;
+            task.port_block_len = block_len;
             true
         }
         Err(_) => false,
     }
 }
 
+/// GH #196 on-the-fly ports: freeze any effective-config name this
+/// task doesn't carry yet into its buffer slots, at spawn time. Rules
+/// confirmed with the maintainer spec: already-frozen pairs never
+/// move; names beyond the remaining buffer are skipped (the block is
+/// full — a NEW task picks them all up); names removed from the
+/// config keep their frozen pair. Concurrent spawns are benign: both
+/// compute the same missing set against the same config, so the pairs
+/// they persist are identical. Returns true when pairs were added
+/// (caller persists).
+fn top_up_extra_ports(task: &mut Task, proj: &Project) -> bool {
+    if task.port < PORT_BASE { return false; } // legacy record, no block
+    // Stamp the block length before consuming buffer: the computed
+    // fallback would otherwise grow with each added pair and creep
+    // into the neighbor task allocated right after this block.
+    if task.port_block_len == 0 {
+        task.port_block_len = task_block_len(task);
+    }
+    let members = task.composition.len() as u16;
+    let mut added = false;
+    for n in effective_extra_named_ports(proj) {
+        if task.extra_named_ports.iter().any(|np| np.name == n) { continue; }
+        let slot = 1 + members + task.extra_named_ports.len() as u16;
+        if slot >= task.port_block_len { break; } // buffer exhausted
+        task.extra_named_ports.push(NamedPort { name: n, port: task.port + slot });
+        added = true;
+    }
+    added
+}
+
 /// Allocate a new task's whole block: returns (base_port, frozen
-/// extra named ports). `member_count` members occupy base+1+i; the
-/// extras follow at base + 1 + member_count + j, in list order.
+/// extra named ports, block_len to stamp on the task). `member_count`
+/// members occupy base+1+i; the extras follow at
+/// base + 1 + member_count + j, in list order.
 fn allocate_task_ports(
     existing: &[Task],
     member_count: u16,
     extra_names: &[String],
-) -> Result<(u16, Vec<NamedPort>), String> {
+) -> Result<(u16, Vec<NamedPort>, u16), String> {
     let needed = 1 + member_count + extra_names.len() as u16 + PORT_BLOCK_BUFFER;
     let base = next_base_port(existing, needed)?;
     let extras = extra_names.iter().enumerate()
@@ -1064,7 +1111,7 @@ fn allocate_task_ports(
             port: base + 1 + member_count + j as u16,
         })
         .collect();
-    Ok((base, extras))
+    Ok((base, extras, needed))
 }
 
 /// Sidebar order: manual position first, creation time as the tiebreak.
@@ -3159,10 +3206,11 @@ fn task_open_repo(
     let member_count_hint = if proj.project_type == ProjectType::Multi {
         proj.members.len() as u16
     } else { 0 };
-    let port = next_base_port(
-        &load_tasks(),
-        1 + member_count_hint + extra_names.len() as u16 + PORT_BLOCK_BUFFER,
-    )?;
+    // Stamped as port_block_len below: the hint-based allocation is the
+    // recorded block even when members get skipped, so the unused tail
+    // just widens this task's buffer.
+    let port_block_len = 1 + member_count_hint + extra_names.len() as u16 + PORT_BLOCK_BUFFER;
+    let port = next_base_port(&load_tasks(), port_block_len)?;
 
     // Multi-repo project opened in REPO mode: drop a symlink for
     // each member into the host's working dir so the agent at the
@@ -3309,6 +3357,7 @@ fn task_open_repo(
         sandbox_allowed_hosts,
         composition,
         extra_named_ports,
+        port_block_len,
         custom_command,
         resume_override: None,
         persisted_tabs: Vec::new(),
@@ -3451,7 +3500,7 @@ fn task_import_worktree(
     // Parse `.termic.yaml` once for this creation (extras + sandbox below).
     let repo_cfg = repo_config_for(&proj);
     let extra_names = effective_extra_named_ports_from(&repo_cfg, &proj);
-    let (port, extra_named_ports) =
+    let (port, extra_named_ports, port_block_len) =
         allocate_task_ports(&existing_tasks, 0, &extra_names)?;
     let explicit_name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
     let derived = explicit_name.is_none();
@@ -3523,6 +3572,7 @@ fn task_import_worktree(
         sandbox_allowed_hosts,
         composition: Vec::new(),
         extra_named_ports,
+        port_block_len,
         custom_command: None,
         resume_override: None,
         persisted_tabs: Vec::new(),
@@ -3739,7 +3789,7 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
 
     // Allocate the task's port block (base + extras + buffer).
     let extra_names = effective_extra_named_ports_from(&repo_cfg, &proj);
-    let (port, extra_named_ports) =
+    let (port, extra_named_ports, port_block_len) =
         allocate_task_ports(&load_tasks(), 0, &extra_names)?;
 
     let cli = args.cli.unwrap_or_else(|| proj.default_cli.clone());
@@ -3817,6 +3867,7 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
         // the same Task + sandbox plumbing.
         composition: Vec::new(),
         extra_named_ports,
+        port_block_len,
         // Set only for `cli == "custom"` worktree tasks (quick "Custom
         // command" in worktree mode); None for agent / shell worktrees.
         custom_command,
@@ -4038,7 +4089,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
     // ports + buffer. Members get base+1+i via the counter below;
     // the extras land right after the members.
     let extra_names = effective_extra_named_ports(&host);
-    let (ws_port, extra_named_ports) =
+    let (ws_port, extra_named_ports, port_block_len) =
         allocate_task_ports(&load_tasks(), frozen.len() as u16, &extra_names)?;
     let mut next_member_port = ws_port + 1;
     for (mp, spec, dir_name) in frozen.into_iter() {
@@ -4203,6 +4254,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         sandbox_allowed_hosts,
         composition,
         extra_named_ports,
+        port_block_len,
         custom_command: None,
         resume_override: None,
         persisted_tabs: Vec::new(),
@@ -8658,6 +8710,24 @@ async fn task_spotlight_resync(id: String, app: AppHandle) -> Result<(), String>
 }
 
 
+/// GH #196 on-the-fly ports: top up a task's frozen extra named ports
+/// from the current effective config and return the fresh record. The
+/// frontend calls this right before spawning any tab so names added to
+/// the config after task creation reach existing tasks; the script
+/// runner path calls `top_up_extra_ports` directly.
+#[tauri::command]
+fn task_ensure_extra_ports(id: String) -> Result<Task, String> {
+    let mut list = load_tasks();
+    let idx = list.iter().position(|w| w.id == id).ok_or("no such task")?;
+    let Some(proj) = load_projects().into_iter().find(|p| p.id == list[idx].project_id) else {
+        return Ok(list[idx].clone()); // orphaned task: spawn with the frozen pairs
+    };
+    if top_up_extra_ports(&mut list[idx], &proj) {
+        save_task(&list[idx]).map_err(|e| e.to_string())?;
+    }
+    Ok(list[idx].clone())
+}
+
 /// Kick off either the project's setup or run script for a task with
 /// live stdout/stderr streaming. Emits:
 ///   script-output://<ws_id>:<kind>  { line: string }
@@ -8681,8 +8751,13 @@ fn task_run_script_stream(
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
-    let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no such task")?;
+    let mut w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no such task")?;
     let p = load_projects().into_iter().find(|p| p.id == w.project_id).ok_or("no proj")?;
+    // On-the-fly ports (GH #196): names configured after this task was
+    // created freeze into its buffer now, so this run sees them.
+    if top_up_extra_ports(&mut w, &p) {
+        let _ = save_task(&w);
+    }
     let member_dir = member.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
 
     // Resolve target: empty member = host, otherwise the named
@@ -11667,7 +11742,7 @@ pub fn run() {
             repo_config_load, repo_config_load_at, repo_config_save, repo_config_scaffold, repo_config_add_allowed_host, repo_config_add_allowed_path,
 
             task_reorder,
-            task_restore, task_delete, task_run_script, task_run_script_stream, task_stop_script, task_record_spawn, task_set_has_history, task_set_agent_session_id,
+            task_restore, task_delete, task_run_script, task_run_script_stream, task_ensure_extra_ports, task_stop_script, task_record_spawn, task_set_has_history, task_set_agent_session_id,
             task_set_tabs, task_set_tab_session_id, task_set_tab_previous_session_id,
             task_set_split_layout,
             task_set_right_tabs, task_set_right_tab_session_id,
@@ -14071,8 +14146,86 @@ mod tests {
     }
 
     #[test]
+    fn top_up_freezes_new_names_into_buffer_slots() {
+        // Task created with 1 extra (block stamped 1+0+1+5=7); config
+        // later grows by two names — they land in the buffer, existing
+        // pair untouched, block length unchanged.
+        let dir = tempdir().unwrap();
+        let cfg = crate::repo_config::RepoConfig {
+            extra_named_ports: vec!["API_PORT".into(), "DB_PORT".into(), "CACHE_PORT".into()],
+            ..Default::default()
+        };
+        crate::repo_config::save(dir.path(), &cfg).unwrap();
+        let proj = Project {
+            root_path: dir.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut task = stub_task(18100, 0, 0, false);
+        task.extra_named_ports = vec![NamedPort { name: "API_PORT".into(), port: 18101 }];
+        task.port_block_len = 7;
+        assert!(top_up_extra_ports(&mut task, &proj));
+        assert_eq!(task.extra_named_ports, vec![
+            NamedPort { name: "API_PORT".into(),   port: 18101 },
+            NamedPort { name: "DB_PORT".into(),    port: 18102 },
+            NamedPort { name: "CACHE_PORT".into(), port: 18103 },
+        ]);
+        assert_eq!(task_block_len(&task), 7, "top-up must not grow the block");
+    }
+
+    #[test]
+    fn top_up_skips_names_past_the_buffer() {
+        // Block 1+0+0+5=6: five slots. Config declares six names — the
+        // sixth is skipped, everything else freezes.
+        let dir = tempdir().unwrap();
+        let names: Vec<String> = (0..6).map(|i| format!("P{i}_PORT")).collect();
+        let cfg = crate::repo_config::RepoConfig {
+            extra_named_ports: names.clone(),
+            ..Default::default()
+        };
+        crate::repo_config::save(dir.path(), &cfg).unwrap();
+        let proj = Project {
+            root_path: dir.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut task = stub_task(18100, 0, 0, false);
+        task.port_block_len = 6;
+        assert!(top_up_extra_ports(&mut task, &proj));
+        assert_eq!(task.extra_named_ports.len(), 5);
+        assert_eq!(task.extra_named_ports[4],
+                   NamedPort { name: "P4_PORT".into(), port: 18105 });
+    }
+
+    #[test]
+    fn top_up_stamps_legacy_records_and_leaves_removed_names_alone() {
+        // Pre-field record (port_block_len 0) with a frozen pair whose
+        // name is gone from the config: the pair survives, the block
+        // stamps to the computed shape BEFORE new pairs are added, and
+        // the new name lands in the buffer.
+        let dir = tempdir().unwrap();
+        let cfg = crate::repo_config::RepoConfig {
+            extra_named_ports: vec!["NEW_PORT".into()],
+            ..Default::default()
+        };
+        crate::repo_config::save(dir.path(), &cfg).unwrap();
+        let proj = Project {
+            root_path: dir.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut task = stub_task(18100, 0, 0, false);
+        task.extra_named_ports = vec![NamedPort { name: "OLD_PORT".into(), port: 18101 }];
+        assert!(top_up_extra_ports(&mut task, &proj));
+        assert_eq!(task.port_block_len, 7, "stamped from the pre-top-up shape");
+        assert_eq!(task.extra_named_ports, vec![
+            NamedPort { name: "OLD_PORT".into(), port: 18101 },
+            NamedPort { name: "NEW_PORT".into(), port: 18102 },
+        ]);
+        // Idempotent: a second spawn adds nothing.
+        assert!(!top_up_extra_ports(&mut task, &proj));
+    }
+
+    #[test]
     fn allocate_assigns_consecutive_extras_after_members() {
-        let (base, extras) = allocate_task_ports(
+        let (base, extras, _) = allocate_task_ports(
             &[], 2, &["API_PORT".to_string(), "DB_PORT".to_string()],
         ).unwrap();
         assert_eq!(base, 18100);
