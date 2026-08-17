@@ -25,6 +25,7 @@ until `make e2e` is green and this file reflects it.
 |---|---|---|
 | ✅ App shell | Renders; `__termic` exposes real store state | `app.e2e.ts` |
 | ✅ Navigation | Dashboard ↔ History via real clicks | `app.e2e.ts` |
+| ✅ History scrolling | The archive pane fills its overlay instead of sizing to its content, so an archive taller than the window overflows INSIDE the scroller: the last row starts out of view and scrolling brings it in. Filtering down and back keeps the pane full-height | `app.e2e.ts` |
 | ✅ Create (wizard) | NewTaskDialog: name + shell CLI + Main-checkout → Create → task exists | `task.e2e.ts` |
 | ✅ Task spawn | Task created; agent PTY comes alive; PTY write round-trips; agent OSC title reaches the app | `task.e2e.ts` |
 | ✅ Deep links (GH #192) | A `termic://new?…` URL pre-fills the New Task dialog (name, prompt, task type) and **creates nothing** until the user presses Create; the prompt stays editable; a prompt at the cap is accepted and one past it is refused with a reason; an unregistered project, a missing project, an unknown action, an unknown task and a foreign scheme are each refused with a toast and no dialog; a confirmed link creates the task it described. `termic://open?…` selects an existing task by name or id with **no dialog** (navigation changes nothing to confirm) and closes a stale New Task dialog on its way through. Enters at `handleDeepLink` with the raw URL Rust queues, because WebDriver cannot ask macOS to open a URL scheme | `deep-link.e2e.ts` |

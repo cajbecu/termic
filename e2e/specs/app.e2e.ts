@@ -567,3 +567,151 @@ describe("windowless mode", () => {
     await snap("windowless-restored.png");
   });
 });
+
+// P1: the History view (the archive). Its list is the one place in the app
+// whose height is driven purely by how much the user has accumulated, so the
+// cases here are about it staying INSIDE the window: the pane must be bounded
+// no matter how many tasks are archived, and the overflow must be reachable by
+// scrolling. Regression guard for the archive rendering taller than the window
+// with no scrollbar (the root used `flex-1` inside MainArea's non-flex overlay,
+// where it is inert, so the root sized to its content and the inner scroller
+// never had anything to overflow).
+describe("history view", () => {
+  const created: string[] = [];
+
+  after(async () => {
+    // Hard-delete everything this block made: it archives by design, so leaving
+    // them behind would grow the archive for every later run of the profile.
+    for (const id of created) {
+      await browser.execute(async (i) => {
+        try { await window.__termic!.ipc.taskDelete(i); } catch { /* already gone */ }
+      }, id);
+    }
+    await browser.execute(() => window.__termic!.useApp.getState().loadAll());
+    await clickByText("Dashboard");
+  });
+
+  /** Open a task, archive it immediately, and remember it for teardown. */
+  async function archiveNew(name: string): Promise<void> {
+    const id = await openTask(name, false);
+    created.push(id);
+    await archiveTask(id);
+  }
+
+  const openHistory = async () => {
+    await clickByText("Dashboard");
+    await clickByText("History");
+    await waitVisible('[data-testid="history-list"]');
+  };
+
+  /** Geometry of the scroller + the overlay it must fit inside. */
+  const listBox = () =>
+    browser.execute(() => {
+      const list = document.querySelector('[data-testid="history-list"]') as HTMLElement;
+      const root = document.querySelector('[data-testid="history-root"]') as HTMLElement;
+      return {
+        clientHeight: list.clientHeight,
+        scrollHeight: list.scrollHeight,
+        scrollTop: list.scrollTop,
+        overflowY: getComputedStyle(list).overflowY,
+        bottom: Math.round(list.getBoundingClientRect().bottom),
+        rootHeight: Math.round(root.getBoundingClientRect().height),
+        parentHeight: Math.round((root.parentElement as HTMLElement).getBoundingClientRect().height),
+        rows: document.querySelectorAll("[data-history-row]").length,
+      };
+    });
+
+  it("fills its pane instead of sizing to the archive", async () => {
+    await archiveNew("history-fills-pane");
+    await openHistory();
+    const box = await listBox();
+    // The root taking the overlay's full height is the whole fix: sized to
+    // content it would be a few rows tall and the list could never scroll.
+    expect(box.rootHeight).toBe(box.parentHeight);
+    expect(box.overflowY).toBe("auto");
+    // And the scroller ends at or above the window's bottom edge - never past
+    // it, which is what put rows out of reach.
+    const winH = await browser.execute(() => window.innerHeight);
+    expect(box.bottom).toBeLessThanOrEqual(winH);
+  });
+
+  it("scrolls to the last task when the archive is taller than the window", async () => {
+    await openHistory();
+    // Fill past the fold. Measure one row rather than guessing a row height, so
+    // the case survives a density change in the list; group headers only add
+    // height, so overshooting is safe and undershooting is impossible.
+    const first = await listBox();
+    const rowH = await browser.execute(() => {
+      const r = document.querySelector("[data-history-row]") as HTMLElement;
+      return r.getBoundingClientRect().height;
+    });
+    const need = Math.ceil(first.clientHeight / rowH) + 3 - first.rows;
+    for (let i = 0; i < need; i++) await archiveNew(`history-scroll-${i}`);
+    await openHistory();
+
+    const box = await listBox();
+    expect(box.rows).toBeGreaterThan(first.rows);
+    // Content genuinely overflows, and the overflow lives in the SCROLLER (not
+    // spilling out of the window).
+    expect(box.scrollHeight).toBeGreaterThan(box.clientHeight);
+    const winH = await browser.execute(() => window.innerHeight);
+    expect(box.bottom).toBeLessThanOrEqual(winH);
+
+    // The last row starts out of view and comes into view after scrolling: the
+    // user-facing outcome, not the CSS.
+    const lastVisible = () =>
+      browser.execute(() => {
+        const list = document.querySelector('[data-testid="history-list"]') as HTMLElement;
+        const rows = [...document.querySelectorAll("[data-history-row]")] as HTMLElement[];
+        const last = rows[rows.length - 1].getBoundingClientRect();
+        const view = list.getBoundingClientRect();
+        return last.bottom <= view.bottom + 1 && last.top >= view.top - 1;
+      });
+    expect(await lastVisible()).toBe(false);
+    await browser.execute(() => {
+      const list = document.querySelector('[data-testid="history-list"]') as HTMLElement;
+      list.scrollTop = list.scrollHeight;
+    });
+    await browser.waitUntil(async () => (await listBox()).scrollTop > 0, {
+      timeout: 5_000, timeoutMsg: "history list did not scroll",
+    });
+    expect(await lastVisible()).toBe(true);
+    await snap("history-scrolled.png");
+  });
+
+  it("filters the archive down and back without breaking the scroller", async () => {
+    await openHistory();
+    const all = await listBox();
+    await browser.execute(() => {
+      const input = document.querySelector(
+        'input[placeholder="Filter tasks..."]',
+      ) as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, "value",
+      )!.set!;
+      setter.call(input, "history-fills-pane");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await browser.waitUntil(async () => (await listBox()).rows === 1, {
+      timeout: 5_000, timeoutMsg: "filter did not narrow the archive",
+    });
+    // Filtered short, the pane still owns its full height - the bug's other
+    // half was the container collapsing onto its content.
+    const narrowed = await listBox();
+    expect(narrowed.rootHeight).toBe(narrowed.parentHeight);
+
+    await browser.execute(() => {
+      const input = document.querySelector(
+        'input[placeholder="Filter tasks..."]',
+      ) as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, "value",
+      )!.set!;
+      setter.call(input, "");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await browser.waitUntil(async () => (await listBox()).rows === all.rows, {
+      timeout: 5_000, timeoutMsg: "clearing the filter did not restore the archive",
+    });
+  });
+});
