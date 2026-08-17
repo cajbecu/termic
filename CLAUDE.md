@@ -101,6 +101,7 @@ No em dashes (—) anywhere in user-visible text: dialogs, tooltips, buttons, `C
 - Force subpixel font smoothing (colored fringing on dark backgrounds).
 - Hard-code hex colors outside `@theme` in `index.css`.
 - Hide panes with `visibility: hidden` (must be `display: none`). xterm's renderer only pauses on zero geometry; visibility-hidden terminals keep running WebGL draws for background TUI repaints and pin the GPU. See docs/performance.md bear trap 2.
+- Reduce the WebGL `onContextLoss` handler to a bare `dispose()`. A lost context must be recovered (dispose + re-attach a fresh addon), or every terminal goes black after sleep/idle and only a tab restart brings it back. The loss event is also not guaranteed, hence the focus/visibilitychange probe. See docs/gotchas.md and docs/performance.md bear trap 3.
 - Write an UNCHANGED value through a store setter on a PTY-driven path. Zustand copies the whole ~233-key state and every mounted task's selectors re-run; `setTabLiveTitle` missing the bail its siblings had cost a third of idle CPU. See docs/performance.md bear trap 8.
 - Add `thread::sleep` poll loops in Rust. PTY flusher/waiter block on a condvar; sleep-polling burned ~1,950 wakeups/s and kept the CPU out of deep sleep. See docs/performance.md bear trap 9.
 
