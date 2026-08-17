@@ -541,8 +541,8 @@ export function RepositorySection({ projectId }: { projectId: string }) {
                 One env var name per line (e.g. <Token>API_PORT</Token>). Each task gets
                 its own unique port for every name, exposed to scripts, agents and the
                 preview URL under exactly that name, alongside <Token>$TERMIC_PORT</Token>.
-                Existing tasks pick up newly added names on their next run or terminal
-                (up to 5 extra per task); ports already assigned never change.
+                Existing tasks pick up newly added names on their next run or terminal;
+                ports already assigned never change.
               </div>
               <textarea
                 value={portsText}

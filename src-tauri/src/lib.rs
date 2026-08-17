@@ -1013,10 +1013,27 @@ fn task_block_len(task: &Task) -> u16 {
         + PORT_BLOCK_BUFFER
 }
 
+/// Every port interval a task occupies: its contiguous block plus any
+/// overflow pairs frozen OUTSIDE it (GH #196 strays, allocated one at
+/// a time once the buffer ran out). Legacy zero-port records occupy
+/// nothing.
+fn task_port_intervals(t: &Task) -> Vec<(u16, u16)> {
+    let mut v = Vec::new();
+    if t.port < PORT_BASE { return v; }
+    let end = t.port.saturating_add(task_block_len(t));
+    v.push((t.port, end));
+    for np in &t.extra_named_ports {
+        if np.port >= PORT_BASE && (np.port < t.port || np.port >= end) {
+            v.push((np.port, np.port.saturating_add(1)));
+        }
+    }
+    v
+}
+
 fn next_base_port(existing: &[Task], needed: u16) -> Result<u16, String> {
     let mut blocks: Vec<(u16, u16)> = existing.iter()
-        .filter(|t| !t.archived && t.port >= PORT_BASE)
-        .map(|t| (t.port, t.port.saturating_add(task_block_len(t))))
+        .filter(|t| !t.archived)
+        .flat_map(task_port_intervals)
         .collect();
     blocks.sort_unstable();
     let mut candidate = PORT_BASE;
@@ -1040,15 +1057,17 @@ fn next_base_port(existing: &[Task], needed: u16) -> Result<u16, String> {
 /// same listening ports. Returns true when the ports moved.
 fn rehome_ports_if_stolen(task: &mut Task, others: &[Task]) -> bool {
     if task.port < PORT_BASE { return false; } // legacy record, nothing to rehome
-    let start = task.port;
-    let end = start.saturating_add(task_block_len(task));
-    let stolen = others.iter().any(|t| {
-        if t.archived || t.id == task.id || t.port < PORT_BASE { return false; }
-        let os = t.port;
-        let oe = os.saturating_add(task_block_len(t));
-        os < end && start < oe
-    });
+    // Compare full occupancy on both sides (block + overflow strays):
+    // an archived task's stray was just as invisible to allocation as
+    // its block, so either can have been claimed meanwhile.
+    let own = task_port_intervals(task);
+    let stolen = others.iter()
+        .filter(|t| !t.archived && t.id != task.id)
+        .flat_map(task_port_intervals)
+        .any(|(os, oe)| own.iter().any(|(s, e)| os < *e && *s < oe));
     if !stolen { return false; }
+    // The fresh allocation is sized from the CURRENT extras count, so a
+    // re-home also re-compacts any strays back into one contiguous block.
     let names: Vec<String> = task.extra_named_ports.iter().map(|np| np.name.clone()).collect();
     let member_count = task.composition.len() as u16;
     match allocate_task_ports(others, member_count, &names) {
@@ -1066,15 +1085,17 @@ fn rehome_ports_if_stolen(task: &mut Task, others: &[Task]) -> bool {
 }
 
 /// GH #196 on-the-fly ports: freeze any effective-config name this
-/// task doesn't carry yet into its buffer slots, at spawn time. Rules
-/// confirmed with the maintainer spec: already-frozen pairs never
-/// move; names beyond the remaining buffer are skipped (the block is
-/// full — a NEW task picks them all up); names removed from the
-/// config keep their frozen pair. Concurrent spawns are benign: both
-/// compute the same missing set against the same config, so the pairs
-/// they persist are identical. Returns true when pairs were added
-/// (caller persists).
-fn top_up_extra_ports(task: &mut Task, proj: &Project) -> bool {
+/// task doesn't carry yet, at spawn time. Already-frozen pairs never
+/// move; names removed from the config keep their frozen pair. New
+/// names land in the block's buffer slots first; once the buffer is
+/// exhausted they overflow to the next free SINGLE port anywhere
+/// (`task_port_intervals` counts those strays as occupied for every
+/// later allocation). `others` is the full task list for that overflow
+/// scan — a stale copy of self inside it is fine, it is filtered by
+/// id. Concurrent spawns are benign: both compute the same missing set
+/// against the same config and occupancy, so the pairs they persist
+/// are identical. Returns true when pairs were added (caller persists).
+fn top_up_extra_ports(task: &mut Task, proj: &Project, others: &[Task]) -> bool {
     if task.port < PORT_BASE { return false; } // legacy record, no block
     // Stamp the block length before consuming buffer: the computed
     // fallback would otherwise grow with each added pair and creep
@@ -1087,8 +1108,24 @@ fn top_up_extra_ports(task: &mut Task, proj: &Project) -> bool {
     for n in effective_extra_named_ports(proj) {
         if task.extra_named_ports.iter().any(|np| np.name == n) { continue; }
         let slot = 1 + members + task.extra_named_ports.len() as u16;
-        if slot >= task.port_block_len { break; } // buffer exhausted
-        task.extra_named_ports.push(NamedPort { name: n, port: task.port + slot });
+        let port = if slot < task.port_block_len {
+            task.port + slot
+        } else {
+            // Buffer exhausted: first-fit a single stray port. Occupancy
+            // must reflect self's IN-PROGRESS state (pairs added earlier
+            // in this loop included), so swap the stale copy for a
+            // snapshot of the live one.
+            let mut occ: Vec<Task> = others.iter()
+                .filter(|t| t.id != task.id)
+                .cloned()
+                .collect();
+            occ.push(task.clone());
+            match next_base_port(&occ, 1) {
+                Ok(p) => p,
+                Err(_) => break, // port space exhausted; keep what we have
+            }
+        };
+        task.extra_named_ports.push(NamedPort { name: n, port });
         added = true;
     }
     added
@@ -8722,7 +8759,8 @@ fn task_ensure_extra_ports(id: String) -> Result<Task, String> {
     let Some(proj) = load_projects().into_iter().find(|p| p.id == list[idx].project_id) else {
         return Ok(list[idx].clone()); // orphaned task: spawn with the frozen pairs
     };
-    if top_up_extra_ports(&mut list[idx], &proj) {
+    let snapshot = list.clone();
+    if top_up_extra_ports(&mut list[idx], &proj, &snapshot) {
         save_task(&list[idx]).map_err(|e| e.to_string())?;
     }
     Ok(list[idx].clone())
@@ -8751,11 +8789,13 @@ fn task_run_script_stream(
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
-    let mut w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no such task")?;
+    let all_tasks = load_tasks();
+    let mut w = all_tasks.iter().find(|w| w.id == id).cloned().ok_or("no such task")?;
     let p = load_projects().into_iter().find(|p| p.id == w.project_id).ok_or("no proj")?;
     // On-the-fly ports (GH #196): names configured after this task was
-    // created freeze into its buffer now, so this run sees them.
-    if top_up_extra_ports(&mut w, &p) {
+    // created freeze into its buffer (or overflow to a stray port) now,
+    // so this run sees them.
+    if top_up_extra_ports(&mut w, &p, &all_tasks) {
         let _ = save_task(&w);
     }
     let member_dir = member.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
@@ -14163,7 +14203,7 @@ mod tests {
         let mut task = stub_task(18100, 0, 0, false);
         task.extra_named_ports = vec![NamedPort { name: "API_PORT".into(), port: 18101 }];
         task.port_block_len = 7;
-        assert!(top_up_extra_ports(&mut task, &proj));
+        assert!(top_up_extra_ports(&mut task, &proj, &[]));
         assert_eq!(task.extra_named_ports, vec![
             NamedPort { name: "API_PORT".into(),   port: 18101 },
             NamedPort { name: "DB_PORT".into(),    port: 18102 },
@@ -14173,9 +14213,10 @@ mod tests {
     }
 
     #[test]
-    fn top_up_skips_names_past_the_buffer() {
-        // Block 1+0+0+5=6: five slots. Config declares six names — the
-        // sixth is skipped, everything else freezes.
+    fn top_up_overflows_past_the_buffer_into_stray_ports() {
+        // Block 1+0+0+5=6: five buffer slots. Config declares six names:
+        // five fill the buffer, the sixth first-fits the next free
+        // single port PAST the block.
         let dir = tempdir().unwrap();
         let names: Vec<String> = (0..6).map(|i| format!("P{i}_PORT")).collect();
         let cfg = crate::repo_config::RepoConfig {
@@ -14188,11 +14229,73 @@ mod tests {
             ..Default::default()
         };
         let mut task = stub_task(18100, 0, 0, false);
+        task.id = "a".into();
         task.port_block_len = 6;
-        assert!(top_up_extra_ports(&mut task, &proj));
-        assert_eq!(task.extra_named_ports.len(), 5);
+        assert!(top_up_extra_ports(&mut task, &proj, &[]));
+        assert_eq!(task.extra_named_ports.len(), 6);
         assert_eq!(task.extra_named_ports[4],
                    NamedPort { name: "P4_PORT".into(), port: 18105 });
+        // Stray lands right after the task's own block.
+        assert_eq!(task.extra_named_ports[5],
+                   NamedPort { name: "P5_PORT".into(), port: 18106 });
+    }
+
+    #[test]
+    fn top_up_strays_avoid_other_tasks_blocks() {
+        // Same overflow, but a neighbor occupies [18106, 18112): the
+        // stray must jump past it.
+        let dir = tempdir().unwrap();
+        let names: Vec<String> = (0..6).map(|i| format!("P{i}_PORT")).collect();
+        let cfg = crate::repo_config::RepoConfig {
+            extra_named_ports: names,
+            ..Default::default()
+        };
+        crate::repo_config::save(dir.path(), &cfg).unwrap();
+        let proj = Project {
+            root_path: dir.path().to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut task = stub_task(18100, 0, 0, false);
+        task.id = "a".into();
+        task.port_block_len = 6;
+        let mut neighbor = stub_task(18106, 0, 0, false);
+        neighbor.id = "b".into();
+        assert!(top_up_extra_ports(&mut task, &proj, &[neighbor]));
+        assert_eq!(task.extra_named_ports[5].port, 18112);
+    }
+
+    #[test]
+    fn allocation_treats_strays_as_occupied() {
+        // A live task with a stray at 18106 (outside its 6-port block):
+        // the next block must clear both the block and the stray.
+        let mut a = stub_task(18100, 0, 0, false);
+        a.id = "a".into();
+        a.port_block_len = 6;
+        a.extra_named_ports = vec![NamedPort { name: "STRAY_PORT".into(), port: 18106 }];
+        assert_eq!(next_base_port(&[a], 6).unwrap(), 18107);
+    }
+
+    #[test]
+    fn restore_rehomes_when_a_stray_was_stolen() {
+        // The archived task's STRAY (not its block) got claimed by a
+        // task created meanwhile: restore must still re-home, and the
+        // fresh allocation re-compacts the stray into the new block.
+        let mut archived = stub_task(18100, 0, 0, true);
+        archived.id = "a".into();
+        archived.port_block_len = 6;
+        archived.extra_named_ports = vec![
+            NamedPort { name: "STRAY_PORT".into(), port: 18106 },
+        ];
+        let mut thief = stub_task(18106, 0, 0, false);
+        thief.id = "b".into();
+        let list = vec![archived.clone(), thief];
+        let mut restoring = archived;
+        assert!(rehome_ports_if_stolen(&mut restoring, &list));
+        // Thief occupies [18106, 18112); new block (1+0+1+5=7) lands after.
+        assert_eq!(restoring.port, 18112);
+        assert_eq!(restoring.extra_named_ports,
+                   vec![NamedPort { name: "STRAY_PORT".into(), port: 18113 }]);
+        assert_eq!(restoring.port_block_len, 7);
     }
 
     #[test]
@@ -14213,14 +14316,14 @@ mod tests {
         };
         let mut task = stub_task(18100, 0, 0, false);
         task.extra_named_ports = vec![NamedPort { name: "OLD_PORT".into(), port: 18101 }];
-        assert!(top_up_extra_ports(&mut task, &proj));
+        assert!(top_up_extra_ports(&mut task, &proj, &[]));
         assert_eq!(task.port_block_len, 7, "stamped from the pre-top-up shape");
         assert_eq!(task.extra_named_ports, vec![
             NamedPort { name: "OLD_PORT".into(), port: 18101 },
             NamedPort { name: "NEW_PORT".into(), port: 18102 },
         ]);
         // Idempotent: a second spawn adds nothing.
-        assert!(!top_up_extra_ports(&mut task, &proj));
+        assert!(!top_up_extra_ports(&mut task, &proj, &[]));
     }
 
     #[test]
