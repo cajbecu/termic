@@ -43,6 +43,8 @@ A metric earns a threshold after its real spread is known, not before. The
 | `startup.bootToFirstPaintMs` | Process spawn to first painted frame, via the Rust `BOOT` instant. What a user waits through. Includes Tauri/WKWebView fixed cost. |
 | `memory.baseline.*` | App RSS, WebKit helper RSS, and their total, 5s after the shell appears. |
 | `memory.growth.slopeMiBPerCycle` | **The row to watch.** Least-squares slope of RSS against cycle number, over the churn samples with the first 5 dropped as warm-up. Read it WITH the fit below. |
+| `memory.growth.slopeAppMiBPerCycle` | The same slope for the Tauri/Rust process alone. |
+| `memory.growth.slopeHelpersMiBPerCycle` | The same slope for the WebKit helpers (mostly WebContent). Together with the row above it names which side of the process boundary is growing, which a total actively hides when one side grows while the other is reclaimed. |
 | `memory.growth.trendFit` | r² of that slope. Near 0 means the slope is a line through scatter whatever its size, so a big slope with a poor fit is not a leak. |
 | `memory.endToEndDeltaMiB` | Settled RSS after the cycles minus settled RSS before. Diagnostic: a large negative here with a flat slope means the baseline was caught mid startup-decay, not that memory was reclaimed. |
 

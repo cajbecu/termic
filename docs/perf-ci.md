@@ -324,7 +324,15 @@ the change: **+2.39 MiB/cycle at r² 0.90** and **+2.47 at r² 0.91** over 25
 cycles, end-to-end +87.6 and +88.2 MiB. That reproduces, fits well, and is the
 first thing this suite has ever said that is worth chasing: either the
 Dashboard/History view swap retains something per cycle, or the debug build
-does. Nobody has looked yet.
+does.
+
+Splitting that slope by process answered the first question about it. Over 25
+cycles: **Tauri/Rust 0.00 MiB/cycle at r² 0.00, WebKit helpers 2.41 at r²
+0.87.** All of it is on the webview side, and on a helpers baseline of ~173 MiB
+that is a third of the webview's footprint added by 25 view swaps. So it is a
+JS/DOM retention in the Dashboard/History swap, not the Rust side, and not an
+artefact of a debug binary's debuginfo (which sits in the app process). Nobody
+has found the retaining reference yet.
 
 - Cold start to first paint. Needs a first-paint marker; none exists.
 - Main-thread jank as frame-gap counts, bucketed over 50 ms and 250 ms.

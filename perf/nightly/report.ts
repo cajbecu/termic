@@ -22,7 +22,12 @@ export interface PerfRow {
   /** Stable key, e.g. "startup.bootToFirstPaintMs". Used to line up series. */
   metric: string;
   value: number | null;
-  unit: "ms" | "MiB" | "count" | "text";
+  /** `MiB/cycle` and `r2` exist for the memory trend: a slope is not a size,
+   *  and a goodness-of-fit is neither. Keep this a closed union so a typo in a
+   *  unit is a build error rather than a column nobody can line up across a
+   *  series. NOTE it is only checked by `tsc -p e2e/tsconfig.json`, which the
+   *  root `tsc -b` does not reach. */
+  unit: "ms" | "MiB" | "MiB/cycle" | "r2" | "count" | "text";
   /** Free text shown next to the number: what it is, or why it is null. */
   note?: string;
   /** Individual samples, when the value is a median. Kept so a weird median

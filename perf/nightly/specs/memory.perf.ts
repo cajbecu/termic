@@ -69,7 +69,13 @@ describe("memory", () => {
     // creation, which would spawn git worktrees and measure disk more than
     // memory. Dashboard/History is cheap, real, and exercises the view swap
     // every session performs constantly.
+    // Sampled per side, not just as a total: WHICH process grows halves the
+    // search before anyone reads code. The Tauri process is Rust (task records,
+    // PTY buffers, IPC); WebContent is the webview (React trees, JS heap, DOM).
+    // A total that grows says only "something does".
     const perCycle: number[] = [];
+    const perCycleApp: number[] = [];
+    const perCycleHelpers: number[] = [];
     for (let i = 0; i < CYCLES; i++) {
       await clickByText("Dashboard");
       await waitForText("HOME FOR YOUR CLI CODING AGENTS");
@@ -77,6 +83,8 @@ describe("memory", () => {
       await waitForTextGone("HOME FOR YOUR CLI CODING AGENTS");
       const s = sampleRss(pid);
       if (s.totalMiB !== null) perCycle.push(s.totalMiB);
+      if (s.appMiB !== null) perCycleApp.push(s.appMiB);
+      if (s.helpersMiB !== null) perCycleHelpers.push(s.helpersMiB);
     }
 
     // Settle again, the same way, so baseline and after are measured on
@@ -128,6 +136,25 @@ describe("memory", () => {
       unit: "r2",
       note: "how much of the RSS variance the slope explains; near 0 means the slope is noise whatever its size",
     });
+
+    // Where the slope lives. Recorded unconditionally, including when the total
+    // is flat: "neither side moved" is the reading that makes a flat total
+    // trustworthy, and two rows that disagree in sign (one growing while the
+    // other is reclaimed) is a thing a total actively hides.
+    for (const [name, samples, what] of [
+      ["memory.growth.slopeAppMiBPerCycle", perCycleApp, "Tauri/Rust process"],
+      ["memory.growth.slopeHelpersMiBPerCycle", perCycleHelpers, "WebKit helpers, mostly WebContent"],
+    ] as const) {
+      const m = samples.slice(WARMUP);
+      const st = trend(m);
+      record({
+        metric: name,
+        value: m.length >= 2 ? Math.round(st.slope * 100) / 100 : null,
+        unit: "MiB/cycle",
+        note: `${what}; r2 ${st.r2.toFixed(2)} over ${st.n} cycles. Splits the total slope by process, so a growing side names itself`,
+        samples: m,
+      });
+    }
 
     // Kept, demoted: still the honest answer to "did it end heavier than it
     // started", which is worth having next to the slope, and it is the row that
