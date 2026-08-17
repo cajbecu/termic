@@ -11,11 +11,14 @@ import {
   Search, Plus, FileText, Pencil, GitBranch, Archive, Zap, ShieldCheck,
   PanelLeft, PanelRight, PanelBottom, Palette, Keyboard, Settings as SettingsIcon,
   FolderCog, RefreshCw, ScrollText, Bug, SlidersHorizontal, Bot, BookText,
-  Check, ChevronLeft, ListTodo, Bell, SquareTerminal, type LucideIcon,
+  Check, ChevronLeft, ListTodo, Bell, SquareTerminal, FolderPlus, History, Square,
+  Play, Swords, Megaphone, Columns2, Rows2, Clock, type LucideIcon,
 } from "lucide-react";
 import { useUI } from "@/store/ui";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useApp } from "@/store/app";
+import { jumpToNextWaiting } from "@/lib/waitingAgents";
+import { readRecents, recentIds, recordRecent } from "@/lib/paletteRecent";
 import { usePrefs, type BuiltinThemeMode, type ThemeMode } from "@/store/prefs";
 import { useUpdate } from "@/store/update";
 import { fuzzyMatch, Highlighted } from "@/lib/fuzzy";
@@ -33,6 +36,11 @@ const ISSUE_URL = "https://github.com/simion/termic/issues/new";
 const SECTION_ORDER = ["Task", "Agent", "View", "Application", "Settings"] as const;
 type Section = (typeof SECTION_ORDER)[number];
 
+/** Pseudo-section pinned above the rest, holding what you last ran (expiry and
+ *  ordering live in lib/paletteRecent). Not in SECTION_ORDER: it is built from
+ *  the other sections' commands rather than being a home for any of them. */
+const RECENT_SECTION = "Recent";
+
 interface Cmd {
   id: string;
   section: Section;
@@ -47,6 +55,13 @@ interface Cmd {
   /** Extra search terms (not shown) so e.g. "palette" finds "Command…". */
   keywords?: string;
   destructive?: boolean;
+  /** Keep this command OUT of the Recent section. The top Recent row is the
+   *  pre-selected one, so Enter on a freshly-opened palette runs it — which is
+   *  fine for "Open settings" and emphatically not for anything that ends an
+   *  agent or a task. Archiving twice in a row is not a workflow worth
+   *  optimising; doing it by accident is a real risk, more so once the user has
+   *  ticked "Don't ask again" on the archive confirm. */
+  noRecent?: boolean;
   run: () => void;
 }
 
@@ -161,6 +176,11 @@ export function CommandPalette() {
       icon: Plus, shortcutId: "new-task-quick", keywords: "create worktree project",
       run: act(() => useUI.getState().openProjectPicker()),
     });
+    cmds.push({
+      id: "new-project", section: "Task", label: "Add project…",
+      icon: FolderPlus, keywords: "repository repo clone discover add new",
+      run: act(() => useUI.getState().openNewProject()),
+    });
     if (task) {
       cmds.push({
         id: "file-picker", section: "Task", label: "File picker",
@@ -185,17 +205,71 @@ export function CommandPalette() {
         });
       }
       cmds.push({
+        id: "resume-override", section: "Task", label: "Resume options…",
+        icon: History, keywords: "session continue previous conversation args",
+        run: act(() => useUI.getState().openResumeOverride(task.id)),
+      });
+      cmds.push({
+        // Ends every PTY in the task but keeps the task itself (GH #119).
+        // Also the only way to release a mounted task's terminals, which is
+        // what the idle-cost work made concrete.
+        id: "stop-task", section: "Task", label: `Stop "${task.name}"`,
+        suffix: "Ends its agents, keeps the task",
+        icon: Square, keywords: "kill terminate close ptys unmount free memory",
+        noRecent: true,
+        run: act(() => useApp.getState().stopTask(task.id)),
+      });
+      cmds.push({
         // Not styled destructive — confirmAndArchive normally shows a confirm
         // modal (with the delete-branch checkbox), so the red isn't needed.
         // Once the user has ticked "Don't ask again" there, this entry archives
         // on Enter with no prompt; Settings › Tasks is the way back.
         id: "archive-task", section: "Task", label: `Archive "${task.name}"`,
         icon: Archive, keywords: "delete remove close worktree",
+        noRecent: true,
         run: act(() => { void confirmAndArchive(task); }),
+      });
+    }
+    if (proj) {
+      cmds.push({
+        id: "run-commands", section: "Task", label: "Run commands…",
+        suffix: proj.name, icon: Play, keywords: "script dev server build custom",
+        run: act(() => useUI.getState().openRunCommands(proj.id)),
       });
     }
 
     // ── Agent ──────────────────────────────────────────────────────────
+    cmds.push({
+      id: "prompt-palette", section: "Agent", label: "Prompt library…",
+      icon: BookText, shortcutId: "prompt-palette", keywords: "prompts snippets send template",
+      run: act(() => useUI.getState().openPromptPalette()),
+    });
+    cmds.push({
+      // Store-driven (lib/waitingAgents), shared with the top-bar jump pill —
+      // so it does the same thing from here as from the pill.
+      id: "jump-next-waiting", section: "Agent", label: "Jump to next waiting agent",
+      icon: Bell, shortcutId: "jump-next-waiting", keywords: "attention blocked done next cycle",
+      run: act(() => { jumpToNextWaiting(); }),
+    });
+    if (proj) {
+      cmds.push({
+        id: "race", section: "Agent", label: "Agent Race…",
+        suffix: proj.name, icon: Swords, keywords: "compare parallel multiple contest winner",
+        run: act(() => useUI.getState().openRace(proj.id)),
+      });
+      cmds.push({
+        id: "broadcast-project", section: "Agent", label: "Broadcast to project…",
+        suffix: proj.name, icon: Megaphone, keywords: "send all tasks message every agent",
+        run: act(() => useUI.getState().openProjectBroadcast(proj.id)),
+      });
+    }
+    if (task) {
+      cmds.push({
+        id: "broadcast", section: "Agent", label: "Broadcast to agents…",
+        icon: Megaphone, shortcutId: "broadcast", keywords: "send message all tabs",
+        run: act(() => useUI.getState().openBroadcast(task.id)),
+      });
+    }
     if (task) {
       const enforced = isSandboxEnforced(effectiveSandboxMode(task));
       cmds.push({
@@ -235,6 +309,21 @@ export function CommandPalette() {
         id: "toggle-terminal", section: "View", label: "Toggle terminal panel",
         icon: PanelBottom, shortcutId: "toggle-terminal", keywords: "bottom split shell console hide show",
         run: act(() => useApp.getState().toggleBottomTerminal(task.id)),
+      });
+      // splitPane targets the store's active pane, not DOM focus, so it means
+      // the same thing from here as from the chord. Its focus-dependent
+      // siblings (new-tab, close-tab, clear-terminal) are deliberately NOT
+      // here: each reads document.activeElement to decide WHICH pane it acts
+      // on, and from the palette that is the palette's own input.
+      cmds.push({
+        id: "split-right", section: "View", label: "Split pane right",
+        icon: Columns2, shortcutId: "split-pane-right", keywords: "pane vertical divider new",
+        run: act(() => { useApp.getState().splitPane(task.id, "v"); }),
+      });
+      cmds.push({
+        id: "split-down", section: "View", label: "Split pane down",
+        icon: Rows2, shortcutId: "split-pane-below", keywords: "pane horizontal divider new",
+        run: act(() => { useApp.getState().splitPane(task.id, "h"); }),
       });
     }
     cmds.push({
@@ -313,6 +402,17 @@ export function CommandPalette() {
     return cmds;
   }, [view, task, proj, themeMode, themeEntries]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Recents, re-read on every open so an hour spent with the palette closed
+  // expires them (the list is only ever consulted at build time). Empty query
+  // only: once you are searching, you want the best match, and a pinned
+  // section would push it down and duplicate rows.
+  const recents = useMemo(
+    () => (open && view === "root" && !query
+      ? recentIds(readRecents(), new Set(commands.map(c => c.id)))
+      : []),
+    [open, view, query, commands],
+  );
+
   // Filter + score against the query, preserving section order. Each command
   // matches on "<label> <keywords>"; only label-range hits are highlighted.
   const filtered = useMemo(() => {
@@ -333,16 +433,25 @@ export function CommandPalette() {
       arr.push(s);
       bySection.set(s.cmd.section, arr);
     }
-    const groups: Array<{ section: Section; items: Scored[] }> = [];
+    const groups: Array<{ section: string; items: Scored[] }> = [];
+    // Recent goes first and its members are LIFTED out of their home sections
+    // rather than duplicated — the same command twice in one list makes the
+    // arrow keys feel broken.
+    const recentSet = new Set(recents);
+    if (recentSet.size > 0) {
+      const byId = new Map(out.map(s => [s.cmd.id, s]));
+      const items = recents.map(id => byId.get(id)).filter(Boolean) as Scored[];
+      if (items.length > 0) groups.push({ section: RECENT_SECTION, items });
+    }
     for (const section of SECTION_ORDER) {
-      const items = bySection.get(section);
-      if (!items || items.length === 0) continue;
+      const items = (bySection.get(section) ?? []).filter(s => !recentSet.has(s.cmd.id));
+      if (items.length === 0) continue;
       if (query) items.sort((a, b) => b.score - a.score);
       groups.push({ section, items });
     }
     const rows: Scored[] = groups.flatMap(g => g.items);
     return { groups, rows };
-  }, [commands, query]);
+  }, [commands, query, recents]);
 
   const rows = filtered.rows;
 
@@ -373,7 +482,8 @@ export function CommandPalette() {
       setActiveIdx(i => Math.max(i - 1, 0));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      rows[activeIdx]?.cmd.run();
+      const c = rows[activeIdx]?.cmd;
+      if (c) runCmd(c);
     } else if (e.key === "Escape") {
       e.preventDefault();
       if (view === "theme") cancelThemePreview(); else close();
@@ -385,6 +495,15 @@ export function CommandPalette() {
 
   // Resolve a command's shortcut glyphs (if it has a binding).
   const glyphsFor = (id?: ShortcutId) => (id && binds[id] ? bindingGlyphs(binds[id]) : null);
+
+  /** Every path that runs a command goes through here, so recording can't drift
+   *  from invocation. Theme submenu entries are not recorded: they are a live
+   *  preview you arrow through, and remembering the last one you happened to
+   *  land on is noise, not intent. */
+  const runCmd = (cmd: Cmd) => {
+    if (view === "root" && !cmd.noRecent) recordRecent(cmd.id);
+    cmd.run();
+  };
 
   let rowIdx = -1; // running index across sections for keyboard nav mapping
 
@@ -462,9 +581,20 @@ export function CommandPalette() {
               <div className="px-3 py-3 text-[13px] text-[var(--color-fg-faint)]">No matching commands</div>
             )}
             {filtered.groups.map(group => (
-              <div key={group.section}>
-                <div className="px-3 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wider text-[var(--color-fg-faint)]">
+              <div
+                key={group.section}
+                // Hairline under Recent so it reads as pinned above the real
+                // list rather than as just another section.
+                className={group.section === RECENT_SECTION
+                  ? "mb-1 border-b border-[var(--color-border-soft)] pb-1"
+                  : undefined}
+              >
+                <div className="flex items-center gap-1.5 px-3 pb-1 pt-2 text-[11px] font-medium uppercase tracking-wider text-[var(--color-fg-faint)]">
+                  {group.section === RECENT_SECTION && <Clock className="h-3 w-3" />}
                   {group.section}
+                  {group.section === RECENT_SECTION && (
+                    <span className="normal-case tracking-normal opacity-70">· what you just ran</span>
+                  )}
                 </div>
                 {group.items.map(({ cmd, labelMatches }) => {
                   rowIdx += 1;
@@ -475,7 +605,7 @@ export function CommandPalette() {
                     <button
                       key={cmd.id}
                       data-row={i}
-                      onClick={() => cmd.run()}
+                      onClick={() => runCmd(cmd)}
                       onMouseMove={() => setActiveIdx(i)}
                       // Subtle neutral highlight (Conductor-style) — a faint
                       // fg-tinted overlay, theme-aware, no accent/border.
