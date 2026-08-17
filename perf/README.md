@@ -48,6 +48,14 @@ A metric earns a threshold after its real spread is known, not before. The
 | `memory.growth.trendFit` | r² of that slope. Near 0 means the slope is a line through scatter whatever its size, so a big slope with a poor fit is not a leak. |
 | `memory.endToEndDeltaMiB` | Settled RSS after the cycles minus settled RSS before. Diagnostic: a large negative here with a flat slope means the baseline was caught mid startup-decay, not that memory was reclaimed. |
 
+**A rising slope is not a leak.** It says RSS is rising, and RSS rises for two
+different reasons: objects nobody released, and allocation churn whose pages the
+allocator never returns. Only the first is a leak, and only the first has a
+retaining reference to find. Confirm which before acting: park a `WeakRef` on
+the suspect payload, exercise the path, force pressure, and deref. The worked
+example, including why "RSS after GC pressure" is confounded by the probe's own
+allocation, is in [docs/perf-ci.md](../docs/perf-ci.md).
+
 **Why a slope and not a difference.** Growth used to be `after - baseline`,
 which only means anything if both ends were caught on a flat stretch. On the
 first successful CI run they were not: the settle check accepted a baseline 8

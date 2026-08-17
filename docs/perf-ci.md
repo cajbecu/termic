@@ -328,11 +328,41 @@ does.
 
 Splitting that slope by process answered the first question about it. Over 25
 cycles: **Tauri/Rust 0.00 MiB/cycle at r² 0.00, WebKit helpers 2.41 at r²
-0.87.** All of it is on the webview side, and on a helpers baseline of ~173 MiB
-that is a third of the webview's footprint added by 25 view swaps. So it is a
-JS/DOM retention in the Dashboard/History swap, not the Rust side, and not an
-artefact of a debug binary's debuginfo (which sits in the app process). Nobody
-has found the retaining reference yet.
+0.87.** All of it is on the webview side, which also rules out the debug
+binary's debuginfo, since that is mapped into the app process, the flat one.
+
+**It is not a retention leak, and RSS alone could never have told us.** What it
+took, in order:
+
+1. **Isolate the step.** Churning the overlay mount/unmount with no HistoryView
+   in it: **+0.05 MiB/cycle**, i.e. nothing. Calling `loadAll()` on its own with
+   no view churn at all: **+1.08 MiB/call at r² 0.99**. The React trees are
+   free; the refetch is not. `HistoryView` fires one `loadAll` per mount
+   (`History.tsx`), which is why the view swap looked responsible.
+2. **Ask the heap, not the OS.** Forcing a collection means allocating, which
+   raises the high-water mark itself, so "RSS after GC pressure" is confounded
+   by the probe. A `WeakRef` to the arrays from an early `loadAll`, checked
+   after 60 more calls plus pressure, came back **collected** on all three
+   (tasks, projects, agents) while a control WeakRef to the live array was still
+   reachable. Nothing in app code holds the payloads.
+3. **Rule out the transport.** 60 × `home_dir`, the smallest command in the app:
+   **0.004 MiB/call**. 60 × a bare `browser.execute`: **0.005**. So neither
+   Tauri's invoke path in general nor the test harness is the source; it is
+   specific to the calls that carry real payloads.
+
+So the growth is allocation churn whose pages WebKit never returns to the OS,
+roughly proportional to payload size, not objects we forgot to release. That is
+a different problem with a different fix: there is no retaining reference to
+find, and the lever is how OFTEN the app refetches, not what it holds.
+
+It still matters. `loadAll` runs on every window focus and on every History
+mount, and ~0.4-1 MiB a call that never comes back is a footprint that only
+grows across a long session.
+
+**The lesson for this suite: a positive slope is necessary but not sufficient.**
+It says "RSS is rising", never "we are leaking". Confirm with a reachability
+probe before anyone goes looking for a retaining reference, or a day disappears
+into code that is not holding anything.
 
 - Cold start to first paint. Needs a first-paint marker; none exists.
 - Main-thread jank as frame-gap counts, bucketed over 50 ms and 250 ms.
