@@ -279,6 +279,17 @@ CI runs show the distribution.
 Same shape as Orca's `terminal-perf.yml`. Cron plus `workflow_dispatch`
 on `macos-14`, JSON artifact on `always()`, traces on `failure()`.
 
+**A nightly nobody watches fails silently.** Every scheduled run from the
+day it landed (5 for 5) died before running one spec: the step built an
+argv array for the optional `--mochaOpts.grep` and expanded it as
+`"${args[@]}"` under `set -u`, which on the macOS runner's bash 3.2 is an
+UNSET expansion when the array is empty. The manual path, which is the
+only one anybody ever ran, passes a grep and so always had a non-empty
+array. Two things to take from it: the failure looked like a red nightly
+nobody had a reason to open, and the metric it was supposed to report
+(`bootToFirstPaintMs`) has no history for those five days. If a nightly's
+failure is not routed anywhere, budget the attention to read it.
+
 - Cold start to first paint. Needs a first-paint marker; none exists.
 - Main-thread jank as frame-gap counts, bucketed over 50 ms and 250 ms.
 - Absolute RSS at steady state.

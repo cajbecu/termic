@@ -75,11 +75,16 @@ jobs:
           TERMIC_PERF_GREP: ${{ inputs.grep }}
         run: |
           set -euo pipefail
-          args=()
+          # Two branches rather than building an argv array. macOS runners ship
+          # bash 3.2, where `"${arr[@]}"` on an EMPTY array is an UNSET
+          # expansion, so `set -u` killed the step before it ran a single spec.
+          # Every scheduled run failed that way from the day this landed, while
+          # a manual run WITH a grep passed, which is why it went unnoticed.
           if [ -n "${TERMIC_PERF_GREP:-}" ]; then
-            args+=(--mochaOpts.grep "$TERMIC_PERF_GREP")
+            npm run test:perf -- --mochaOpts.grep "$TERMIC_PERF_GREP"
+          else
+            npm run test:perf
           fi
-          npm run test:perf -- "${args[@]}"
 
       - name: Upload perf report
         # always(): a partial report from a run that lost one spec is still a
