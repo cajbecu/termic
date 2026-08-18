@@ -44,6 +44,10 @@ concurrency:
 jobs:
   perf:
     name: startup + memory (macos-14)
+
+    # Cron is upstream-only, so forks stop getting nightly failure mail.
+    # Manual dispatch stays open everywhere.
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'simion/termic'
     runs-on: macos-14
     timeout-minutes: 45
     steps:
