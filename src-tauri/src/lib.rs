@@ -1080,7 +1080,7 @@ fn block_len(member_count: u16, extra_count: u16) -> u16 {
 /// snapshot can pick the same block or stray. Hold this from the
 /// `load_tasks()` that feeds the scan until `save_task` has persisted
 /// the claimed ports.
-static PORT_ALLOC_LOCK: Mutex<()> = Mutex::new(());
+static PORT_ALLOC_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 fn task_block_len(task: &Task) -> u16 {
     // Stored at allocation; the computed fallback covers records
@@ -3927,8 +3927,8 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
     }
 
     // Allocate the task's port block (base + extras + buffer).
-    // Held until save_task below persists the claimed block.
-    let _port_guard = PORT_ALLOC_LOCK.lock();
+    // Released right after save_task below persists the claimed block.
+    let port_guard = PORT_ALLOC_LOCK.lock();
     let extra_names = effective_extra_named_ports_from(&repo_cfg, &proj);
     let (port, extra_named_ports, port_block_len) =
         allocate_task_ports(&load_tasks(), 0, &extra_names)?;
@@ -4022,6 +4022,7 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
         archived_at: None,
     };
     save_task(&task).map_err(|e| e.to_string())?;
+    drop(port_guard);
 
     // Setup no longer runs here. It used to fire in a background thread and
     // stream to the New Task dialog via setup-output/setup-done, which the
@@ -4236,7 +4237,12 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
     // member-creation loop (the record persists only after it), so a
     // multi create briefly serializes other allocations; creates are
     // rare enough that this beats persisting a half-built record.
-    let _port_guard = PORT_ALLOC_LOCK.lock();
+    // Reentrancy: safe to hold across the loop because members are
+    // created inline (git worktree / symlink), never via another
+    // allocation path, and PORT_ALLOC_LOCK's other takers are all
+    // frontend-invoked commands, not callees of this fn. Released
+    // right after save_task below persists the claimed block.
+    let port_guard = PORT_ALLOC_LOCK.lock();
     let extra_names = effective_extra_named_ports(&host);
     let (ws_port, extra_named_ports, port_block_len) =
         allocate_task_ports(&load_tasks(), frozen.len() as u16, &extra_names)?;
@@ -4415,6 +4421,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         archived_at: None,
     };
     save_task(&task).map_err(|e| e.to_string())?;
+    drop(port_guard);
 
     // Streamed setup: host's project.setup_script (cwd=wrapper)
     // first, then each member's setup_script (cwd=member.path) in
@@ -5863,9 +5870,16 @@ fn task_restore_sync(app: AppHandle, id: String) -> Result<Task, String> {
     if list[idx].is_main_checkout {
         // Fresh occupancy under the port lock (not the earlier `list`
         // load): a create finishing in between could have claimed this
-        // task's block without appearing in the stale snapshot.
+        // task's block without appearing in the stale snapshot. Adopt
+        // the fresh on-disk record too, not just the occupancy: saving
+        // the fn-start copy would silently drop pairs a concurrent
+        // top-up persisted meanwhile. Everything restore does before
+        // this point only READS the record, so nothing is lost.
         let _port_guard = PORT_ALLOC_LOCK.lock();
         let snapshot = load_tasks();
+        if let Some(fresh) = snapshot.iter().find(|t| t.id == id) {
+            list[idx] = fresh.clone();
+        }
         rehome_ports_if_stolen(&mut list[idx], &snapshot);
         list[idx].archived = false;
         list[idx].archived_at = None;
@@ -6049,11 +6063,20 @@ fn task_restore_sync(app: AppHandle, id: String) -> Result<Task, String> {
     // Fresh occupancy under the port lock, not the fn-start `list` load:
     // the worktree recreation above takes long enough for a concurrent
     // create to have claimed this block without appearing in that snapshot.
-    let _port_guard = PORT_ALLOC_LOCK.lock();
+    // Adopt the fresh on-disk record too, not just the occupancy: saving
+    // the fn-start copy would silently drop pairs a concurrent top-up
+    // persisted meanwhile. Everything restore does before this point only
+    // READS the record, so nothing is lost. Released right after the
+    // save_task below persists the (possibly re-homed) ports.
+    let port_guard = PORT_ALLOC_LOCK.lock();
     let snapshot = load_tasks();
+    if let Some(fresh) = snapshot.iter().find(|t| t.id == id) {
+        list[idx] = fresh.clone();
+    }
     rehome_ports_if_stolen(&mut list[idx], &snapshot);
     list[idx].archived = false;
     save_task(&list[idx]).map_err(|e| e.to_string())?;
+    drop(port_guard);
     let task = list[idx].clone();
 
     // Run setup script(s) fire-and-forget, same as creation.
