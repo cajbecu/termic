@@ -145,13 +145,22 @@ export function CommandPalette() {
     } else setActiveIdx(0);
   }, [view]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /** Wrap an action so it closes the palette, then runs on the NEXT frame.
+  /** Wrap an action so it closes the palette, then runs once the click that
+   *  triggered it has fully settled.
+   *
    *  The defer matters when the action opens another dialog (Archive → confirm,
-   *  Sandbox, New task): the palette is non-modal, so the click that
-   *  triggered the row would otherwise reach the freshly-mounted dialog's
-   *  dismissable layer and dismiss it instantly. One frame lets the click
-   *  fully settle first. Harmless for synchronous actions. */
-  const act = (fn: () => void) => () => { close(); requestAnimationFrame(fn); };
+   *  Sandbox, New task): the palette is non-modal, so the click that triggered
+   *  the row would otherwise reach the freshly-mounted dialog's dismissable
+   *  layer and dismiss it instantly. Harmless for synchronous actions.
+   *
+   *  A TIMER, not `requestAnimationFrame`: rAF is frozen while the window is
+   *  occluded (another Space, another window on top), so a deferred effect
+   *  would sit queued until the window is visible again and then fire at an
+   *  arbitrary later moment — opening a dialog over whatever the user is doing
+   *  by then. A macrotask runs after event dispatch completes, which is all
+   *  this needs, and it runs whether the window is on screen or not. Same
+   *  reason `mouseDrag` in the e2e helpers yields with a timer. */
+  const act = (fn: () => void) => () => { close(); setTimeout(fn, 0); };
 
   // Build the full command list. Task/agent rows only exist when a
   // task is active. Everything reads live store state at build time.
