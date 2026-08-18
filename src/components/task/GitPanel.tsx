@@ -154,6 +154,17 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
   const [stagedCollapsed, setStagedCollapsed] = useState<boolean>(() => readBool(LS_SCOL));
   const [view, setView] = useState<GitView>(() => readGitView());
   const changeView = (v: GitView) => { setView(v); persist(LS_VIEWTAB, v); };
+  // The blame popup's "Show in History": RightPanel has already put this tab on
+  // screen, and the Graph is the only view that can show a commit.
+  const commitReveal = useUI(s => s.commitReveal);
+  const seenRevealAt = useRef(0);
+  useEffect(() => {
+    if (!commitReveal || commitReveal.taskId !== task.id) return;
+    if (commitReveal.at === seenRevealAt.current) return;
+    seenRevealAt.current = commitReveal.at;
+    changeView("history");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [commitReveal, task.id]);
   // History's scope lives here, not in HistoryPanel: the picker rides this
   // component's sub-tab row, so this is where the value it edits has to sit.
   // Reset per repo, since refs belong to one.

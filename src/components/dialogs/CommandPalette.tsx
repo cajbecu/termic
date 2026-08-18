@@ -12,7 +12,7 @@ import {
   PanelLeft, PanelRight, PanelBottom, Palette, Keyboard, Settings as SettingsIcon,
   FolderCog, RefreshCw, ScrollText, Bug, SlidersHorizontal, Bot, BookText,
   Check, ChevronLeft, ListTodo, Bell, SquareTerminal, FolderPlus, History, Square,
-  Play, Swords, Megaphone, Columns2, Rows2, Clock, type LucideIcon,
+  Play, Swords, Megaphone, Columns2, Rows2, Clock, UserPen, type LucideIcon,
 } from "lucide-react";
 import { useUI } from "@/store/ui";
 import { copyToClipboard } from "@/lib/clipboard";
@@ -86,6 +86,7 @@ export function CommandPalette() {
   const themeMode = usePrefs(s => s.themeMode);
   const customThemes = usePrefs(s => s.customThemes);
   const binds = usePrefs(s => s.shortcuts);
+  const inlineBlame = usePrefs(s => s.inlineBlame);
 
   // Built-ins first, then the custom theme files — the submenu's order.
   const themeEntries = useMemo<{ id: ThemeMode; label: string }[]>(
@@ -327,6 +328,12 @@ export function CommandPalette() {
       });
     }
     cmds.push({
+      id: "toggle-inline-blame", section: "View", label: "Toggle inline git blame",
+      suffix: inlineBlame ? "On" : "Off", icon: UserPen,
+      keywords: "annotation decoration author commit who changed line history",
+      run: act(() => usePrefs.getState().toggleInlineBlame()),
+    });
+    cmds.push({
       id: "change-theme", section: "View", label: "Change theme…",
       suffix: themeLabel(themeMode), icon: Palette, keywords: "appearance color dark light",
       run: () => {
@@ -400,7 +407,7 @@ export function CommandPalette() {
     }
 
     return cmds;
-  }, [view, task, proj, themeMode, themeEntries]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [view, task, proj, themeMode, themeEntries, inlineBlame]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Recents, re-read on every open so an hour spent with the palette closed
   // expires them (the list is only ever consulted at build time). Empty query
@@ -605,6 +612,9 @@ export function CommandPalette() {
                     <button
                       key={cmd.id}
                       data-row={i}
+                      // Stable handle for the e2e suite: row order shifts with
+                      // the query, the command's id does not.
+                      data-cmd-id={cmd.id}
                       onClick={() => runCmd(cmd)}
                       onMouseMove={() => setActiveIdx(i)}
                       // Subtle neutral highlight (Conductor-style) — a faint

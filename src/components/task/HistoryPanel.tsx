@@ -20,10 +20,12 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GitBranch, Tag, Loader2, Copy, Check, ChevronDown } from "lucide-react";
 import type { GitCommit, GitFile, GitRef, Task } from "@/lib/types";
-import { taskGitLog, taskGitRefs, taskGitCommitFiles } from "@/lib/ipc";
+import { taskGitLog, taskGitRefs, taskGitCommitFiles, taskGitCommitOffset } from "@/lib/ipc";
 import { layoutGraph, graphWidth, type GraphRow } from "@/lib/gitGraph";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useApp } from "@/store/app";
+import { useUI } from "@/store/ui";
+import { splitTrailers } from "@/lib/commitMessage";
 import { cn } from "@/lib/utils";
 import * as RT from "@radix-ui/react-tooltip";
 import { Tip } from "@/components/ui/Tooltip";
@@ -34,6 +36,10 @@ import { fileIconUrl } from "@/lib/explorer/iconResolver";
 /** Commits per page. VS Code's graph loads 50 and pages on scroll; a page here
  *  is a bit bigger because the rows are one line and the fetch is one process. */
 const PAGE_SIZE = 100;
+
+/** Rows kept above a revealed commit, so it lands in context rather than pinned
+ *  to the very top of the list. */
+const REVEAL_CONTEXT = 10;
 
 /** Geometry of the lane gutter, in px. Rows are one line tall so a busy day of
  *  agent commits fits on screen without scrolling. */
@@ -92,30 +98,17 @@ const laneColor = (i: number) => LANE_COLORS[i % LANE_COLORS.length];
 
 /** Same status → glyph/colour mapping the staging list uses, so a file reads the
  *  same whether it is pending or historical. */
+// Re-exported: it used to live here, and the History panel is still its most
+// visible consumer. The implementation moved to lib/ so inline blame can share
+// it without importing this component.
+import { commitAge } from "@/lib/commitAge";
+export { commitAge };
+
 const SC: Record<string, string> = { M: "M", A: "+", D: "D", R: "R", C: "C" };
 const COL: Record<string, string> = {
   M: "var(--color-accent)", A: "var(--color-ok)", D: "var(--color-err)",
   R: "var(--color-accent)", C: "var(--color-accent)",
 };
-
-/** "now" / "14m" / "3h" / "6d" / "8 Mar" — terse, because it sits at the right
- *  edge of a narrow row. Anything older than a year carries the year. */
-export function commitAge(unixSeconds: number, now = Date.now()): string {
-  const secs = Math.floor(now / 1000 - unixSeconds);
-  if (!Number.isFinite(secs)) return "";
-  if (secs < 60) return "now";
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d`;
-  const d = new Date(unixSeconds * 1000);
-  const sameYear = d.getFullYear() === new Date(now).getFullYear();
-  return d.toLocaleDateString(undefined, sameYear
-    ? { day: "numeric", month: "short" }
-    : { day: "numeric", month: "short", year: "numeric" });
-}
 
 /** Split git's `%D` decorations into what a chip should say.
  *  "HEAD -> main" → the branch, flagged as head; "tag: v1" → a tag. */
@@ -149,27 +142,11 @@ const CARD_DELAY_MS = 1500;
 /** Grace after a card closes during which the next opens instantly. */
 const CARD_SKIP_MS = 900;
 
-/** Split a commit message body into its trailers and the prose above them.
- *
- *  Only `Co-authored-by:` is pulled out by name (it is the one every agent
- *  writes, and the one worth a face in the card); the rest of the trailer
- *  block is left in the prose, because a `Refs #12` line is part of what the
- *  author wrote and dropping it would hide it.
- *
- *  Case-insensitive: git's own trailer matching is, and agents disagree about
- *  the capital A. */
-export function splitTrailers(body: string): { prose: string; coAuthors: string[] } {
-  const coAuthors: string[] = [];
-  const kept: string[] = [];
-  for (const line of (body || "").split("\n")) {
-    const m = /^\s*co-authored-by:\s*(.+?)\s*$/i.exec(line);
-    if (!m) { kept.push(line); continue; }
-    // "Name <email>" → "Name". A bare email keeps its angle brackets off.
-    const name = m[1].replace(/\s*<[^>]*>\s*$/, "").trim();
-    if (name) coAuthors.push(name);
-  }
-  return { prose: kept.join("\n").trim(), coAuthors };
-}
+// splitTrailers moved to lib/commitMessage.ts (shared with the editor's blame
+// popup) and is re-exported here, where it used to live and where the History
+// panel's own tests still import it from.
+export { splitTrailers } from "@/lib/commitMessage";
+
 
 export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirProp, scope, search = "" }: {
   task: Task;
@@ -236,6 +213,8 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
   const [err, setErr] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [paging, setPaging] = useState(false);
+  /** The scrolling list, so a revealed commit can be brought into view. */
+  const listRef = useRef<HTMLDivElement>(null);
   // How many rows are on screen, for the refresh below. A ref, not state: the
   // refresh effect must READ it without re-firing every time a page lands.
   const loadedRef = useRef(PAGE_SIZE);
@@ -293,6 +272,60 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refsKey is pickedRefs
   }, [task.id, repoDir, allBranches, refsKey, firstParent, grep, commits.length]);
 
+  // "Show this commit in History", from the editor's blame popup.
+  //
+  // If the commit is already on screen this is just a select + scroll. If it is
+  // not, we ask git WHERE it is (`task_git_commit_offset`) and fetch the one
+  // page around it. The earlier version paged forward until the sha turned up,
+  // which works on a young repo and is hopeless on a monorepo: a two-year-old
+  // commit is tens of thousands of rows down, and no page budget reaches it.
+  const commitReveal = useUI(s => s.commitReveal);
+  const revealSha = commitReveal && commitReveal.taskId === task.id ? commitReveal.sha : null;
+  const revealAt = commitReveal?.at ?? 0;
+  /** The request we have already jumped for, so a jump happens once. */
+  const jumpedForRef = useRef(0);
+  useEffect(() => {
+    if (!revealSha || loading) return;
+    if (commits.some(c => c.sha === revealSha)) {
+      setSelected(revealSha);
+      // Honoured: drop the request so it cannot be re-applied later. Left
+      // standing it is a standing order, re-pinning the right panel on every
+      // task switch and re-selecting this commit in whatever history is on
+      // screen.
+      useUI.getState().clearCommitReveal();
+      // The row renders selected on this pass, so the scroll waits a frame.
+      requestAnimationFrame(() => {
+        listRef.current
+          ?.querySelector(`[data-sha="${revealSha}"]`)
+          ?.scrollIntoView({ block: "center" });
+      });
+      return;
+    }
+    if (jumpedForRef.current === revealAt || paging) return;
+    jumpedForRef.current = revealAt;
+    setPaging(true);
+    taskGitCommitOffset(task.id, repoDir, revealSha)
+      .then(offset => {
+        const skip = Math.max(0, offset - REVEAL_CONTEXT);
+        return taskGitLog(task.id, repoDir, skip, PAGE_SIZE, allBranches, pickedRefs, firstParent, grep)
+          .then(page => {
+            // A jump REPLACES the window rather than appending: the rows above
+            // belong to a different part of the history and stitching them
+            // together would draw a graph with a hole in it.
+            setCommits(page.commits);
+            setHasMore(page.has_more);
+          });
+      })
+      .catch(() => {
+        // Not reachable from HEAD (another branch), or git said no. Say so once
+        // and drop the request rather than leaving it to fire elsewhere.
+        useUI.getState().pushToast("That commit is not in this branch's history", "info");
+        useUI.getState().clearCommitReveal();
+      })
+      .finally(() => setPaging(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealSha, revealAt, commits, loading, paging]);
+
   const rows = useMemo(() => layoutGraph(commits), [commits]);
   const lanes = Math.min(graphWidth(rows), MAX_LANES);
   const gutter = Math.max(lanes, 1) * LANE_W + 6;
@@ -349,7 +382,7 @@ export function HistoryPanel({ task, reloadToken, onOpenDiff, repoDir: repoDirPr
           cursor has to be able to enter it. That is also why it sits flush
           against the row (`sideOffset={0}`) with no gap to cross. */}
       <RT.Provider delayDuration={CARD_DELAY_MS} skipDelayDuration={CARD_SKIP_MS}>
-      <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+      <div ref={listRef} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
         {err && <Empty tone="err">{err}</Empty>}
         {!err && loading && commits.length === 0 && (
           <div className="flex items-center gap-2 px-3 py-3 text-[12px] text-[var(--color-fg-faint)]">

@@ -677,7 +677,12 @@ fn check_tasks_root(root: &Path, repo: &Path) -> Result<(), String> {
 /// "not tracked".
 fn git_tracks_path(repo: &Path, path: &Path) -> bool {
     let arg = path.to_string_lossy().into_owned();
-    git(&["ls-files", "--", &arg], repo).map(|o| !o.trim().is_empty()).unwrap_or(false)
+    // `--no-optional-locks`: this runs on the blame path (a background read on a
+    // cursor move) as well as on task creation, and neither should be able to
+    // hold `index.lock` against the user's own git.
+    git(&["--no-optional-locks", "ls-files", "--", &arg], repo)
+        .map(|o| !o.trim().is_empty())
+        .unwrap_or(false)
 }
 
 /// Does this tasks path name a fixed place on disk (`/…`, `~`, `~/…`), as
@@ -6750,6 +6755,15 @@ pub struct GitLogPage {
     pub upstream: String,
 }
 
+/// %H sha, %h short, %P parents, %an author, %ae email, %at date, %D refs,
+/// %s subject, %b body. RS-terminated so a record is unambiguous, which is what
+/// lets the body carry newlines and still be one field.
+///
+/// Shared by the history page and by `task_git_commit_meta`'s single-commit
+/// read, so the blame popup and the History row cannot describe one commit
+/// differently.
+const GIT_LOG_FORMAT: &str = "--pretty=format:%H\u{1f}%h\u{1f}%P\u{1f}%an\u{1f}%ae\u{1f}%at\u{1f}%D\u{1f}%s\u{1f}%b\u{1e}";
+
 /// Parse `git log`'s US/RS-delimited output into commits. Split out from the
 /// command so it can be tested without a repo.
 fn parse_git_log(out: &str, unpushed: &std::collections::HashSet<String>) -> Vec<GitCommit> {
@@ -6912,10 +6926,7 @@ fn git_log_page(
             .unwrap_or_default()
     };
 
-    // %H sha, %h short, %P parents, %an author, %ae email, %at date,
-    // %D refs, %s subject, %b body. RS-terminated so a record is unambiguous,
-    // which is what lets the body carry newlines and still be one field.
-    const FORMAT: &str = "--pretty=format:%H\u{1f}%h\u{1f}%P\u{1f}%an\u{1f}%ae\u{1f}%at\u{1f}%D\u{1f}%s\u{1f}%b\u{1e}";
+    const FORMAT: &str = GIT_LOG_FORMAT;
     // One extra row tells us whether a next page exists without a second
     // walk; it is dropped before returning.
     let max = (limit + 1).to_string();
@@ -6999,6 +7010,260 @@ async fn task_git_log(
             grep.as_deref().unwrap_or(""),
             &refs.unwrap_or_default(),
         ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// One commit referenced by a blame result, deduped: a file whose 15k lines
+/// come from 169 commits ships 169 of these, not 15k.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct BlameCommit {
+    pub sha: String,
+    /// Author name as recorded on the commit. `.mailmap` is applied by git
+    /// (blame honours it), so this is the canonical name, not the raw one.
+    pub author: String,
+    pub author_email: String,
+    /// Author time, unix seconds. Formatted on the frontend so the relative
+    /// age stays live without re-blaming.
+    pub author_time: i64,
+    /// Commit subject (first line). NOT the body: the annotation is one line
+    /// of dimmed text, and the body would have to be truncated anyway.
+    pub summary: String,
+    /// The all-zero sha git uses for lines that are not committed yet. Split
+    /// out so the frontend does not have to know that convention.
+    pub uncommitted: bool,
+}
+
+/// Whole-file blame, shaped for a per-line lookup on the frontend.
+///
+/// The wire format is deliberately NOT one record per line. `--line-porcelain`
+/// on this repo's own `lib.rs` (15,742 lines) is 7 MB, and `--porcelain` is
+/// still 1.6 MB because it echoes the file content back. Deduping to a commit
+/// table plus a `u32` index per line puts the same information in ~63 KB, and
+/// that matters because this crosses the IPC boundary into a WKWebView.
+#[derive(Clone, Debug, Serialize)]
+pub struct BlameFile {
+    pub commits: Vec<BlameCommit>,
+    /// `lines[n]` is the index into `commits` for 1-based line `n + 1`.
+    /// `u32::MAX` means git attributed no commit to that line, which should
+    /// not happen but is cheaper to tolerate than to trust.
+    pub lines: Vec<u32>,
+    /// HEAD at blame time, so the caller can tell a stale cache entry from a
+    /// fresh one without re-running blame.
+    pub head: String,
+    /// The file was too long to blame (see `BLAME_MAX_LINES`) and `commits` /
+    /// `lines` are empty. A distinct signal from "no blame data", so the UI
+    /// can stay silent instead of looking broken.
+    pub skipped: bool,
+}
+
+/// Blame is skipped above this. It deliberately mirrors `task_file_read`'s own
+/// 2 MB text cap rather than inventing a second policy: a file the editor
+/// refuses to open has no buffer to annotate, and a file it will open is worth
+/// blaming (`lib.rs`, 15,742 lines, is ~200 ms with `--incremental`). Checked
+/// with one `metadata` call, so the guard itself costs nothing.
+const BLAME_MAX_BYTES: u64 = 2_000_000;
+
+/// Absurd-input backstop for the line index. Nothing legitimate reaches it
+/// (2 MB of one-byte lines is a million), it just stops a malformed or hostile
+/// blame header from asking for an arbitrary allocation.
+const BLAME_MAX_LINES: usize = 4_000_000;
+
+/// Parse `git blame --incremental` into the deduped shape above.
+///
+/// `--incremental` is the cheapest of the three machine formats because it
+/// emits no file content at all, and it repeats a commit's header block only
+/// on that commit's FIRST group. Groups arrive commit-major, not line-major,
+/// hence the index write per group rather than a straight push.
+///
+/// Format, per group: a `<sha> <orig-line> <result-line> <num-lines>` header,
+/// then `key value` lines (only for a commit not yet seen), then `filename`.
+fn parse_git_blame_incremental(out: &str) -> (Vec<BlameCommit>, Vec<u32>) {
+    use std::collections::HashMap;
+    let mut commits: Vec<BlameCommit> = Vec::new();
+    let mut index: HashMap<String, u32> = HashMap::new();
+    // Length comes from git's own line numbers rather than from a separate
+    // read of the file: counting newlines ourselves would mean reading every
+    // byte a second time, and a file rewritten between the two reads would
+    // give an index that disagrees with the blame.
+    let mut lines: Vec<u32> = Vec::new();
+    // The group being read: which commit, and which result lines it covers.
+    let mut cur: Option<usize> = None;
+
+    for raw in out.lines() {
+        // A group header is the only line that starts with a 40-hex sha
+        // followed by three numbers. Header keys never look like that.
+        let mut parts = raw.split(' ');
+        let first = parts.next().unwrap_or("");
+        let is_sha = first.len() == 40 && first.bytes().all(|b| b.is_ascii_hexdigit());
+        if is_sha {
+            let nums: Vec<usize> = parts.filter_map(|p| p.parse().ok()).collect();
+            if nums.len() < 3 {
+                continue;
+            }
+            let (result_line, count) = (nums[1], nums[2]);
+            let idx = *index.entry(first.to_string()).or_insert_with(|| {
+                commits.push(BlameCommit {
+                    sha: first.to_string(),
+                    author: String::new(),
+                    author_email: String::new(),
+                    author_time: 0,
+                    summary: String::new(),
+                    uncommitted: first.bytes().all(|b| b == b'0'),
+                });
+                (commits.len() - 1) as u32
+            });
+            // `result_line` is 1-based, and groups arrive commit-major, so a
+            // later group can name an earlier line: grow to fit, never append.
+            let end = result_line.saturating_add(count);
+            if result_line >= 1 && end <= BLAME_MAX_LINES {
+                if end - 1 > lines.len() {
+                    lines.resize(end - 1, u32::MAX);
+                }
+                for n in result_line..end {
+                    lines[n - 1] = idx;
+                }
+            }
+            cur = Some(idx as usize);
+            continue;
+        }
+        let Some(ci) = cur else { continue };
+        let Some((key, val)) = raw.split_once(' ') else { continue };
+        let c = &mut commits[ci];
+        match key {
+            // Only the first group for a commit carries these, so an
+            // already-filled field must not be overwritten by a later
+            // `previous`/`boundary` line that happens to share a prefix.
+            "author" if c.author.is_empty() => c.author = val.to_string(),
+            "author-mail" if c.author_email.is_empty() => {
+                c.author_email = val.trim_start_matches('<').trim_end_matches('>').to_string();
+            }
+            "author-time" if c.author_time == 0 => c.author_time = val.parse().unwrap_or(0),
+            "summary" if c.summary.is_empty() => c.summary = val.to_string(),
+            _ => {}
+        }
+    }
+    (commits, lines)
+}
+
+/// Blame one file of a task's worktree, whole-file, in one shot.
+///
+/// Blames the WORKING TREE (no rev argument), not HEAD: the frontend lines up
+/// the result against the buffer it has on screen, and blaming HEAD would
+/// misalign every line below an uncommitted edit. Uncommitted lines come back
+/// as the all-zero sha, which is what `BlameCommit::uncommitted` marks.
+fn task_git_blame_for_task(w: &Task, path: &str) -> Result<BlameFile, String> {
+    let (cwd, rel) = resolve_task_git_path(w, path)?;
+    let abs = safe_task_path(&cwd, &rel)?;
+    // `--no-optional-locks` on every git in this path. Blame is a BACKGROUND
+    // read triggered by a cursor move, and it must never be the reason the
+    // user's own `git commit` in the embedded terminal fails on a held
+    // `index.lock`. This is what the flag exists for, and what other editors
+    // pass for their background git; it is hygiene, not a fix for a measured
+    // failure.
+    let head = git(&["--no-optional-locks", "rev-parse", "HEAD"], &cwd)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    // Not a repo, or the path is not tracked: no blame, not an error. An
+    // untracked file legitimately has no history, and the editor should just
+    // show nothing rather than surface a git failure per keystroke.
+    if head.is_empty() || !git_tracks_path(&cwd, &abs) {
+        return Ok(BlameFile { commits: Vec::new(), lines: Vec::new(), head, skipped: false });
+    }
+
+    // Size guard, one metadata call, no read. Blame reads the file itself;
+    // reading it here as well just to measure it would double the IO.
+    let too_big = fs::metadata(&abs).map(|m| m.len() > BLAME_MAX_BYTES).unwrap_or(false);
+    if too_big {
+        return Ok(BlameFile { commits: Vec::new(), lines: Vec::new(), head, skipped: true });
+    }
+
+    // `--root` stops the initial commit being treated as a boundary, so the
+    // oldest lines get attributed instead of coming back bare. Same flag VS
+    // Code passes (extensions/git/src/git.ts, `blame2`).
+    let out = git(&["--no-optional-locks", "blame", "--root", "--incremental", "--", &rel], &cwd)
+        .map_err(|e| format!("git blame failed: {e}"))?;
+    let (commits, lines) = parse_git_blame_incremental(&out);
+    Ok(BlameFile { commits, lines, head, skipped: false })
+}
+
+/// Async + `spawn_blocking` per the docs/ipc.md rule: blame forks git and
+/// walks history, which on a large file is a few hundred ms. Run on the
+/// webview's thread it would freeze the window.
+#[tauri::command]
+async fn task_git_blame(id: String, path: String) -> Result<BlameFile, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<BlameFile, String> {
+        let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        task_git_blame_for_task(&w, &path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// One commit in full, for the blame popup's hover card: author, email, date,
+/// subject and the whole message body (trailers included, `Co-authored-by:`
+/// pulled out on the frontend by `splitTrailers`).
+///
+/// Deliberately NOT part of `task_git_blame`'s payload. A file's blame can name
+/// 169 distinct commits, and fetching every message body up front would be 169
+/// `git show`s for the one line the cursor happens to be on. This is fetched
+/// when a popup actually opens, and cached per sha on the frontend.
+///
+/// `path` resolves the repo the same member-aware way blame does, so a
+/// multi-repo task reads the member the file belongs to.
+fn task_git_commit_meta_for_task(w: &Task, path: &str, sha: &str) -> Result<GitCommit, String> {
+    if !is_commit_ish(sha) {
+        return Err("bad commit id".into());
+    }
+    let (cwd, _rel) = resolve_task_git_path(w, path)?;
+    // `--no-walk` so this reads exactly the named commit rather than starting a
+    // traversal at it, and the shared format keeps the parser the same one the
+    // history page is tested against.
+    let out = git(&["--no-optional-locks", "log", "--no-walk", GIT_LOG_FORMAT, sha], &cwd)
+        .map_err(|e| format!("git log failed: {e}"))?;
+    parse_git_log(&out, &std::collections::HashSet::new())
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("no commit {sha}"))
+}
+
+#[tauri::command]
+async fn task_git_commit_meta(id: String, path: String, sha: String) -> Result<GitCommit, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<GitCommit, String> {
+        let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        task_git_commit_meta_for_task(&w, &path, &sha)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// How far back `sha` sits from HEAD: the number of commits reachable from HEAD
+/// but not from it. That is exactly the `skip` offset the history page needs to
+/// land on it, which is what turns "show this commit in History" into one query
+/// instead of paging forward until it turns up.
+///
+/// The paging version was fine on this repo and useless on a real monorepo: a
+/// commit from two years ago is tens of thousands of rows down, and no sane page
+/// budget reaches it. `rev-list --count` answers in one walk that git is built
+/// for, and the caller then fetches ONE page around the answer.
+fn task_git_commit_offset_for_task(w: &Task, dir_name: &str, sha: &str) -> Result<usize, String> {
+    if !is_commit_ish(sha) {
+        return Err("bad commit id".into());
+    }
+    let cwd = repo_cwd(w, dir_name)?;
+    let range = format!("{sha}..HEAD");
+    let out = git(&["--no-optional-locks", "rev-list", "--count", &range], &cwd)
+        .map_err(|e| format!("git rev-list failed: {e}"))?;
+    out.trim().parse::<usize>().map_err(|e| format!("unparseable count: {e}"))
+}
+
+#[tauri::command]
+async fn task_git_commit_offset(id: String, dir_name: String, sha: String) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
+        let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        task_git_commit_offset_for_task(&w, &dir_name, &sha)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -12545,7 +12810,7 @@ pub fn run() {
             task_spotlight_start, task_spotlight_stop, task_spotlight_resync, task_spotlight_status,
             task_diff, task_files, task_list_files_for_finder, task_match_ignored_files, task_send_diff_to_main,
             task_changes, task_git_status, task_git_branches, project_git_branches, project_branch_context, task_git_checkout, task_git_update, task_git_update_info, task_stage, task_unstage, task_commit, task_discard,
-            task_git_log, task_git_refs, task_git_push, task_git_commit_files, task_git_compare,
+            task_git_log, task_git_refs, task_git_push, task_git_commit_files, task_git_compare, task_git_blame, task_git_commit_meta, task_git_commit_offset,
             task_file_diff, task_file_diff_sides, task_file_read, task_file_read_base64, task_file_fp, task_file_write, task_dir_list, task_path_stat,
             task_path_rename, task_path_delete, task_reveal_path,
             task_rename, project_rename,
@@ -14443,6 +14708,196 @@ mod tests {
             .expect("tip-to-tree compare sees the base's newer commit");
         assert_eq!(later.status, "D");
         assert_ne!(merged.base_sha, direct.base_sha, "the two modes read different left sides");
+    }
+
+    #[test]
+    fn blame_parses_incremental_groups_and_dedupes_the_commit_table() {
+        // Two commits, three groups: commit A owns lines 1-2 and 5, commit B
+        // owns 3-4. A's second group repeats only the sha line, which is the
+        // whole reason --incremental is cheap and the reason the parser must
+        // not clear already-filled fields.
+        let a = "1111111111111111111111111111111111111111";
+        let b = "2222222222222222222222222222222222222222";
+        let out = format!(
+"{a} 1 1 2
+author Ada
+author-mail <ada@example.com>
+author-time 1700000000
+author-tz +0000
+summary first subject
+filename f.rs
+{b} 3 3 2
+author Grace
+author-mail <grace@example.com>
+author-time 1700000100
+author-tz +0000
+summary second subject
+filename f.rs
+{a} 5 5 1
+previous 3333333333333333333333333333333333333333 f.rs
+filename f.rs
+");
+        let (commits, lines) = parse_git_blame_incremental(&out);
+
+        assert_eq!(commits.len(), 2, "a commit owning two groups appears once");
+        assert_eq!(commits[0].author, "Ada");
+        assert_eq!(commits[0].author_email, "ada@example.com", "angle brackets are stripped");
+        assert_eq!(commits[0].author_time, 1700000000);
+        assert_eq!(commits[0].summary, "first subject");
+        assert!(!commits[0].uncommitted);
+        assert_eq!(commits[1].author, "Grace");
+
+        // Line index is 0-based over 1-based git line numbers, and the
+        // out-of-order trailing group lands on line 5, not appended.
+        assert_eq!(lines, vec![0, 0, 1, 1, 0]);
+    }
+
+    #[test]
+    fn blame_marks_the_all_zero_sha_as_uncommitted_and_tolerates_gaps() {
+        let zero = "0000000000000000000000000000000000000000";
+        let out = format!(
+"{zero} 1 2 1
+author Not Committed Yet
+author-mail <not.committed.yet>
+author-time 1700000200
+author-tz +0000
+summary Version of f.rs from f.rs
+filename f.rs
+");
+        // Only line 2 is attributed, so line 1 stays sentinel rather than
+        // silently pointing at commit 0, and the index ends where git's
+        // numbers end.
+        let (commits, lines) = parse_git_blame_incremental(&out);
+        assert_eq!(commits.len(), 1);
+        assert!(commits[0].uncommitted, "the all-zero sha is a working-tree line");
+        assert_eq!(lines, vec![u32::MAX, 0]);
+    }
+
+    #[test]
+    fn blame_ignores_a_malformed_group_header_and_refuses_an_absurd_count() {
+        let a = "1111111111111111111111111111111111111111";
+        // First header is malformed (two numbers, not three) and must be
+        // skipped without poisoning the following real group.
+        let out = format!("{a} 1 1\n{a} 1 1 3\nauthor Ada\nsummary s\nfilename f.rs\n");
+        let (commits, lines) = parse_git_blame_incremental(&out);
+        assert_eq!(commits.len(), 1, "the malformed header contributed no commit");
+        assert_eq!(lines, vec![0, 0, 0]);
+
+        // An absurd line count is refused outright rather than allocating for
+        // it. Nothing legitimate gets near BLAME_MAX_LINES.
+        let huge = format!("{a} 1 1 {}\nauthor Ada\nsummary s\nfilename f.rs\n", BLAME_MAX_LINES + 1);
+        let (_c, l) = parse_git_blame_incremental(&huge);
+        assert!(l.is_empty(), "a hostile count must not size the index");
+    }
+
+    #[test]
+    fn blame_reads_a_real_repo_and_attributes_the_working_tree_edit() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+        git_init_with_commit(repo);
+        git_set_identity(repo);
+        git_commit_file(repo, "f.txt", "one\ntwo\n", "add f");
+        let task = Task { path: repo.to_string_lossy().into_owned(), ..Default::default() };
+
+        let blamed = task_git_blame_for_task(&task, "f.txt").unwrap();
+        assert!(!blamed.skipped);
+        assert_eq!(blamed.lines.len(), 2);
+        assert!(!blamed.head.is_empty(), "head is reported for cache keying");
+        let author = &blamed.commits[blamed.lines[0] as usize].author;
+        assert!(!author.is_empty(), "a committed line has an author");
+
+        // Blame runs against the WORKING TREE, so an unsaved-then-saved third
+        // line is attributed to nobody yet instead of shifting the other two.
+        fs::write(repo.join("f.txt"), "one\ntwo\nthree\n").unwrap();
+        let dirty = task_git_blame_for_task(&task, "f.txt").unwrap();
+        assert_eq!(dirty.lines.len(), 3);
+        assert!(
+            dirty.commits[dirty.lines[2] as usize].uncommitted,
+            "the new line is not committed yet",
+        );
+        assert!(
+            !dirty.commits[dirty.lines[0] as usize].uncommitted,
+            "the untouched first line keeps its commit",
+        );
+    }
+
+    #[test]
+    fn commit_offset_locates_a_commit_without_walking_pages() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+        git_init_with_commit(repo);
+        git_set_identity(repo);
+        let first = git_head(repo);
+        for n in 1..=5 {
+            git_commit_file(repo, &format!("f{n}.txt"), "x\n", &format!("c{n}"));
+        }
+        let head = git_head(repo);
+        let task = Task { path: repo.to_string_lossy().into_owned(), ..Default::default() };
+
+        // HEAD is at offset 0; the initial commit is 5 commits back. That IS
+        // the page `skip` needed to land on it, which is the whole point.
+        assert_eq!(task_git_commit_offset_for_task(&task, "", &head).unwrap(), 0);
+        assert_eq!(task_git_commit_offset_for_task(&task, "", &first).unwrap(), 5);
+
+        // Non-hex never reaches git as an argument.
+        assert!(task_git_commit_offset_for_task(&task, "", "--exec=touch /tmp/pwn").is_err());
+        assert!(task_git_commit_offset_for_task(&task, "", "HEAD~2").is_err());
+        // Well-formed but absent is an error, not 0 (which would silently scroll
+        // the panel to the top and look like a successful reveal).
+        assert!(task_git_commit_offset_for_task(&task, "", &"b".repeat(40)).is_err());
+    }
+
+    #[test]
+    fn commit_meta_reads_one_commit_in_full_and_rejects_a_bad_sha() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+        git_init_with_commit(repo);
+        git_set_identity(repo);
+        fs::write(repo.join("f.txt"), "one\n").unwrap();
+        git_run(repo, &["add", "f.txt"]);
+        git_run(repo, &[
+            "commit", "-q", "-m",
+            "feat: the subject\n\nProse that explains it.\n\nCo-authored-by: Ada <ada@example.com>",
+        ]);
+        let head = git_head(repo);
+        let task = Task { path: repo.to_string_lossy().into_owned(), ..Default::default() };
+
+        let c = task_git_commit_meta_for_task(&task, "f.txt", &head).unwrap();
+        assert_eq!(c.sha, head);
+        assert_eq!(c.subject, "feat: the subject");
+        // The whole message below the subject, trailers included: the popup
+        // renders the prose and pulls co-authors out on the frontend.
+        assert!(c.body.contains("Prose that explains it."));
+        assert!(c.body.contains("Co-authored-by: Ada <ada@example.com>"));
+        assert!(!c.author.is_empty() && !c.email.is_empty());
+        assert!(c.timestamp > 0);
+
+        // Anything that is not hex never reaches git as an argument.
+        assert!(task_git_commit_meta_for_task(&task, "f.txt", "--exec=touch /tmp/pwn").is_err());
+        assert!(task_git_commit_meta_for_task(&task, "f.txt", "HEAD~1").is_err());
+        // Well-formed but absent is an error, not an empty commit.
+        assert!(task_git_commit_meta_for_task(&task, "f.txt", &"a".repeat(40)).is_err());
+    }
+
+    #[test]
+    fn blame_is_silent_for_an_untracked_file_and_outside_a_repo() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+        git_init_with_commit(repo);
+        fs::write(repo.join("untracked.txt"), "hi\n").unwrap();
+        let task = Task { path: repo.to_string_lossy().into_owned(), ..Default::default() };
+
+        // Untracked: empty, NOT an error. The editor shows nothing rather than
+        // a git failure on every file it opens.
+        let untracked = task_git_blame_for_task(&task, "untracked.txt").unwrap();
+        assert!(untracked.commits.is_empty() && untracked.lines.is_empty());
+        assert!(!untracked.skipped, "empty is not the same signal as skipped");
+
+        let plain = tempdir().unwrap();
+        fs::write(plain.path().join("f.txt"), "hi\n").unwrap();
+        let non_git = Task { path: plain.path().to_string_lossy().into_owned(), ..Default::default() };
+        let out = task_git_blame_for_task(&non_git, "f.txt").unwrap();
+        assert!(out.commits.is_empty() && out.head.is_empty());
     }
 
     #[test]

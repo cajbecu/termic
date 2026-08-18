@@ -61,6 +61,23 @@ export function RightPanel() {
   // A reveal-in-tree request (editor breadcrumb / locate button) forces the
   // "All files" view so the tree is on screen for FileTree to expand/scroll.
   const revealFile = useApp(s => s.revealFile);
+  // "Show this commit in History" from the editor's blame popup. Same shape as
+  // revealFile above: force the tab that can honour it, and un-hide the panel,
+  // because revealing into a collapsed panel reads as a dead button.
+  const commitReveal = useUI(s => s.commitReveal);
+  // Which request has already been acted on. `task?.id` is a dependency below
+  // (the panel has to know whose commit it is), so without this the effect
+  // re-runs on every task switch and re-applies an old request, which pinned
+  // the panel to the Git tab for the rest of the session.
+  const seenRevealAt = useRef(0);
+  useEffect(() => {
+    if (!commitReveal || !task || commitReveal.taskId !== task.id) return;
+    if (commitReveal.at === seenRevealAt.current) return;
+    seenRevealAt.current = commitReveal.at;
+    setView("changes");
+    if (useApp.getState().rightPanelHidden) useApp.getState().toggleRightPanel();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [commitReveal, task?.id]);
   useEffect(() => {
     if (revealFile && task && revealFile.taskId === task.id) setView("files");
     // eslint-disable-next-line react-hooks/exhaustive-deps

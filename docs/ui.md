@@ -143,6 +143,40 @@ The editor's gutter column collapses to zero width while there is nothing to put
 
 While an editor is open, each queued comment keeps the actual selection it was made on as document offsets, mapped through every edit (`lib/commentAnchors.ts`) and written back to the store debounced. Type three lines above a queued comment and its stored range follows the code instead of pointing at whatever now occupies the old line number. The association pair is deliberate: `from` maps with +1 and `to` with -1, so the range does not swallow text typed at its edges. Note the anchor tracks the BUFFER; comment on unsaved edits and the agent, which reads disk, sees something different.
 
+## Inline git blame (cursor line only)
+
+`inlineBlameExtension(taskId, path, { onOpenCommit, onShowInHistory })` annotates the line the cursor is on with `subject, Author (age)` in dimmed text, 50px after the code. VS Code's `git.blame.editorDecoration`, and the format is VS Code's default template with `commitAge` supplying the age so the editor and the History panel describe the same commit the same way.
+
+**The annotation itself is inert.** It sits inside the line being edited, where a click target competes with placing the cursor, so it is hover-only. Resting on it for `CARD_DELAY_MS` (500ms) opens a hover card: long enough that crossing the annotation on the way somewhere else does not throw a card over the next line, short enough that resting on it feels answered.
+
+The card carries author, relative age AND absolute date (the first answers "is this recent", the second "which release"), the short sha, co-authors, the subject in full, and the message prose. Its header holds the two actions:
+
+- **Open diff** — this file as that commit changed it, in the `commit:<sha>` diff tab the History panel already uses.
+- **Show in History** — `revealCommitInHistory(taskId, sha)` on the UI store. RightPanel opens the Git tab (and un-hides the panel), GitPanel switches to the Graph, HistoryPanel selects, expands and scrolls to the sha. Three consumers of one request, because the editor has no handle on any of them.
+
+  Two things about that request are load-bearing:
+
+  - **It is CONSUMED.** `clearCommitReveal()` once honoured, plus an `at` timestamp each consumer records so it acts on a request once. Left standing it is a standing order: RightPanel's effect depends on the active task, so it re-fires on every task switch and re-pins the panel to the Git tab. That is not theoretical, it cost most of a debugging session and broke two unrelated e2e specs.
+  - **A commit that is not loaded is JUMPED to, not paged to.** `task_git_commit_offset` asks git how far back the sha is (`rev-list --count <sha>..HEAD`) and the panel fetches the single page around it, replacing the window rather than appending (the rows above belong to a different part of the history, and stitching them would draw a graph with a hole in it). Paging forward until the sha appears works on a young repo and is hopeless on a monorepo, where a two-year-old commit is tens of thousands of rows down. A sha that is not reachable from HEAD says so in a toast and drops the request.
+
+The card is a CodeMirror tooltip (`showTooltip`), so CodeMirror owns positioning, flipping and clipping. Two things had to be told about the geometry, and both were visible bugs first:
+
+- **`tooltips({ tooltipSpace })` in EditorPane**, constraining every tooltip to the editor pane's own rect. CodeMirror's default is the whole document viewport, so a card anchored at the end of a long line ran under the right panel and one near the top ran under the tab bar. Mounted in EditorPane rather than in this extension because the review-comment tooltip wants it too.
+- **A `min-width` on the card**, not just a max. The annotation sits at the end of a line, so there is often only a sliver of room to its right; with no minimum the card shrink-to-fit into that sliver, wrapped its header into a column and drew its buttons over the author line. Given a width it cannot fit, CodeMirror shifts it left instead, which is the wanted behaviour. It has to survive the pointer travelling into it or its buttons are decoration, hence `CARD_CLOSE_MS` (220ms) of grace on leaving the annotation, cancelled when the pointer arrives in the card. Any edit closes it: the card describes a line that is moving under it.
+
+The message body is NOT part of the blame payload. A file's blame can name 169 distinct commits and the reader looks at one, so `task_git_commit_meta` fetches the body when a card opens, cached per sha. The header renders immediately from the blame data and the prose fills in when git answers, rather than the card waiting on a fork before showing anything.
+
+There is deliberately **no blame column**. Annotating every line is a layout cost, not a cosmetic choice; the reasoning and the CodeMirror rule behind it are bear trap 10 in [performance.md](performance.md).
+
+The pref is `inlineBlame`, OFF by default (matching VS Code's own default and the opt-in shape `loadRemoteImages` set), in Settings → Appearance → Editor, and in the command palette as "Toggle inline git blame" with its current state as the row suffix. It is mounted through its own `Compartment`, so toggling reconfigures in place: cursor, undo history and scroll position all survive, and with it off the extension is never constructed, so nothing is fetched and no state field exists.
+
+Two honesty rules, because a confidently wrong author is worse than none:
+
+- **A line the user edited loses its attribution** and reads "Not committed yet". Mapping alone does not achieve that: `MapMode.TrackBefore` drops a line joined onto the one above, but the survivor keeps its own mark, so the merged line would be credited to whoever owned the first half. Every line an edit touched is filtered out of the snapshot as well.
+- **A dirty buffer is never re-blamed.** Blame reads the file on DISK, so its line numbers would not match the screen. The save and external-reload paths drop the cache entry and dispatch `refreshBlame`, which is when a re-fetch happens.
+
+A git tick is deliberately NOT a re-fetch. `gitRevision` bumps on every stage and unstage, not just on commits, so it dispatches `markBlameStale`: the annotation on screen stays put and the refetch rides the reader's next cursor move. Re-blaming per tick forks git once per open editor to redraw one line that usually did not change, and it measurably slowed the e2e suite when it was written that way.
+
 ## Settled detection / notifications
 
 TerminalPane samples `term.buffer.active` every 3s, FNV-1a hashes the visible viewport, marks tab "settled" after 2 identical consecutive samples. Resets on user input. `markAttention(wsId, tabId, reason)` never marks the active tab in the active task. `useAttentionNotifier` suppresses OS notifications for every tab in the focused task. Desktop notifications off by default. Clicking a banner only brings the window forward: it never changes the active task or tab (the old focus-edge router jumped on any refocus within 15s of a notification, including a plain cmd-Tab). The unread dot is what points at the tab; the user does the switching.

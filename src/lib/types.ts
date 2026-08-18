@@ -692,6 +692,37 @@ export interface GitLogPage {
   upstream: string;
 }
 
+/** One commit referenced by a `BlameFile`, deduped across the lines it owns. */
+export interface BlameCommit {
+  sha: string;
+  /** Mailmap-resolved author name. */
+  author: string;
+  author_email: string;
+  /** Unix seconds. Formatted on this side so the relative age stays live
+   *  without re-blaming the file. */
+  author_time: number;
+  /** Subject line only. */
+  summary: string;
+  /** Git's all-zero sha: the line exists in the working tree but in no
+   *  commit yet. */
+  uncommitted: boolean;
+}
+
+/** Whole-file blame, deduped: a commit table plus one index per line.
+ *  Deliberately not one record per line, see `BlameFile` in lib.rs for the
+ *  payload sizes that forced the shape. */
+export interface BlameFile {
+  commits: BlameCommit[];
+  /** `lines[n]` indexes `commits` for 1-based line `n + 1`. `0xffffffff`
+   *  means git attributed nothing to that line. */
+  lines: number[];
+  /** HEAD at blame time, for cache keying. "" outside a repo. */
+  head: string;
+  /** File was over the line cap, so `commits`/`lines` are empty. Distinct
+   *  from "no blame data" so the UI can stay silent rather than look broken. */
+  skipped: boolean;
+}
+
 /** Result of a Git-tab branch switch. `stashed` = local work was parked and
  *  re-applied; `conflicted` = the re-apply hit conflicts (markers left in the
  *  tree, stash retained). */

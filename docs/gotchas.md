@@ -6,6 +6,7 @@
 - **Terminal ribbons in TUIs.** `lineHeight` != 1.0 or WebglAddon not loaded.
 - **WebGL crash (`_isDisposed`).** Dispose `webglAddon` BEFORE `term.dispose()`.
 - **Theme picker flicker.** Radix DropdownMenu has cursor-transit gaps. Use HoverCard with `sideOffset=0`.
+- **A colour that ignores its token and renders as plain white.** An unknown CSS custom property is not "empty", it makes the whole declaration **invalid at computed-value time**, so the property falls back to its inherited value. `color: var(--color-text-faint)` on the inline-blame annotation therefore inherited the code's own foreground and the annotation shipped looking like ordinary code. There is no `--color-text-faint`; the tokens are `--color-fg`, `--color-fg-dim`, `--color-fg-faint` (see the `@theme` block in `index.css`). Nothing warns: it is valid CSS, valid TypeScript, and the pixel is simply the wrong colour. Grep `index.css` for the token before inventing one, and treat "my colour did nothing" as a misspelled token first.
 - **Toggle knob escapes track.** Hardcode geometry, don't lean on Tailwind transform classes.
 - **Footer collapses, files overflow.** Grid needs `gridTemplateRows: "minmax(0, 1fr)"`.
 - **`pty_spawn` "invalid length 0".** Payload wrap forgotten — wrap SpawnArgs in `{ args: ... }`.

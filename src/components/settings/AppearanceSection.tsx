@@ -60,6 +60,8 @@ export function AppearanceSection() {
   const uiScale = usePrefs(s => s.uiScale);
   const setUiScale = usePrefs(s => s.setUiScale);
   const codeLigatures = usePrefs(s => s.codeLigatures);
+  const inlineBlame = usePrefs(s => s.inlineBlame);
+  const setInlineBlame = usePrefs(s => s.setInlineBlame);
   const setCodeLigatures = usePrefs(s => s.setCodeLigatures);
   const showAllInstalledFonts = usePrefs(s => s.showAllInstalledFonts);
   const resetAppearance = usePrefs(s => s.resetAppearance);
@@ -105,6 +107,7 @@ export function AppearanceSection() {
     editorFontSize        === APPEARANCE_DEFAULTS.editorFontSize &&
     uiScale               === APPEARANCE_DEFAULTS.uiScale &&
     codeLigatures         === APPEARANCE_DEFAULTS.codeLigatures &&
+    inlineBlame           === APPEARANCE_DEFAULTS.inlineBlame &&
     showAllInstalledFonts === APPEARANCE_DEFAULTS.showAllInstalledFonts;
 
   return (
@@ -280,6 +283,13 @@ export function AppearanceSection() {
         hint="Render font ligatures like `=>`, `!==`, `>=` as combined glyphs in the editor."
         value={codeLigatures}
         onChange={setCodeLigatures}
+      />
+
+      <Toggle
+        label="Inline git blame"
+        hint="Show who last changed the line the cursor is on, after the code. Click it to open that commit's diff."
+        value={inlineBlame}
+        onChange={setInlineBlame}
       />
       </div>}
 

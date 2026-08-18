@@ -7,7 +7,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Project, ProjectMember, Task, CreateTaskArgs, CreateMultiArgs, Settings, DiscoveredRepo,
   ImportableWorktree, CliInfo, ChangeFile, Changes, GitStatus, CheckoutResult, UpdateMode, UpdateResult, UpdateInfo, FileEntry, Agent, RepoConfig,
-  SandboxMode, TaskDiffSummary, CliInstallStatus, BranchContext, GitCompare, GitFile, GitLogPage, GitRef,
+  SandboxMode, TaskDiffSummary, CliInstallStatus, BranchContext, BlameFile, GitCommit, GitCompare, GitFile, GitLogPage, GitRef,
 } from "./types";
 import type { CustomThemeFile } from "./customTheme";
 import {
@@ -463,6 +463,23 @@ export const taskGitRefs = (id: string, dirName: string) =>
  *  Creates the upstream when the branch has none, same as Commit and Push. */
 export const taskGitPush = (id: string, dirName: string) =>
   invoke<void>("task_git_push", { id, dirName });
+/** Whole-file blame for one editor tab, in one call. Deduped to a commit
+ *  table + a per-line index on the Rust side; blames the working tree so the
+ *  line numbers line up with the buffer on screen. Async on the Rust side
+ *  (a few hundred ms on a big file), and cached per file by `blameCache`. */
+export const taskGitBlame = (id: string, path: string) =>
+  invoke<BlameFile>("task_git_blame", { id, path });
+/** How many commits sit between HEAD and `sha`, i.e. the page `skip` that lands
+ *  on it. Lets "show this commit in History" jump straight there instead of
+ *  paging forward: on a monorepo the target can be tens of thousands of rows
+ *  down, where paging is not slow so much as hopeless. */
+export const taskGitCommitOffset = (id: string, dirName: string, sha: string) =>
+  invoke<number>("task_git_commit_offset", { id, dirName, sha });
+/** One commit in full (subject + body + author + date), for the blame popup's
+ *  hover card. Fetched only when a card opens, and cached per sha: a file's
+ *  blame can name a hundred-odd commits and the reader looks at one. */
+export const taskGitCommitMeta = (id: string, path: string, sha: string) =>
+  invoke<GitCommit>("task_git_commit_meta", { id, path, sha });
 /** The files one commit touched (merges report against their first parent). */
 export const taskGitCommitFiles = (id: string, dirName: string, sha: string) =>
   invoke<GitFile[]>("task_git_commit_files", { id, dirName, sha });

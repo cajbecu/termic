@@ -32,6 +32,7 @@ const LS_TERMINAL_FONT = "terminalFont";
 const LS_TERMINAL_SIZE = "terminalFontSize";
 const LS_EDITOR_SIZE   = "editorFontSize";
 const LS_LIGATURES     = "codeLigatures";
+const LS_INLINE_BLAME  = "inlineBlame";
 const LS_THEME         = "themeMode";
 const LS_DESKTOPNOTIF  = "desktopNotifications";
 const LS_SETTLED_HIGHLIGHT = "settledHighlight";
@@ -594,6 +595,13 @@ interface PrefsState {
   uiScale: number;
   /** Enable font ligatures (=>, !==, ...) in the editor. */
   codeLigatures: boolean;
+  /** Show git blame for the CURSOR'S LINE ONLY, as dimmed text after the
+   *  code (VS Code's `git.blame.editorDecoration.enabled`). OFF by default,
+   *  same as VS Code's own and the same opt-in shape as `loadRemoteImages`:
+   *  with it off nothing is fetched and the extension is never constructed.
+   *  Deliberately not a whole-file blame column either: see inlineBlameExt.ts
+   *  for why every-line annotation is the expensive shape. */
+  inlineBlame: boolean;
   /** List EVERY installed font family in the font pickers, not just the
    *  is_monospace()-detected subset. OFF by default: the wall exists because
    *  proportional fonts break terminal column math, but font-kit's monospace
@@ -653,6 +661,8 @@ interface PrefsState {
   /** Bump zoom by one step in either direction (for the Cmd +/- shortcuts). */
   nudgeUiScale:       (dir: 1 | -1) => void;
   setCodeLigatures:   (v: boolean) => void;
+  setInlineBlame:     (v: boolean) => void;
+  toggleInlineBlame:  () => void;
   setShowAllInstalledFonts: (v: boolean) => void;
   /** Restore every Appearance-section pref (fonts, sizes, weight,
    *  letter-spacing, ligatures) to `APPEARANCE_DEFAULTS`. Theme is
@@ -752,6 +762,7 @@ export const APPEARANCE_DEFAULTS = {
   editorFontSize:        13,
   uiScale:               100,
   codeLigatures:         true,
+  inlineBlame:           false,
   showAllInstalledFonts: false,
 } as const;
 
@@ -777,6 +788,7 @@ const initialTerminalCopyOnSelect  = lsGetBool(LS_TERMINAL_COPY_ON_SELECT, true)
 const initialEditorSize   = lsGetNum(LS_EDITOR_SIZE, APPEARANCE_DEFAULTS.editorFontSize);
 const initialUiScale      = clampUiScale(lsGetNum(LS_UI_SCALE, APPEARANCE_DEFAULTS.uiScale));
 const initialLigatures    = lsGetBool(LS_LIGATURES, APPEARANCE_DEFAULTS.codeLigatures);
+const initialInlineBlame  = lsGetBool(LS_INLINE_BLAME, APPEARANCE_DEFAULTS.inlineBlame);
 const initialShowAllFonts = lsGetBool(LS_SHOW_ALL_FONTS, APPEARANCE_DEFAULTS.showAllInstalledFonts);
 const initialTheme        = parseThemeMode(lsGet(LS_THEME, "claude"));
 const initialDesktopNotif = lsGetBool(LS_DESKTOPNOTIF, false);
@@ -856,6 +868,7 @@ export const usePrefs = create<PrefsState>(set => ({
   editorFontSize: initialEditorSize,
   uiScale: initialUiScale,
   codeLigatures: initialLigatures,
+  inlineBlame: initialInlineBlame,
   showAllInstalledFonts: initialShowAllFonts,
   taskExpandMode: initialTaskExpandMode,
   hideInactiveProjects: initialHideInactiveProjects,
@@ -947,6 +960,14 @@ export const usePrefs = create<PrefsState>(set => ({
     try { localStorage.setItem(LS_LIGATURES, v ? "1" : "0"); } catch {}
     set({ codeLigatures: v });
   },
+  setInlineBlame: (v) => {
+    if (usePrefs.getState().inlineBlame === v) return;  // no-op writes re-run every selector
+    try { localStorage.setItem(LS_INLINE_BLAME, v ? "1" : "0"); } catch {}
+    set({ inlineBlame: v });
+  },
+  toggleInlineBlame: () => {
+    usePrefs.getState().setInlineBlame(!usePrefs.getState().inlineBlame);
+  },
   setShowAllInstalledFonts: (v) => {
     try { localStorage.setItem(LS_SHOW_ALL_FONTS, v ? "1" : "0"); } catch {}
     set({ showAllInstalledFonts: v });
@@ -966,6 +987,7 @@ export const usePrefs = create<PrefsState>(set => ({
     s.setEditorFontSize(d.editorFontSize);
     s.setUiScale(d.uiScale);
     s.setCodeLigatures(d.codeLigatures);
+    s.setInlineBlame(d.inlineBlame);
     s.setShowAllInstalledFonts(d.showAllInstalledFonts);
   },
   setThemeMode: (m) => {

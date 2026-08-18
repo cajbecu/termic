@@ -246,6 +246,23 @@ interface UIState {
   openRaceCompare: (raceId: string) => void;
   closeRaceCompare: () => void;
   openSandbox: (taskId: string) => void;
+  /** "Show this commit in History": the blame popup's second button. Read by
+   *  RightPanel (open the Git tab), GitPanel (switch to the History view) and
+   *  HistoryPanel (select, expand and scroll to the sha). One request rather
+   *  than three, because the three live in different components and the editor
+   *  has no handle on any of them.
+   *
+   *  `at` is what makes it a REQUEST and not a state: asking for the same sha
+   *  twice must reveal it twice, and a plain `{taskId, sha}` compares equal the
+   *  second time and does nothing. Deliberately not named `open*`: it is not a
+   *  dialog, and CommandPalette.coverage.test.ts polices that prefix. */
+  commitReveal: { taskId: string; sha: string; at: number } | null;
+  revealCommitInHistory: (taskId: string, sha: string) => void;
+  /** Consume the request. MUST be called once it has been honoured: a reveal
+   *  that stays in the store is a standing order, and RightPanel re-runs its
+   *  effect on every task switch, so an un-consumed one pins the panel to the
+   *  Git tab for the rest of the session. Found the hard way, see ui.md. */
+  clearCommitReveal: () => void;
   closeSandbox: () => void;
   openFileFinder: (taskId: string) => void;
   closeFileFinder: () => void;
@@ -403,6 +420,13 @@ export const useUI = create<UIState>(set => ({
   openRaceCompare:   (raceId) => set({ raceCompareId: raceId }),
   closeRaceCompare:  () => set({ raceCompareId: null }),
   openSandbox:       (taskId) => set({ sandboxForTaskId: taskId }),
+  commitReveal: null,
+  revealCommitInHistory: (taskId, sha) =>
+    // Un-hiding the right panel is RightPanel's job, not this store's: app.ts
+    // already imports this module, and reaching back the other way would make
+    // the two stores a cycle.
+    set({ commitReveal: { taskId, sha, at: Date.now() } }),
+  clearCommitReveal: () => set({ commitReveal: null }),
   closeSandbox:      () => set({ sandboxForTaskId: null }),
   openFileFinder:    (taskId) => set({ fileFinderTaskId: taskId }),
   closeFileFinder:   () => set({ fileFinderTaskId: null }),
