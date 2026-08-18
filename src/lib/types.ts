@@ -99,6 +99,9 @@ export interface Project {
    *  team-shared equivalent lives in `.termic.yaml` under
    *  `scripts.run_scripts`; the two lists are merged at read time. */
   run_scripts?: RunCommand[];
+  /** Personal extra named ports (GH #196): env var names unioned with
+   *  the committed `.termic.yaml` list (yaml first, deduped). */
+  extra_named_ports?: string[];
 }
 
 /** One named extra run command (GH #124). `command` is a freeform shell
@@ -158,6 +161,13 @@ export interface TaskMember {
   setup_script?: string;
   run_script?: string;
   archive_script?: string;
+}
+
+/** One frozen extra named port (GH #196): configured env var name +
+ *  the port allocated from the task's block at creation. */
+export interface NamedPort {
+  name: string;
+  port: number;
 }
 
 export interface Task {
@@ -221,6 +231,15 @@ export interface Task {
   sandbox_allowed_hosts?: string[];
   /** Multi-repo composition. Empty for single-repo tasks. */
   composition?: TaskMember[];
+  /** Extra named ports (GH #196), frozen at creation and topped up at
+   *  spawn time from the current config (buffer slots, oldest names
+   *  keep their ports). Injected next to TERMIC_PORT everywhere, and
+   *  expanded in the preview URL. */
+  extra_named_ports?: NamedPort[];
+  /** Length of the task's port block, stored at allocation so a top-up
+   *  never grows the block into the neighbor task. 0/undefined on
+   *  records predating on-the-fly ports. */
+  port_block_len?: number;
   /** Pre-set launch command for `cli === "custom"` repo-root tasks.
    *  The default tab runs this through a login shell instead of an agent
    *  binary (e.g. `ssh box`, `npm run dev`). Null/undefined for every
@@ -1035,4 +1054,7 @@ export interface RepoConfig {
   /** Glob patterns hidden from the "All files" tree (committed, team-shared).
    *  Unioned with the user's personal `Settings.file_tree_exclude`. */
   exclude: string[];
+  /** Extra named ports (GH #196), team-shared: env var NAMES only.
+   *  Every new task gets a unique port per name, frozen at create. */
+  extra_named_ports: string[];
 }

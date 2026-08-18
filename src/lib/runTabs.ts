@@ -44,17 +44,27 @@ export function expandPreviewUrl(project: Project | null, task: Task, yamlUrl = 
   // dead Open button is worse than none.
   if (!tmpl) return null;
   const port = String(task.port);
-  return tmpl
-    .replaceAll("${TERMIC_PORT}",            port)
-    .replaceAll("$TERMIC_PORT",              port)
-    .replaceAll("${CONDUCTOR_PORT}",         port)
-    .replaceAll("$CONDUCTOR_PORT",           port)
-    .replaceAll("${PORT}",                   port)
-    .replaceAll("$PORT",                     port)
-    .replaceAll("${TERMIC_WORKSPACE_NAME}",  task.name)
-    .replaceAll("$TERMIC_WORKSPACE_NAME",    task.name)
-    .replaceAll("${CONDUCTOR_WORKSPACE_NAME}", task.name)
-    .replaceAll("$CONDUCTOR_WORKSPACE_NAME",   task.name);
+  // Built-ins + extra named ports (GH #196) as one token list, replaced
+  // longest name FIRST so no token can eat the front of a longer one
+  // ($TERMIC_PORT vs $TERMIC_WORKSPACE_NAME_2, $API_PORT vs
+  // $API_PORT_EXT). Reserved-name validation keeps extras from ever
+  // EQUALING a built-in, but prefix overlaps are legal and must be
+  // resolved by ordering.
+  const tokens: Array<{ name: string; value: string }> = [
+    { name: "TERMIC_PORT",              value: port },
+    { name: "CONDUCTOR_PORT",           value: port },
+    { name: "PORT",                     value: port },
+    { name: "TERMIC_WORKSPACE_NAME",    value: task.name },
+    { name: "CONDUCTOR_WORKSPACE_NAME", value: task.name },
+    ...(task.extra_named_ports ?? []).map(np => ({ name: np.name, value: String(np.port) })),
+  ].sort((a, b) => b.name.length - a.name.length);
+  let out = tmpl;
+  for (const t of tokens) {
+    out = out
+      .replaceAll("${" + t.name + "}", t.value)
+      .replaceAll("$" + t.name,        t.value);
+  }
+  return out;
 }
 
 /** All run-kind tabs of a task ("run", not "setup"). */

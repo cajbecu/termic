@@ -1501,6 +1501,20 @@ const captureArmedRef = useRef(false);
           unattended: !!(tab as TerminalTab).unattended,
           task,
         });
+        // On-the-fly ports (GH #196): names configured after this task
+        // was created freeze into its buffer now, so this tab's env sees
+        // them. Best-effort: a failure spawns with the already-frozen
+        // pairs. The store refresh (loadAll) only fires when pairs were
+        // actually added, so the common path costs one cheap IPC.
+        let extraPorts = task.extra_named_ports ?? [];
+        try {
+          const fresh = await ipc.taskEnsureExtraPorts(task.id);
+          const freshPorts = fresh.extra_named_ports ?? [];
+          if (freshPorts.length !== extraPorts.length) {
+            extraPorts = freshPorts;
+            void useApp.getState().loadAll();
+          }
+        } catch { /* keep the frozen pairs */ }
         const spawn = await ipc.ptySpawn({
           cwd: task.path,
           cmd: spawnCmd,
@@ -1513,6 +1527,13 @@ const captureArmedRef = useRef(false);
           // parent env, so anything set here always trumps a system env.
           env: {
             TERMIC_PORT: String(task.port),
+            // Extra named ports (GH #196): frozen name→port pairs under
+            // the exact names the user configured (topped up just above).
+            // Before the per-agent block below, so a power user's env
+            // overrides still win.
+            ...Object.fromEntries(
+              extraPorts.map(np => [np.name, String(np.port)]),
+            ),
             TERMIC_WORKSPACE_NAME: task.name,
             COLORFGBG: currentColorFgBg(),
             // Registry entries (agents AND terminal-kind) carry a

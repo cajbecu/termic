@@ -18,6 +18,7 @@ import { useTasksPathConflicts } from "./Controls";
 import { ExcludeEditor } from "./ExcludeEditor";
 import { ScriptField } from "./ScriptField";
 import { cn, cleanLines } from "@/lib/utils";
+import { isValidPortName } from "@/lib/namedPorts";
 import { isTerminalEntry } from "@/lib/agents";
 
 export function RepositorySection({ projectId }: { projectId: string }) {
@@ -101,6 +102,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
       scripts: { setup: "", run: "", archive: "", preview_url: "", files_to_copy: [], run_scripts: [] },
       sandbox: { enabled_by_default: false, allowed_hosts: [], allowed_paths: [] },
       exclude: [],
+      extra_named_ports: [],
     };
     repoConfigLoad(projectId)
       .then(loaded => {
@@ -182,6 +184,8 @@ export function RepositorySection({ projectId }: { projectId: string }) {
               ? next.files_to_copy
               : String(next.files_to_copy).split("\n").map(s => s.trim()).filter(Boolean))
           : [],
+        // Raw split lines from the textarea → trimmed, blanks dropped.
+        extra_named_ports: cleanLines(next.extra_named_ports ?? []),
       };
       await projectUpdate(cleaned);
       await loadAll();
@@ -246,6 +250,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
         files_to_copy: cleanLines(next.scripts.files_to_copy),
       },
       exclude: cleanLines(next.exclude ?? []),
+      extra_named_ports: cleanLines(next.extra_named_ports ?? []),
     };
     setStatus("saving"); setErr(null);
     repoConfigSave(projectId, cleaned)
@@ -286,6 +291,17 @@ export function RepositorySection({ projectId }: { projectId: string }) {
     setRc(prev => {
       if (!prev) return prev;
       const next = { ...prev, scripts: { ...prev.scripts, files_to_copy: text.split("\n") } };
+      scheduleRcSave(next);
+      return next;
+    });
+  }
+  // Extra named ports live at the top level of .termic.yaml (GH #196),
+  // like `exclude`. Raw split lines kept in state so typing isn't
+  // mangled; cleanLines normalizes on save.
+  function patchRcExtraPorts(text: string) {
+    setRc(prev => {
+      if (!prev) return prev;
+      const next = { ...prev, extra_named_ports: text.split("\n") };
       scheduleRcSave(next);
       return next;
     });
@@ -353,6 +369,14 @@ export function RepositorySection({ projectId }: { projectId: string }) {
     ? (Array.isArray(draft.files_to_copy) ? draft.files_to_copy : [])
     : (rc?.scripts.files_to_copy ?? []);
   const filesText = filesArr.join("\n");
+  // Extra named ports (GH #196), same source rule as files-to-copy.
+  // Single-repo only: multi hosts declare them in .termic.yaml directly.
+  const portsArr = scriptTarget === "personal"
+    ? (Array.isArray(draft.extra_named_ports) ? draft.extra_named_ports : [])
+    : (rc?.extra_named_ports ?? []);
+  const portsText = portsArr.join("\n");
+  const badPortNames = portsArr.map(s => s.trim()).filter(Boolean)
+    .filter(n => !isValidPortName(n));
   // Tab order signals importance + frequency of edit:
   //   Scripts first  → the thing you actually came here to tune
   //   Files / Sandbox → focused single-concept tabs
@@ -461,6 +485,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
               URL the terminal panel's Open button opens. Supports{" "}
               <Token>$TERMIC_WORKSPACE_NAME</Token>,{" "}
               <Token>$TERMIC_PORT</Token>, etc.
+              Extra named ports work here too (e.g. <Token>$API_PORT</Token>).
               Blank = auto-detect from output logs.
             </div>
             <Input
@@ -487,7 +512,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
               />
               <ScriptField
                 label="Run script"
-                hint={<>Runs when you click the Run button. Use <Token>$TERMIC_PORT</Token> so each task gets its own port.</>}
+                hint={<>Runs when you click the Run button. Use <Token>$TERMIC_PORT</Token> so each task gets its own port. Extra named ports are available under their own names.</>}
                 value={scriptTarget === "yaml" ? (rc?.scripts.run ?? "") : (draft.run_script ?? "")}
                 onChange={(v) => scriptTarget === "yaml" ? patchScript("run", v) : patch("run_script", v)}
                 placeholder="PORT=$TERMIC_PORT npm run dev"
@@ -501,6 +526,47 @@ export function RepositorySection({ projectId }: { projectId: string }) {
                 placeholder="docker compose down"
                 flash={scriptTarget === "personal" && flashKeys.has("archive_script")}
               />
+            </div>
+          )}
+
+          {/* Extra named ports (GH #196). Team list lives at the top level
+              of .termic.yaml, personal list on Project.extra_named_ports;
+              the union (yaml first, deduped) is frozen into each NEW task
+              as name→port pairs. Single-repo only for now: multi hosts can
+              declare them by editing .termic.yaml directly. */}
+          {!isMulti && (
+            <div>
+              <div className="text-[14px] font-medium">Extra named ports</div>
+              <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+                One env var name per line (e.g. <Token>API_PORT</Token>). Each task gets
+                its own unique port for every name, exposed to scripts, agents and the
+                preview URL under exactly that name, alongside <Token>$TERMIC_PORT</Token>.
+                Existing tasks pick up newly added names on their next run or terminal;
+                ports already assigned never change.
+              </div>
+              <textarea
+                value={portsText}
+                onChange={(e) => {
+                  if (scriptTarget === "personal") {
+                    patch("extra_named_ports", e.target.value.split("\n") as unknown as Project["extra_named_ports"]);
+                  } else {
+                    patchRcExtraPorts(e.target.value);
+                  }
+                }}
+                rows={3}
+                placeholder="API_PORT&#10;DB_PORT"
+                data-testid="extra-named-ports-input"
+                autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+                className={cn(
+                  "mt-2 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5 font-mono text-[12.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]",
+                  scriptTarget === "personal" && flashRing("extra_named_ports"),
+                )}
+              />
+              {badPortNames.length > 0 && (
+                <div data-testid="extra-named-ports-warning" className="mt-1 text-[12px] text-[var(--color-warn)]">
+                  Ignored (invalid or reserved): {badPortNames.join(", ")}
+                </div>
+              )}
             </div>
           )}
 

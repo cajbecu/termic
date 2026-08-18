@@ -41,6 +41,13 @@ pub struct RepoConfig {
     /// `Settings.file_tree_exclude`. `.git` is always hidden regardless.
     #[serde(deserialize_with = "de_vec")]
     pub exclude: Vec<String>,
+    /// Extra named ports (GH #196), team-shared. Each entry is an env
+    /// var NAME (e.g. `API_PORT`); every new task gets a unique port
+    /// per name, frozen into the task at creation. Names are used
+    /// verbatim, no prefixing. Values are allocated per task, so this
+    /// list carries names only.
+    #[serde(deserialize_with = "de_vec")]
+    pub extra_named_ports: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -261,6 +268,28 @@ mod tests {
         assert_eq!(reloaded.scripts.run_scripts.len(), 2);
         assert_eq!(reloaded.scripts.run_scripts[0].label, "Build");
         assert_eq!(reloaded.scripts.run_scripts[1].command, "npm run build:prod");
+    }
+
+    #[test]
+    fn extra_named_ports_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        let cfg = RepoConfig {
+            extra_named_ports: vec!["API_PORT".into(), "DB_PORT".into()],
+            ..Default::default()
+        };
+        save(p, &cfg).unwrap();
+        let reloaded = load(p).unwrap().unwrap();
+        assert_eq!(reloaded.extra_named_ports, vec!["API_PORT", "DB_PORT"]);
+    }
+
+    #[test]
+    fn extra_named_ports_null_tolerant() {
+        // `extra_named_ports:` with no value must load as empty, not error.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(FILE_NAME), "version: 1\nextra_named_ports:\n").unwrap();
+        let cfg = load(dir.path()).unwrap().unwrap();
+        assert!(cfg.extra_named_ports.is_empty());
     }
 
     #[test]

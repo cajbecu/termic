@@ -1598,3 +1598,95 @@ describe("sidebar task drag", () => {
     expect(own[own.length - 1]).toBe(a);
   });
 });
+
+// Extra named ports (GH #196): tasks created after the project declares
+// port names freeze consecutive name→port pairs from their own block, and
+// two live tasks' blocks never overlap. Asserted on the task records:
+// ports have no DOM surface (the env vars land inside the PTY), and the
+// PTY spawn is rAF-gated on occluded CI windows (see run.e2e.ts).
+describe("extra named ports allocation", () => {
+  let projectId: string;
+  const created: string[] = [];
+
+  const setPorts = (names: string[]) =>
+    browser.execute(async (id, list) => {
+      const t = window.__termic!;
+      const p = t.useApp.getState().projects.find((x: any) => x.id === id);
+      await t.ipc.projectUpdate({ ...p, extra_named_ports: list });
+      await t.useApp.getState().loadAll();
+    }, projectId, names);
+  const taskById = (id: string) =>
+    browser.execute(
+      (tid) => window.__termic!.useApp.getState().tasks.find((t: any) => t.id === tid),
+      id,
+    );
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    projectId = await browser.execute(() =>
+      window.__termic!.useApp.getState()
+        .projects.find((p: any) => p.name === "fixture-repo").id as string,
+    );
+    await setPorts(["API_PORT", "DB_PORT"]);
+  });
+
+  after(async () => {
+    for (const id of created) await archiveTask(id);
+    await setPorts([]);
+  });
+
+  it("freezes consecutive named ports from the task's block", async () => {
+    const id = await openTask("e2e-ports-a");
+    created.push(id);
+    const task: any = await taskById(id);
+    // Single-repo task block: base ($TERMIC_PORT), extras at base+1, base+2.
+    expect(task.extra_named_ports).toEqual([
+      { name: "API_PORT", port: task.port + 1 },
+      { name: "DB_PORT",  port: task.port + 2 },
+    ]);
+  });
+
+  it("gives a second live task a non-overlapping block", async () => {
+    const id = await openTask("e2e-ports-b");
+    created.push(id);
+    const a: any = await taskById(created[0]);
+    const b: any = await taskById(id);
+    // Block = 1 base + 2 extras + 5 buffer = 8 ports; the later base must
+    // clear the earlier block entirely (either side).
+    const BLOCK = 8;
+    const clear = b.port >= a.port + BLOCK || a.port >= b.port + BLOCK;
+    expect(clear).toBe(true);
+    // And b's own pairs stay inside b's block, consecutive after its base.
+    expect(b.extra_named_ports.map((np: any) => np.port)).toEqual([b.port + 1, b.port + 2]);
+  });
+
+  it("leaves a task created after the config is cleared without extra ports", async () => {
+    await setPorts([]);
+    const id = await openTask("e2e-ports-none");
+    created.push(id);
+    const task: any = await taskById(id);
+    expect(task.extra_named_ports).toEqual([]);
+  });
+
+  // On-the-fly top-up: names configured AFTER a task exists reach it on
+  // its next spawn via task_ensure_extra_ports (the command every tab
+  // spawn calls). Asserted through the command + record because the env
+  // itself lives inside the PTY (no DOM) and PTY spawn is rAF-gated on
+  // occluded CI windows (see run.e2e.ts).
+  it("tops up an existing task with newly configured names on spawn", async () => {
+    const id = created[2]; // the extras-free task from the previous case
+    await setPorts(["LATE_PORT"]);
+    const fresh: any = await browser.execute(
+      (tid) => window.__termic!.invoke("task_ensure_extra_ports", { id: tid }),
+      id,
+    );
+    // The new name lands in the task's own buffer (base+1 for a
+    // single-repo task with no prior extras) and persists on the record.
+    expect(fresh.extra_named_ports).toEqual([{ name: "LATE_PORT", port: fresh.port + 1 }]);
+    await browser.execute(() => window.__termic!.useApp.getState().loadAll());
+    const stored: any = await taskById(id);
+    expect(stored.extra_named_ports).toEqual([{ name: "LATE_PORT", port: stored.port + 1 }]);
+    await setPorts([]);
+  });
+});

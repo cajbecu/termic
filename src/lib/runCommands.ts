@@ -49,6 +49,7 @@ function emptyRepoConfig(): RepoConfig {
     scripts: { setup: "", run: "", archive: "", preview_url: "", files_to_copy: [], run_scripts: [] },
     sandbox: { enabled_by_default: false, allowed_hosts: [], allowed_paths: [] },
     exclude: [],
+    extra_named_ports: [],
   };
 }
 
