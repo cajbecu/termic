@@ -499,6 +499,108 @@ describe("file tree", () => {
     expect(await rowExists("e2e-refresh/one.txt")).toBe(true);
   });
 
+  // GH #159: a directory read that fails must not leave the row showing
+  // "Loading…" forever. Two halves of the same invariant, both driven by
+  // chmod 000 (read_dir fails with EACCES, deterministically):
+  //   - a failure on a settle reload keeps the listing the tree already had,
+  //     instead of dropping the key and rendering a spinner with nothing coming,
+  //   - a failure on first expand says so and offers a retry.
+  it("keeps a folder's contents when a settle reload cannot read it", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = taskId ?? (await openTask("e2e-tree"));
+
+    const dir = path.join(fixture, "e2e-unreadable");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "kid.txt"), "k\n");
+    await browser.execute(
+      (id) => window.__termic!.useApp.getState().bumpFsRevision(id),
+      taskId,
+    );
+    await browser.waitUntil(() => rowExists("e2e-unreadable"), {
+      timeout: 10_000,
+      timeoutMsg: "the new folder never appeared in the tree",
+    });
+
+    await clickRow("e2e-unreadable");
+    await browser.waitUntil(() => rowExists("e2e-unreadable/kid.txt"), {
+      timeout: 8_000,
+      timeoutMsg: "expanding the folder did not reveal its child",
+    });
+
+    // The folder becomes unreadable, then an agent settles. Before the fix the
+    // reload dropped the failed key from the whole-map replace and the row
+    // went to a permanent "Loading…". The sibling file is what makes this bite:
+    // the reload skips the whole update when nothing it re-read changed, so the
+    // root listing has to differ for the merge to be exercised at all.
+    execSync(`chmod 000 "${dir}"`);
+    writeFileSync(path.join(fixture, "e2e-unreadable-sibling.txt"), "s\n");
+    try {
+      await browser.execute(
+        (id) => window.__termic!.useApp.getState().bumpFsRevision(id),
+        taskId,
+      );
+      // The sibling landing proves the reload ran and updated the tree.
+      await browser.waitUntil(() => rowExists("e2e-unreadable-sibling.txt"), {
+        timeout: 10_000,
+        timeoutMsg: "the settle reload never landed",
+      });
+      // The unreadable folder kept the listing it already had.
+      expect(await rowExists("e2e-unreadable/kid.txt")).toBe(true);
+    } finally {
+      execSync(`chmod 755 "${dir}"`);
+    }
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(path.join(fixture, "e2e-unreadable-sibling.txt"), { force: true });
+  });
+
+  it("offers a retry when a folder cannot be read at all", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = taskId ?? (await openTask("e2e-tree"));
+
+    const dir = path.join(fixture, "e2e-denied");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "kid.txt"), "k\n");
+    execSync(`chmod 000 "${dir}"`);
+    try {
+      await browser.execute(
+        (id) => window.__termic!.useApp.getState().bumpFsRevision(id),
+        taskId,
+      );
+      await browser.waitUntil(() => rowExists("e2e-denied"), {
+        timeout: 10_000,
+        timeoutMsg: "the new folder never appeared in the tree",
+      });
+
+      // Expand: the read fails (once, then the automatic retry), so the row
+      // says so instead of spinning.
+      await clickRow("e2e-denied");
+      const errorRow = () =>
+        browser.execute(
+          () => !!document.querySelector('[data-testid="dir-read-failed"][data-dir="e2e-denied"]'),
+        );
+      await browser.waitUntil(errorRow, {
+        timeout: 10_000,
+        timeoutMsg: "an unreadable folder never showed its retry row",
+      });
+
+      // Make it readable and click Retry: the contents arrive, no collapse
+      // and re-expand needed.
+      execSync(`chmod 755 "${dir}"`);
+      await browser.execute(() =>
+        (document.querySelector('[data-testid="dir-read-failed"][data-dir="e2e-denied"]') as HTMLElement).click(),
+      );
+      await browser.waitUntil(() => rowExists("e2e-denied/kid.txt"), {
+        timeout: 8_000,
+        timeoutMsg: "Retry did not load the folder once it was readable again",
+      });
+    } finally {
+      execSync(`chmod 755 "${dir}"`);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // Clicking an image in the tree must render the picture, not an empty pane:
   // the tab routes to PreviewPane (previewKindForPath) and the bytes arrive as
   // base64 over taskFileReadBase64. The fixture's committed shot.png is the
