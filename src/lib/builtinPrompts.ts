@@ -171,3 +171,20 @@ Look for:
 - Comments that narrate WHAT the code does or justify a workaround at length; keep only one-line WHY comments for genuine hidden constraints.
 
 Rules: behavior stays identical, the diff stays small, and the test suite stays green (run it before and after). If something looks simplifiable but risky, list it instead of touching it.`;
+
+export const FIX_MERGE_CONFLICT_PROMPT = `# Fix the merge conflicts
+
+Resolve the merge conflicts in this repository, or bring the base branch in first if that is what is missing, so the merge or rebase can finish.
+
+1. Get your bearings first: \`git status\` tells you whether a merge, rebase, cherry-pick, or revert is in flight, and \`git diff --name-only --diff-filter=U\` lists the conflicted files. Do not start editing before you know which operation you are in.
+2. If nothing is in flight, check whether the base branch is even merged in yet: \`git fetch\`, then \`git merge-base --is-ancestor origin/main HEAD\` (use the repo's actual base branch if it is not main, for example master or develop). If it is not an ancestor, the branch is behind, so merge the base into the CURRENT branch first with \`git merge origin/main\` and resolve whatever conflicts that surfaces. Never merge the other direction, never switch branches, and never rebase instead unless I ask for it.
+3. Understand BOTH sides before resolving. For each conflicted file, read the conflict hunks and use \`git log --oneline --merge -- <file>\` and \`git diff :2:<file> :3:<file>\` to see what each side was trying to do. "Ours" and "theirs" swap meaning during a rebase, so confirm which is which instead of assuming.
+4. Resolve by intent, not by picking a side to make the markers go away. Keep both changes when both are still wanted, and merge them properly (both new imports, both new cases, both new tests). Take one side only when the other is genuinely superseded, and say why.
+5. Never leave conflict markers (\`<<<<<<<\`, \`=======\`, \`>>>>>>>\`) behind. Grep for them across the tree when you think you are done.
+6. Watch for semantic conflicts the tool cannot see: a rename on one side and a new caller on the other, a signature change plus a new call site, lockfiles and generated files (regenerate those from their source rather than hand-merging).
+7. Stage each resolved file with \`git add\`, then finish the operation (\`git merge --continue\`, \`git rebase --continue\`, or the matching command for what is in flight). Do not commit while files are still unresolved.
+8. Run the project's typecheck and test suite after resolving. A clean merge that does not compile is not resolved.
+
+Never run \`git merge --abort\`, \`git rebase --abort\`, \`git reset --hard\`, or \`git checkout --ours/--theirs\` across the whole tree to escape a hard conflict. If a conflict needs a decision you cannot make, stop with the file, both sides, and the question.
+
+Report: each conflicted file, how you resolved it, and the result of the checks.`;
