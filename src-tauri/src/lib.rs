@@ -1067,6 +1067,21 @@ fn load_tasks() -> Vec<Task> {
 const PORT_BASE: u16 = 18100;
 const PORT_BLOCK_BUFFER: u16 = 5;
 
+/// The one place the block arithmetic lives: 1 ($TERMIC_PORT) + one
+/// port per composition member + one per extra named port + the buffer.
+fn block_len(member_count: u16, extra_count: u16) -> u16 {
+    1 + member_count + extra_count + PORT_BLOCK_BUFFER
+}
+
+/// Serializes every load-occupancy -> allocate -> persist sequence
+/// (task create/import/open-repo, restore rehome, spawn top-up).
+/// Port allocation is a read-scan over the task files with no other
+/// synchronization, so two concurrent allocations against the same
+/// snapshot can pick the same block or stray. Hold this from the
+/// `load_tasks()` that feeds the scan until `save_task` has persisted
+/// the claimed ports.
+static PORT_ALLOC_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 fn task_block_len(task: &Task) -> u16 {
     // Stored at allocation; the computed fallback covers records
     // written before `port_block_len` existed (their extras count
@@ -1074,9 +1089,7 @@ fn task_block_len(task: &Task) -> u16 {
     if task.port_block_len > 0 {
         return task.port_block_len;
     }
-    1 + task.composition.len() as u16
-        + task.extra_named_ports.len() as u16
-        + PORT_BLOCK_BUFFER
+    block_len(task.composition.len() as u16, task.extra_named_ports.len() as u16)
 }
 
 /// Every port interval a task occupies: its contiguous block plus any
@@ -1158,9 +1171,12 @@ fn rehome_ports_if_stolen(task: &mut Task, others: &[Task]) -> bool {
 /// (`task_port_intervals` counts those strays as occupied for every
 /// later allocation). `others` is the full task list for that overflow
 /// scan — a stale copy of self inside it is fine, it is filtered by
-/// id. Concurrent spawns are benign: both compute the same missing set
-/// against the same config and occupancy, so the pairs they persist
-/// are identical. Returns true when pairs were added (caller persists).
+/// id. Repeated top-ups of the SAME task are idempotent (same missing
+/// set, same slots), but that is not a concurrency guarantee: a stray
+/// allocated against a stale `others` snapshot can collide with a
+/// concurrent allocation, so callers hold PORT_ALLOC_LOCK from the
+/// `load_tasks()` that produced `others` until the task is persisted.
+/// Returns true when pairs were added (caller persists).
 fn top_up_extra_ports(task: &mut Task, proj: &Project, others: &[Task]) -> bool {
     if task.port < PORT_BASE { return false; } // legacy record, no block
     // Stamp the block length before consuming buffer: the computed
@@ -1206,7 +1222,7 @@ fn allocate_task_ports(
     member_count: u16,
     extra_names: &[String],
 ) -> Result<(u16, Vec<NamedPort>, u16), String> {
-    let needed = 1 + member_count + extra_names.len() as u16 + PORT_BLOCK_BUFFER;
+    let needed = block_len(member_count, extra_names.len() as u16);
     let base = next_base_port(existing, needed)?;
     let extras = extra_names.iter().enumerate()
         .map(|(j, n)| NamedPort {
@@ -2533,6 +2549,12 @@ fn pty_spawn(
     for (k, v) in &args.env {
         cmd.env(k, v);
     }
+    // INVARIANT: everything `cmd.env`'d from here down is applied AFTER
+    // the caller's overlay above, so it silently overrides any extra
+    // named port (GH #196) a user gave the same name. That is exactly
+    // what RESERVED_PORT_NAMES exists to prevent: any var added below
+    // this line must also be added to that list (both the Rust copy and
+    // the src/lib/namedPorts.ts mirror; a test pins them equal).
     // Multi-repo: expose sibling ports so the agent (or anything the
     // user runs in this PTY) can `curl localhost:$TERMIC_PORT_API`
     // without hardcoding. Same scheme as the script-stream spawn.
@@ -3320,7 +3342,9 @@ fn task_open_repo(
     // Stamped as port_block_len below: the hint-based allocation is the
     // recorded block even when members get skipped, so the unused tail
     // just widens this task's buffer.
-    let port_block_len = 1 + member_count_hint + extra_names.len() as u16 + PORT_BLOCK_BUFFER;
+    let port_block_len = block_len(member_count_hint, extra_names.len() as u16);
+    // Held until save_task below persists the claimed block.
+    let _port_guard = PORT_ALLOC_LOCK.lock();
     let port = next_base_port(&load_tasks(), port_block_len)?;
 
     // Multi-repo project opened in REPO mode: drop a symlink for
@@ -3600,6 +3624,9 @@ fn task_import_worktree(
     // LIVE tasks only: an archived task keeps its old path on the record
     // (the dir is gone), and counting it would refuse re-adopting that
     // path forever with a wrong message.
+    // Port lock held until save_task below: `existing_tasks` also feeds
+    // the port allocation, so it must stay the authoritative occupancy.
+    let _port_guard = PORT_ALLOC_LOCK.lock();
     let existing_tasks = load_tasks();
     if existing_tasks.iter().any(|w| !w.archived && canon_str(&w.path) == wt_canon) {
         return Err("this worktree is already open as a task".into());
@@ -3900,6 +3927,8 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
     }
 
     // Allocate the task's port block (base + extras + buffer).
+    // Released right after save_task below persists the claimed block.
+    let port_guard = PORT_ALLOC_LOCK.lock();
     let extra_names = effective_extra_named_ports_from(&repo_cfg, &proj);
     let (port, extra_named_ports, port_block_len) =
         allocate_task_ports(&load_tasks(), 0, &extra_names)?;
@@ -3993,6 +4022,7 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
         archived_at: None,
     };
     save_task(&task).map_err(|e| e.to_string())?;
+    drop(port_guard);
 
     // Setup no longer runs here. It used to fire in a background thread and
     // stream to the New Task dialog via setup-output/setup-done, which the
@@ -4203,7 +4233,16 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
     // Allocate the task's whole port block up front (GH #196): base
     // ($TERMIC_PORT) + one port per member + the host's extra named
     // ports + buffer. Members get base+1+i via the counter below;
-    // the extras land right after the members.
+    // the extras land right after the members. The port lock spans the
+    // member-creation loop (the record persists only after it), so a
+    // multi create briefly serializes other allocations; creates are
+    // rare enough that this beats persisting a half-built record.
+    // Reentrancy: safe to hold across the loop because members are
+    // created inline (git worktree / symlink), never via another
+    // allocation path, and PORT_ALLOC_LOCK's other takers are all
+    // frontend-invoked commands, not callees of this fn. Released
+    // right after save_task below persists the claimed block.
+    let port_guard = PORT_ALLOC_LOCK.lock();
     let extra_names = effective_extra_named_ports(&host);
     let (ws_port, extra_named_ports, port_block_len) =
         allocate_task_ports(&load_tasks(), frozen.len() as u16, &extra_names)?;
@@ -4382,6 +4421,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         archived_at: None,
     };
     save_task(&task).map_err(|e| e.to_string())?;
+    drop(port_guard);
 
     // Streamed setup: host's project.setup_script (cwd=wrapper)
     // first, then each member's setup_script (cwd=member.path) in
@@ -5828,7 +5868,18 @@ fn task_restore_sync(app: AppHandle, id: String) -> Result<Task, String> {
     // Repo-root tasks have no dedicated worktree to recreate — the task
     // IS the main checkout. Just unarchive the record and return.
     if list[idx].is_main_checkout {
-        let snapshot = list.clone();
+        // Fresh occupancy under the port lock (not the earlier `list`
+        // load): a create finishing in between could have claimed this
+        // task's block without appearing in the stale snapshot. Adopt
+        // the fresh on-disk record too, not just the occupancy: saving
+        // the fn-start copy would silently drop pairs a concurrent
+        // top-up persisted meanwhile. Everything restore does before
+        // this point only READS the record, so nothing is lost.
+        let _port_guard = PORT_ALLOC_LOCK.lock();
+        let snapshot = load_tasks();
+        if let Some(fresh) = snapshot.iter().find(|t| t.id == id) {
+            list[idx] = fresh.clone();
+        }
         rehome_ports_if_stolen(&mut list[idx], &snapshot);
         list[idx].archived = false;
         list[idx].archived_at = None;
@@ -6009,10 +6060,23 @@ fn task_restore_sync(app: AppHandle, id: String) -> Result<Task, String> {
 
     // Unarchive and persist. A task created while this one was archived
     // may have reused its port block (GH #196) — rehome before going live.
-    let snapshot = list.clone();
+    // Fresh occupancy under the port lock, not the fn-start `list` load:
+    // the worktree recreation above takes long enough for a concurrent
+    // create to have claimed this block without appearing in that snapshot.
+    // Adopt the fresh on-disk record too, not just the occupancy: saving
+    // the fn-start copy would silently drop pairs a concurrent top-up
+    // persisted meanwhile. Everything restore does before this point only
+    // READS the record, so nothing is lost. Released right after the
+    // save_task below persists the (possibly re-homed) ports.
+    let port_guard = PORT_ALLOC_LOCK.lock();
+    let snapshot = load_tasks();
+    if let Some(fresh) = snapshot.iter().find(|t| t.id == id) {
+        list[idx] = fresh.clone();
+    }
     rehome_ports_if_stolen(&mut list[idx], &snapshot);
     list[idx].archived = false;
     save_task(&list[idx]).map_err(|e| e.to_string())?;
+    drop(port_guard);
     let task = list[idx].clone();
 
     // Run setup script(s) fire-and-forget, same as creation.
@@ -9809,6 +9873,9 @@ async fn task_spotlight_resync(id: String, app: AppHandle) -> Result<(), String>
 /// runner path calls `top_up_extra_ports` directly.
 #[tauri::command]
 fn task_ensure_extra_ports(id: String) -> Result<Task, String> {
+    // Held until save_task below: a stray allocated against a stale
+    // snapshot could collide with a concurrent create's block.
+    let _port_guard = PORT_ALLOC_LOCK.lock();
     let mut list = load_tasks();
     let idx = list.iter().position(|w| w.id == id).ok_or("no such task")?;
     let Some(proj) = load_projects().into_iter().find(|p| p.id == list[idx].project_id) else {
@@ -9844,6 +9911,9 @@ fn task_run_script_stream(
     use std::os::unix::process::CommandExt;
     use std::process::Stdio;
 
+    // Port lock spans load -> top-up -> save only; dropped before the
+    // script actually spawns.
+    let port_guard = PORT_ALLOC_LOCK.lock();
     let all_tasks = load_tasks();
     let mut w = all_tasks.iter().find(|w| w.id == id).cloned().ok_or("no such task")?;
     let p = load_projects().into_iter().find(|p| p.id == w.project_id).ok_or("no proj")?;
@@ -9853,6 +9923,7 @@ fn task_run_script_stream(
     if top_up_extra_ports(&mut w, &p, &all_tasks) {
         let _ = save_task(&w);
     }
+    drop(port_guard);
     let member_dir = member.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
 
     // Resolve target: empty member = host, otherwise the named
@@ -16450,6 +16521,31 @@ filename f.rs
                   "TERMIC_CLI_HELP"] {
             assert!(!valid_port_name(n), "{n} must be reserved");
         }
+    }
+
+    #[test]
+    fn reserved_names_match_ts_mirror() {
+        // src/lib/namedPorts.ts carries a hand-maintained copy of
+        // RESERVED_PORT_NAMES for the Settings editor's inline warnings.
+        // Pin the two sets equal so "keep in sync" is a gate, not a
+        // comment. Parses the string literals out of the TS `new Set([...])`.
+        let ts_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/lib/namedPorts.ts");
+        let ts = std::fs::read_to_string(&ts_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", ts_path.display()));
+        let start = ts.find("RESERVED_PORT_NAMES").expect("TS list missing");
+        let open = ts[start..].find('[').expect("TS list has no [") + start;
+        let close = ts[open..].find(']').expect("TS list has no ]") + open;
+        let ts_names: HashSet<&str> = ts[open..close]
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .collect();
+        let rust_names: HashSet<&str> = RESERVED_PORT_NAMES.iter().copied().collect();
+        assert!(!ts_names.is_empty(), "parsed zero names from namedPorts.ts");
+        assert_eq!(
+            ts_names, rust_names,
+            "RESERVED_PORT_NAMES differs between lib.rs and src/lib/namedPorts.ts"
+        );
     }
 
     #[test]
