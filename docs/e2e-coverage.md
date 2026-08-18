@@ -72,7 +72,7 @@ until `make e2e` is green and this file reflects it.
 | ✅ Editor persist | Single-click = preview tab; double-click persists it | `editor.e2e.ts` |
 | ✅ Split panes | Unsplit start; split-right → 2 leaves; split-below → 3 | `tabs-layout.e2e.ts` |
 | ✅ Message queue | Message held while working, drains on idle | `agent.e2e.ts` |
-| ✅ Command palette | Opens/lists; filters; command activation closes it; Escape closes | `app.e2e.ts` |
+| ✅ Command palette | Opens/lists; filters; command activation closes it; Escape closes; the top-bar button toggles it open and shut and names the live binding in its label; top-bar tooltips (palette, Prompts, right-panel toggle) print their live glyphs | `app.e2e.ts` |
 | ✅ File finder | ⌘P lists the repo's files; selecting one opens an editor tab | `files.e2e.ts` |
 | ✅ Git stage/unstage/commit | Stage → unstage → re-stage + commit → clean | `git.e2e.ts` |
 | ✅ Task rename/delete | Rename updates store+sidebar; duplicate name refused (IPC) + toast (inline flow, GH #153); delete removes the task entirely | `task.e2e.ts` |

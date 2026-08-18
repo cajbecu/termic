@@ -37,6 +37,58 @@ describe("termic e2e pipeline", () => {
   });
 });
 
+// The top bar teaches its shortcuts through tooltips, and every one of them
+// is built from the LIVE binding, so a rebind can never leave a tooltip naming
+// a key that does nothing. Cases: the palette button, the Prompts dropdown
+// (⌥⌘P opens the searchable palette over the same list), and the right-panel
+// toggle (⌥⌘B).
+describe("top-bar tooltips name their shortcut", () => {
+  let taskId!: string;
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+  });
+
+  // Radix opens a tooltip on pointermove over the trigger; WebDriver's own
+  // hover is unreliable here, so the event goes in directly.
+  const hover = (selector: string) =>
+    browser.execute((sel) => {
+      const el = document.querySelector(sel) as HTMLElement | null;
+      if (!el) throw new Error(`no trigger for ${sel}`);
+      el.dispatchEvent(
+        new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse" }),
+      );
+    }, selector);
+
+  const tipText = () =>
+    browser.execute(() =>
+      [...document.querySelectorAll('[role="tooltip"]')]
+        .map((t) => (t as HTMLElement).textContent ?? "")
+        .join("|"),
+    );
+
+  const expectTip = async (selector: string, needle: string) => {
+    await hover(selector);
+    await browser.waitUntil(async () => (await tipText()).includes(needle), {
+      timeout: 5_000,
+      timeoutMsg: `tooltip for ${selector} never showed "${needle}"`,
+    });
+    // Leave, so the next trigger's tooltip is the only one on screen.
+    await browser.execute((sel) => {
+      const el = document.querySelector(sel) as HTMLElement | null;
+      el?.dispatchEvent(new PointerEvent("pointerleave", { bubbles: false, pointerType: "mouse" }));
+    }, selector);
+  };
+
+  it("names the palette, prompt palette and right-panel bindings", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask("e2e-bar-tips");
+    await expectTip('[data-testid="command-palette-button"]', "Command palette (\u21e7\u2318P)");
+    await expectTip('[data-testid="prompts-menu"]', "Prompts (\u2325\u2318P)");
+    await expectTip('[data-testid="toggle-right-panel"]', "Toggle right panel (\u2325\u2318B)");
+  });
+});
+
 // P1: the command palette (⌘K). Cases: opens and lists commands; filtering
 // narrows the list; running a command performs its action and closes the
 // palette; Escape closes it.
@@ -111,6 +163,32 @@ describe("command palette", () => {
     await browser.waitUntil(async () => (await paletteOpen()) === false, {
       timeout: 5_000,
       timeoutMsg: "activating a command did not close the palette",
+    });
+  });
+
+  // The top-bar button is the discoverable half of ⇧⌘P. It toggles, so a
+  // second click has to dismiss the palette rather than no-op.
+  it("the top-bar button toggles the palette", async () => {
+    await browser.execute(() =>
+      window.__termic!.useUI.getState().closeCommandPalette(),
+    );
+    await clickWhenVisible('[data-testid="command-palette-button"]');
+    await browser.waitUntil(async () => (await paletteOpen()) === true, {
+      timeout: 5_000,
+      timeoutMsg: "clicking the palette button did not open the palette",
+    });
+    // The tooltip/aria label carries the live binding, so a rebind can't
+    // leave the button naming a key that no longer opens anything.
+    const ariaLabel = await browser.execute(() =>
+      document
+        .querySelector('[data-testid="command-palette-button"]')
+        ?.getAttribute("aria-label"),
+    );
+    expect(ariaLabel).toBe("Command palette (\u21e7\u2318P)");
+    await clickWhenVisible('[data-testid="command-palette-button"]');
+    await browser.waitUntil(async () => (await paletteOpen()) === false, {
+      timeout: 5_000,
+      timeoutMsg: "clicking the palette button again did not close the palette",
     });
   });
 
