@@ -247,13 +247,12 @@ export function TasksSection() {
         />
       </Block>
 
-      {/* Archiving can't be undone from inside Termic, so the confirmation
-          needs a visible way back for anyone who turned it off from the
-          dialog. */}
+      {/* The dialog's "Show this every time" checkbox writes this toggle, so
+          anyone who unticked it there has a visible way back. */}
       <Block>
         <Toggle
           label="Confirm before archiving a task"
-          hint="Ask before archiving a task. With this off, archiving happens straight away."
+          hint={"Ask before archiving a task. With this off (or after unticking \"Show this every time\" in the dialog), archiving happens straight away and a toast points at History."}
           value={confirmBeforeArchiveTask}
           onChange={setConfirmBeforeArchiveTask}
         />

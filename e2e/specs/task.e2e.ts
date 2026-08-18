@@ -285,11 +285,11 @@ describe("task archive", () => {
   });
 });
 
-// P0: the archive confirmation's "Don't ask again" opt-out. Archiving can't be
-// undone from inside Termic, so all three halves are pinned here: backing out
-// must NOT store the opt-out, confirming with it ticked must store BOTH it and
-// the delete-branch answer, and a later archive must then run silently with
-// that stored branch answer.
+// P0: the archive confirmation's "Show this every time" opt-out (issue #102 -
+// ticked by default, unticking is what opts out). All three halves are pinned
+// here: backing out must NOT store the opt-out, confirming with it unticked
+// must store BOTH it and the delete-branch answer, and a later archive must
+// then run silently with that stored branch answer.
 describe("archive confirmation", () => {
   const ARCHIVE_REPO = path.join(process.cwd(), ".e2e", "fixture-repo");
   // Deliberately NOT the task names below: the dialog title is
@@ -380,7 +380,7 @@ describe("archive confirmation", () => {
     }
   });
 
-  it("keeps asking when the user ticks the box but then cancels", async () => {
+  it("keeps asking when the user unticks the box but then cancels", async () => {
     await browser.execute(() => {
       const p = window.__termic!.usePrefs.getState();
       p.setConfirmBeforeArchiveTask(true);
@@ -395,7 +395,9 @@ describe("archive confirmation", () => {
     // exactly what "Delete the git branch" would remove.
     expect(await dialogText()).toContain(BRANCH_A);
 
-    await clickInDialog("confirm-dont-ask");
+    // Unticking "Show this every time" is the opt-out; the branch box is the
+    // separate delete-the-branch answer.
+    await clickInDialog("confirm-show-every-time");
     await clickInDialog("confirm-checkbox");
     await clickInDialog("confirm-cancel");
 
@@ -411,7 +413,7 @@ describe("archive confirmation", () => {
 
     await clickWhenVisible('[data-testid="archive-task"]');
     await waitForArchiveDialog();
-    await clickInDialog("confirm-dont-ask");
+    await clickInDialog("confirm-show-every-time");
     await clickInDialog("confirm-checkbox");
     await clickInDialog("confirm-ok");
 
@@ -432,9 +434,22 @@ describe("archive confirmation", () => {
       timeout: 15_000, timeoutMsg: "silent archive never landed",
     });
     // No confirmation was ever shown, and the branch went with it because
-    // that is what the user answered when they ticked "Don't ask again".
+    // that is what the user answered when they unticked "Show this every
+    // time".
     expect(await dialogText()).toBe("");
     expect(branchExists(BRANCH_B)).toBe(false);
+    // With no dialog, the toast is the only feedback and the only pointer to
+    // where the task went (issue #102). Assert the rendered toast, not the
+    // store: the [role="status"] node is the part the user actually reads.
+    await browser.waitUntil(
+      () =>
+        browser.execute(() =>
+          [...document.querySelectorAll('[role="status"]')].some((t) =>
+            (t as HTMLElement).innerText.includes("History"),
+          ),
+        ),
+      { timeout: 10_000, timeoutMsg: "a silent archive showed no toast pointing at History" },
+    );
     await snap("archive-silent.png");
   });
 });

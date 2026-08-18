@@ -270,6 +270,12 @@ export function TerminalPane({ task, tab, active }: Props) {
   // Writes timestamped lines to termic-pty-<task>-<cli>-<ptyId>.log in
   // the OS temp dir. Find path: python3 -c 'import tempfile; print(tempfile.gettempdir())'
   const debugLogRef = useRef<((tag: string, content: string) => void) | null>(null);
+  // A session uuid termic minted for THIS spawn, held back until the user
+  // actually submits (issue #102). Persisting it at spawn time meant a
+  // close+reopen before the first prompt resumed a session the agent had
+  // never written to disk, and claude answers that with "No conversation
+  // found". Cleared once persisted, and on every respawn.
+  const pendingSessionUuidRef = useRef<string | null>(null);
   // True once the user has submitted (Enter) since THIS PTY spawned.
   // Stored as a ref so it survives across re-renders and can be set from
   // both the spawn effect (term.onData) and a lastInputAt watcher (broadcast).
@@ -324,6 +330,18 @@ const captureArmedRef = useRef(false);
   // skipping the ceilings below it. Every other outcome (fired, acknowledged,
   // drained into the message queue, or already spent this turn) returns true —
   // the turn needs nothing further.
+  // Persist the uuid this spawn minted, on the FIRST real submit (keyboard
+  // Enter or a broadcast stamping lastInputAt). One-shot: the ref clears, so
+  // later submits cost nothing. Before this, a fresh agent closed and reopened
+  // without a single prompt came back with `--resume <uuid>` for a session the
+  // CLI had never written, i.e. "No conversation found" (issue #102).
+  const persistMintedSession = useCallback(() => {
+    const uuid = pendingSessionUuidRef.current;
+    if (!uuid) return;
+    pendingSessionUuidRef.current = null;
+    useApp.getState().setTabSessionId(task.id, tab.id, uuid);
+  }, [task.id, tab.id]);
+
   const fireDone = useCallback((reason: string, attn: "done" | "attention" = "done", seen = false, force = false): boolean => {
     if (doneFiredSinceSubmitRef.current) {
       debugLogRef.current?.("done-suppressed", `already fired this turn (${reason})`);
@@ -920,6 +938,7 @@ const captureArmedRef = useRef(false);
     // submit-window and submittedSinceSpawn on launch.
     spawnStartedAtRef.current = Date.now();
     // Reset submit-window refs for this new PTY session.
+    pendingSessionUuidRef.current = null;
     submitWindowUntilRef.current = 0;
     submitAtRef.current = 0;
     preSubmitHashRef.current = 0;
@@ -1629,13 +1648,15 @@ const captureArmedRef = useRef(false);
           // spawn means we have a usable session regardless of whether
           // this one was a resume or a fallback fresh.
           failedResumeRef.current = false;
-          // Just minted a uuid for THIS tab: persist it (per-tab, so each
-          // agent in the task resumes independently) so the next spawn
-          // — this session or after a restart — uses --resume <uuid> instead
-          // of --session-id <uuid>. setTabSessionId updates both the
-          // in-memory tab and disk.
+          // Just minted a uuid for THIS tab: hold it until the first real
+          // submit (see persistMintedSession), then persist it per-tab so each
+          // agent in the task resumes independently and the next spawn — this
+          // session or after a restart — uses --resume <uuid> instead of
+          // --session-id <uuid>. The agent only writes its session file once
+          // there is a conversation, so persisting at spawn time hands the
+          // next spawn a --resume id that does not exist yet.
           if (decision.kind === "mint" && sessionUuid) {
-            useApp.getState().setTabSessionId(task.id, tab.id, sessionUuid);
+            pendingSessionUuidRef.current = sessionUuid;
           }
           // Cwd-resume agents (codex) + legacy worktree continue: keep the
           // has_resumable_history flag flow so the next worktree spawn (this
@@ -1869,6 +1890,7 @@ const captureArmedRef = useRef(false);
             }
             patchTab(task.id, tab.id, { lastInputAt: Date.now() });
             submittedSinceSpawnRef.current = true;
+            persistMintedSession();
             noteSubmit(tab.cli);
             submitAtRef.current = Date.now();
             submitWindowUntilRef.current = submitAtRef.current + 5_000;
@@ -1994,6 +2016,7 @@ const captureArmedRef = useRef(false);
     const t = tab.lastInputAt;
     if (t && t > (spawnStartedAtRef.current || 0)) {
       submittedSinceSpawnRef.current = true;
+      persistMintedSession();
       noteSubmit(tab.cli);
       submitAtRef.current = t;
       submitWindowUntilRef.current = t + 5_000;

@@ -467,12 +467,12 @@ interface PrefsState {
   /** Whether closing a non-shell terminal/agent tab asks for confirmation
    *  first. ON by default. Once the "+" menu's Resume section makes
    *  undoing a close one click away, users who've learned that can turn
-   *  this off via the dialog's "Don't ask again" checkbox — closing then
+   *  this off by unticking the dialog's "Show this every time" box — closing then
    *  happens immediately, with a toast pointing back at Resume. Dirty
    *  edit-tab closes are never gated by this; that confirm always fires. */
   confirmBeforeCloseAgentTab: boolean;
   /** Whether archiving a task asks for confirmation first. ON by default.
-   *  Turned off by ticking "Don't ask again" in the archive dialog, which
+   *  Turned off by unticking "Show this every time" in the archive dialog, which
    *  ALSO freezes `archiveDeleteBranch` to whatever the delete-branch
    *  checkbox said at that moment — so a silent archive still honours the
    *  last explicit branch decision. Archiving can't be undone from inside

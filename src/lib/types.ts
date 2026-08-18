@@ -498,7 +498,7 @@ export interface Settings {
    *  the migration would re-fire and undo a user's opt-out. */
   cli_default_migrated?: boolean;
   /** What the window's close button does. Absent/"ask" = show the close
-   *  prompt (whose "Don't ask again" checkbox writes the choice back here);
+   *  prompt (whose "Show this every time" checkbox writes the choice back here);
    *  "menubar" = close to the menu bar, agents keep running; "quit" = quit
    *  Termic and kill every agent. */
   close_action?: "ask" | "menubar" | "quit";

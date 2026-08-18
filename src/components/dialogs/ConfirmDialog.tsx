@@ -29,9 +29,12 @@ export function ConfirmDialog() {
     sandboxForTaskId !== null;
 
   const [checked, setChecked] = useState(false);
-  // Second, independent checkbox: "Don't ask again". Never defaults to on -
-  // an opt-out of a destructive confirm has to be a deliberate tick.
-  const [dontAsk, setDontAsk] = useState(false);
+  // Second, independent checkbox: "Show this every time", ticked by default.
+  // Framed positively (issue #102) because the confirms that carry it guard
+  // recoverable actions: unticking is the deliberate one-time act, and the
+  // state on screen matches the setting it writes ("Confirm before archiving"
+  // in Settings > Tasks), which "Don't ask again" inverted every time.
+  const [showEveryTime, setShowEveryTime] = useState(true);
 
   useEffect(() => {
     if (confirm?.req?.checkbox) {
@@ -39,7 +42,7 @@ export function ConfirmDialog() {
     } else {
       setChecked(false);
     }
-    setDontAsk(false);
+    setShowEveryTime(true);
   }, [confirm]);
 
   // ⏎ confirms, Esc cancels. Esc is already handled by Radix Dialog's
@@ -49,12 +52,12 @@ export function ConfirmDialog() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        resolve(true, checked, dontAsk);
+        resolve(true, checked, !showEveryTime);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [confirm, resolve, checked, dontAsk]);
+  }, [confirm, resolve, checked, showEveryTime]);
 
   if (!confirm) return null;
   const { req } = confirm;
@@ -63,7 +66,7 @@ export function ConfirmDialog() {
   return (
     <AppDialog
       open
-      onOpenChange={(v) => { if (!v) resolve(false, checked, dontAsk); }}
+      onOpenChange={(v) => { if (!v) resolve(false, checked, !showEveryTime); }}
       title={req.title}
       // Stacked confirms (popping on top of an open dialog) ALSO get a
       // warm warning ring + soft outer glow so they don't blend into
@@ -118,30 +121,30 @@ export function ConfirmDialog() {
           <label className="ml-8 flex items-start gap-2.5 cursor-pointer select-none text-[13px] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)]">
             <input
               type="checkbox"
-              checked={dontAsk}
-              onChange={(e) => setDontAsk(e.target.checked)}
+              checked={showEveryTime}
+              onChange={(e) => setShowEveryTime(e.target.checked)}
               className="mt-0.5 h-3.5 w-3.5 rounded border-[var(--color-border)] bg-[var(--color-bg-2)] text-[var(--color-accent)] focus:ring-0 focus:ring-offset-0 cursor-pointer shrink-0"
-              data-testid="confirm-dont-ask"
+              data-testid="confirm-show-every-time"
             />
             <div className="flex flex-col gap-0.5">
-              <span>Don't ask again</span>
-              {/* Ticking this arms a destructive action to run with no
-                  confirmation at all, so name the way back. */}
+              <span>Show this every time</span>
+              {/* Unticking this runs the action with no confirmation from
+                  here on, so name the way back. */}
               <span className="text-[12px] text-[var(--color-fg-dim)]/70">
-                Change it later in Settings &gt; Tasks.
+                Untick to skip it from now on. Change it later in Settings &gt; Tasks.
               </span>
             </div>
           </label>
         )}
       </div>
       <div className="mt-4 flex justify-end gap-2">
-        <Button variant="ghost" type="button" onClick={() => resolve(false, checked, dontAsk)} data-testid="confirm-cancel">
+        <Button variant="ghost" type="button" onClick={() => resolve(false, checked, !showEveryTime)} data-testid="confirm-cancel">
           {req.cancelLabel ?? "Cancel"}
         </Button>
         <Button
           variant="primary"
           type="button"
-          onClick={() => resolve(true, checked, dontAsk)}
+          onClick={() => resolve(true, checked, !showEveryTime)}
           data-testid="confirm-ok"
           // Override accent → red for destructive actions so the
           // user has a visual "this is irreversible" before they click.

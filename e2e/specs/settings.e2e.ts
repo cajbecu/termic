@@ -695,10 +695,10 @@ describe("preferences", () => {
   });
 });
 
-// P1: the archive confirmation prefs. Ticking "Don't ask again" in the archive
-// dialog is otherwise a one-way door (archiving can't be undone from inside
-// Termic), so Settings → Tasks is the ONLY way back and both halves of the
-// stored answer have to be visible and reversible there.
+// P1: the archive confirmation prefs. Unticking "Show this every time" in the
+// archive dialog is otherwise a one-way door, so Settings → Tasks is the ONLY
+// way back and both halves of the stored answer have to be visible and
+// reversible there.
 describe("archive confirmation settings", () => {
   const CONFIRM_LABEL = "Confirm before archiving a task";
   const BRANCH_LABEL = "Delete the branch when archiving";

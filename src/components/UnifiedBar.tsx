@@ -308,7 +308,7 @@ export function UnifiedBar() {
               );
             })()}
             <Tip content="Archive task" side="bottom">
-              {/* Copy, delete-branch checkbox and the "Don't ask again"
+              {/* Copy, delete-branch checkbox and the "Show this every time"
                   opt-out all live in confirmAndArchive - this button used to
                   inline its own near-copy of the prompt, which then drifted
                   from the sidebar's. */}

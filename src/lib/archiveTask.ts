@@ -49,20 +49,20 @@ export async function archiveAndRefresh(taskId: string, deleteBranch: boolean): 
 function archivePrompt(w: Task, deleteBranchDefault: boolean): { message: string; confirmLabel: string; checkbox?: ConfirmCheckbox } {
   if (w.is_main_checkout) {
     return {
-      message: "This removes the Termic entry for the project's main checkout. The repo on disk is NOT touched, so you can re-open it any time. Any agent running here will be terminated.",
+      message: "This removes the Termic entry for the project's main checkout. The repo on disk is NOT touched, so you can re-open it from the project's + menu any time. Any agent running here will be terminated.",
       confirmLabel: "Remove entry",
     };
   }
   if ((w.composition?.length ?? 0) > 0) {
     const members = (w.composition ?? []).filter(m => m.mode === "worktree").map(m => m.dir_name);
     return {
-      message: `Branches stay in git, so you can recreate the task later. This removes: the host worktree + every member worktree (${members.join(", ") || "none"}), plus any member symlinks to live checkouts (those live repos are NOT touched). Any running agent will be terminated.`,
+      message: `Easy to get back: the task stays in History and the branches stay in git, so you can recreate it later. This removes the on-disk worktrees (the host + ${members.join(", ") || "none"}) and any member symlinks to live checkouts (those live repos are NOT touched). Any running agent will be terminated.`,
       confirmLabel: "Archive",
       checkbox: { label: "Delete the git branches", defaultValue: deleteBranchDefault },
     };
   }
   return {
-    message: "The branch stays in git, so you can spin up a fresh worktree on it later. This removes only the on-disk worktree directory (build artifacts: node_modules, .venv, untracked files) and terminates any running agent. Can't be undone from inside Termic.",
+    message: "Easy to get back: the task stays in History and the branch stays in git, so you can spin up a fresh worktree on it later. This removes only the on-disk worktree directory (build artifacts: node_modules, .venv, untracked files) and terminates any running agent.",
     confirmLabel: "Archive",
     checkbox: { label: "Delete the git branch:", branchName: w.branch || undefined, defaultValue: deleteBranchDefault },
   };
@@ -70,7 +70,7 @@ function archivePrompt(w: Task, deleteBranchDefault: boolean): { message: string
 
 /** Confirm + archive a task, with the busy overlay. The ONLY archive entry
  *  point in the UI (sidebar row menu, unified bar button, command palette) so
- *  the copy, the delete-branch checkbox and the "Don't ask again" opt-out
+ *  the copy, the delete-branch checkbox and the "Show this every time" opt-out
  *  can't drift between them. No-op if the user cancels. */
 export async function confirmAndArchive(w: Task): Promise<void> {
   const ui = useUI.getState();
@@ -82,6 +82,12 @@ export async function confirmAndArchive(w: Task): Promise<void> {
   // the checkbox.
   if (!prefs.confirmBeforeArchiveTask) {
     await runArchive(w, !w.is_main_checkout && prefs.archiveDeleteBranch);
+    // No dialog was shown, so the toast is the only feedback that anything
+    // happened — and the only pointer back to where the task went.
+    ui.pushToast(`Archived "${w.name}". It's in History.`, "info", {
+      ttlMs: 6000,
+      action: { label: "History", onClick: () => useApp.getState().setView("history") },
+    });
     return;
   }
 
@@ -89,7 +95,10 @@ export async function confirmAndArchive(w: Task): Promise<void> {
     title: `Archive "${w.name}"?`,
     message,
     confirmLabel,
-    destructive: true,
+    // Not red: archiving is recoverable (History keeps the task, git keeps
+    // the branch). The red button is reserved for the genuinely one-way
+    // actions, e.g. History's "Empty archive" (issue #102).
+    destructive: false,
     checkbox,
     dontAskAgain: true,
   });

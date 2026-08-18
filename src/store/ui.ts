@@ -30,7 +30,7 @@ export interface ConfirmRequest {
    *  delete / "ripping the cage" style actions. */
   destructive?: boolean;
   checkbox?: ConfirmCheckbox;
-  /** Renders a second, separate "Don't ask again" checkbox under
+  /** Renders a second, separate "Show this every time" checkbox under
    *  `checkbox`. The dialog only reports it back (as `dontAskAgain`); it is
    *  the CALLER's job to persist the opt-out, and to do so only when
    *  `confirmed` is also true. */

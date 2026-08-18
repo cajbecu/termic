@@ -42,8 +42,8 @@ async function confirmTabClose(tab: Tab | undefined, paneTab: boolean): Promise<
     // terminal-like tabs have no session to lose either. Close silently
     // instead of a fake "Stops the running process" confirm.
     if (termLike && !tab.ptyId) return true;
-    // Fast path: the user opted out via the dialog's "Don't ask again"
-    // checkbox below. The "+" menu's Resume section (backed by closedTabs)
+    // Fast path: the user opted out by unticking "Show this every time" in
+    // the dialog below. The "+" menu's Resume section (backed by closedTabs)
     // makes undoing a close one click away, so a blocking modal on every
     // close is no longer the only safety net. requestCloseTab /
     // requestClosePaneTab toast a Resume shortcut once the close lands.
@@ -52,23 +52,31 @@ async function confirmTabClose(tab: Tab | undefined, paneTab: boolean): Promise<
       ? (tab.title || "this command")
       : agentDisplayName(tab.cli, useApp.getState().agents);
     const isMain = !paneTab && !!tab.is_default;
+    // Only a PANE tab close is genuinely one-way: pane tabs are never
+    // snapshotted into closedTabs (see app.ts's closeTab), so there is no
+    // Resume entry to click afterwards. The main tab auto-resumes and a
+    // secondary strip tab is one click away in the "+" menu, so neither
+    // gets the red button or copy that implies loss (issue #102).
+    const gone = !isMain && !termLike && paneTab;
     const ok = await useUI.getState().askConfirm({
       title: `Close ${label}?`,
       message: termLike
         ? "Stops the running process and closes the tab."
         : isMain
           ? "Stops the running process. The session resumes when you reopen the task."
-          : "Ends this agent's session. It won't be restored when the task reopens.",
+          : gone
+            ? "Ends this agent's session. A pane tab isn't kept, so this one can't be resumed."
+            : "Ends this agent's session. Bring it back any time from the Resume list in the + menu.",
       confirmLabel: "Close tab",
-      destructive: !isMain && !termLike,
-      checkbox: { label: "Don't ask again", defaultValue: false },
+      destructive: gone,
+      dontAskAgain: true,
     });
     // Only persist the opt-out when the user actually confirmed the close —
-    // ticking the box then backing out (Escape / Cancel / click-outside)
-    // still resolves with ok.checked=true (ConfirmDialog reports whatever
+    // unticking the box then backing out (Escape / Cancel / click-outside)
+    // still resolves with dontAskAgain=true (ConfirmDialog reports whatever
     // the checkbox state was at dismissal), so gating on confirmed too
     // stops a cancelled close from silently disabling future confirmations.
-    if (ok.confirmed && ok.checked) usePrefs.getState().setConfirmBeforeCloseAgentTab(false);
+    if (ok.confirmed && ok.dontAskAgain) usePrefs.getState().setConfirmBeforeCloseAgentTab(false);
     return ok.confirmed;
   }
   return true;

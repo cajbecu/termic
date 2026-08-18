@@ -60,7 +60,7 @@ interface Cmd {
    *  fine for "Open settings" and emphatically not for anything that ends an
    *  agent or a task. Archiving twice in a row is not a workflow worth
    *  optimising; doing it by accident is a real risk, more so once the user has
-   *  ticked "Don't ask again" on the archive confirm. */
+   *  unticked "Show this every time" on the archive confirm. */
   noRecent?: boolean;
   run: () => void;
 }
@@ -232,7 +232,7 @@ export function CommandPalette() {
       cmds.push({
         // Not styled destructive — confirmAndArchive normally shows a confirm
         // modal (with the delete-branch checkbox), so the red isn't needed.
-        // Once the user has ticked "Don't ask again" there, this entry archives
+        // Once the user has unticked "Show this every time" there, this entry archives
         // on Enter with no prompt; Settings › Tasks is the way back.
         id: "archive-task", section: "Task", label: `Archive "${task.name}"`,
         icon: Archive, keywords: "delete remove close worktree",

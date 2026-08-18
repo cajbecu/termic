@@ -61,6 +61,31 @@ Two gestures, one landing point (`lib/terminalDrop.ts`): every terminal host reg
 
 Both share the hit test and the `.termic-drop-target` highlight, so they agree on where a drop lands.
 
+## Confirms for recoverable actions
+
+`ConfirmDialog` (`askConfirm`) renders an optional second checkbox when the
+request passes `dontAskAgain: true`. It reads **"Show this every time" and
+starts ticked**: unticking is the deliberate act, and the box then matches the
+Settings toggle it writes rather than inverting it. The result still comes back
+as `dontAskAgain` (true = the user opted out), so callers persist on
+`confirmed && dontAskAgain` and never on dismissal alone: the dialog reports
+the checkbox state at dismissal, so a backed-out action would otherwise disable
+every future confirmation.
+
+Two flows use it, both writing a Settings › Tasks toggle:
+`confirmBeforeArchiveTask` (`src/lib/archiveTask.ts`) and
+`confirmBeforeCloseAgentTab` (`src/lib/closeTab.ts`). When the confirm is off,
+the action still reports itself with a toast that names the way back (History
+for an archive, the `+` menu's Resume list for a closed tab), because the
+dialog was the only other feedback that anything happened.
+
+Copy follows what is actually recoverable, and only a genuinely one-way action
+gets `destructive: true` (the red button). An archive keeps the task in History
+and the branch in git; a main agent tab auto-resumes; a secondary tab comes
+back from Resume. A **pane** tab is never snapshotted into `closedTabs`, so
+that one is one-way and says so. Red buttons everywhere teach people to ignore
+red buttons.
+
 ## Close vs Quit (windowless mode)
 
 Standard macOS app semantics, added as a prerequisite for the CLI's windowless daemon mode:

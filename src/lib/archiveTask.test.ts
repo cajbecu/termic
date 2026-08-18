@@ -7,6 +7,8 @@ const h = vi.hoisted(() => ({
   setActiveTask: vi.fn(),
   askConfirm: vi.fn(),
   setBusy: vi.fn(),
+  pushToast: vi.fn(),
+  setView: vi.fn(),
   setConfirmBeforeArchiveTask: vi.fn(),
   setArchiveDeleteBranch: vi.fn(),
   state: { activeTaskId: null as string | null },
@@ -20,13 +22,14 @@ vi.mock("@/store/app", () => ({
       activeTaskId: h.state.activeTaskId,
       setActiveTask: h.setActiveTask,
       loadAll: h.loadAll,
+      setView: h.setView,
     }),
   },
 }));
 // The real ui/prefs stores touch `document` on import (theme application),
 // which the node test environment has no answer for.
 vi.mock("@/store/ui", () => ({
-  useUI: { getState: () => ({ askConfirm: h.askConfirm, setBusy: h.setBusy }) },
+  useUI: { getState: () => ({ askConfirm: h.askConfirm, setBusy: h.setBusy, pushToast: h.pushToast }) },
 }));
 vi.mock("@/store/prefs", () => ({
   usePrefs: {
@@ -54,6 +57,8 @@ beforeEach(() => {
   h.setActiveTask.mockReset();
   h.askConfirm.mockReset().mockResolvedValue({ confirmed: true, checked: false, dontAskAgain: false });
   h.setBusy.mockReset();
+  h.pushToast.mockReset();
+  h.setView.mockReset();
   h.setConfirmBeforeArchiveTask.mockReset();
   h.setArchiveDeleteBranch.mockReset();
   h.state.activeTaskId = null;
@@ -105,6 +110,10 @@ describe("confirmAndArchive", () => {
     expect(req.title).toBe('Archive "show approvers"?');
     expect(req.confirmLabel).toBe("Archive");
     expect(req.dontAskAgain).toBe(true);
+    // Archiving is recoverable (History + the branch in git), so the prompt
+    // is not dressed as a one-way action (issue #102).
+    expect(req.destructive).toBe(false);
+    expect(req.message).toContain("History");
     expect(req.checkbox).toMatchObject({ branchName: "show-approvers" });
     expect(h.taskArchive).toHaveBeenCalledWith("w1", true);
   });
@@ -154,6 +163,27 @@ describe("confirmAndArchive", () => {
     expect(h.loadAll).toHaveBeenCalledTimes(1);
   });
 
+  it("toasts a way back to History when the confirmation is off", async () => {
+    // The silent archive shows nothing else, so the toast is the only signal
+    // that it happened AND the only pointer to where the task went.
+    h.prefs.confirmBeforeArchiveTask = false;
+    await confirmAndArchive(task());
+    const [msg, kind, opts] = h.pushToast.mock.calls[0];
+    expect(msg).toContain("show approvers");
+    expect(msg).toContain("History");
+    expect(kind).toBe("info");
+    opts.action.onClick();
+    expect(h.setView).toHaveBeenCalledWith("history");
+  });
+
+  it("does NOT toast when the user answered the dialog", async () => {
+    // The dialog already told them what archiving does; a toast on top of it
+    // is noise.
+    await confirmAndArchive(task());
+    expect(h.taskArchive).toHaveBeenCalled();
+    expect(h.pushToast).not.toHaveBeenCalled();
+  });
+
   it("silently deletes the branch when that was the remembered answer", async () => {
     h.prefs.confirmBeforeArchiveTask = false;
     h.prefs.archiveDeleteBranch = true;
@@ -193,7 +223,8 @@ describe("confirmAndArchive", () => {
 
   it("lets the dialog override the seeded default for one archive", async () => {
     // Seeded on, unticked in the dialog: this archive keeps the branch, and
-    // the stored default is NOT rewritten, because "Don't ask again" was off.
+    // the stored default is NOT rewritten, because "Show this every time"
+    // stayed ticked.
     h.prefs.archiveDeleteBranch = true;
     h.askConfirm.mockResolvedValue({ confirmed: true, checked: false, dontAskAgain: false });
     await confirmAndArchive(task());
