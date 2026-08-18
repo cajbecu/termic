@@ -289,6 +289,16 @@ the file tree, plus an explicit read-only bypass of the containment check.
 Phases 1-2 give nice navigation. **This phase is what makes it a PyCharm
 replacement.** It is not optional for the stated goal.
 
+## The hover surface is already partly claimed
+
+Inline blame (shipped, see [ui.md](../ui.md)) shows its commit card as a CodeMirror
+tooltip, so phase 1's hover no longer has the surface to itself. Blame does NOT use
+`hoverTooltip`: it drives `showTooltip` from its own state field, opened by the
+annotation's own `mouseenter` after a 1s delay and anchored at the line's end. So the
+two can coexist without both registering a hover source and racing, but they can
+still overlap on screen, and nothing has been done about that yet. Whether two
+`hoverTooltip` sources stack cleanly is still untested; blame simply is not one.
+
 ## Security
 
 - **Sanitize hover/completion HTML.** Servers return Markdown that gets rendered to

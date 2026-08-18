@@ -695,11 +695,103 @@ describe("preferences", () => {
   });
 });
 
+// P1: the archive confirmation prefs. Ticking "Don't ask again" in the archive
+// dialog is otherwise a one-way door (archiving can't be undone from inside
+// Termic), so Settings → Tasks is the ONLY way back and both halves of the
+// stored answer have to be visible and reversible there.
+describe("archive confirmation settings", () => {
+  const CONFIRM_LABEL = "Confirm before archiving a task";
+  const BRANCH_LABEL = "Delete the branch when archiving";
+  let orig: { confirm: boolean; deleteBranch: boolean } | undefined;
+
+  const prefs = () =>
+    browser.execute(() => {
+      const p = window.__termic!.usePrefs.getState();
+      return { confirm: p.confirmBeforeArchiveTask, deleteBranch: p.archiveDeleteBranch };
+    });
+
+  const ariaChecked = (label: string) =>
+    browser.execute((lbl) => {
+      const labelEl = [...document.querySelectorAll("div")].find(
+        (d) => d.textContent?.trim() === lbl,
+      );
+      return labelEl?.closest(".justify-between")
+        ?.querySelector('[role="switch"]')?.getAttribute("aria-checked");
+    }, label);
+
+  after(async () => {
+    // The profile is shared with every later spec; a leaked opt-out would make
+    // their archives skip the dialog.
+    if (orig) {
+      await browser.execute((o) => {
+        const p = window.__termic!.usePrefs.getState();
+        p.setConfirmBeforeArchiveTask(o.confirm);
+        p.setArchiveDeleteBranch(o.deleteBranch);
+      }, orig);
+    }
+    await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
+  });
+
+  it("shows the branch toggle while the confirmation is on", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    orig = await prefs();
+
+    await browser.execute(() => {
+      window.__termic!.usePrefs.getState().setConfirmBeforeArchiveTask(true);
+      window.__termic!.useApp.getState().openSettings("tasks");
+    });
+    await waitForText(CONFIRM_LABEL);
+    // The branch toggle used to be hidden here. It seeds the dialog's checkbox
+    // now, so hiding it left someone who deletes branches every time re-ticking
+    // the box on every archive with no way to change the default.
+    await waitForText(BRANCH_LABEL);
+    expect(await ariaChecked(CONFIRM_LABEL)).toBe("true");
+  });
+
+  it("keeps the branch toggle when archiving stops asking", async () => {
+    // The state the dialog's opt-out leaves behind.
+    await browser.execute(() => {
+      const p = window.__termic!.usePrefs.getState();
+      p.setConfirmBeforeArchiveTask(false);
+      p.setArchiveDeleteBranch(true);
+    });
+    await waitForText(BRANCH_LABEL);
+    expect(await ariaChecked(CONFIRM_LABEL)).toBe("false");
+    expect(await ariaChecked(BRANCH_LABEL)).toBe("true");
+  });
+
+  it("flips the remembered branch answer", async () => {
+    const before = (await prefs()).deleteBranch;
+    await clickToggleByLabel(BRANCH_LABEL);
+
+    await browser.waitUntil(async () => (await prefs()).deleteBranch !== before,
+      { timeout: 5_000, timeoutMsg: "archiveDeleteBranch never changed" });
+    // Flipping one must not disturb the other: they answer different questions.
+    expect((await prefs()).confirm).toBe(false);
+    expect(await ariaChecked(BRANCH_LABEL)).toBe(String(!before));
+    await snap("archive-settings.png");
+  });
+
+  it("turns the confirmation back on with the branch toggle still there", async () => {
+    const branchBefore = (await prefs()).deleteBranch;
+    await clickToggleByLabel(CONFIRM_LABEL);
+
+    await browser.waitUntil(async () => (await prefs()).confirm === true,
+      { timeout: 5_000, timeoutMsg: "confirmBeforeArchiveTask never came back on" });
+    expect(await ariaChecked(CONFIRM_LABEL)).toBe("true");
+    // Both stay reachable, and turning confirmation on does not silently
+    // rewrite the branch answer the dialog is about to be seeded with.
+    await waitForText(BRANCH_LABEL);
+    expect(await ariaChecked(BRANCH_LABEL)).toBe(String(branchBefore));
+  });
+});
+
 // P1: per-task sandbox. Enable enforce mode then turn it off via taskSetSandbox
 // (killLive=false so the running PTY isn't disrupted) and assert the task's
 // sandbox mode follows.
 describe("task sandbox", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) {
       await browser.execute(async (id) => {

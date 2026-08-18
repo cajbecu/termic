@@ -52,7 +52,7 @@ function pidsMatching(pattern: string): number[] {
 
 /** The app binary the perf run launched. Debug build, driven by wdio.
  *
- *  Anchored with `$`, matching bench/measure.sh. This is DEFENSIVE, not a fix
+ *  Anchored with `$`, matching perf/local/measure.sh. This is DEFENSIVE, not a fix
  *  for an observed bug: measured on a real run, the unanchored pattern also
  *  matched exactly one process, so nothing was being misattributed. The anchor
  *  guards against a future caller whose argv happens to contain the same path
@@ -84,6 +84,57 @@ function helperPidsFor(appPid: number): number[] {
   return found;
 }
 
+/** Least-squares slope of `ys` against its own index, plus how much of the
+ *  variance that line explains.
+ *
+ *  This is what "is it leaking" actually asks. A difference between two
+ *  snapshots answers it only if both were taken on a flat stretch; a slope over
+ *  many samples answers it even when the ends are imperfect, and `r2` says
+ *  whether the slope is a trend or a line drawn through noise.
+ *
+ *  Exported and pure so it is unit-tested (`proc.test.ts`) rather than trusted:
+ *  a metric nobody can test is a metric nobody should read. */
+export function trend(ys: number[]): { slope: number; r2: number; n: number } {
+  const n = ys.length;
+  if (n < 2) return { slope: 0, r2: 0, n };
+  const meanX = (n - 1) / 2;
+  const meanY = ys.reduce((a, b) => a + b, 0) / n;
+  let sxy = 0;
+  let sxx = 0;
+  for (let i = 0; i < n; i++) {
+    sxy += (i - meanX) * (ys[i] - meanY);
+    sxx += (i - meanX) ** 2;
+  }
+  const slope = sxx === 0 ? 0 : sxy / sxx;
+  // r² against the fitted line. A flat series (every sample identical) has no
+  // variance to explain, and calling that a perfect fit would dress up "the
+  // number never moved" as a confident trend, so it reports 0.
+  let ssTot = 0;
+  let ssRes = 0;
+  for (let i = 0; i < n; i++) {
+    const fit = meanY + slope * (i - meanX);
+    ssTot += (ys[i] - meanY) ** 2;
+    ssRes += (ys[i] - fit) ** 2;
+  }
+  const r2 = ssTot === 0 ? 0 : Math.max(0, 1 - ssRes / ssTot);
+  return { slope, r2, n };
+}
+
+/** True when a window of samples is flat rather than merely narrow.
+ *
+ *  The spread test this replaces (`max - min <= tol`) cannot tell a monotonic
+ *  DRIFT from jitter: four samples falling 2 MiB each sit inside an 8 MiB
+ *  spread while shedding ~120 MiB/minute. That is how the first CI run
+ *  "settled" its baseline 8s in, mid startup-decay, and reported growth of
+ *  -88.8 MiB across the cycles. So both have to hold: the window must be
+ *  narrow AND its net drift end-to-end must be small. */
+export function isFlat(window: number[], tolMiB: number): boolean {
+  if (window.length < 2) return false;
+  const spread = Math.max(...window) - Math.min(...window);
+  const netDrift = Math.abs(window[window.length - 1] - window[0]);
+  return spread <= tolMiB && netDrift <= tolMiB / 2;
+}
+
 /** Poll until RSS stops moving, then return the settled snapshot.
  *
  *  A fixed sleep does NOT work here, and the first version of this suite proved
@@ -91,17 +142,18 @@ function helperPidsFor(appPid: number): number[] {
  *  minute, and "growth across 12 cycles" came out at -355 MiB. A negative leak
  *  number is a nonsense metric, and it was measuring startup decay rather than
  *  anything the cycles did. This is GH #140 trap 6 ("poll until quiet instead")
- *  in a different costume, documented in bench/README.md.
+ *  in a different costume, documented in perf/local/README.md.
  *
- *  Settled = `streak` consecutive samples within `tolMiB` of each other. Gives
- *  up after `maxMs` and returns the last sample, with `settled: false` so the
- *  caller can label the row rather than silently reporting a peak. */
+ *  Settled = a `streak`-long window that `isFlat` accepts. `maxMs` is generous
+ *  on purpose: the decay this exists to outlast ran for half a minute on one
+ *  machine, and giving up early returns `settled: false` for the caller to
+ *  label, which is honest but useless. */
 export async function waitForStableRss(
   appPid: number | null,
-  { tolMiB = 8, streak = 4, intervalMs = 1_000, maxMs = 45_000 } = {},
+  { tolMiB = 8, streak = 6, intervalMs = 1_000, maxMs = 90_000 } = {},
 ): Promise<{ snapshot: RssSnapshot; settled: boolean; waitedMs: number }> {
   const started = Date.now();
-  let recent: number[] = [];
+  const recent: number[] = [];
   let last = sampleRss(appPid);
 
   while (Date.now() - started < maxMs) {
@@ -112,7 +164,7 @@ export async function waitForStableRss(
 
     recent.push(total);
     if (recent.length > streak) recent.shift();
-    if (recent.length === streak && Math.max(...recent) - Math.min(...recent) <= tolMiB) {
+    if (recent.length === streak && isFlat(recent, tolMiB)) {
       return { snapshot: last, settled: true, waitedMs: Date.now() - started };
     }
   }

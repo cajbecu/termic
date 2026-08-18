@@ -68,11 +68,19 @@ export function DropdownMenu({ children, align = "end", side, sideOffset = 4, co
 /** `onSelect` receives Radix's event: call `preventDefault()` on it to keep
  *  the menu OPEN after the pick (for a setting the user toggles mid-menu,
  *  like "Branch from", where closing would make them reopen to continue). */
-export function DropdownItem({ children, className, onSelect, disabled }: {
+/** `data-*` attributes are forwarded to the rendered item. They were being
+ *  DROPPED, which is worse than not supporting them: a `data-testid` written
+ *  on an item compiled, rendered nothing, and left a spec searching the DOM
+ *  for a hook that could never exist (the History scope picker's rows, red
+ *  since the day they were written). */
+type DataAttrs = { [key: `data-${string}`]: string | number | boolean | undefined };
+
+export function DropdownItem({ children, className, onSelect, disabled, ...data }: {
   children: ReactNode; className?: string; onSelect?: (event: Event) => void; disabled?: boolean;
-}) {
+} & DataAttrs) {
   return (
     <DM.Item
+      {...data}
       onSelect={onSelect}
       disabled={disabled}
       className={cn(

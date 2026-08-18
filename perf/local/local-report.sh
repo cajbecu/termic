@@ -3,9 +3,9 @@
 #
 # Idle CPU, WindowServer cost and GPU utilisation need a real GPU, a real
 # display and an undisturbed desktop. On a virtualised runner every one of the
-# seven traps in bench/README.md produces a plausible wrong number instead of
+# seven traps in perf/local/README.md produces a plausible wrong number instead of
 # an error, which is worse than not measuring. So these live here, behind a
-# human, and never in a workflow. See docs/research/perf-ci.md.
+# human, and never in a workflow. See docs/perf-ci.md.
 #
 # Exits 0 even when it cannot measure. This is a reporting tool, not a gate,
 # and `make perf` must still surface the CI-suite section that ran before it.
@@ -66,5 +66,5 @@ cat <<'EOF'
 
   A focused terminal is never idle (cursor blink, trap 4), so this is
   "idle with a focused terminal", not "idle". Full renderer A/B:
-    ./bench/run-three.sh 5 20
+    ./perf/local/run-three.sh 5 20
 EOF

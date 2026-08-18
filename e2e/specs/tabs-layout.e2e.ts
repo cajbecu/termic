@@ -1,9 +1,9 @@
-import { archiveTask, clickByText, clickMenuItem, dismissOverlays, ensureActiveTask, mouseDrag, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell } from "../helpers";
+import { archiveTask, clickByText, clickMenuItem, dismissOverlays, ensureActiveTask, mouseDrag, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitVisible } from "../helpers";
 
 // Tabs are how a task holds multiple terminals/agents/editors. Guards adding a
 // tab through the "+" menu and switching the active tab by clicking it.
 describe("tab management", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -93,11 +93,177 @@ describe("tab management", () => {
   });
 });
 
+// GH #197: the "+" menu is ALSO the sidebar task row's "New" submenu, because
+// that row (right-click or kebab) is where people look for "add another agent
+// to this task" and the tab strip's "+" was undiscoverable. Both render from
+// NewTabMenuItems, so these cases guard the wiring: the same entries, spawning
+// into the row's task (not whichever task happens to be on screen), and
+// waking that task rather than replacing its restore seed.
+describe("sidebar task menu: New submenu", () => {
+  let taskId!: string;
+  let otherId: string | undefined;
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+    if (otherId) await archiveTask(otherId);
+  });
+
+  const tabsOf = (id: string) =>
+    browser.execute(
+      (i) =>
+        (window.__termic!.useApp.getState().tabs[i] ?? []).map((t: any) => t.cli),
+      id,
+    ) as Promise<string[]>;
+
+  /** The entries of the open Radix menu that holds the "Terminal" row. Scoped
+   *  to that one menu: the task menu stays open behind its submenu, so a bare
+   *  `[role='menuitem']` sweep would mix "Rename" / "Archive task" in. */
+  const entriesOfTerminalMenu = () =>
+    browser.execute(() => {
+      const menu = [...document.querySelectorAll("[role='menu']")].find((m) =>
+        [...m.querySelectorAll("[role='menuitem']")].some(
+          (i) => i.textContent?.trim() === "Terminal",
+        ),
+      );
+      if (!menu) throw new Error("no open menu contains a Terminal entry");
+      return [...menu.querySelectorAll("[role='menuitem']")].map(
+        (e) => e.textContent?.trim() ?? "",
+      );
+    }) as Promise<string[]>;
+
+  /** Right-click the row (the gesture from the issue) and wait for the menu. */
+  async function openTaskRowMenu(id: string) {
+    await browser.execute((i) => {
+      const row = document.querySelector(`[data-sidebar-task-id="${i}"]`);
+      if (!row) throw new Error(`no sidebar row for task ${i}`);
+      row.dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, button: 2 }),
+      );
+    }, id);
+    await browser.waitUntil(
+      () =>
+        browser.execute(() =>
+          [...document.querySelectorAll("[role='menuitem']")].some(
+            (e) => e.textContent?.trim() === "New",
+          ),
+        ),
+      { timeout: 5_000, timeoutMsg: "the task row menu never opened" },
+    );
+  }
+
+  /** Open the "New" submenu and return the entries it offers. */
+  async function openNewSubmenu(): Promise<string[]> {
+    // Radix opens a SubTrigger on hover OR click; click is the deterministic
+    // one under WebDriver (no pointer position involved).
+    await clickMenuItem("New");
+    await browser.waitUntil(
+      () =>
+        browser.execute(() =>
+          [...document.querySelectorAll("[role='menuitem']")].some(
+            (e) => e.textContent?.trim() === "Terminal",
+          ),
+        ),
+      { timeout: 5_000, timeoutMsg: "the New submenu never opened" },
+    );
+    return entriesOfTerminalMenu();
+  }
+
+  it("spawns a terminal into the row's task, waking it without dropping its agent", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    // Two tasks: one on screen, one never visited. The submenu must act on the
+    // row it was opened from, not on the active task.
+    otherId = await openTask("e2e-newmenu-other");
+    taskId = await openTask("e2e-newmenu", false);
+    await ensureActiveTask(otherId);
+    // The row has to be on screen to be right-clicked: a project an earlier
+    // spec collapsed renders no task rows at all.
+    await browser.execute(() => {
+      const app = window.__termic!.useApp.getState();
+      const proj = app.projects.find((p: any) => p.name === "fixture-repo");
+      app.setProjectCollapsed(proj.id, false);
+    });
+    await waitVisible(`[data-sidebar-task-id="${taskId}"]`);
+
+    await openTaskRowMenu(taskId);
+    await openNewSubmenu();
+    await clickMenuItem("Terminal");
+
+    // The row's task is now the active one and holds BOTH its seeded agent tab
+    // and the new shell — picking "Terminal" on a cold task must not cost the
+    // user the agent the task exists for.
+    await browser.waitUntil(
+      async () => (await tabsOf(taskId!)).includes("shell"),
+      { timeout: 10_000, timeoutMsg: "the shell tab never landed in the task" },
+    );
+    const clis = await tabsOf(taskId);
+    expect(clis).toEqual(["fakeagent", "shell"]);
+    expect(await tabsOf(otherId!)).not.toContain("shell");
+    expect(
+      await browser.execute(
+        () => window.__termic!.useApp.getState().activeTaskId,
+      ),
+    ).toBe(taskId);
+    // The new tab is the focused one (addTab self-focuses).
+    expect(
+      await browser.execute(
+        (id) => window.__termic!.useApp.getState().activeTab[id],
+        taskId,
+      ),
+    ).toBe(
+      await browser.execute(
+        (id) =>
+          (window.__termic!.useApp.getState().tabs[id] ?? []).find(
+            (t: any) => t.cli === "shell",
+          )?.id,
+        taskId,
+      ),
+    );
+    await snap("sidebar-new-submenu.png");
+  });
+
+  it("offers the same entries as the tab strip's + menu", async () => {
+    await dismissOverlays();
+    await ensureActiveTask(taskId!);
+
+    await openTaskRowMenu(taskId!);
+    const fromSidebar = await openNewSubmenu();
+    await dismissOverlays();
+
+    // Same list from the "+" button on the active task's strip. Radix opens on
+    // pointerdown, so a bare .click() is not enough.
+    await browser.execute(() => {
+      const strip = document.querySelector("[data-main-strip]");
+      const plus = [...(strip?.querySelectorAll("button") ?? [])].find((b) =>
+        b.querySelector("svg.lucide-plus"),
+      );
+      if (!plus) throw new Error("tab '+' button not found");
+      const opts = { bubbles: true, pointerType: "mouse", button: 0 } as any;
+      plus.dispatchEvent(new PointerEvent("pointerdown", opts));
+      plus.dispatchEvent(new PointerEvent("pointerup", opts));
+      (plus as HTMLElement).click();
+    });
+    await browser.waitUntil(
+      () =>
+        browser.execute(() =>
+          [...document.querySelectorAll("[role='menuitem']")].some(
+            (e) => e.textContent?.trim() === "Terminal",
+          ),
+        ),
+      { timeout: 5_000, timeoutMsg: "the + menu never opened" },
+    );
+    const fromTabStrip = await entriesOfTerminalMenu();
+    await dismissOverlays();
+
+    expect(fromSidebar.length).toBeGreaterThan(1);
+    expect(fromSidebar).toEqual(fromTabStrip);
+  });
+});
+
 // Renaming a tab (double-click -> inline edit -> Enter) is a common action and
 // exercises the controlled-input + persist path. Guards that the committed
 // name lands in the store.
 describe("tab rename", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -181,7 +347,7 @@ describe("tab rename", () => {
 // P1: splitting a task into multiple panes (Sublime-style). Cases: no split to
 // start, split right builds a 2-leaf tree, split below grows it to 3 leaves.
 describe("split pane", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -286,11 +452,15 @@ describe("split pane", () => {
 // (reorderTab / moveTabToSplit / moveTabToMain), so each is asserted on the
 // store, not on pixels.
 describe("tab drag", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
 
+  // Annotated, like the other list helpers in the suite: the store behind
+  // `window.__termic` is loosely typed, so without this the result lands as an
+  // `any`-derived union and every `.find((t) => ...)` below it is an implicit
+  // any that only a typecheck of this project would ever flag.
   const tabs = () =>
     browser.execute(
       (id) =>
@@ -300,7 +470,7 @@ describe("tab drag", () => {
           paneId: (t.paneId ?? null) as string | null,
         })),
       taskId,
-    );
+    ) as Promise<Array<{ id: string; title: string; paneId: string | null }>>;
   const leafCount = () =>
     browser.execute((id) => {
       const tree = window.__termic!.useApp.getState().splitTree[id];
@@ -382,6 +552,147 @@ describe("tab drag", () => {
     );
     // Emptying the pane collapses the split back to a single surface.
     expect(await leafCount()).toBeLessThan(2);
+  });
+});
+
+// Right-click "Split right" / "Split down" / "Move to split…" are the menu
+// equivalents of the toolbar split buttons and drag-and-drop, wired straight
+// to the same store actions (moveTabToSplit / moveTabToMain). "Move to
+// split" specifically arms a cursor-following drag with no button held
+// (src/lib/menuDrag.ts): the ghost follows the pointer from wherever the menu
+// closed, and the next click commits wherever it lands — mirroring
+// pointerDrag's real drag without a real grab to start it.
+describe("split from the tab context menu", () => {
+  let taskId!: string;
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+  });
+
+  const tabs = () =>
+    browser.execute(
+      (id) =>
+        (window.__termic!.useApp.getState().tabs[id] ?? []).map((t: any) => ({
+          id: t.id as string,
+          paneId: (t.paneId ?? null) as string | null,
+        })),
+      taskId,
+    ) as Promise<Array<{ id: string; paneId: string | null }>>;
+  const leafCount = () =>
+    browser.execute((id) => {
+      const tree = window.__termic!.useApp.getState().splitTree[id];
+      const walk = (n: any): number =>
+        !n ? 0 : n.type === "pane" ? 1 : walk(n.a) + walk(n.b);
+      return walk(tree);
+    }, taskId);
+
+  const addShells = (prefix: string, n: number) =>
+    browser.execute(
+      (id, p, count) => {
+        const app = window.__termic!.useApp.getState();
+        const ids: string[] = [];
+        for (let i = 0; i < count; i++) {
+          const tabId = `${p}-${i}`;
+          ids.push(tabId);
+          app.addTab(id, { id: tabId, type: "terminal", cli: "shell", title: tabId } as any);
+        }
+        return ids;
+      },
+      taskId, prefix, n,
+    );
+
+  // Same dispatched-contextmenu approach as the "tab context menu" describe
+  // above: a WebDriver right-click gesture doesn't reach Radix in this
+  // WKWebView, so the MouseEvent goes in through the real trigger instead.
+  const openTabMenu = async (tabId: string) => {
+    await browser.execute((id) => {
+      const el = document.querySelector(`[data-tab-id="${id}"]`) as HTMLElement;
+      if (!el) throw new Error(`no tab pill ${id}`);
+      const r = el.getBoundingClientRect();
+      el.dispatchEvent(new MouseEvent("contextmenu", {
+        bubbles: true, cancelable: true, button: 2,
+        clientX: r.left + 10, clientY: r.top + 10,
+      }));
+    }, tabId);
+    await waitVisible('[role="menu"]');
+  };
+
+  const clickTabMenuItem = (label: string) =>
+    browser.execute((text) => {
+      const menu = [...document.querySelectorAll('[role="menu"]')].pop() as HTMLElement | undefined;
+      if (!menu) throw new Error("the tab context menu is not open");
+      const item = [...menu.children].find(
+        (i) => (i as HTMLElement).innerText?.trim() === text,
+      ) as HTMLElement | undefined;
+      if (!item) throw new Error(`no menu item "${text}"`);
+      item.click();
+    }, label);
+
+  it("split right moves the tab into a fresh pane to the right", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask("e2e-menusplit");
+    await browser.waitUntil(async () => (await tabs()).length === 1, {
+      timeout: 20_000, timeoutMsg: "agent tab never appeared",
+    });
+    // Extra main tabs: Split right/down and Move to split stay disabled (or
+    // hidden, for Move to split) while a main tab is alone in the strip.
+    await addShells("e2e-menusplit-shell", 3);
+    await browser.waitUntil(async () => (await tabs()).length === 4, {
+      timeout: 8_000, timeoutMsg: "shell tabs never appeared",
+    });
+    await ensureActiveTask(taskId);
+    await dismissOverlays();
+
+    const [target] = await tabs();
+    await openTabMenu(target.id);
+    await clickTabMenuItem("Split right");
+    await browser.waitUntil(async () => (await leafCount()) === 2, {
+      timeout: 8_000, timeoutMsg: "split right never produced a second pane",
+    });
+    const moved = (await tabs()).find((t) => t.id === target.id)!;
+    expect(moved.paneId).toBeTruthy();
+  });
+
+  it("split down grows the tree further", async () => {
+    await ensureActiveTask(taskId!);
+    const mainTab = (await tabs()).find((t) => !t.paneId)!;
+    await openTabMenu(mainTab.id);
+    await clickTabMenuItem("Split down");
+    await browser.waitUntil(async () => (await leafCount()) === 3, {
+      timeout: 8_000, timeoutMsg: "split down never produced a third pane",
+    });
+  });
+
+  it("move to split arms a cursor-following drag that commits on the next click", async () => {
+    await ensureActiveTask(taskId!);
+    const paneTab = (await tabs()).find((t) => t.paneId)!;
+    await openTabMenu(paneTab.id);
+    await clickTabMenuItem("Move to split…");
+
+    // The menu closes and a drag ghost appears immediately, following the
+    // cursor with no button held — that's the whole point of the feature.
+    await browser.waitUntil(
+      async () => browser.execute(() => !!document.querySelector(".termic-drag-ghost")),
+      { timeout: 4_000, timeoutMsg: "move to split never armed a drag ghost" },
+    );
+
+    // There's no button held from a real grab to release, so a fresh
+    // pointerdown anywhere stands in for the drop. Land it on the main
+    // strip's header, which always resolves to "move to main" regardless of
+    // where in the header it lands.
+    await browser.execute((scopeSel) => {
+      const strip = document.querySelector(`${scopeSel} [data-main-strip]`) as HTMLElement;
+      const r = strip.getBoundingClientRect();
+      const x = r.left + r.width / 2, y = r.top + r.height / 2;
+      window.dispatchEvent(new PointerEvent("pointermove", { clientX: x, clientY: y, bubbles: true }));
+      window.dispatchEvent(new PointerEvent("pointerdown", { clientX: x, clientY: y, bubbles: true, cancelable: true }));
+    }, `[data-task-id="${taskId}"]`);
+
+    await browser.waitUntil(
+      async () => !(await tabs()).find((t) => t.id === paneTab.id)!.paneId,
+      { timeout: 8_000, timeoutMsg: "move to split never landed the tab back on main" },
+    );
+    expect(await browser.execute(() => !!document.querySelector(".termic-drag-ghost"))).toBe(false);
   });
 });
 
@@ -508,7 +819,7 @@ describe("layout", () => {
 // in main persists nothing for main. Found on disk as a saved split_layout
 // referencing two tab ids beside an empty persisted tab list.
 describe("split restore", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -634,5 +945,381 @@ describe("split restore", () => {
     );
     expect(mainCount).toBeGreaterThan(0);
     await snap("split-restore-collapsed.png");
+  });
+});
+
+// Tab context menu (GH #183): Pin / Unpin plus the two bulk closes. Pinning is
+// an ORDERING operation, not just a flag — the pin appends to the pinned block
+// at the head of the strip and the unpin drops back to the first slot after it,
+// so the cases assert tab order, and that both bulk closes spare pinned tabs.
+describe("tab context menu", () => {
+  let taskId!: string;
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+  });
+
+  // Main-strip tab ids, in display order.
+  const strip = () =>
+    browser.execute(
+      (id) =>
+        (window.__termic!.useApp.getState().tabs[id] ?? [])
+          .filter((t: any) => !t.paneId)
+          .map((t: any) => t.id as string),
+      taskId,
+    );
+
+  // Shell tabs on purpose: closing one is silent, so the bulk-close cases
+  // assert the close itself instead of racing a confirm dialog.
+  const addShells = (prefix: string, n: number) =>
+    browser.execute(
+      (id, p, count) => {
+        const app = window.__termic!.useApp.getState();
+        const ids: string[] = [];
+        for (let i = 0; i < count; i++) {
+          const tabId = `${p}-${i}`;
+          ids.push(tabId);
+          app.addTab(id, { id: tabId, type: "terminal", cli: "shell", title: tabId } as any);
+        }
+        return ids;
+      },
+      taskId, prefix, n,
+    );
+
+  // Dispatched, not gestured: a WebDriver right-click does not reach Radix's
+  // onContextMenu in this WKWebView (same gap as its double-click, see
+  // files.e2e.ts). The MouseEvent goes through the real trigger, so everything
+  // from the menu opening downwards is genuinely exercised.
+  const openTabMenu = async (tabId: string) => {
+    await browser.execute((id) => {
+      const el = document.querySelector(`[data-tab-id="${id}"]`) as HTMLElement;
+      if (!el) throw new Error(`no tab pill ${id}`);
+      const r = el.getBoundingClientRect();
+      el.dispatchEvent(new MouseEvent("contextmenu", {
+        bubbles: true, cancelable: true, button: 2,
+        clientX: r.left + 10, clientY: r.top + 10,
+      }));
+    }, tabId);
+    await browser.waitUntil(async () => (await menuItems()).length > 0, {
+      timeout: 8_000,
+      timeoutMsg: `the tab context menu never opened for ${tabId}`,
+    });
+  };
+
+  // Scoped to the menu holding the tab items, never a bare [role="menu"]:
+  // menus stack and a closing one can linger (see the e2e skill). Items are the
+  // content div's direct children; ContextMenuItem passes role={undefined} for
+  // plain items, so an ARIA selector would match nothing.
+  const menuItems = () =>
+    browser.execute(() => {
+      const menu = [...document.querySelectorAll('[role="menu"]')].find((m) =>
+        (m as HTMLElement).innerText.includes("Close others"),
+      ) as HTMLElement | undefined;
+      if (!menu) return [] as { label: string; disabled: boolean }[];
+      return [...menu.children]
+        .map((el) => ({
+          label: (el as HTMLElement).innerText?.trim() ?? "",
+          disabled: el.hasAttribute("data-disabled"),
+        }))
+        .filter((i) => i.label.length > 0);
+    });
+
+  const clickTabMenuItem = (label: string) =>
+    browser.execute((text) => {
+      const menu = [...document.querySelectorAll('[role="menu"]')].find((m) =>
+        (m as HTMLElement).innerText.includes("Close others"),
+      ) as HTMLElement | undefined;
+      if (!menu) throw new Error("the tab context menu is not open");
+      const item = [...menu.children].find(
+        (i) => (i as HTMLElement).innerText?.trim() === text,
+      ) as HTMLElement | undefined;
+      if (!item) throw new Error(`no menu item "${text}"`);
+      item.click();
+    }, label);
+
+  const isPinned = (tabId: string) =>
+    browser.execute(
+      (id) => !!document.querySelector(`[data-tab-id="${id}"][data-pinned]`),
+      tabId,
+    );
+
+  const pillWidth = (tabId: string) =>
+    browser.execute((wid, id) => {
+      const pill = document.querySelector(
+        `[data-task-id="${wid}"] [data-tab-id="${id}"]`,
+      ) as HTMLElement | null;
+      return pill ? Math.round(pill.getBoundingClientRect().width) : -1;
+    }, taskId, tabId);
+
+  const tabLiveTitle = (tabId: string) =>
+    browser.execute((wid, id) => {
+      const tab = (window.__termic!.useApp.getState().tabs[wid] ?? []).find(
+        (t: any) => t.id === id,
+      );
+      return (tab?.liveTitle as string) ?? "";
+    }, taskId, tabId);
+
+  // Titles of the pill's own action buttons, which is what the user can click.
+  // Run-tab controls (Restart / Stop / Run) would show up here too; these
+  // fixtures are plain shells and an agent, so the trailing slot is all there is.
+  const pillButtons = (tabId: string) =>
+    browser.execute(
+      (id) =>
+        [...document.querySelectorAll(`[data-tab-id="${id}"] button`)].map(
+          (b) => b.getAttribute("title") ?? "",
+        ),
+      tabId,
+    );
+
+  it("pins a tab to the head of the strip", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask("e2e-tabmenu");
+    await browser.waitUntil(async () => (await strip()).length === 1, {
+      timeout: 20_000,
+      timeoutMsg: "agent tab never appeared",
+    });
+    await ensureActiveTask(taskId);
+    await dismissOverlays();
+
+    const [agent] = await strip();
+    const [s0, s1, s2] = await addShells("e2e-pin", 3);
+    await browser.waitUntil(async () => (await strip()).length === 4, {
+      timeout: 8_000, timeoutMsg: "shell tabs never rendered",
+    });
+
+    await openTabMenu(s2);
+    await clickTabMenuItem("Pin");
+    await browser.waitUntil(async () => (await strip())[0] === s2, {
+      timeout: 5_000, timeoutMsg: "the pinned tab never moved to the head",
+    });
+    expect(await strip()).toEqual([s2, agent, s0, s1]);
+    expect(await isPinned(s2)).toBe(true);
+    await snap("tab-menu-pinned.png");
+  });
+
+  it("holds a pinned pill's width steady while its live title changes", async () => {
+    const [s2, , s0] = await strip(); // [s2*, agent, s0, s1]
+    // A pinned pill sits in the strip's shrink-to-fit region, so a
+    // content-sized one would re-measure on every OSC title the agent emits and
+    // shove the whole scrolling remainder sideways with it.
+    const before = await pillWidth(s2);
+    const looseBefore = await pillWidth(s0);
+    // The fixed width equals the unpinned max-width, so the pinned pill matches
+    // an uncrowded neighbour and holds while a crowded one shrinks below it.
+    // Asserted as "never the narrower one" because which of the two reads is
+    // true depends on the window width, and the suite pins no window size.
+    expect(before).toBeGreaterThanOrEqual(looseBefore);
+
+    for (const title of ["x", "a considerably longer live title than before", "y"]) {
+      await browser.execute((wid, id, t) => {
+        window.__termic!.useApp.getState().setTabLiveTitle(wid, id, t);
+      }, taskId, s2, title);
+      await browser.waitUntil(
+        async () => (await tabLiveTitle(s2)) === title,
+        { timeout: 5_000, timeoutMsg: `live title never became "${title}"` },
+      );
+      expect(await pillWidth(s2)).toBe(before);
+      // The point of the fixed width: a title change must not shove the
+      // scrolling remainder sideways either.
+      expect(await pillWidth(s0)).toBe(looseBefore);
+    }
+  });
+
+  it("trades the close X for an unpin control on a pinned pill", async () => {
+    const [s2, agent] = await strip(); // [s2*, agent, s0, s1]
+    // A pinned tab must not be one stray click from a dead PTY: the pill
+    // offers "Unpin tab" where an unpinned one offers "Close tab".
+    expect(await pillButtons(s2)).toEqual(["Unpin tab"]);
+    expect(await pillButtons(agent)).toEqual(["Close tab"]);
+
+    // And that control unpins rather than closing: the tab survives, it just
+    // leaves the pinned block.
+    await browser.execute((id) => {
+      const btn = document.querySelector(
+        `[data-tab-id="${id}"] button[title="Unpin tab"]`,
+      ) as HTMLElement;
+      btn.click();
+    }, s2);
+    await browser.waitUntil(async () => !(await isPinned(s2)), {
+      timeout: 5_000, timeoutMsg: "the pin control never unpinned the tab",
+    });
+    expect(await strip()).toHaveLength(4);
+    expect(await pillButtons(s2)).toEqual(["Close tab"]);
+
+    // Put it back so the ordering cases below start where they expect.
+    await openTabMenu(s2);
+    await clickTabMenuItem("Pin");
+    await browser.waitUntil(async () => (await strip())[0] === s2, {
+      timeout: 5_000, timeoutMsg: "the tab never went back to the pinned block",
+    });
+  });
+
+  it("a second pin appends to the END of the pinned block", async () => {
+    const [, , s0] = await strip(); // [s2*, agent, s0, s1]
+    await openTabMenu(s0);
+    await clickTabMenuItem("Pin");
+    await browser.waitUntil(async () => (await strip())[1] === s0, {
+      timeout: 5_000, timeoutMsg: "the second pin did not land after the first",
+    });
+  });
+
+  it("unpin drops the tab to the first slot after the pinned block", async () => {
+    const [s2, s0] = await strip(); // [s2*, s0*, agent, s1]
+    await openTabMenu(s2);
+    await clickTabMenuItem("Unpin");
+    await browser.waitUntil(async () => (await strip())[0] === s0, {
+      timeout: 5_000, timeoutMsg: "the unpinned tab never left the pinned block",
+    });
+    expect((await strip())[1]).toBe(s2);
+    expect(await isPinned(s2)).toBe(false);
+  });
+
+  it("close to the right spares pinned tabs", async () => {
+    // Pin the agent tab too, so no bulk close can reach it (closing an agent
+    // tab would raise a confirm dialog; shells close silently).
+    const before = await strip(); // [s0*, s2, agent, s1]
+    const agent = before[2];
+    await openTabMenu(agent);
+    await clickTabMenuItem("Pin");
+    await browser.waitUntil(async () => (await strip())[1] === agent, {
+      timeout: 5_000, timeoutMsg: "the agent tab never joined the pinned block",
+    });
+
+    const [pinnedShell] = await strip(); // [s0*, agent*, s2, s1]
+    await openTabMenu(pinnedShell);
+    await clickTabMenuItem("Close to the right");
+    await browser.waitUntil(async () => (await strip()).length === 2, {
+      timeout: 8_000, timeoutMsg: "close to the right never closed the tabs",
+    });
+    expect(await strip()).toEqual([pinnedShell, agent]);
+  });
+
+  it("close others keeps the clicked tab and every pinned tab", async () => {
+    const [pinnedShell, agent] = await strip();
+    const [keep] = await addShells("e2e-others", 2);
+    await browser.waitUntil(async () => (await strip()).length === 4, {
+      timeout: 8_000, timeoutMsg: "shell tabs never rendered",
+    });
+
+    await openTabMenu(keep);
+    await clickTabMenuItem("Close others");
+    await browser.waitUntil(async () => (await strip()).length === 3, {
+      timeout: 8_000, timeoutMsg: "close others never closed the sibling",
+    });
+    expect(await strip()).toEqual([pinnedShell, agent, keep]);
+  });
+
+  it("disables a bulk close that has nothing to close", async () => {
+    const strips = await strip(); // [pinned shell*, agent*, keep]
+    await openTabMenu(strips[strips.length - 1]);
+    const items = await menuItems();
+    const byLabel = (l: string) => items.find((i) => i.label === l);
+    // Nothing to its right, and every other tab is pinned.
+    expect(byLabel("Close to the right")?.disabled).toBe(true);
+    expect(byLabel("Close others")?.disabled).toBe(true);
+    expect(byLabel("Close")?.disabled).toBe(false);
+    await browser.keys(["Escape"]);
+  });
+});
+
+// The reason pinning exists (GH #183): a pinned tab must stay in reach when the
+// strip overflows. Reordering it to the head is not enough on its own — it has
+// to sit OUTSIDE the scroller, so this drives the strip to a real overflow and
+// scrolls it to the end.
+describe("pinned tabs do not scroll away", () => {
+  let taskId!: string;
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+  });
+
+  // Scoped to THIS task's strip: every visited task stays mounted, so a bare
+  // [data-main-strip] can return a hidden copy whose geometry is all zeroes
+  // (see the e2e skill) — which reads as "never overflows" forever.
+  const geometry = (tabId: string) =>
+    browser.execute((wid, id) => {
+      const strip = document.querySelector(
+        `[data-task-id="${wid}"] [data-main-strip]`,
+      ) as HTMLElement | null;
+      const scroller = strip?.querySelector("[data-scroll-strip]") as HTMLElement | null;
+      const pill = strip?.querySelector(`[data-tab-id="${id}"]`) as HTMLElement | null;
+      if (!strip || !scroller || !pill) {
+        return { found: false, pillLeft: 0, visible: false, overflowing: false, scrollLeft: 0, scrollWidth: 0, clientWidth: 0 };
+      }
+      const s = strip.getBoundingClientRect();
+      const p = pill.getBoundingClientRect();
+      return {
+        found: true,
+        pillLeft: Math.round(p.left),
+        // Fully inside the strip's box = the user can see and click it.
+        visible: p.left >= s.left - 1 && p.right <= s.right + 1,
+        overflowing: scroller.scrollWidth > scroller.clientWidth + 1,
+        scrollLeft: Math.round(scroller.scrollLeft),
+        scrollWidth: Math.round(scroller.scrollWidth),
+        clientWidth: Math.round(scroller.clientWidth),
+      };
+    }, taskId, tabId);
+
+  it("keeps a pinned tab in view after the strip is scrolled to the end", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask("e2e-pinscroll");
+    await browser.waitUntil(
+      () => browser.execute(
+        (id) => (window.__termic!.useApp.getState().tabs[id] ?? []).length === 1,
+        taskId,
+      ),
+      { timeout: 20_000, timeoutMsg: "agent tab never appeared" },
+    );
+    await ensureActiveTask(taskId);
+    await dismissOverlays();
+
+    // Pin the agent tab, then flood the strip until it genuinely overflows.
+    const agent = await browser.execute(
+      (id) => window.__termic!.useApp.getState().tabs[id][0].id as string,
+      taskId,
+    );
+    await browser.execute((id, tab) => {
+      window.__termic!.useApp.getState().pinTab(id, tab);
+    }, taskId, agent);
+
+    // Size the flood to the real strip: a pill shrinks to min-w 140px, so it
+    // takes ceil(width / 140) of them to overflow. A fixed count would silently
+    // stop overflowing on a wider window and make the case vacuous.
+    const need = Math.ceil((await geometry(agent)).clientWidth / 140) + 3;
+    await browser.execute((id, n) => {
+      const app = window.__termic!.useApp.getState();
+      for (let i = 0; i < n; i++) {
+        app.addTab(id, { id: `e2e-flood-${i}`, type: "terminal", cli: "shell", title: `flood ${i}` } as any);
+      }
+    }, taskId, need);
+
+    // A strip that does not overflow would make every assertion below vacuous,
+    // so fail loudly WITH the measurements rather than passing on nothing.
+    let g = await geometry(agent);
+    try {
+      await browser.waitUntil(async () => (g = await geometry(agent)).overflowing, { timeout: 10_000 });
+    } catch {
+      throw new Error(`the tab strip never overflowed: ${JSON.stringify(g)}`);
+    }
+
+    const before = await geometry(agent);
+    expect(before.visible).toBe(true);
+
+    // Scroll the unpinned remainder all the way to its end.
+    await browser.execute((wid) => {
+      const scroller = document.querySelector(
+        `[data-task-id="${wid}"] [data-main-strip] [data-scroll-strip]`,
+      ) as HTMLElement;
+      scroller.scrollLeft = scroller.scrollWidth;
+    }, taskId);
+    await browser.waitUntil(async () => (await geometry(agent)).scrollLeft > 0, {
+      timeout: 5_000, timeoutMsg: "the strip never scrolled",
+    });
+
+    // The pinned pill has not moved a pixel and is still fully in the bar.
+    const after = await geometry(agent);
+    expect(after.visible).toBe(true);
+    expect(after.pillLeft).toBe(before.pillLeft);
+    await snap("tab-pinned-stays-visible.png");
   });
 });

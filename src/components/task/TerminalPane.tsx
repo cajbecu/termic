@@ -253,12 +253,6 @@ export function TerminalPane({ task, tab, active }: Props) {
   const lastSpawnWasResumeRef = useRef(false);
   const failedResumeRef = useRef(false);
   const RESUME_FAILURE_MS = 2000;
-  // The uuid a resume attempt failed on during THIS app run. Only used to
-  // word the recovery banner: the stashed session is a known-bad resume
-  // ("Couldn't resume") when it matches, and a still-usable session we
-  // swapped away from ("switch back") when it doesn't (including after a
-  // restart, where the failure is no longer news).
-  const [failedUuid, setFailedUuid] = useState<string | null>(null);
 
   const patchTab = useApp(s => s.patchTab);
   const markAttention = useApp(s => s.markAttention);
@@ -1730,8 +1724,12 @@ const captureArmedRef = useRef(false);
             }
           }
         });
-        // Compose data + sandbox unlisteners into the existing ref so
-        // cleanup tears down both. Avoids adding another ref.
+        // The effect cleanup calls this (with unlistenExitRef) before any
+        // respawn, so the listener never outlives its PTY. NB: a previous
+        // comment here claimed this COMPOSED several unlisteners into one ref;
+        // it does not, it assigns. Anything else that needs tearing down wants
+        // its own ref, not this one — assigning over it would silently drop
+        // whatever was already there and leak a listener per respawn.
         unlistenDataRef.current = unlistenData;
 
         const unlistenExit = await ipc.onPtyExit(ptyId, (code) => {
@@ -1761,21 +1759,18 @@ const captureArmedRef = useRef(false);
             // task prop refreshes.
             failedResumeRef.current = true;
             if (decision.kind === "resume-id") {
-              // This tab's stored uuid didn't resolve on this spawn. Don't
-              // discard it — the failure may be transient (the session's
-              // transcript still exists on disk), and nuking the pointer
-              // turns that into permanent conversation loss. Stash it as the
-              // tab's previous session so the recover banner can offer it,
-              // then clear the live slot so the immediate retry mints fresh.
-              // An occupied stash is left alone: it holds the session we
-              // swapped away from to try this one, which is worth keeping
-              // over a uuid that just proved unresumable.
-              const stashed = (useApp.getState().tabs[task.id]?.find(t => t.id === tab.id) as
-                TerminalTab | undefined)?.previousSessionId;
-              if (storedUuid) {
-                if (!stashed) useApp.getState().setTabPreviousSessionId(task.id, tab.id, storedUuid);
-                setFailedUuid(storedUuid);
-              }
+              // This tab's stored uuid no longer resolves, so clear the slot
+              // and let the immediate retry mint a fresh session. Say so once,
+              // now: termic losing its pointer does NOT delete the transcript,
+              // and every id-resuming agent has its own picker for it
+              // (`claude --resume`, `opencode session list`). We used to stash
+              // the uuid and offer a "Resume it" banner instead; it outlived
+              // the failure it described, never cleared itself, and came back
+              // on every relaunch worded as if nothing had gone wrong.
+              useUI.getState().pushToast(
+                `Couldn't resume the previous ${agentDisplayName(tab.cli)} session. Started a fresh one.`,
+                "info",
+              );
               useApp.getState().setTabSessionId(task.id, tab.id, "");
             } else if (!useIdResume) {
               // Worktree rapid-exit on `--continue` = "no conversation"
@@ -2346,45 +2341,6 @@ const captureArmedRef = useRef(false);
           } : undefined}
         />
       )}
-      {!exited && tab.previousSessionId && (
-        // A --resume attempt fast-exited and we fell back to a fresh session;
-        // the old session id was stashed, not discarded, so offer to recover
-        // it. In-flow (like the exited banner) so it pushes the live terminal
-        // down instead of covering it. The banner outlives the failure (it's
-        // persisted, and the fallback session may be days old by the time it's
-        // clicked), so it swaps the two uuids rather than dropping the live
-        // one, and words itself by whether the stashed session is the one that
-        // failed to resume in this run.
-        <TerminalExitedBanner
-          label={tab.previousSessionId === failedUuid
-            ? "Couldn't resume your previous session."
-            : "Your previous session is still available."}
-          actionLabel={tab.previousSessionId === failedUuid ? "Resume it" : "Switch back"}
-          tone="warning"
-          onAction={() => {
-            const live = useApp.getState().tabs[task.id]?.find(t => t.id === tab.id) as
-              TerminalTab | undefined;
-            const prev = live?.previousSessionId;
-            if (!prev) return;
-            // SWAP, don't discard: the session we're leaving is a real
-            // conversation too (the user may have been working in it since the
-            // failed resume), and dropping its uuid is the same permanent loss
-            // this banner exists to prevent. Then respawn: reset the fail flag
-            // + bump gen so the spawn effect re-reads the uuid live and resumes
-            // it via --resume.
-            useApp.getState().setTabSessionId(task.id, tab.id, prev);
-            useApp.getState().setTabPreviousSessionId(task.id, tab.id, live?.sessionId ?? "");
-            failedResumeRef.current = false;
-            setGen(g => g + 1);
-          }}
-          secondary={{
-            label: "Dismiss",
-            title: "Keep the current session and forget the previous one",
-            icon: X,
-            onAction: () => useApp.getState().setTabPreviousSessionId(task.id, tab.id, ""),
-          }}
-        />
-      )}
       {/* data-* hooks: the terminal renders to a WebGL canvas, so e2e has no
           text to select this pane by (see the drop spec in files.e2e.ts). */}
       <div ref={hostRef} data-terminal-host={tab.id} className="min-h-0 flex-1 bg-[var(--color-bg)]" />
@@ -2460,7 +2416,7 @@ export function FooterBar({ task, sandboxWarning }: {
 }) {
   const splitOpen     = useApp(s => !!s.terminalSplit[task.id]);
   const splitCollapsed = useApp(s => !!s.terminalSplitCollapsed[task.id]);
-  const toggleSplit = useApp(s => s.toggleTerminalSplit);
+  const toggleBottomTerminal = useApp(s => s.toggleBottomTerminal);
   const mode = effectiveSandboxMode(task);
 
   // no right-split agent queue state needed; split panes show their own queue via SplitView
@@ -2522,11 +2478,13 @@ export function FooterBar({ task, sandboxWarning }: {
           affordance reachable from any tab regardless of split state. */}
       <ReviewCommentsBar taskId={task.id} />
       {/* +Terminal opens the bottom split. Hidden when the split is already
-          open — no point offering to add what's there. */}
+          open — no point offering to add what's there. Goes through
+          toggleBottomTerminal (the ⌘J action) so the new shell also takes
+          focus; a raw toggleTerminalSplit leaves the seeded shell unfocused. */}
       {!splitOpen && (
         <button
           type="button"
-          onClick={() => toggleSplit(task.id)}
+          onClick={() => toggleBottomTerminal(task.id)}
           title="Open a bottom terminal split"
           className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[12.5px] text-[var(--color-fg-faint)] hover:bg-[var(--color-bg-2)] hover:text-[var(--color-fg)]"
         >

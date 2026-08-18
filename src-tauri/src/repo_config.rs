@@ -138,7 +138,7 @@ pub fn save(repo_root: &Path, cfg: &RepoConfig) -> Result<()> {
     let raw = serde_yml::to_string(&cfg).context("serialize .termic.yaml")?;
     let text = indent_block_sequences(&raw);
     let path = repo_root.join(FILE_NAME);
-    std::fs::write(&path, text).with_context(|| format!("write {}", path.display()))?;
+    crate::write_atomic(&path, text.as_bytes()).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 

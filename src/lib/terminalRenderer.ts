@@ -106,9 +106,93 @@ export async function awaitTerminalFonts(
   push();
 }
 
+/** Context-loss recovery budget. A dead GL context is normal and transient
+ *  (WebKit reaps the GPU process under memory pressure, after sleep, or after
+ *  a long idle); a GPU that dies MAX times inside WINDOW is not, and retrying
+ *  into it just black-flashes the pane on a loop. Past the budget we stay on
+ *  xterm's DOM renderer, which is slower but always paints, until the losses
+ *  age out of the window and WebGL is worth a try again. Deliberately a
+ *  sliding window rather than a permanent give-up: a terminal can live for
+ *  days in one session, and a transient GPU outage should not cost it the
+ *  fast renderer for all of them.
+ *  The delay is one beat for WebKit's GPU process to come back:
+ *  asking for a context in the same task as the loss event hands back one
+ *  that is already lost. Exported for terminalRenderer.test.ts. */
+export const CONTEXT_LOSS_WINDOW_MS = 60_000;
+export const CONTEXT_LOSS_MAX = 3;
+export const CONTEXT_REATTACH_DELAY_MS = 100;
+
 export function loadTerminalRenderer(term: Terminal): { dispose(): void } {
   let addon: WebglAddon | CanvasAddon | null = null;
   let disposed = false;
+
+  // Reported symptom: after a long session (sleep, or the window left in the
+  // background for hours) every terminal pane is BLACK, and only restarting
+  // that tab brings it back. Nothing is wrong with the terminal — the PTY is
+  // live and the scrollback is intact, which is exactly why a respawn "fixes"
+  // it. What died is the WebGL context: WKWebView reclaims GPU resources for
+  // a webview it considers idle, every context in the process is lost at
+  // once, and the addon's canvas keeps compositing its last (empty) frame.
+  //
+  // This handler used to be `a.onContextLoss(() => a.dispose())`. Disposing is
+  // necessary (a renderer on a dead context draws nothing and throws on some
+  // paths) but it is only half the job: xterm falls back to its DOM renderer
+  // internally, yet nothing repaints, so the pane stays black until the user
+  // notices and restarts the tab by hand. Do NOT reduce this back to a bare
+  // dispose. Re-attaching is what gets the pixels back.
+  let lossTimes: number[] = [];
+  // The budget is a sliding window, not a one-way latch: losses that age out
+  // stop counting, so a GPU that comes back an hour later gets WebGL back
+  // instead of leaving the terminal on the DOM renderer for the rest of its
+  // life. Every path that would attach WebGL has to consult this, not just the
+  // loss handler, or the give-up decision is only as durable as the next
+  // window focus.
+  const lossBudgetSpent = () => {
+    const now = Date.now();
+    lossTimes = lossTimes.filter(t => now - t < CONTEXT_LOSS_WINDOW_MS);
+    return lossTimes.length > CONTEXT_LOSS_MAX;
+  };
+
+  const recoverFromContextLoss = (lost: WebglAddon) => {
+    try { lost.dispose(); } catch { /* already gone */ }
+    if (addon === lost) addon = null;
+    if (disposed) return;
+    lossTimes.push(Date.now());
+    if (lossBudgetSpent()) {
+      // Out of budget: the DOM renderer xterm fell back to on dispose owns the
+      // pane now, but it only paints rows it is told are dirty and the loss
+      // dirtied nothing. Without this the give-up path looks identical to the
+      // bug it exists to avoid.
+      try { term.refresh(0, term.rows - 1); } catch { /* mid-teardown */ }
+      return;
+    }
+    window.setTimeout(() => { if (!disposed && !addon) attach(); }, CONTEXT_REATTACH_DELAY_MS);
+  };
+
+  // The event is not guaranteed. A webview that is suspended (window hidden
+  // for hours, App Nap) can have its context reaped without `webglcontextlost`
+  // ever being delivered — the same black pane with no callback to recover
+  // from it, which is the shape the original report describes. So also probe
+  // on the edges where the user is about to LOOK at the terminal: focus and
+  // visibilitychange. `_gl` is optional-chained and pinned by
+  // xtermInternals.test.ts, so an xterm rename degrades to "event-driven
+  // recovery only" rather than throwing.
+  //
+  // A null addon here is the other half: an earlier re-attach that ran while
+  // the GPU was still down hit the catch in attach() and left the terminal on
+  // the DOM renderer. Wake is the natural moment to try again.
+  const onWake = () => {
+    if (disposed || document.visibilityState === "hidden") return;
+    if (addon instanceof WebglAddon) {
+      const gl = (addon as unknown as { _renderer?: { _gl?: WebGLRenderingContext } })
+        ._renderer?._gl;
+      if (gl?.isContextLost() === true) recoverFromContextLoss(addon);
+      return;
+    }
+    if (!addon && isTerminalFontReady() && !lossBudgetSpent()) attach();
+  };
+  window.addEventListener("focus", onWake);
+  document.addEventListener("visibilitychange", onWake);
 
   const attach = () => {
     const kind = usePrefs.getState().terminalRenderer;
@@ -125,7 +209,7 @@ export function loadTerminalRenderer(term: Terminal): { dispose(): void } {
         return;
       }
       const a = new WebglAddon();
-      a.onContextLoss(() => a.dispose());
+      a.onContextLoss(() => recoverFromContextLoss(a));
       // Atlas swaps (font/theme/dpr). Microtask: the event fires before the
       // renderer stores the new atlas; its warm-up runs later, on idle.
       a.onChangeTextureAtlas(() => queueMicrotask(() => { if (!disposed) keepAtlasCanvasConnected(a); }));
@@ -166,6 +250,8 @@ export function loadTerminalRenderer(term: Terminal): { dispose(): void } {
   return {
     dispose() {
       disposed = true;
+      window.removeEventListener("focus", onWake);
+      document.removeEventListener("visibilitychange", onWake);
       dumpTimers.forEach(t => window.clearTimeout(t));
       // Park the shared atlas canvas before this pane's DOM unmounts with it.
       // Only WebGL has one; the canvas renderer's layers die with its dispose.

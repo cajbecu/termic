@@ -32,7 +32,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { isUserWatching, useApp } from "@/store/app";
 import * as ipc from "@/lib/ipc";
 import { markUnattendedSpawn, takeUnattendedSpawn } from "@/lib/unattendedSpawns";
-import type { QueueItem, Tab, TerminalTab, PersistedTab } from "@/lib/types";
+import type { QueueItem, PaneLeaf, Tab, TerminalTab, PersistedTab } from "@/lib/types";
 import { useUI } from "@/store/ui";
 // Store interactor — the ONE place that knows the store's shape. Cases below
 // say what they mean ("what work state is that tab in?") instead of spelling
@@ -252,6 +252,87 @@ describe("setWorkState", () => {
     const result = getTerminalTab(taskId, tab.id);
     expect(result.workProgress).toBeNull();
     expect(result.workProgressKind).toBeNull();
+  });
+});
+
+// ── setTabLiveTitle ───────────────────────────────────────────────────
+//
+// An UNCHANGED title must not write. xterm fires onTitleChange for every
+// OSC 0/2 without comparing it to the previous value (InputHandler.setTitle),
+// and an agent TUI re-emits its unchanged title while it sits at the prompt —
+// so a setter that allocated on every one of those woke every store subscriber
+// several times a second, per terminal, forever, with the app idle. Measured
+// on a 16-terminal fixture: 62 store writes/s and 19% of a core, halving to 31
+// writes/s and 12.7% with the bail below.
+//
+// This is a COUNT assertion, which is the class that can gate a PR — a 3-core
+// CI runner counts the same as an M1 Max, where the CPU figure would not
+// survive the trip (docs/performance.md, docs/perf-ci.md).
+describe("setTabLiveTitle", () => {
+  it("applies a title that actually changed", () => {
+    const taskId = "ws1";
+    const tab = makeTermTab();
+    addTab(taskId, tab);
+
+    useApp.getState().setTabLiveTitle(taskId, tab.id, "✳ termic");
+
+    expect(getTerminalTab(taskId, tab.id).liveTitle).toBe("✳ termic");
+  });
+
+  it("does not touch the store when the title is unchanged", () => {
+    const taskId = "ws1";
+    const tab = makeTermTab();
+    addTab(taskId, tab);
+    useApp.getState().setTabLiveTitle(taskId, tab.id, "✳ termic");
+
+    const before = useApp.getState();
+    useApp.getState().setTabLiveTitle(taskId, tab.id, "✳ termic");
+    const after = useApp.getState();
+
+    // Same STATE object, not merely equal: a fresh `tabs` record is what
+    // invalidates every selector in every mounted task.
+    expect(after).toBe(before);
+    expect(after.tabs).toBe(before.tabs);
+    expect(after.tabs[taskId]).toBe(before.tabs[taskId]);
+    expect(after.tabs[taskId][0]).toBe(before.tabs[taskId][0]);
+  });
+
+  it("notifies subscribers ONCE for a title repainted 100 times", () => {
+    const taskId = "ws1";
+    const tab = makeTermTab();
+    addTab(taskId, tab);
+
+    let notifications = 0;
+    const unsub = useApp.subscribe(() => { notifications++; });
+    for (let i = 0; i < 100; i++) {
+      useApp.getState().setTabLiveTitle(taskId, tab.id, "✳ termic");
+    }
+    unsub();
+
+    // Only the first write is real; the other 99 are the idle TUI repainting.
+    expect(notifications).toBe(1);
+  });
+
+  it("keeps ignoring the agent's title on a user-renamed tab", () => {
+    const taskId = "ws1";
+    const tab = makeTermTab({ customTitle: true, title: "mine" });
+    addTab(taskId, tab);
+
+    const before = useApp.getState();
+    useApp.getState().setTabLiveTitle(taskId, tab.id, "✳ termic");
+
+    expect(useApp.getState()).toBe(before);
+    expect(getTerminalTab(taskId, tab.id).liveTitle).toBeUndefined();
+  });
+
+  it("is a no-op for a tab id that does not exist", () => {
+    const taskId = "ws1";
+    addTab(taskId, makeTermTab({ id: "a" }));
+
+    const before = useApp.getState();
+    useApp.getState().setTabLiveTitle(taskId, "nope", "✳ termic");
+
+    expect(useApp.getState()).toBe(before);
   });
 });
 
@@ -653,6 +734,105 @@ describe("reorderTab", () => {
   });
 });
 
+// ── pin / unpin (issue #183) ──────────────────────────────────────────
+
+describe("pinTab / unpinTab", () => {
+  const ids = getTabIds;
+  const pinnedOf = (taskId: string, tabId: string) =>
+    !!getTabs(taskId).find(t => t.id === tabId)?.pinned;
+
+  function seed(taskId: string, n: number) {
+    for (let i = 0; i < n; i++) addTab(taskId, makeTermTab({ id: `t${i}` }));
+  }
+
+  it("pin moves the tab to the front when nothing else is pinned", () => {
+    seed("ws1", 3); // t0 t1 t2
+    useApp.getState().pinTab("ws1", "t2");
+    expect(ids("ws1")).toEqual(["t2", "t0", "t1"]);
+    expect(pinnedOf("ws1", "t2")).toBe(true);
+  });
+
+  it("pin appends to the END of the pinned block, not the front", () => {
+    seed("ws1", 4); // t0 t1 t2 t3
+    useApp.getState().pinTab("ws1", "t3");
+    useApp.getState().pinTab("ws1", "t2");
+    expect(ids("ws1")).toEqual(["t3", "t2", "t0", "t1"]);
+  });
+
+  it("unpin drops the tab to the first slot after the pinned block", () => {
+    seed("ws1", 4); // t0 t1 t2 t3
+    useApp.getState().pinTab("ws1", "t2");
+    useApp.getState().pinTab("ws1", "t3"); // t2 t3 t0 t1
+    useApp.getState().unpinTab("ws1", "t2");
+    expect(ids("ws1")).toEqual(["t3", "t2", "t0", "t1"]);
+    expect(pinnedOf("ws1", "t2")).toBe(false);
+  });
+
+  it("pinning an already-pinned tab at the boundary leaves the order alone", () => {
+    seed("ws1", 3);
+    useApp.getState().pinTab("ws1", "t0");
+    const before = ids("ws1");
+    useApp.getState().pinTab("ws1", "t0");
+    expect(ids("ws1")).toEqual(before);
+  });
+
+  it("ignores an unknown tab id", () => {
+    seed("ws1", 2);
+    const before = ids("ws1");
+    useApp.getState().pinTab("ws1", "nope");
+    expect(ids("ws1")).toEqual(before);
+  });
+
+  it("persists the pinned flag and the new order", () => {
+    useApp.setState({ tasks: [makeTask()] });
+    useApp.getState().addTab("ws1", makeTermTab({ id: "a", cli: "claude" }));
+    useApp.getState().addTab("ws1", makeTermTab({ id: "b", cli: "codex" }));
+
+    useApp.getState().pinTab("ws1", "b");
+
+    const task = useApp.getState().tasks.find(w => w.id === "ws1")!;
+    expect(task.persisted_tabs!.map(t => t.id)).toEqual(["b", "a"]);
+    expect(task.persisted_tabs!.map(t => t.pinned)).toEqual([true, false]);
+  });
+
+  it("persists an unpin even when the order does not change", () => {
+    useApp.setState({ tasks: [makeTask()] });
+    useApp.getState().addTab("ws1", makeTermTab({ id: "a", cli: "claude" }));
+    useApp.getState().addTab("ws1", makeTermTab({ id: "b", cli: "codex" }));
+    useApp.getState().pinTab("ws1", "a"); // already first — no move
+
+    useApp.getState().unpinTab("ws1", "a"); // still first — no move either
+
+    const task = useApp.getState().tasks.find(w => w.id === "ws1")!;
+    expect(task.persisted_tabs!.map(t => t.id)).toEqual(["a", "b"]);
+    expect(task.persisted_tabs![0].pinned).toBe(false);
+  });
+
+  it("a main tab's pin ignores split-pane tabs interleaved in the array", () => {
+    addTab("ws1", makeTermTab({ id: "p0", paneId: "leaf-1" }));
+    addTab("ws1", makeTermTab({ id: "t0" }));
+    addTab("ws1", makeTermTab({ id: "t1" }));
+    useApp.getState().pinTab("ws1", "t1");
+    // t1 lands before t0 (the first MAIN tab), not at array index 0.
+    expect(ids("ws1")).toEqual(["p0", "t1", "t0"]);
+  });
+
+  it("a pane tab's pin reorders its leaf's tabIds", () => {
+    addTab("ws1", makeTermTab({ id: "p0", paneId: "leaf-1" }));
+    addTab("ws1", makeTermTab({ id: "p1", paneId: "leaf-1" }));
+    useApp.setState({
+      splitTree: {
+        ws1: { type: "pane", id: "leaf-1", tabIds: ["p0", "p1"], activeTabId: "p0" },
+      },
+    } as never);
+
+    useApp.getState().pinTab("ws1", "p1");
+
+    const leaf = useApp.getState().splitTree["ws1"] as PaneLeaf;
+    expect(leaf.tabIds).toEqual(["p1", "p0"]);
+  });
+});
+
 // ── persist + restore agent tabs (issue #23) ──────────────────────────
 
 describe("ensureDefaultTab — seed / restore / migrate", () => {
@@ -689,6 +869,18 @@ describe("ensureDefaultTab — seed / restore / migrate", () => {
     expect(useApp.getState().activeTab["ws1"]).toBe("t1");
     // Restore reads existing on-disk state — it must NOT re-persist.
     expect(ipc.taskSetTabs).not.toHaveBeenCalled();
+  });
+
+  it("restores the pinned flag (issue #183)", () => {
+    const persisted: PersistedTab[] = [
+      { id: "t1", cli: "claude", is_default: true, pinned: true },
+      { id: "t2", cli: "codex", pinned: false },
+    ];
+    useApp.setState({ tasks: [makeTask({ persisted_tabs: persisted })] });
+    useApp.getState().ensureDefaultTab("ws1", "claude");
+
+    const tabs = useApp.getState().tabs["ws1"];
+    expect(tabs.map(t => !!t.pinned)).toEqual([true, false]);
   });
 
   it("re-derives the title for tabs the user never renamed", () => {
@@ -1020,7 +1212,6 @@ describe("stopTask", () => {
       id: "t1",
       ptyId: "pty-live",
       sessionId: "sess-uuid",
-      previousSessionId: "prev-uuid",
       lastInputAt: 111,
       lastOutputAt: 222,
       workState: "working",
@@ -1040,7 +1231,6 @@ describe("stopTask", () => {
     expect(tab.workState).toBeUndefined();
     // The whole point of Stop vs Archive: the session survives.
     expect(tab.sessionId).toBe("sess-uuid");
-    expect(tab.previousSessionId).toBe("prev-uuid");
   });
 
   it("falls back to the dashboard when stopping the active task", () => {

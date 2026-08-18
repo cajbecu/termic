@@ -1,8 +1,12 @@
-# E2E coverage plan & checklist
+# E2E coverage map & checklist
+
+**Status: reference.** Not a plan to implement and then delete: it is a
+living map, updated by nearly every feature commit, which is why it sits in
+`docs/` rather than `docs/plans/`.
 
 The running map of what our WebdriverIO e2e suite covers and what it still
 needs. Update this whenever you add/change a spec. Harness + authoring rules
-live in [docs/e2e-tests.md](../e2e-tests.md) and the **`e2e` skill**.
+live in [docs/e2e-tests.md](e2e-tests.md) and the **`e2e` skill**.
 
 - **Run:** `make e2e` (build + run) · `npm run test:e2e` (iterate). ~40s serial.
 - **Specs are grouped by area** into ~10 files (one app launch each; cases run sequentially and self-clean). Add a new test as an `it` in the relevant group file.
@@ -21,8 +25,10 @@ until `make e2e` is green and this file reflects it.
 |---|---|---|
 | ✅ App shell | Renders; `__termic` exposes real store state | `app.e2e.ts` |
 | ✅ Navigation | Dashboard ↔ History via real clicks | `app.e2e.ts` |
+| ✅ History scrolling | The archive pane fills its overlay instead of sizing to its content, so an archive taller than the window overflows INSIDE the scroller: the last row starts out of view and scrolling brings it in. Filtering down and back keeps the pane full-height | `app.e2e.ts` |
 | ✅ Create (wizard) | NewTaskDialog: name + shell CLI + Main-checkout → Create → task exists | `task.e2e.ts` |
 | ✅ Task spawn | Task created; agent PTY comes alive; PTY write round-trips; agent OSC title reaches the app | `task.e2e.ts` |
+| ✅ Deep links (GH #192) | A `termic://new?…` URL pre-fills the New Task dialog (name, prompt, task type) and **creates nothing** until the user presses Create; the prompt stays editable; a prompt at the cap is accepted and one past it is refused with a reason; an unregistered project, a missing project, an unknown action, an unknown task and a foreign scheme are each refused with a toast and no dialog; a confirmed link creates the task it described. `termic://open?…` selects an existing task by name or id with **no dialog** (navigation changes nothing to confirm) and closes a stale New Task dialog on its way through. Enters at `handleDeepLink` with the raw URL Rust queues, because WebDriver cannot ask macOS to open a URL scheme | `deep-link.e2e.ts` |
 | ✅ Agent working | After a real submit, the agent enters the working state | `agent.e2e.ts` |
 | ✅ Agent attention | An agent you are not viewing flags completion (unread/done) when it finishes | `agent.e2e.ts` |
 | ✅ CLI tabs (unit) | `termic tab` on an UNMOUNTED task keeps every persisted agent and its session id, does not steal the default-target role, and a shell tab does not strand the task agentless | `store/cliTab.integration.test.ts` |
@@ -42,11 +48,14 @@ until `make e2e` is green and this file reflects it.
 | ✅ Run tabs | A custom run command opens a run tab whose PTY executes it | `run.e2e.ts` |
 | ✅ Task archive | Archived task leaves the active board | `task.e2e.ts` |
 | ✅ Task restore | Archived task shows in History; restore returns it to active | `task.e2e.ts` |
+| ✅ Archive confirmation | "Don't ask again" ticked then cancelled stores nothing; confirmed, it stores the opt-out AND the delete-branch answer; the next archive then runs with no dialog and deletes the branch. Settings › Tasks keeps both toggles visible either way, flips the branch one, and turning the confirmation back on neither hides it nor rewrites its value. The branch toggle seeds the dialog's checkbox (singular and plural forms), which can still be overridden for one archive without changing the stored default | `task.e2e.ts`, `settings.e2e.ts` |
 | ✅ Multi-task | Two tasks, independent/distinct PTYs, survive going inactive, switching works | `task.e2e.ts` |
 | ✅ Editor open | Click a file → editor tab opens → CodeMirror loads the real contents | `editor.e2e.ts` |
 | ✅ Editor save | Edit in CodeMirror → dirty dot → Cmd+S → written to disk | `editor.e2e.ts` |
 | ✅ Git clean | Clean working-tree status for the fixture repo | `git.e2e.ts` |
-| ✅ Git dirty | Modify a file → Git panel leaves clean state, git status reports it | `git.e2e.ts` |
+| ✅ Git dirty | Modify a file → Commit panel leaves clean state, git status reports it | `git.e2e.ts` |
+| ✅ Git history / graph | The Git tab's History sub-tab lists real commits (made outside the app) newest first with lane gutters + ref chips; a commit expands into its files; a file opens a diff of THAT revision (asserted against a deliberately dirtied working tree) with no review affordances; the ref picker scopes to Auto, All and a named branch, unticking the last ref returns to Auto, First parent only collapses merged branches without emptying the graph, and the message search narrows the graph across the whole branch (a literal no-match query empties it, clearing restores); subjects indent to their own lane (GH #199, GH #208) | `git.e2e.ts` |
+| ✅ Git branch compare | The Compare sub-tab lists committed, uncommitted and untracked work against the base in ONE list (the committed file being the case the Commit view structurally cannot show); the summary strip carries a file count + diffstat; the shared Filter box narrows the list and restores it; a file opens a `base:<sha>` diff whose left side is the base and right side the live worktree (fingerprint non-empty), review affordances still ON unlike a graph diff; picking another base re-runs the comparison; folders render as a tree, not flat paths (GH #208) | `git.e2e.ts` |
 | ✅ Settings | Toggling a preference lands in the prefs store + control reflects it | `settings.e2e.ts` |
 | ✅ Terminal renderer picker | Appearance → Terminal exposes the three-way webgl/canvas/dom picker on macOS (GH #140); the option list is asserted to be exactly those three, and driving the real segmented control through canvas and dom lands in prefs and keeps the legacy `terminalGpuEnabled` in sync | `settings.e2e.ts` |
 | ✅ CLI graduated | The Termic CLI page and its rail item carry NO Experimental badge (0.26.0); docs/ui.md ties the badge to being off by default, so a badge next to a shipped-enabled setting is a contradiction | `settings.e2e.ts` |
@@ -54,18 +63,22 @@ until `make e2e` is green and this file reflects it.
 | ✅ Select chrome | Every settings `<select>` computes `appearance: none` with the repainted chevron and reserves room for it, so WKWebView's native bevel cannot come back (one bare-element rule, all selects at once) | `settings.e2e.ts` |
 | ✅ Default tasks path | The global setting ships a real value (not an empty box); a new project's `tasks_path` starts empty so that setting applies; an absolute default lands worktrees at `<default>/<project>/<task>` and a relative one at `<repo>/<default>/<task>`, both verified on disk; a project's own tasks path overrides it; the project field shows the global-derived path as its placeholder while staying empty; the Settings → Tasks preview flips between the two halves of the rule as it is typed, and emptying the required field blocks the save | `settings.e2e.ts` |
 | ✅ Tabs | Add a terminal tab via the "+" menu; switch active tab | `tabs-layout.e2e.ts` |
+| ✅ Sidebar New submenu | The task row's menu offers the same entries as the tab strip's "+" (GH #197); picking one spawns into that row's task, wakes it, and keeps its seeded agent tab | `tabs-layout.e2e.ts` |
 | ✅ Tab rename | Double-click inline edit commits the new name | `tabs-layout.e2e.ts` |
+| ✅ Tab context menu | Right-click a pill: Pin moves the tab to the head of the strip and a second pin appends to the end of that block; Unpin drops back to the first slot after it; Close to the right and Close others spare every pinned tab and the clicked one; both go disabled when they have nothing to close (GH #183) | `tabs-layout.e2e.ts` |
+| ✅ Pinned pill has no close X | A pinned pill offers "Unpin tab" where an unpinned one offers "Close tab", so one stray click cannot kill a live PTY; that control unpins (the tab survives) and the X comes back with it (GH #183) | `tabs-layout.e2e.ts` |
+| ✅ Pinned tabs stay in view | A pinned tab lives outside the strip's scroller: with the strip flooded past overflow and scrolled to its end, the pinned pill has not moved a pixel and is still fully inside the bar (GH #183) | `tabs-layout.e2e.ts` |
 | ✅ Theme | Picker switches theme; palette class applied to `<html>` | `tabs-layout.e2e.ts` |
 | ✅ Editor persist | Single-click = preview tab; double-click persists it | `editor.e2e.ts` |
 | ✅ Split panes | Unsplit start; split-right → 2 leaves; split-below → 3 | `tabs-layout.e2e.ts` |
 | ✅ Message queue | Message held while working, drains on idle | `agent.e2e.ts` |
-| ✅ Command palette | Opens/lists; filters; command activation closes it; Escape closes | `app.e2e.ts` |
+| ✅ Command palette | Opens/lists; filters; command activation closes it; Escape closes; the top-bar button toggles it open and shut and names the live binding in its label; top-bar tooltips (palette, Prompts, right-panel toggle) print their live glyphs | `app.e2e.ts` |
 | ✅ File finder | ⌘P lists the repo's files; selecting one opens an editor tab | `files.e2e.ts` |
 | ✅ Git stage/unstage/commit | Stage → unstage → re-stage + commit → clean | `git.e2e.ts` |
 | ✅ Task rename/delete | Rename updates store+sidebar; duplicate name refused (IPC) + toast (inline flow, GH #153); delete removes the task entirely | `task.e2e.ts` |
 | ✅ Git diff | Open a diff tab for a changed file | `git.e2e.ts` |
 | ✅ Inline review comments | Select a diff line → tooltip → compose → save, three times; line numbers stay level with the code throughout (GH #157) | `git.e2e.ts` |
-| ✅ Find in files | ⇧⌘F opens; a repo-present query returns a result row; a pattern matches nothing as a literal and matches once the `.*` toggle turns regexp mode on; a differently-cased query matches until the `Aa` toggle turns match-case on (both toggles persist to prefs) | `files.e2e.ts` |
+| ✅ Find in files | ⇧⌘F opens; the status line names the backend that actually ran (ripgrep or the `git grep` fallback) and the install hint shows only on the fallback (GH #181); a repo-present query returns a result row with the match highlighted; a pattern matches nothing as a literal and matches once the `.*` toggle turns regexp mode on; a differently-cased query matches until the `Aa` toggle turns match-case on (both toggles persist to prefs). Run the spec a second time with `TERMIC_FIND_BACKEND=git-grep` to exercise the fallback on a machine that has rg | `files.e2e.ts` |
 | ✅ Markdown preview | Preview view renders the README markdown (h1) | `editor.e2e.ts` |
 | ✅ Directory links | A folder link recycles the preview tab into a listing and expands the tree; the folder README renders under it; folder rows, `..` and links inside the README navigate in place; a file row or README file link pins the listing and opens alongside it; a hidden listing's README does not claim ⌘F; ⌘[ / ⌘] walk the folder trail, are declined when focus is in the bottom drawer or right panel, and fall through to task switching once the trail runs out | `editor.e2e.ts` |
 | ✅ Find in preview | ⌘F marks exactly the query text and nothing else (asserted on the `<mark>`s and their *computed background*, never a highlight registry), including the code spans a doc contains but the query doesn't touch; Enter/⇧Enter step with the counter and wrap both ways; a second query replaces the first instead of stacking; a query inside a code span still matches; a phrase the markdown source hard-wrapped still matches; a regex metacharacter stays literal; no match clears; Escape restores the document; a theme flip that rebuilds the DOM re-marks against the fresh one | `editor.e2e.ts` |
@@ -95,6 +108,7 @@ until `make e2e` is green and this file reflects it.
 | ✅ Code editor | Open a .py file → CodeMirror renders with highlight tokens | `editor.e2e.ts` |
 | ✅ Editor h-scroll gutter | A long line scrolled fully right keeps the sticky gutter painting the host's surface, so code never shows through it (GH #161) | `editor.e2e.ts` |
 | ✅ Commit & push | Commit with push to a bare remote; remote receives it | `git.e2e.ts` |
+| ✅ Inline git blame | Cursor line gets ONE annotation naming the real commit (real `git blame`, asserted on the fixture's own author + subject), nothing before the cursor leaves position 0, never more than one (no column, and no annotation on the phantom line a trailing newline creates), an edited line drops to "Not committed yet", the pref removes it and restores it on a parked cursor, and the palette's `toggle-inline-blame` row flips it. Mutates no fixture state on purpose: one extra commit in the shared history breaks `git.e2e.ts`'s first-parent case. Card: resting on the annotation opens it with the real commit; the header's Open diff opens a `commit:` diff tab; Show in History expands that commit in the Graph; a click on the annotation does nothing | `editor.e2e.ts` |
 | ✅ Editor selection → agent | A selection raises ONE gutter icon (never the diff's pill or hover button) and retracts with the selection; the composer offers Send + Add to pending; Send ships that one comment WITH the code and skips the queue; Add to pending queues it (card in place, editor keeps the stage, nothing sent); ⇧⌘L stacks a second one and no-ops with no selection; queued comments follow their code when lines are inserted above; the batch sends as one message carrying both bodies + both SHIFTED line attributions (asserted from the agent's PTY ring) and drains the queue | `editor.e2e.ts` |
 | ✅ Multi-repo Git panel | Two member repos: the panel opens on a CHANGED repo (never the clean host) with its files listed and no click; a second dirty repo adds its pill without stealing the selection; picking a pill swaps the list and stages into that repo only | `git.e2e.ts` |
 | ✅ Discover repos | Scan a folder → returns its git repos | `projects.e2e.ts` |

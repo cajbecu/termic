@@ -20,7 +20,7 @@ declare global {
 // unreliable and Tauri intercepts it for file drops), so the spec can drive it
 // with synthetic pointer events through the app's real handlers.
 describe("drag a file onto a terminal", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
@@ -180,7 +180,7 @@ describe("drag a file onto a terminal", () => {
 // P1: the file finder (⌘P). Cases: opens and lists the repo's files; selecting
 // a result opens an editor tab for that file.
 describe("file finder", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     await browser.execute(() =>
       window.__termic!.useUI.getState().closeFileFinder(),
@@ -230,11 +230,14 @@ describe("file finder", () => {
   });
 });
 
-// P1: find-in-files (⇧⌘F) streams git-grep results. Cases: opens with an
-// input; a query that matches the fixture README returns a result row; the
-// regexp toggle switches git grep from -F to -E; the Aa toggle drops the -i.
+// P1: find-in-files (⇧⌘F) streams results from ripgrep, or git grep where rg
+// isn't installed (GH #181). Cases: opens with an input; the dialog names the
+// backend that actually ran and offers the install hint only on the fallback;
+// a query that matches the fixture README returns a result row with the match
+// highlighted; the regexp toggle switches literal → pattern; Aa drops the
+// case folding.
 describe("find in files", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     await browser.execute(() => {
       window.__termic!.useUI.getState().closeFindInFiles();
@@ -290,6 +293,36 @@ describe("find in files", () => {
     );
   });
 
+  // Which backend runs depends on the machine (CI runners and dev Macs
+  // differ), and it's fixed for the life of the process, so the invariant
+  // worth pinning is agreement: the dialog must describe the backend that
+  // actually ran, and the "install rg" nudge must never appear to someone
+  // who already has it.
+  it("names the backend it searched with", async () => {
+    const backend = await browser.execute(async () => {
+      const info = (await window.__termic!.invoke("task_find_backend")) as {
+        backend: string;
+        settled: boolean;
+      };
+      return info.backend;
+    });
+    expect(["ripgrep", "git-grep"]).toContain(backend);
+
+    const wanted = backend === "ripgrep" ? "ripgrep" : "git grep";
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(
+          () => document.querySelector('[data-testid="fif-status"]')?.textContent ?? "",
+        )).includes(wanted),
+      { timeout: 10_000, timeoutMsg: `status line never named ${wanted}` },
+    );
+
+    const hasHint = await browser.execute(
+      () => !!document.querySelector('[data-testid="fif-rg-hint"]'),
+    );
+    expect(hasHint).toBe(backend === "git-grep");
+  });
+
   it("returns a match for a query present in the repo", async () => {
     // "fixture" is in the committed README ("# e2e fixture").
     await type("fixture");
@@ -299,6 +332,17 @@ describe("find in files", () => {
       timeoutMsg: "no result row for the query",
     });
     await snap("find-in-files.png");
+  });
+
+  // The match ranges come from ripgrep itself and from a JS re-match on the
+  // git grep fallback. Either way the row has to paint the hit, so this
+  // guards the seam without caring which side produced it.
+  it("highlights the matched text inside the row", async () => {
+    const marks = await browser.execute(() =>
+      [...document.querySelectorAll('[data-testid="fif-results"] [data-row] b')]
+        .map((b) => b.textContent?.toLowerCase() ?? ""),
+    );
+    expect(marks).toContain("fixture");
   });
 
   // "^# e2e" only matches the committed README as a pattern; as a literal
@@ -358,7 +402,7 @@ describe("find in files", () => {
 const fixture = process.env.E2E_FIXTURE ?? path.join(process.cwd(), ".e2e", "fixture-repo");
 
 describe("file tree", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
     execSync(`git -C "${fixture}" clean -fd`);
@@ -516,7 +560,7 @@ describe("file tree", () => {
 // `open_file_external` in lib.rs): the suite must not launch Blender, and the
 // reveal fallback would pop a Finder window over the window under test.
 describe("open a file in its default app", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   const openedLog = path.join(process.cwd(), ".e2e", "profile", "e2e-opened.log");
 
   after(async () => {

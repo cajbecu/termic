@@ -6,6 +6,7 @@ import { useLayoutEffect, useEffect, useRef, useState } from "react";
 import type { Tab } from "@/lib/types";
 import { showDragGhost, moveDragGhost, hideDragGhost } from "@/lib/dragGhost";
 import { detectDropZone, setDropHighlight, clearDropHighlight, type DropZone } from "@/lib/dropZones";
+import { startMenuDrag } from "@/lib/menuDrag";
 
 interface DragBookkeeping {
   id: string;
@@ -122,8 +123,13 @@ export function useTabStripDrag(opts: {
     }
     const stripT = stripTabsRef.current; const allT = allTabsRef.current;
     const cur = stripT.findIndex(t => t.id === d.id);
-    if (target === cur) return;
     const filteredWithout = stripT.filter(t => t.id !== d.id);
+    // Pinned tabs own the head of the strip, so a drag can only reorder WITHIN
+    // its own group: a pinned pill stops at the boundary, an unpinned one can't
+    // cross above it (issue #183).
+    const boundary = filteredWithout.filter(t => t.pinned).length;
+    target = stripT[cur]?.pinned ? Math.min(target, boundary) : Math.max(target, boundary);
+    if (target === cur) return;
     const fullWithout = allT.filter(t => t.id !== d.id);
     let fullTarget: number;
     if (target >= filteredWithout.length) {
@@ -233,5 +239,26 @@ export function useTabStripDrag(opts: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { dragId, dragTx, suppressClickRef, startDrag };
+  // Menu-triggered equivalent of startDrag: no mousedown to anchor to, so it
+  // starts from the pill's own position and arms a cursor-following session
+  // via startMenuDrag instead of a real pointer capture.
+  function startMenuMove(tabId: string) {
+    const strip = stripRef.current;
+    const pill = strip?.querySelector(`[data-tab-id="${CSS.escape(tabId)}"]`) as HTMLElement | null;
+    const rect = pill?.getBoundingClientRect();
+    const x = rect ? rect.left + rect.width / 2 : window.innerWidth / 2;
+    const y = rect ? rect.top + rect.height / 2 : 0;
+    const t = stripTabsRef.current.find(tt => tt.id === tabId);
+    startMenuDrag({
+      label: t ? (((t as { liveTitle?: string }).liveTitle) || t.title) : "Tab",
+      x, y,
+      hitTest: hitTestDropTarget,
+      onDrop: (target) => {
+        if (target.zone !== "center" && onDropToSplit) onDropToSplit(tabId, target.toPaneId, target.zone);
+        else if (target.toPaneId && onDropToPane) onDropToPane(tabId, target.toPaneId);
+      },
+    });
+  }
+
+  return { dragId, dragTx, suppressClickRef, startDrag, startMenuMove };
 }

@@ -7,7 +7,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Project, ProjectMember, Task, CreateTaskArgs, CreateMultiArgs, Settings, DiscoveredRepo,
   ImportableWorktree, CliInfo, ChangeFile, Changes, GitStatus, CheckoutResult, UpdateMode, UpdateResult, UpdateInfo, FileEntry, Agent, RepoConfig,
-  SandboxMode, TaskDiffSummary, CliInstallStatus, BranchContext,
+  SandboxMode, TaskDiffSummary, CliInstallStatus, BranchContext, BlameFile, GitCommit, GitCompare, GitFile, GitLogPage, GitRef,
 } from "./types";
 import type { CustomThemeFile } from "./customTheme";
 import {
@@ -60,6 +60,9 @@ export const taskOpenRepo = (
   command?: string,
   /** Externally-started session the agent resumes on first spawn (GH #169). */
   resumeSessionId?: string,
+  /** Resume-args override, applied from the first spawn. Same field as the
+   *  task menu's "Resume override" (`taskSetResumeOverride`). */
+  resumeOverride?: string,
 ) =>
   invoke<Task>("task_open_repo", {
     projectId, cli, name, command,
@@ -67,7 +70,7 @@ export const taskOpenRepo = (
     sandboxMode: sandbox?.mode,
     sandboxRwPaths: sandbox?.rwPaths,
     sandboxAllowedHosts: sandbox?.allowedHosts,
-    resumeSessionId,
+    resumeSessionId, resumeOverride,
   });
 /** List a project's git worktrees not yet open as tasks (issue #5). */
 export const taskImportableWorktrees = (projectId: string) =>
@@ -83,6 +86,9 @@ export const taskImportWorktree = (
   sandbox?: { enabled: boolean; mode?: SandboxMode; rwPaths: string[]; allowedHosts: string[] },
   /** Externally-started session the agent resumes on first spawn (GH #169). */
   resumeSessionId?: string,
+  /** Resume-args override, applied from the first spawn. Same field as the
+   *  task menu's "Resume override" (`taskSetResumeOverride`). */
+  resumeOverride?: string,
   yolo?: boolean,
 ) =>
   invoke<Task>("task_import_worktree", {
@@ -91,7 +97,7 @@ export const taskImportWorktree = (
     sandboxMode: sandbox?.mode,
     sandboxRwPaths: sandbox?.rwPaths,
     sandboxAllowedHosts: sandbox?.allowedHosts,
-    resumeSessionId, yolo,
+    resumeSessionId, resumeOverride, yolo,
   });
 export const taskArchive  = (id: string, deleteBranch?: boolean) => invoke<void>("task_archive", { id, deleteBranch });
 export const taskRestore  = (id: string) => invoke<Task>("task_restore", { id });
@@ -132,15 +138,38 @@ export const taskMatchIgnoredFiles = (id: string, clicked: string) =>
 
 // ───────────────────────────── find in files ─────────────────────────────
 
-export interface GrepHit { path: string; line: number; col: number; preview: string }
+export interface GrepHit {
+  path: string;
+  line: number;
+  col: number;
+  preview: string;
+  /** UTF-16 `[start, end)` offsets of every match on the line, straight
+   *  from the search engine. ripgrep reports them; `git grep` can't, and
+   *  sends `[]` so the frontend re-matches the preview (findMatches.ts). */
+  ranges: Array<[number, number]>;
+}
 
-/** How the query is matched. `regex` is a POSIX ERE (git grep -E), NOT
- *  PCRE — git is not always compiled with libpcre. Kept as one object so
- *  the two flags can't be swapped at a call site, and so the search and
- *  its result highlighting always read the same pair. */
+/** Which program backs find-in-files. Picks the regex flavor and whether
+ *  the dialog offers the install hint. */
+export type FindBackend = "ripgrep" | "git-grep";
+
+/** `settled: false` means the answer could still improve: Rust probes the
+ *  login-shell PATH off-thread, and until it lands an installed `rg` may
+ *  not be visible yet. Don't cache an unsettled answer, or the dialog
+ *  keeps offering "install ripgrep" to someone who already has it. */
+export interface FindBackendInfo { backend: FindBackend; settled: boolean }
+
+export const taskFindBackend = () => invoke<FindBackendInfo>("task_find_backend");
+
+/** How the query is matched. `regex` is a Rust regex under ripgrep and a
+ *  POSIX ERE (git grep -E) on the fallback, never PCRE — git is not always
+ *  compiled with libpcre. Kept as one object so the two flags can't be
+ *  swapped at a call site, and so the search and its result highlighting
+ *  always read the same pair. */
 export interface GrepOpts { regex: boolean; case_sensitive: boolean }
 
-/** Start a streaming `git grep` in the task. Results arrive via
+/** Start a streaming search in the task (ripgrep, or `git grep` where rg
+ *  isn't installed). Results arrive via
  *  `grep-result://<searchId>` events (see `onGrepResult`) and a final
  *  `grep-done://<searchId>` (`onGrepDone`). The caller generates a fresh
  *  `searchId` per keystroke so we can ignore late events from cancelled
@@ -319,8 +348,6 @@ export const taskSetTabs = (id: string, tabs: import("@/lib/types").PersistedTab
 export const taskSetTabSessionId = (id: string, tabId: string, uuid: string) =>
   invoke<void>("task_set_tab_session_id", { id, tabId, uuid });
 
-export const taskSetTabPreviousSessionId = (id: string, tabId: string, uuid: string) =>
-  invoke<void>("task_set_tab_previous_session_id", { id, tabId, uuid });
 /** Persist the JSON-encoded SplitTree for a task. Pass null to clear. */
 export const taskSetSplitLayout = (id: string, layout: string | null) =>
   invoke<void>("task_set_split_layout", { id, layout });
@@ -363,8 +390,11 @@ export type DiffSides = {
   original_bytes: number;
   modified_bytes: number;
 };
-export const taskFileDiffSides = (id: string, path: string, scope?: "unstaged" | "staged") =>
-  invoke<DiffSides>("task_file_diff_sides", { id, path, scope: scope ?? null });
+export const taskFileDiffSides = (
+  id: string,
+  path: string,
+  scope?: "unstaged" | "staged" | `commit:${string}` | `base:${string}`,
+) => invoke<DiffSides>("task_file_diff_sides", { id, path, scope: scope ?? null });
 export const taskFileRead = (id: string, path: string) => invoke<string>("task_file_read", { id, path });
 /** Read a task image or PDF as base64, for the markdown preview's inline
  *  images or the file-tree preview pane (image/PDF extensions, 20 MB cap).
@@ -408,9 +438,59 @@ export const taskRevealPath = (id: string, path: string) =>
 export const taskChanges  = (id: string) => invoke<Changes>("task_changes", { id });
 // Fork-style staging: staged/unstaged split per repo + stage/unstage/commit.
 export const taskGitStatus = (id: string) => invoke<GitStatus>("task_git_status", { id });
+/** One page of committed history for the Graph section (GH #199). `skip` pages
+ *  through it (the panel appends), `allBranches` swaps this branch's history
+ *  for `--all`. Newest first, `--topo-order` so a branch stays contiguous. */
+/** `allBranches` is `--all`; otherwise `refs` names the ones to walk (the
+ *  History scope picker's multi-select), and an empty list means HEAD alone.
+ *  Refs are allowlisted against the repo's real refs on the Rust side. */
+export const taskGitLog = (
+  id: string, dirName: string, skip: number, limit: number, allBranches: boolean,
+  refs: string[] = [],
+  /** Follow only the first parent of each merge, so a merged side branch
+   *  collapses into the merge that brought it in ("what landed here, in
+   *  order") instead of opening a lane. Ignored under allBranches. */
+  firstParent = false,
+  /** Literal, case-insensitive message search (`git log --grep`), run over the
+   *  whole history rather than over the page already on screen. */
+  grep = "",
+) => invoke<GitLogPage>("task_git_log", { id, dirName, skip, limit, allBranches, refs, firstParent, grep });
+/** Every ref the scope picker may offer: local branches, remote-tracking
+ *  branches and tags, freshest first. */
+export const taskGitRefs = (id: string, dirName: string) =>
+  invoke<GitRef[]>("task_git_refs", { id, dirName });
+/** Push the repo's current branch without committing, for the Push button.
+ *  Creates the upstream when the branch has none, same as Commit and Push. */
+export const taskGitPush = (id: string, dirName: string) =>
+  invoke<void>("task_git_push", { id, dirName });
+/** Whole-file blame for one editor tab, in one call. Deduped to a commit
+ *  table + a per-line index on the Rust side; blames the working tree so the
+ *  line numbers line up with the buffer on screen. Async on the Rust side
+ *  (a few hundred ms on a big file), and cached per file by `blameCache`. */
+export const taskGitBlame = (id: string, path: string) =>
+  invoke<BlameFile>("task_git_blame", { id, path });
+/** How many commits sit between HEAD and `sha`, i.e. the page `skip` that lands
+ *  on it. Lets "show this commit in History" jump straight there instead of
+ *  paging forward: on a monorepo the target can be tens of thousands of rows
+ *  down, where paging is not slow so much as hopeless. */
+export const taskGitCommitOffset = (id: string, dirName: string, sha: string) =>
+  invoke<number>("task_git_commit_offset", { id, dirName, sha });
+/** One commit in full (subject + body + author + date), for the blame popup's
+ *  hover card. Fetched only when a card opens, and cached per sha: a file's
+ *  blame can name a hundred-odd commits and the reader looks at one. */
+export const taskGitCommitMeta = (id: string, path: string, sha: string) =>
+  invoke<GitCommit>("task_git_commit_meta", { id, path, sha });
+/** The files one commit touched (merges report against their first parent). */
+export const taskGitCommitFiles = (id: string, dirName: string, sha: string) =>
+  invoke<GitFile[]>("task_git_commit_files", { id, dirName, sha });
 /** Local branch names for a task's repo (host, or a member via dirName). */
 export const taskGitBranches = (id: string, dirName: string) =>
   invoke<string[]>("task_git_branches", { id, dirName });
+/** Everything differing between `base` and the working tree — History › Compare
+ *  (GH #208). `mergeBase` picks three-dot semantics ("what this branch added",
+ *  the default) over a literal tip-to-tree diff. */
+export const taskGitCompare = (id: string, dirName: string, base: string, mergeBase: boolean) =>
+  invoke<GitCompare>("task_git_compare", { id, dirName, base, mergeBase });
 /** Local branch names for a project's repo, before any task exists. Feeds the
  *  New Task dialog's auto-numbering of the proposed branch (issue #129). */
 export const projectGitBranches = (projectId: string) =>

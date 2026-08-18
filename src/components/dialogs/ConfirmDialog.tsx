@@ -29,6 +29,9 @@ export function ConfirmDialog() {
     sandboxForTaskId !== null;
 
   const [checked, setChecked] = useState(false);
+  // Second, independent checkbox: "Don't ask again". Never defaults to on -
+  // an opt-out of a destructive confirm has to be a deliberate tick.
+  const [dontAsk, setDontAsk] = useState(false);
 
   useEffect(() => {
     if (confirm?.req?.checkbox) {
@@ -36,6 +39,7 @@ export function ConfirmDialog() {
     } else {
       setChecked(false);
     }
+    setDontAsk(false);
   }, [confirm]);
 
   // ⏎ confirms, Esc cancels. Esc is already handled by Radix Dialog's
@@ -45,12 +49,12 @@ export function ConfirmDialog() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        resolve(true, checked);
+        resolve(true, checked, dontAsk);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [confirm, resolve, checked]);
+  }, [confirm, resolve, checked, dontAsk]);
 
   if (!confirm) return null;
   const { req } = confirm;
@@ -59,7 +63,7 @@ export function ConfirmDialog() {
   return (
     <AppDialog
       open
-      onOpenChange={(v) => { if (!v) resolve(false, checked); }}
+      onOpenChange={(v) => { if (!v) resolve(false, checked, dontAsk); }}
       title={req.title}
       // Stacked confirms (popping on top of an open dialog) ALSO get a
       // warm warning ring + soft outer glow so they don't blend into
@@ -97,6 +101,7 @@ export function ConfirmDialog() {
               checked={checked}
               onChange={(e) => setChecked(e.target.checked)}
               className="mt-0.5 h-3.5 w-3.5 rounded border-[var(--color-border)] bg-[var(--color-bg-2)] text-[var(--color-accent)] focus:ring-0 focus:ring-offset-0 cursor-pointer shrink-0"
+              data-testid="confirm-checkbox"
             />
             <div className="flex flex-col gap-1.5">
               <span>{req.checkbox.label}</span>
@@ -108,15 +113,36 @@ export function ConfirmDialog() {
             </div>
           </label>
         )}
+
+        {req.dontAskAgain && (
+          <label className="ml-8 flex items-start gap-2.5 cursor-pointer select-none text-[13px] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)]">
+            <input
+              type="checkbox"
+              checked={dontAsk}
+              onChange={(e) => setDontAsk(e.target.checked)}
+              className="mt-0.5 h-3.5 w-3.5 rounded border-[var(--color-border)] bg-[var(--color-bg-2)] text-[var(--color-accent)] focus:ring-0 focus:ring-offset-0 cursor-pointer shrink-0"
+              data-testid="confirm-dont-ask"
+            />
+            <div className="flex flex-col gap-0.5">
+              <span>Don't ask again</span>
+              {/* Ticking this arms a destructive action to run with no
+                  confirmation at all, so name the way back. */}
+              <span className="text-[12px] text-[var(--color-fg-dim)]/70">
+                Change it later in Settings &gt; Tasks.
+              </span>
+            </div>
+          </label>
+        )}
       </div>
       <div className="mt-4 flex justify-end gap-2">
-        <Button variant="ghost" type="button" onClick={() => resolve(false, checked)}>
+        <Button variant="ghost" type="button" onClick={() => resolve(false, checked, dontAsk)} data-testid="confirm-cancel">
           {req.cancelLabel ?? "Cancel"}
         </Button>
         <Button
           variant="primary"
           type="button"
-          onClick={() => resolve(true, checked)}
+          onClick={() => resolve(true, checked, dontAsk)}
+          data-testid="confirm-ok"
           // Override accent → red for destructive actions so the
           // user has a visual "this is irreversible" before they click.
           className={

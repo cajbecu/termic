@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { clickByText, dismissOverlays, pointerDrag, requireTermicApi, snap, waitForAppShell, waitVisible } from "../helpers";
+import { clickByText, clickMenuItem, dismissOverlays, pointerDrag, requireTermicApi, snap, waitForAppShell, waitVisible } from "../helpers";
 
 // P1: adding/removing a project. Cases: a git repo can be added as a project
 // (shows in the store); removing it drops it. Uses a throwaway temp repo and
@@ -45,6 +45,41 @@ describe("project add/remove", () => {
         ),
       { timeout: 8_000, timeoutMsg: "added project never appeared" },
     );
+  });
+
+  // The dashed "New task" placeholder stands in for the task rows an empty
+  // project does not have yet, so it must be the same height as one. It used
+  // to be ~11px taller, which broke the sidebar rhythm.
+  it("sizes the empty-project placeholder like a task row", async () => {
+    const id = projectId!;
+    await browser.execute((i) => {
+      window.__termic!.useApp.getState().setProjectCollapsed(i, false);
+    }, id);
+    const trigger = `[data-testid="project-empty-new-task-${id}"]`;
+    await waitVisible(trigger);
+    const placeholderH = await browser.execute(
+      (sel) => (document.querySelector(sel) as HTMLElement).offsetHeight,
+      trigger,
+    );
+
+    const taskId = await browser.execute(async (i) => {
+      const t = window.__termic!;
+      const task = await t.ipc.taskOpenRepo(i, "fakeagent", "placeholder-size");
+      await t.useApp.getState().loadAll();
+      return task.id as string;
+    }, id);
+    const row = `[data-sidebar-task-id="${taskId}"]`;
+    await waitVisible(row);
+    const rowH = await browser.execute(
+      (sel) => (document.querySelector(sel) as HTMLElement).offsetHeight,
+      row,
+    );
+
+    expect(placeholderH).toEqual(rowH);
+    await browser.execute(async (i) => {
+      await window.__termic!.ipc.taskArchive(i);
+      await window.__termic!.useApp.getState().loadAll();
+    }, taskId);
   });
 
   it("reorders projects", async () => {
@@ -471,10 +506,10 @@ describe("branch new tasks from", () => {
     await browser.keys("Escape");
   });
 
-  it("offers one flat branch list, pin checked and HEAD marked", async () => {
-    // The pin lives IN the list rather than in a separate "Project default"
-    // row, so there's one place to look. Reopen the menu: the previous case
-    // closed it with Escape.
+  // Terminal used to bypass the inline name prompt in main-checkout mode
+  // (create-at-once, Rust auto-names it), unlike every other item in this
+  // menu. It now goes through the same prompt as the agent items.
+  it("prompts for a name before creating a main-checkout Terminal task", async () => {
     const trigger = `[data-testid="project-new-task-${projectId}"]`;
     await waitVisible(trigger);
     await browser.execute((sel) => {
@@ -485,6 +520,59 @@ describe("branch new tasks from", () => {
       el.click();
     }, trigger);
     await waitVisible('[role="menu"]');
+    await clickByText("Main checkout");
+    await clickMenuItem("Terminal");
+
+    // Menu closes, an inline name input takes its place instead of a task
+    // appearing immediately.
+    const nameInput = 'input[placeholder="Task name"]';
+    await waitVisible(nameInput);
+    const prefilled = await browser.execute(
+      (sel) => (document.querySelector(sel) as HTMLInputElement).value,
+      nameInput,
+    );
+    expect(prefilled).toMatch(/^terminal-\d+$/);
+
+    await browser.keys("Enter");
+    await browser.waitUntil(
+      async () =>
+        browser.execute(
+          (pid, n) =>
+            window.__termic!.useApp
+              .getState()
+              .tasks.some((t: any) => t.project_id === pid && t.name === n),
+          projectId,
+          prefilled,
+        ),
+      { timeout: 8_000, timeoutMsg: "named main-checkout terminal task never appeared" },
+    );
+    const created = await browser.execute(
+      (pid, n) =>
+        window.__termic!.useApp
+          .getState()
+          .tasks.find((t: any) => t.project_id === pid && t.name === n),
+      projectId,
+      prefilled,
+    );
+    createdTaskIds.push((created as any).id);
+  });
+
+  it("offers one flat branch list, pin checked and HEAD marked", async () => {
+    // The pin lives IN the list rather than in a separate "Project default"
+    // row, so there's one place to look. Mode is remembered app-wide (the
+    // previous case left it on Main checkout), so drive it rather than
+    // assume where we start.
+    const trigger = `[data-testid="project-new-task-${projectId}"]`;
+    await waitVisible(trigger);
+    await browser.execute((sel) => {
+      const el = document.querySelector(sel) as HTMLElement;
+      const opts = { bubbles: true, pointerType: "mouse", button: 0 } as any;
+      el.dispatchEvent(new PointerEvent("pointerdown", opts));
+      el.dispatchEvent(new PointerEvent("pointerup", opts));
+      el.click();
+    }, trigger);
+    await waitVisible('[role="menu"]');
+    await clickByText("Worktree");
 
     // Radix submenus open on hover; the trigger carries aria-haspopup.
     await browser.execute(() => {

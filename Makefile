@@ -163,7 +163,7 @@ perf: ## Run both performance suites locally and report each separately.
 	@# that a CI runner cannot measure honestly. They print separately because
 	@# they carry different amounts of trust: section 1 is reproducible,
 	@# section 2 is only as good as the desktop it ran on.
-	@# Why not gated: docs/research/perf-ci.md.
+	@# Why not gated: docs/perf-ci.md.
 	@[ -x node_modules/.bin/wdio ] || npm install
 	@node scripts/e2e-seed.mjs
 	@npm run perf:build
@@ -178,7 +178,7 @@ perf: ## Run both performance suites locally and report each separately.
 	@# it here would hide half the report over an unrelated failure. The status
 	@# is kept and re-raised at the end so `make perf` still fails honestly.
 	@npm run test:perf; echo $$? > .perf/.section1-status
-	@./bench/local-report.sh
+	@./perf/local/local-report.sh
 	@s=$$(cat .perf/.section1-status 2>/dev/null || echo 0); \
 	  if [ "$$s" != "0" ]; then \
 	    echo ""; \
@@ -187,7 +187,7 @@ perf: ## Run both performance suites locally and report each separately.
 	  fi
 .PHONY: perf
 
-perf-ci: ## Section 1 only: the nightly suite (startup + memory), no local bench.
+perf-ci: ## Section 1 only: perf/nightly (startup + memory), without perf/local.
 	@[ -x node_modules/.bin/wdio ] || npm install
 	@node scripts/e2e-seed.mjs
 	@npm run perf:build

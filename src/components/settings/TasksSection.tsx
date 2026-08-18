@@ -46,6 +46,10 @@ export function TasksSection() {
   const setQueueMinIntervalMs = usePrefs(s => s.setQueueMinIntervalMs);
   const confirmBeforeCloseAgentTab = usePrefs(s => s.confirmBeforeCloseAgentTab);
   const setConfirmBeforeCloseAgentTab = usePrefs(s => s.setConfirmBeforeCloseAgentTab);
+  const confirmBeforeArchiveTask = usePrefs(s => s.confirmBeforeArchiveTask);
+  const setConfirmBeforeArchiveTask = usePrefs(s => s.setConfirmBeforeArchiveTask);
+  const archiveDeleteBranch = usePrefs(s => s.archiveDeleteBranch);
+  const setArchiveDeleteBranch = usePrefs(s => s.setArchiveDeleteBranch);
 
   const hydrated = useRef(false);
   useEffect(() => {
@@ -240,6 +244,35 @@ export function TasksSection() {
           hint="Ask before closing a non-shell terminal or agent tab. Turning this off (or unchecking it once from the close dialog) closes tabs immediately; a toast then points back to the '+' menu's Resume section to bring one back."
           value={confirmBeforeCloseAgentTab}
           onChange={setConfirmBeforeCloseAgentTab}
+        />
+      </Block>
+
+      {/* Archiving can't be undone from inside Termic, so the confirmation
+          needs a visible way back for anyone who turned it off from the
+          dialog. */}
+      <Block>
+        <Toggle
+          label="Confirm before archiving a task"
+          hint="Ask before archiving a task. With this off, archiving happens straight away."
+          value={confirmBeforeArchiveTask}
+          onChange={setConfirmBeforeArchiveTask}
+        />
+      </Block>
+
+      {/* Always shown, whichever way the confirmation toggle is set. With the
+          dialog on it seeds that dialog's checkbox, which is still the answer
+          for that one archive; with the dialog off it IS the answer. Hiding it
+          while confirmation was on meant a user who deletes branches every
+          time had to re-tick the box on every single archive, with no way to
+          change the default. */}
+      <Block>
+        <Toggle
+          label="Delete the branch when archiving"
+          hint={confirmBeforeArchiveTask
+            ? "Start the archive dialog's \"Delete the git branch\" box ticked. You can still untick it for any single archive. A project's main checkout is never affected."
+            : "Archiving also deletes the task's branch. A project's main checkout is never affected."}
+          value={archiveDeleteBranch}
+          onChange={setArchiveDeleteBranch}
         />
       </Block>
     </div>

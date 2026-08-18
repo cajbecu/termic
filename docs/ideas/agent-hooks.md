@@ -412,7 +412,7 @@ internal event and correlates to the right task.
 **e2e spec** (`e2e/specs/`, per the `e2e` skill): toggle on, assert the
 config diff on a fixture HOME, assert a hook-driven state change reaches
 the DOM, toggle off, assert clean restore. Add it to
-`docs/plans/e2e-coverage.md`.
+`docs/e2e-coverage.md`.
 
 ## Step 1: measure hooks against OSC, before anything else
 

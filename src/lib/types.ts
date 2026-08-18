@@ -279,15 +279,13 @@ export interface PersistedTab {
    *  (claude / gemini). Null for cwd-resume agents (codex) and tabs that
    *  have not minted a session yet. Owned by `taskSetTabSessionId`. */
   session_id?: string | null;
-  /** The uuid a `--resume` attempt just fast-exited on, stashed here
-   *  (instead of discarded) so it can be one-click recovered. Owned by
-   *  `taskSetTabPreviousSessionId`. */
-  previous_session_id?: string | null;
   /** Leaf ID of the split pane this tab belongs to (absent for main panel tabs). */
   pane_leaf_id?: string | null;
   /** Run pop-out tab marker (GH #54): the member dir ("" = host project)
    *  when this tab hosts the run script. Restores as a RunPane. */
   run_member?: string | null;
+  /** Pinned state, so a pinned tab comes back pinned and leftmost. */
+  pinned?: boolean;
 }
 
 /** Per-member input for `task_create_multi`. `root_path` matches a
@@ -312,6 +310,9 @@ export interface CreateMultiArgs {
   sandbox_mode?: SandboxMode;
   sandbox_rw_paths?: string[];
   sandbox_allowed_hosts?: string[];
+  /** Resume-args override for the host task, applied from the first spawn.
+   *  Same field as the task menu's "Resume override". */
+  resume_override?: string;
 }
 
 export interface CreateTaskArgs {
@@ -344,6 +345,11 @@ export interface CreateTaskArgs {
   /** Externally-started session id the agent resumes on its first spawn
    *  (GH #169): seeds `agent_session_ids[cli]`, same as an import. */
   resume_session_id?: string;
+  /** Resume-args override, applied from the FIRST spawn. Same field and
+   *  semantics as the task menu's "Resume override" (Task.resume_override):
+   *  replaces termic's default resume block, placeholders expanded per
+   *  launch. Empty / unset leaves the default logic in place. */
+  resume_override?: string;
 }
 
 export interface Agent {
@@ -605,6 +611,36 @@ export interface GitFile {
    *  deletion. Used to auto-clear a file's "viewed" mark once the agent
    *  touches it again. See store/fileViewed.ts. */
   fp: string;
+  /** Lines added / removed. Only Compare fills these in; the staging
+   *  lists leave them undefined rather than paying for a `--numstat` process
+   *  on every status poll. Undefined also covers a binary file, whose churn
+   *  git reports as `-`. */
+  added?: number;
+  removed?: number;
+}
+
+/** Everything that differs between some ref and the working tree — the
+ *  History › Compare sub-view (issue #208). One flat list: committed, staged, unstaged and
+ *  untracked work all land in `files`, because "what does this task look like
+ *  next to that branch" doesn't care which of those a change happens to be in. */
+export interface GitCompare {
+  /** The ref as picked, echoed back for the header. */
+  base: string;
+  /** The commit every file's left side is read from — the merge base with
+   *  HEAD, or the ref's own tip in direct mode. Goes straight into each
+   *  diff tab's `base:<sha>` scope. */
+  base_sha: string;
+  base_short: string;
+  /** HEAD's branch, so the header can name both sides. "" when detached. */
+  branch: string;
+  /** Merge-base mode was asked for but the histories are unrelated, so this
+   *  fell back to the ref's tip. */
+  no_merge_base: boolean;
+  files: GitFile[];
+  added: number;
+  removed: number;
+  /** True when the list was capped at 5 000 entries. */
+  truncated: boolean;
 }
 
 export interface GitRepo {
@@ -621,12 +657,89 @@ export interface GitRepo {
   last_commit_message: string;
   /** True when the file lists were capped at 5 000 entries. */
   truncated?: boolean;
+  /** Commits the upstream does not have, i.e. what Push would send. 0 when
+   *  there is no upstream: Push then creates one rather than being disabled. */
+  ahead?: number;
 }
 
 export interface GitStatus {
   repos: GitRepo[];
   total_changed: number;
   repos_changed: number;
+}
+
+/** One row of the Commit tab's Graph section (issue #199). */
+export interface GitCommit {
+  sha: string;
+  /** Abbreviation git chose, unambiguous within the repo. */
+  short: string;
+  /** Parent shas, FIRST PARENT FIRST — lane layout depends on that order. */
+  parents: string[];
+  subject: string;
+  author: string;
+  email: string;
+  /** Author date, unix SECONDS (not ms). */
+  timestamp: number;
+  /** Decorations as git prints them: "HEAD -> main", "origin/main", "tag: v1". */
+  refs: string[];
+  /** Committed locally but not reachable from the upstream — VS Code calls
+   *  these outgoing. Always false when the branch has no upstream. */
+  unpushed: boolean;
+  /** Message below the subject, trailers included. "" for a one-line commit.
+   *  Feeds the row's hover card; co-authors are parsed out of it here rather
+   *  than in Rust, so the raw message is what crossed the wire. */
+  body?: string;
+}
+
+/** One page of `task_git_log`. */
+/** One selectable ref in the Graph section's scope picker. */
+export interface GitRef {
+  /** Short name as the user knows it: `main`, `origin/main`, `v1.2.0`. */
+  name: string;
+  /** Abbreviated sha it points at. */
+  sha: string;
+  kind: "branch" | "remote" | "tag";
+}
+
+export interface GitLogPage {
+  commits: GitCommit[];
+  has_more: boolean;
+  /** "" on a detached HEAD or an unborn branch. */
+  branch: string;
+  /** "" when the branch has no upstream; the unpushed markers stay hidden
+   *  then rather than claiming every commit is outgoing. */
+  upstream: string;
+}
+
+/** One commit referenced by a `BlameFile`, deduped across the lines it owns. */
+export interface BlameCommit {
+  sha: string;
+  /** Mailmap-resolved author name. */
+  author: string;
+  author_email: string;
+  /** Unix seconds. Formatted on this side so the relative age stays live
+   *  without re-blaming the file. */
+  author_time: number;
+  /** Subject line only. */
+  summary: string;
+  /** Git's all-zero sha: the line exists in the working tree but in no
+   *  commit yet. */
+  uncommitted: boolean;
+}
+
+/** Whole-file blame, deduped: a commit table plus one index per line.
+ *  Deliberately not one record per line, see `BlameFile` in lib.rs for the
+ *  payload sizes that forced the shape. */
+export interface BlameFile {
+  commits: BlameCommit[];
+  /** `lines[n]` indexes `commits` for 1-based line `n + 1`. `0xffffffff`
+   *  means git attributed nothing to that line. */
+  lines: number[];
+  /** HEAD at blame time, for cache keying. "" outside a repo. */
+  head: string;
+  /** File was over the line cap, so `commits`/`lines` are empty. Distinct
+   *  from "no blame data" so the UI can stay silent rather than look broken. */
+  skipped: boolean;
 }
 
 /** Result of a Git-tab branch switch. `stashed` = local work was parked and
@@ -726,6 +839,10 @@ export interface BaseTab {
    *  main pane tab (shown in the task tab bar). Split-pane tabs are
    *  ephemeral — they are not persisted across launches. */
   paneId?: string;
+  /** Pinned tabs sort before every unpinned tab in their strip, and
+   *  "Close others" / "Close to the right" skip them. `pinTab` / `unpinTab`
+   *  own both the flag and the move that keeps that order true. */
+  pinned?: boolean;
 }
 
 export interface TerminalTab extends BaseTab {
@@ -770,14 +887,9 @@ export interface TerminalTab extends BaseTab {
    *  launch and minted on first spawn otherwise. Distinct per tab so two
    *  agents in one task resume independently — the primary tab is no
    *  longer the only resumable one. Cleared (undefined) when a resume
-   *  attempt rapid-exits (the stored session no longer resolves — the old
-   *  uuid moves to `previousSessionId` for recovery). */
+   *  attempt rapid-exits (the stored session no longer resolves; the agent's
+   *  own picker is the way back to it). */
   sessionId?: string;
-  /** The uuid a `--resume` just fast-exited on, stashed instead of thrown
-   *  away so the user can one-click recover it (a transient failure would
-   *  otherwise lose the conversation permanently). Drives the recover
-   *  banner in TerminalPane. Restored from `persisted_tabs` on launch. */
-  previousSessionId?: string;
   /** iTerm2-style work-progress state. Authoritative signals: OSC 9;4
    *  (Claude progress), OSC 133;C/D (FinalTerm semantic prompts), OSC 0
    *  title classifier (gemini/codex). `working` → spinner; `done` →
@@ -855,10 +967,15 @@ export interface QueueItem {
 export interface DiffTab extends BaseTab {
   type: "diff";
   path: string;
-  /** Which Git-panel pane the diff was opened from (GH #122):
+  /** Which pane the diff was opened from (GH #122):
    *  "staged" diffs HEAD→index, "unstaged" diffs index→worktree.
+   *  `commit:<sha>` diffs that commit against its parent — the Graph section
+   *  (GH #199), where BOTH sides come out of the object store.
+   *  `base:<sha>` diffs that commit against the WORKING TREE — the Compare
+   *  tab (GH #208). Its right side is the live file, so unlike `commit:` it
+   *  keeps the review affordances (viewed marks, inline comments).
    *  Absent → HEAD→worktree (the full uncommitted delta). */
-  scope?: "unstaged" | "staged";
+  scope?: "unstaged" | "staged" | `commit:${string}` | `base:${string}`;
 }
 
 /** The complete delta a task produced vs its base (`task_diff`). `diff` folds

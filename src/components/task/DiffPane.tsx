@@ -5,7 +5,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { DiffTab, Task, GitFile } from "@/lib/types";
-import { taskFileDiffSides, taskGitStatus, type DiffSides } from "@/lib/ipc";
+import { taskFileDiffSides, taskGitStatus, taskGitCompare, type DiffSides } from "@/lib/ipc";
 import { BinaryDiffBody } from "./BinaryDiffBody";
 import { orderedFiles, readView } from "./GitPanel";
 import { Button } from "@/components/ui/Button";
@@ -72,6 +72,17 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
   // (GH #42). Empty for a deletion → the toggle is hidden.
   const [fp, setFp] = useState("");
   const viewed = useIsViewed(task.id, tab.path, fp);
+  // A History-tab diff (GH #199) compares two REVISIONS: neither side is the
+  // working copy. That turns off the two review affordances, which both
+  // address the live file — "viewed" is keyed on the worktree fingerprint,
+  // and a review comment left here would ride on a file version nobody is
+  // about to edit.
+  const commitSha = tab.scope?.startsWith("commit:") ? tab.scope.slice("commit:".length) : null;
+  // A Compare diff (GH #208) reads a base commit against the LIVE file, so
+  // it keeps both affordances the History tab has to drop — but its "next
+  // file" is the compare list, not the staging panes, so the walk below forks
+  // on this.
+  const baseSha = tab.scope?.startsWith("base:") ? tab.scope.slice("base:".length) : null;
   const hostRef = useRef<HTMLDivElement>(null);
   // The host div is the scroll container for both modes; its position
   // dies with the box when a hidden task/tab goes display:none in
@@ -88,6 +99,43 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
   const addTab = useApp(s => s.addTab);
   const editorFontSize = usePrefs(s => s.editorFontSize);
 
+  /** "Next unseen file" for a Compare diff (GH #208). The staging walk below
+   *  cannot serve this one: most of a compare list is already committed, so
+   *  those files don't appear in `git status` at all and the walk would stop
+   *  at the first of them. Re-reads the same list the Compare panel renders,
+   *  in the same view order, and steps to the next file whose viewed mark
+   *  isn't current. `mergeBase` is off on purpose — the sha in the scope IS
+   *  the resolved left side, and resolving it a second time against HEAD
+   *  could move it (a "direct" compare's base is not an ancestor). */
+  const advanceWithinCompare = async (sha: string) => {
+    try {
+      // Member files carry a `dir_name/` prefix, host files don't. Longest
+      // match wins so a member called "app" can't claim "apps/whatever".
+      const member = (task.composition ?? [])
+        .filter(m => tab.path.startsWith(`${m.dir_name}/`))
+        .sort((a, b) => b.dir_name.length - a.dir_name.length)[0];
+      const pfx = member ? `${member.dir_name}/` : "";
+      const rel = tab.path.slice(pfx.length);
+      const cmp = await taskGitCompare(task.id, member?.dir_name ?? "", sha, false);
+      const seen = useFileViewed.getState().byTask[task.id] ?? {};
+      const ordered = orderedFiles(cmp.files, readView());
+      const idx = ordered.findIndex(f => f.path === rel);
+      if (idx === -1) return;
+      const next = ordered.slice(idx + 1).find(f => f.fp !== "" && seen[pfx + f.path] !== f.fp);
+      if (!next) return;
+      useApp.getState().openPreviewTab(task.id, {
+        type: "diff",
+        path: pfx + next.path,
+        // Same base, so the walked-to diff shows the sides a click on its row
+        // in the panel would.
+        scope: `base:${sha}`,
+        title: `Δ ${next.path.split("/").pop()}`,
+      });
+    } catch {
+      // Compare failed — leave the current (now-viewed) diff open.
+    }
+  };
+
   // Mark this file viewed and, when ticking it ON, walk to the next file you
   // haven't looked at yet — the GitHub PR-review flow. Mirrors the Git panel's
   // focusNext (advance after acting on a file) but skips files already viewed,
@@ -98,6 +146,10 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
     const wasViewed = viewed;
     useFileViewed.getState().toggle(task.id, tab.path, fp);
     if (wasViewed) return; // un-viewing: stay put
+    if (baseSha) {
+      await advanceWithinCompare(baseSha);
+      return;
+    }
     try {
       const status = await taskGitStatus(task.id);
       const seen = useFileViewed.getState().byTask[task.id] ?? {};
@@ -289,7 +341,11 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
       // boundaries, so the panes drift slightly below a card until the next
       // hunk. Accepted tradeoff (unified is pixel-exact); the alternative is
       // an out-of-flow overlay, which is a lot more machinery for this.
-      const commentExt = reviewCommentsExtension(task.id, tab.path);
+      // Empty for a historical revision: review comments address the file the
+      // agent is about to edit, and this diff's right side is a commit that
+      // already happened (GH #199).
+      const isCommitScope = !!tab.scope?.startsWith("commit:");
+      const commentExt = isCommitScope ? [] : reviewCommentsExtension(task.id, tab.path);
 
       // GH #118: @codemirror/merge's default diffConfig caps the precise
       // diff at scanLimit 500 changed characters per scanned range; a big
@@ -309,7 +365,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
           collapseUnchanged: { margin: 3, minSize: 6 },
           diffConfig,
         });
-        setCommentable(true);
+        setCommentable(!isCommitScope);
       } else {
         editorRef.current = new EditorView({
           parent: hostRef.current,
@@ -328,7 +384,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
             }),
           ],
         });
-        setCommentable(true);
+        setCommentable(!isCommitScope);
       }
     }).catch(e => alive && setErr(String(e)));
     return () => {
@@ -359,7 +415,18 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
             <CopyPathItems rel={tab.path} root={task.path} />
           </ContextMenuContent>
         </ContextMenuRoot>
-        <div className="flex items-center gap-1">
+        {/* Which revision this is. Without it a historical diff is
+            indistinguishable from the working-tree one. */}
+        {commitSha && (
+          <span
+            data-testid="diff-commit-chip"
+            title={`Comparing ${commitSha} with its parent`}
+            className="ml-2 shrink-0 rounded bg-[var(--color-bg-3)] px-1.5 font-mono text-[11px] leading-[18px] text-[var(--color-fg-faint)]"
+          >
+            {commitSha.slice(0, 7)}
+          </span>
+        )}
+        <div className="ml-auto flex items-center gap-1">
           {/* Side-by-side ⇄ Unified toggle. Persisted in localStorage
               so the user's preference sticks across launches. Hidden for an
               image/binary diff: both modes are line-based. */}
@@ -405,7 +472,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
           }><FolderOpen className="h-4 w-4" /> Open</Button>
           {/* Mark-as-viewed (GH #42): mirrors the Git panel row checkbox.
               Hidden for deletions (no working-tree file to fingerprint). */}
-          {fp !== "" && (
+          {fp !== "" && !commitSha && (
             <Button
               size="sm"
               variant="ghost"

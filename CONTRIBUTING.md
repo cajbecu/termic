@@ -63,6 +63,47 @@ foot-guns, every subtle bug we've fixed before) lives in
 
 ---
 
+## Docs structure
+
+```
+docs/
+  ideas/       # not approved. Detailed or not, nobody has committed to it.
+  plans/       # approved and refined. Ready to implement, no design work left.
+  *.md         # reference and operational docs about the app as it is today
+```
+
+A doc's directory is a claim about its status, not a filing preference. There is no third bucket for "detailed but undecided": that is an idea. `lsp.md`, `windows.md` and `docker-sandbox/` are all build-ready documents that are still ideas, because nobody has committed to them.
+
+If you want something to work on, `docs/plans/` is the place to look: every file there is scoped and approved, so it needs implementation rather than design. The bar is high, so it is usually near-empty. Not everything in it reaches the README roadmap, which lists features rather than chores; an internal follow-up plan is still yours to pick up.
+
+`docs/ideas/` is the bigger pile and it is open to anyone, but the first deliverable there is an argument, not a patch. Say what you would build and why, and get agreement before you write the code.
+
+### Roadmap and issues
+
+The [README roadmap](./README.md#roadmap) has two halves and they mean different things.
+
+**Planned** items are committed to. Each has an issue labelled [`planned`](https://github.com/simion/termic/issues?q=is%3Aissue+label%3Aplanned), and that issue is where the work is tracked.
+
+**Ideas** are not committed to and deliberately have **no tracking issue**. An issue implies somebody intends to do it, and a backlog nobody will action is worse than no backlog. Please don't open issues for roadmap ideas; comment on the linked discussion, or open one making the case for a specific thing you want to build.
+
+Approved ideas move `docs/ideas/ → docs/plans/`, get an issue, and move from Ideas to Planned in the README, all at once.
+
+### Docs are part of the diff
+
+**A PR that changes behaviour is not finished until the docs tree matches it**, in the same PR:
+
+- **Implemented a plan?** Delete it. It describes work that no longer needs doing, and a stale plan is worse than none because someone will pick it up. Move anything still true (a measurement, a trap, a decision and why) into the matching `docs/*.md` reference doc first.
+- **Implemented part of one?** Narrow the plan to what's left, and say what shipped.
+- **An idea got approved?** Move `ideas/ → plans/` and rewrite the header into a spec: what to build, not whether to.
+- **A plan's premise changed?** Move it back `plans/ → ideas/` and say why at the top.
+- **Changed something a reference doc describes?** Update that doc. `ipc.md`, `data-model.md`, `ui.md`, `shortcuts.md`, `sandbox.md`, `themes.md`, `performance.md` and `gotchas.md` are read by every contributor after you, and a wrong one costs more than a missing one.
+
+Two things are maintainer-only, so leave them alone: the README roadmap and `CHANGELOG.md`. If your change ships a roadmap item, say "closes #N" in the PR and stop there.
+
+AI contributions are more than welcome. One important caveat: must be manually tested, thoroughly. The same docs rule applies, and agents skip it by default unless told, so [CLAUDE.md](./CLAUDE.md) carries the long-form version for them.
+
+---
+
 ## How to contribute
 
 ### Reporting bugs

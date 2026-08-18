@@ -131,17 +131,25 @@ pub fn start(app: tauri::AppHandle) {
 /// RELEASE only. Debug is newest-wins: relaunching `make dev` over a
 /// lingering instance should hand the socket to the FRESH build (server_main
 /// unlinks + rebinds), not defer to stale code.
-pub fn another_instance_running() -> bool {
+///
+/// `deep_link` (GH #192) is the `termic://` URL this process was launched
+/// with, if any. It is handed to the surviving instance along with the
+/// raise, so a link that spawned a fresh process still opens its New Task
+/// dialog instead of dying with the process we are about to exit. macOS
+/// routes links to the running app itself and never gets here; Windows and
+/// Linux do spawn a second process, which is exactly this path.
+pub fn another_instance_running(deep_link: Option<&str>) -> bool {
     if cfg!(debug_assertions) {
         return false;
     }
     let Ok(dir) = crate::data_dir() else { return false };
-    raise_existing(&dir.join(proto::SOCKET_FILE))
+    raise_existing(&dir.join(proto::SOCKET_FILE), deep_link)
 }
 
 /// Connect to `sock`; if a LIVE termic answers hello (not a stale socket
-/// file left by a crash), ask it to raise its window and report true.
-fn raise_existing(sock: &Path) -> bool {
+/// file left by a crash), ask it to raise its window (and take over any
+/// deep link we were launched with) and report true.
+fn raise_existing(sock: &Path, deep_link: Option<&str>) -> bool {
     let Ok(stream) = UnixStream::connect(sock) else { return false };
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
@@ -162,9 +170,14 @@ fn raise_existing(sock: &Path) -> bool {
     }
     // Best-effort: bring the running instance to front, then let the caller
     // exit. If the raise is dropped, single-instance still holds; the user
-    // just may need to click the running window.
-    let raise = Request { id: "preflight".into(), token: None, cmd: Command::Raise };
-    let _ = proto::write_msg(&mut writer, &raise);
+    // just may need to click the running window. With a deep link, one
+    // `open_url` does both (the server raises before queueing), so the URL
+    // and the raise can never land out of order.
+    let cmd = match deep_link {
+        Some(url) => Command::OpenUrl { url: url.to_string() },
+        None => Command::Raise,
+    };
+    let _ = proto::write_msg(&mut writer, &Request { id: "preflight".into(), token: None, cmd });
     let _ = proto::read_msg::<_, Reply>(&mut reader);
     true
 }
@@ -514,6 +527,11 @@ pub(crate) trait CliHost: Send + Sync {
     fn work_states(&self, ids: &[String]) -> Option<HashMap<String, WorkStateInfo>>;
     fn open_task_in_ui(&self, task_id: &str) -> Result<(), String>;
     fn raise_window(&self);
+    /// Queue a `termic://` URL for the webview (GH #192). Only the
+    /// single-instance handoff calls this; the in-process deep-link
+    /// callback queues directly. Default no-op so test hosts, which never
+    /// exercise the handoff, don't each need a stub.
+    fn deliver_deep_link(&self, _url: &str) {}
     /// (tasks with live agents, live agent PTYs). Ground truth from the
     /// PTY map, not the webview cache.
     fn live_agent_counts(&self) -> (u32, u32);
@@ -636,11 +654,23 @@ pub(crate) fn handle_request(req: &Request, host: &dyn CliHost, sink: &mut dyn E
         host.raise_window();
         return Reply { id: req.id.clone(), ok: true, data: None, error: None };
     }
+    // The third unauthenticated verb, and for the same reason (GH #192):
+    // a second instance launched by a `termic://` link hands the URL over
+    // before exiting, so the link lands in the window that survives. The
+    // URL only pre-fills a dialog the user still has to confirm, so it
+    // discloses nothing and commits nothing.
+    if let Command::OpenUrl { url } = &req.cmd {
+        host.raise_window();
+        host.deliver_deep_link(url);
+        return Reply { id: req.id.clone(), ok: true, data: None, error: None };
+    }
     if let Some(refused) = auth_gate(req, host) {
         return refused;
     }
     match &req.cmd {
-        Command::Hello | Command::Raise => unreachable!("handled above"),
+        Command::Hello | Command::Raise | Command::OpenUrl { .. } => {
+            unreachable!("handled above")
+        }
         // A live attach session is handled by serve_conn BEFORE dispatch
         // (it takes over the whole connection); reaching here means a
         // path with no bidirectional transport (tests, future callers).
@@ -3393,6 +3423,9 @@ impl CliHost for TauriHost {
         // showing a window while still pretending to be an accessory.
         crate::leave_windowless(&self.app);
     }
+    fn deliver_deep_link(&self, url: &str) {
+        crate::queue_deep_link(&self.app, url);
+    }
     fn diff_stat(&self, task: &Task) -> Option<proto::DiffStat> {
         diff_stat(task)
     }
@@ -3826,29 +3859,30 @@ fn resolve_tab_selector_with(
         .map(|e| e.tab_states.clone())
         .filter(|t| !t.is_empty());
 
-    let Some(tabs) = tabs else {
-        // Degraded: no per-tab snapshot yet (app just started, or the
-        // task never reported). An EXACT id can still resolve against
-        // the persisted strip set, so a script that recorded the id
-        // `termic tab` printed keeps working; index and title need the
-        // live list and honestly cannot.
-        if let Some(pt) = task
+    // An EXACT id resolved against the durable strip set. Used when there is
+    // no live snapshot yet AND when the snapshot is merely BEHIND: `termic
+    // tab` prints an id the moment the tab exists, and the webview's next
+    // report can be a second away, so `termic logs --tab <that id>` used to
+    // come back "no tab matches" for a tab the CLI had just handed out.
+    // Index and title still need the live list and honestly cannot.
+    let from_persisted = |selector: &str| -> Option<Result<ResolvedTab, proto::ErrorBody>> {
+        let pt = task
             .persisted_tabs
             .iter()
             .filter(|p| p.pane_leaf_id.is_none())
-            .find(|p| p.id == selector)
+            .find(|p| p.id == selector)?;
         {
             let terminal_kind = pt.cli == "custom"
                 || pt.cli == "shell"
                 || pt.run_member.is_some()
                 || host.agents().iter().any(|a| a.id == pt.cli && a.kind == "terminal");
             if terminal_kind && reach == TabReach::AgentsOnly {
-                return Err(err(
+                return Some(Err(err(
                     ErrorCode::Unsupported,
                     "that tab is not an agent tab; only agent tabs are reachable, the rest are write-only from the CLI".into(),
-                ));
+                )));
             }
-            return Ok(ResolvedTab {
+            return Some(Ok(ResolvedTab {
                 id: pt.id.clone(),
                 cli: pt.cli.clone(),
                 // The durable record's label, falling back to the cli id
@@ -3872,7 +3906,13 @@ fn resolve_tab_selector_with(
                 },
                 // No live strip to count.
                 strip_len: 0,
-            });
+            }));
+        }
+    };
+
+    let Some(tabs) = tabs else {
+        if let Some(r) = from_persisted(selector) {
+            return r;
         }
         return Err(err(
             ErrorCode::Internal,
@@ -3883,6 +3923,14 @@ fn resolve_tab_selector_with(
     // 1. The identity itself.
     if let Some((i, t)) = tabs.iter().enumerate().find(|(_, t)| t.id == selector) {
         return gate(i as u32 + 1, t, tabs.len());
+    }
+    // 1b. An id the live snapshot has not caught up with yet. The snapshot is
+    // "fresh" by age but is still whatever the webview last reported, so a tab
+    // created a moment ago is absent from it while being perfectly real on
+    // disk. Only exact ids take this path, so it cannot invent an index or a
+    // title that the strip does not have.
+    if let Some(r) = from_persisted(selector) {
+        return r;
     }
     // 2. A 1-based strip index (`status` prints the same numbering).
     if let Ok(n) = selector.parse::<usize>() {
@@ -4432,6 +4480,8 @@ mod tests {
         states: Option<HashMap<String, WorkStateInfo>>,
         opened: Mutex<Vec<String>>,
         raised: Mutex<u32>,
+        /// `termic://` URLs handed over by a second instance (GH #192).
+        deep_links: Mutex<Vec<String>>,
         agents: Vec<AgentMeta>,
         /// method -> scripted result; unscripted methods error.
         rpc_results: Mutex<HashMap<String, Result<serde_json::Value, String>>>,
@@ -4500,6 +4550,7 @@ mod tests {
                 states: None,
                 opened: Mutex::new(Vec::new()),
                 raised: Mutex::new(0),
+                deep_links: Mutex::new(Vec::new()),
                 live_agents: (0, 0),
                 quit_calls: Mutex::new(0),
                 agents: vec![
@@ -4583,6 +4634,9 @@ mod tests {
         }
         fn raise_window(&self) {
             *self.raised.lock().unwrap() += 1;
+        }
+        fn deliver_deep_link(&self, url: &str) {
+            self.deep_links.lock().unwrap().push(url.to_string());
         }
         fn diff_stat(&self, _task: &Task) -> Option<proto::DiffStat> {
             None
@@ -4857,6 +4911,46 @@ mod tests {
             QUIT_AFTER_REPLY.with(|f| f.replace(false)),
             "commit did not arm teardown on this thread",
         );
+    }
+
+    // GH #192. A `termic://` link that launched a SECOND process hands the
+    // URL to the instance that owns the data dir, right before exiting. It
+    // must work without a token for the same reason `raise` does: the
+    // preflight connection has none, and the URL only pre-fills a dialog a
+    // human still has to confirm. If this ever needed auth, a deep link
+    // would silently do nothing on Windows/Linux.
+    #[test]
+    fn open_url_is_unauthenticated_and_queues_the_link() {
+        let host = StubHost::default();
+        let url = "termic://new?project=web&p=hello";
+        let reply = handle(&req(Command::OpenUrl { url: url.into() }, None), &host);
+        assert!(reply.ok, "open_url was refused: {:?}", reply.error);
+        assert_eq!(*host.deep_links.lock().unwrap(), vec![url.to_string()]);
+    }
+
+    // The raise rides along with the same verb so the URL and the window
+    // coming forward can't land out of order (the alternative, raise-then-
+    // open_url as two requests, can interleave with the sender exiting).
+    #[test]
+    fn open_url_also_raises_the_window() {
+        let host = StubHost::default();
+        let reply = handle(&req(Command::OpenUrl { url: "termic://new?project=web".into() }, None), &host);
+        assert!(reply.ok);
+        assert_eq!(*host.raised.lock().unwrap(), 1, "open_url did not raise the window");
+    }
+
+    // Rust is a pipe here, not a parser: validation needs the webview's
+    // project list, so a nonsense URL still crosses and the webview
+    // rejects it with a message naming the problem. Pinning this keeps
+    // someone from "helpfully" adding a Rust-side filter that silently
+    // swallows links instead.
+    #[test]
+    fn open_url_does_not_validate_the_url() {
+        let host = StubHost::default();
+        let junk = "termic://nonsense?whatever";
+        let reply = handle(&req(Command::OpenUrl { url: junk.into() }, None), &host);
+        assert!(reply.ok);
+        assert_eq!(*host.deep_links.lock().unwrap(), vec![junk.to_string()]);
     }
 
     // Quitting kills every agent, so it sits behind the same gate as the
@@ -6506,11 +6600,25 @@ mod tests {
         // A live sibling answers hello, so the preflight raises it and
         // reports true (the second instance should exit). raise_existing
         // reads the raise reply, so the raise_window call has already run.
-        assert!(raise_existing(&sock));
+        assert!(raise_existing(&sock, None));
         assert_eq!(*host.raised.lock().unwrap(), 1);
         // No server behind the path: not a live sibling, so we would bind.
         let dead = guard.path().join("nobody.sock");
-        assert!(!raise_existing(&dead));
+        assert!(!raise_existing(&dead, None));
+    }
+
+    // GH #192: the same preflight, but this process was launched BY a
+    // `termic://` link. The link has to reach the sibling that survives,
+    // otherwise it dies with the process we are about to exit and the user
+    // sees a window come forward with nothing in it.
+    #[test]
+    fn preflight_hands_its_deep_link_to_the_live_sibling() {
+        let (sock, _guard, host) = spawn_server_arc(StubHost::default());
+        let url = "termic://new?project=web&p=hello";
+        assert!(raise_existing(&sock, Some(url)));
+        assert_eq!(*host.deep_links.lock().unwrap(), vec![url.to_string()]);
+        // Still raises: the link is useless behind another window.
+        assert_eq!(*host.raised.lock().unwrap(), 1);
     }
 
     #[test]
@@ -6521,7 +6629,7 @@ mod tests {
         let stale = dir.path().join(proto::SOCKET_FILE);
         let listener = UnixListener::bind(&stale).unwrap();
         drop(listener); // socket file may linger, but nothing listens
-        assert!(!raise_existing(&stale));
+        assert!(!raise_existing(&stale, None));
     }
 
     #[test]
@@ -6897,9 +7005,9 @@ mod tests {
             is_default: false,
             command: None,
             session_id: None,
-            previous_session_id: None,
             pane_leaf_id: None,
             run_member: run.map(str::to_string),
+            pinned: false,
         };
         let mut host = host;
         host.tasks.iter_mut().find(|t| t.id == "w3").unwrap().persisted_tabs = vec![
@@ -6934,9 +7042,9 @@ mod tests {
             is_default,
             command: None,
             session_id: None,
-            previous_session_id: None,
             pane_leaf_id: None,
             run_member: None,
+            pinned: false,
         };
         let mut host = host;
         host.tasks.iter_mut().find(|t| t.id == "w3").unwrap().persisted_tabs =
@@ -6997,6 +7105,38 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_id_the_snapshot_has_not_caught_up_with_still_resolves() {
+        // `termic tab` prints an id the moment the tab exists on disk, but the
+        // webview's per-tab snapshot is only whatever it last reported. A
+        // script doing `id=$(termic tab ...); termic logs --tab "$id"` used to
+        // get "no tab matches" for a tab the CLI had just handed it, because
+        // the snapshot was fresh by AGE while missing the new tab entirely.
+        let host = StubHost::default();
+        let mut t = w3(&host);
+        t.persisted_tabs.push(crate::PersistedTab {
+            id: "brand-new".into(),
+            cli: "shell".into(),
+            title: None,
+            custom_title: false,
+            is_default: false,
+            command: None,
+            session_id: None,
+            pane_leaf_id: None,
+            run_member: None,
+            pinned: false,
+        });
+        // Exact id resolves off the durable record...
+        let e = resolve_tab_selector(&host, &t, "brand-new").unwrap_err();
+        assert_eq!(e.code, ErrorCode::Unsupported, "a shell tab is reachable-but-write-only, not missing");
+        // ...while anything that is not an exact id still needs the live
+        // strip, and says which of the two it is missing rather than
+        // pretending the tab does not exist.
+        let miss = resolve_tab_selector(&host, &t, "no-such-tab").unwrap_err();
+        assert_eq!(miss.code, ErrorCode::Internal);
+        assert!(miss.message.contains("has not reported"));
+    }
+
+    #[test]
     fn selector_not_found_names_the_strip() {
         let host = StubHost::default();
         seed_strip(&host);
@@ -7042,9 +7182,9 @@ mod tests {
                 is_default: true,
                 command: None,
                 session_id: None,
-                previous_session_id: None,
                 pane_leaf_id: None,
                 run_member: None,
+                pinned: false,
             },
             crate::PersistedTab {
                 id: "tab-x".into(),
@@ -7054,9 +7194,9 @@ mod tests {
                 is_default: false,
                 command: Some("npm run dev".into()),
                 session_id: None,
-                previous_session_id: None,
                 pane_leaf_id: None,
                 run_member: None,
+                pinned: false,
             },
             crate::PersistedTab {
                 id: "tab-sh".into(),
@@ -7066,9 +7206,9 @@ mod tests {
                 is_default: false,
                 command: None,
                 session_id: None,
-                previous_session_id: None,
                 pane_leaf_id: None,
                 run_member: None,
+                pinned: false,
             },
         ];
         assert_eq!(resolve_tab_selector(&host, &t, "tab-a").unwrap().id, "tab-a");

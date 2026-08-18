@@ -1,14 +1,14 @@
-# bench/ — local performance harness
+# perf/local — the local-only performance harness
 
 **Local only. Never in CI, and not because it is slow.** These scripts measure
 CPU, GPU and compositor cost, which cannot be measured on a virtualised
 GitHub runner without producing confidently wrong numbers. The reasoning, and
 what *can* be gated in CI instead, is in
-[docs/research/perf-ci.md](../docs/research/perf-ci.md).
+[docs/perf-ci.md](../docs/perf-ci.md).
 
 This harness was built for GH #140 and it earned its keep: it refuted a claim
 that had already shipped into the 0.26.0 changelog. It lived in the gitignored
-`scratchpad/` until then, which is why it is tracked now. The scripts are
+`scratchpad/` until then, which is why it is tracked now (it lived at `bench/` until it moved in beside its nightly sibling). The scripts are
 worth less than the traps encoded in them.
 
 ## Scripts
@@ -23,7 +23,7 @@ Environment: `TERMIC_APP` (default `Termic Beta`), and `TERMIC_BENCH_W` /
 `TERMIC_BENCH_H` for the window size in `run-three.sh`.
 
 ```sh
-TERMIC_APP="Termic Beta" ./bench/run-three.sh 5 20
+TERMIC_APP="Termic Beta" ./perf/local/run-three.sh 5 20
 ```
 
 ## Read this before trusting a number

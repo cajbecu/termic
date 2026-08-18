@@ -57,6 +57,8 @@ that CI is running.
 ## Path A — normal release (`make release`)
 
 ```sh
+# 0. Prune the README roadmap (see "Roadmap upkeep"):
+gh issue list --label planned --state closed
 # 1. Author the changelog entry for the new version (see "Changelog entry").
 #    Add a new "## [x.y.z] - " section at the TOP of CHANGELOG.md.
 # 2. Cut the release:
@@ -79,6 +81,38 @@ git push && git push --tags
 3. Bumps the four version files in lockstep.
 4. Commits the version files **+ `CHANGELOG.md` + `changelog.json`** as
    `release: vX` and tags `vX`.
+
+---
+
+## Roadmap upkeep (Path A, step 0)
+
+The README roadmap goes stale silently: nothing in the build, the tests or
+the release flow reads it, so a shipped item sits in the list until someone
+notices by eye. This step is the only thing that catches it.
+
+The roadmap has two halves. **Planned** items each have an issue labelled
+`planned`, and that issue, not the position in the list, is the item's
+identity: never cite a roadmap item by position, in a doc, a commit message
+or a comment. **Ideas** deliberately have NO issue (see CLAUDE.md's docs-tree
+section) and are checked against `docs/ideas/` instead.
+
+```sh
+gh issue list --label planned --state closed    # shipped, may still be in Planned
+gh issue list --label planned --state open      # should match README ## Planned
+ls docs/ideas docs/plans                        # should match README ## Ideas
+```
+
+For each closed one: delete its Planned item (do not mark it done, the
+roadmap is what is *not* built), and if it shipped in this release make sure
+the changelog entry covers it. If an item shipped only in part, narrow the
+README text to the remaining half rather than deleting it, and say so.
+
+For each open one with no Planned item, either add it or drop the label. For
+each `docs/ideas/` file with no Ideas bullet, add one (or delete the file if
+the idea is dead).
+
+A new PLANNED item needs a `planned` issue and a `docs/plans/` spec. A new
+idea needs neither: it is a file and a bullet. Do not open issues for ideas.
 
 ---
 

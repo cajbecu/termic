@@ -1,8 +1,12 @@
 # Performance benchmarks in CI (investigation)
 
-**Status: research, now partly built.** This doc answers one question,
-README roadmap item 12: can "performance trumps polish" be enforced by
-CI instead of by review and habit, and if so, which parts of it. It was
+**Status: reference.** Written as research, and the question it opened has
+since been answered and partly built, which is why it sits in `docs/` rather
+than `docs/ideas/`: CLAUDE.md makes it required reading before anyone adds
+a perf check or a threshold. It answers one question, from a README roadmap
+item that has since shipped and been pruned: can
+"performance trumps polish" be enforced by CI instead of by review and
+habit, and if so, which parts of it. It was
 written before any of it existed and is kept as the reasoning behind
 what shipped, so a future reader can tell which parts were argued for
 and which were only assumed.
@@ -14,7 +18,7 @@ What exists now, and where the argument for each lives below:
 | 0 — counts, PR-gating | yes | `src/store/selectorFanout.test.ts` |
 | 1 — e2e invariants, PR-gating | no | still proposal |
 | 2 — nightly, ungated | yes | `perf/`, `.github/workflows/perf.yml` |
-| 3 — local only | yes | `bench/`, section 2 of `make perf` |
+| 3 — local only | yes | `perf/local/`, section 2 of `make perf` |
 
 Idle CPU was deliberately left out of the nightly, per the Tier 3
 argument below and Orca's own practice of never running theirs in CI.
@@ -29,7 +33,7 @@ The short answer: **yes, but only for metrics that are counts or
 static facts.** App-level timings, CPU percentages and GPU utilisation
 cannot be gated on a GitHub macOS runner. That split is not a compromise
 invented here; it is what Orca independently converged on, and it maps
-cleanly onto the bear traps in [performance.md](../performance.md).
+cleanly onto the bear traps in [performance.md](performance.md).
 
 ## Finding: what Orca actually gates on
 
@@ -152,7 +156,8 @@ and **whether the platform can be Linux** (everything Orca gates, is).
 
 Note in particular that their one runtime PR gate, Zustand selector
 fan-out, is *termic's bear trap 5*, and that the metrics they never run
-in CI are exactly the four our roadmap item names.
+in CI are exactly the four the roadmap item named (listed under
+"Recommendation" below).
 
 ## Finding: why termic cannot copy the runner strategy
 
@@ -274,6 +279,91 @@ CI runs show the distribution.
 Same shape as Orca's `terminal-perf.yml`. Cron plus `workflow_dispatch`
 on `macos-14`, JSON artifact on `always()`, traces on `failure()`.
 
+**A nightly nobody watches fails silently.** Every scheduled run from the
+day it landed (5 for 5) died before running one spec: the step built an
+argv array for the optional `--mochaOpts.grep` and expanded it as
+`"${args[@]}"` under `set -u`, which on the macOS runner's bash 3.2 is an
+UNSET expansion when the array is empty. The manual path, which is the
+only one anybody ever ran, passes a grep and so always had a non-empty
+array. Two things to take from it: the failure looked like a red nightly
+nobody had a reason to open, and the metric it was supposed to report
+(`bootToFirstPaintMs`) has no history for those five days. If a nightly's
+failure is not routed anywhere, budget the attention to read it.
+
+Its artifact was empty for the same reason, independently: `.perf/` is a dot
+directory and `actions/upload-artifact` treats hidden paths as excluded, so
+the step uploaded nothing directly under a log line reading "wrote 10 rows".
+`.e2e/artifacts` in `test.yml` had it too, which is why no failing e2e run
+ever produced a screenshot. Both now pass `include-hidden-files: true`. Any
+upload of a dot-path needs it, and `if-no-files-found` at `warn` or `ignore`
+will not tell you.
+
+### The first real numbers from the runner (2026-08-17)
+
+The first scheduled-path run that actually completed, worth recording because
+this doc keeps deferring the gating question to "distribution data from real
+runs":
+
+| Metric | macos-14 runner | M1 Max local |
+| --- | ---: | ---: |
+| `startup.bootToFirstPaintMs` | 7419 ms | 850 ms |
+| `startup.firstContentfulPaintMs` | 1663 ms | 206 ms |
+| `memory.growth.totalMiB` (12 cycles, since replaced) | -88.8 | n/a |
+
+Startup is ~9x slower on the runner, which is the concrete version of the
+argument above: a threshold loose enough to survive 7.4s cannot catch a
+regression that matters locally, and one tight enough to catch it fails every
+honest PR. It is one sample, so it bounds nothing yet; it does say the two
+environments are not measuring the same machine in the same units.
+
+The -88.8 was not a memory result at all, it was a broken metric: growth was
+`after - baseline` and the baseline had been accepted 8s into a startup decay.
+It is a slope across the churn cycles now, with an r² beside it and both
+functions unit-tested (`src/lib/rssTrend.test.ts`). First two local runs after
+the change: **+2.39 MiB/cycle at r² 0.90** and **+2.47 at r² 0.91** over 25
+cycles, end-to-end +87.6 and +88.2 MiB. That reproduces, fits well, and is the
+first thing this suite has ever said that is worth chasing: either the
+Dashboard/History view swap retains something per cycle, or the debug build
+does.
+
+Splitting that slope by process answered the first question about it. Over 25
+cycles: **Tauri/Rust 0.00 MiB/cycle at r² 0.00, WebKit helpers 2.41 at r²
+0.87.** All of it is on the webview side, which also rules out the debug
+binary's debuginfo, since that is mapped into the app process, the flat one.
+
+**It is not a retention leak, and RSS alone could never have told us.** What it
+took, in order:
+
+1. **Isolate the step.** Churning the overlay mount/unmount with no HistoryView
+   in it: **+0.05 MiB/cycle**, i.e. nothing. Calling `loadAll()` on its own with
+   no view churn at all: **+1.08 MiB/call at r² 0.99**. The React trees are
+   free; the refetch is not. `HistoryView` fires one `loadAll` per mount
+   (`History.tsx`), which is why the view swap looked responsible.
+2. **Ask the heap, not the OS.** Forcing a collection means allocating, which
+   raises the high-water mark itself, so "RSS after GC pressure" is confounded
+   by the probe. A `WeakRef` to the arrays from an early `loadAll`, checked
+   after 60 more calls plus pressure, came back **collected** on all three
+   (tasks, projects, agents) while a control WeakRef to the live array was still
+   reachable. Nothing in app code holds the payloads.
+3. **Rule out the transport.** 60 × `home_dir`, the smallest command in the app:
+   **0.004 MiB/call**. 60 × a bare `browser.execute`: **0.005**. So neither
+   Tauri's invoke path in general nor the test harness is the source; it is
+   specific to the calls that carry real payloads.
+
+So the growth is allocation churn whose pages WebKit never returns to the OS,
+roughly proportional to payload size, not objects we forgot to release. That is
+a different problem with a different fix: there is no retaining reference to
+find, and the lever is how OFTEN the app refetches, not what it holds.
+
+It still matters. `loadAll` runs on every window focus and on every History
+mount, and ~0.4-1 MiB a call that never comes back is a footprint that only
+grows across a long session.
+
+**The lesson for this suite: a positive slope is necessary but not sufficient.**
+It says "RSS is rising", never "we are leaking". Confirm with a reachability
+probe before anyone goes looking for a retaining reference, or a day disappears
+into code that is not holding anything.
+
 - Cold start to first paint. Needs a first-paint marker; none exists.
 - Main-thread jank as frame-gap counts, bucketed over 50 ms and 250 ms.
 - Absolute RSS at steady state.
@@ -325,9 +415,9 @@ better argument for the tiered approach than the current framing.
 
 ## Recommendation
 
-Feasible, with the scope inverted from how the roadmap item states it.
+Feasible, with the scope inverted from how the roadmap item stated it.
 
-The four targets the roadmap names (idle CPU, cold start to first paint,
+The four targets it named (idle CPU, cold start to first paint,
 main-thread jank, RSS growth) are three durations and a percentage.
 Those are exactly the category that cannot be gated on a virtualised
 3-core runner without manufacturing false confidence. Do not build them

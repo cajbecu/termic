@@ -4,12 +4,12 @@
 //
 // NOT run on PRs. The metrics here are durations and memory, which a 3-core
 // virtualised runner cannot resolve tightly enough to gate a merge on. The
-// argument, and what IS gated per-PR instead, is in docs/research/perf-ci.md.
+// argument, and what IS gated per-PR instead, is in docs/perf-ci.md.
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
-import { flush, resetCollector } from "./perf/report.js";
+import { flush, resetCollector } from "./perf/nightly/report.js";
 
 const repoRoot = path.dirname(fileURLToPath(import.meta.url));
 const appBinary = path.join(repoRoot, "src-tauri", "target", "debug", "termic");
@@ -22,12 +22,15 @@ export const config: WebdriverIO.Config = {
   runner: "local",
   tsConfigPath: path.join(repoRoot, "e2e", "tsconfig.json"),
 
-  specs: [path.join(repoRoot, "perf", "specs", "**", "*.perf.ts")],
+  specs: [path.join(repoRoot, "perf", "nightly", "specs", "**", "*.perf.ts")],
   // Serial for the same reason as the e2e suite, and additionally because two
   // app instances on one runner would contaminate every number here.
   maxInstances: 1,
 
-  capabilities: [{ browserName: "tauri", "tauri:options": { application: appBinary } }],
+  // Vendor capability extension, unknown to WebdriverIO's types. See wdio.conf.ts.
+  capabilities: [
+    { browserName: "tauri", "tauri:options": { application: appBinary } } as WebdriverIO.Capabilities,
+  ],
   services: [
     ["@wdio/tauri-service", { appBinaryPath: appBinary, driverProvider: "embedded" }],
   ],

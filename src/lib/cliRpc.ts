@@ -236,6 +236,7 @@ async function importTask(p: NewTaskParams): Promise<Task> {
         cli,
         sandbox,
         typeof p.resume === "string" && p.resume ? p.resume : undefined,
+        undefined, // resume-args override: dialog-only, no CLI flag for it yet
         p.yolo === true ? true : undefined,
       );
     } catch (e) {
@@ -643,7 +644,7 @@ export async function sendPromptHandler(raw: unknown): Promise<{ mode: string; c
     // --resume: a prior session must exist, else --fresh is the answer.
     const hasSession =
       !!task.has_resumable_history
-      || (task.persisted_tabs ?? []).some(pt => pt.session_id || pt.previous_session_id);
+      || (task.persisted_tabs ?? []).some(pt => pt.session_id);
     if (!hasSession) {
       throw sendErr(
         "no_session",

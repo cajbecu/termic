@@ -301,7 +301,7 @@ describe("termic tab close: one tab, not the task (GH #185)", () => {
     // only side that can report the process died.
     const opened = await rpc({ cmd: "tab", task: "cli-tab-close", kind: { tab: "shell" } });
     expect(opened.ok).toBe(true);
-    const shellTabId = opened.data.tab_id;
+    const shellTabId: string = opened.data.tab_id;
     await browser.waitUntil(
       () =>
         browser.execute(
@@ -581,7 +581,7 @@ describe("termic new --from: adopt an existing worktree (GH #169)", () => {
         (window.__termic!.useApp.getState().tabs[id!] ?? []).find((t: any) => t.id === tab)
           ?.sessionId,
       adoptedId,
-      r.data.tab_id,
+      r.data.tab_id as string,
     );
     expect(tabSession).toBe("SESSION-TAB");
   });

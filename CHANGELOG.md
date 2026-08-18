@@ -4,6 +4,48 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
+## [0.27.3] - 2026-08-17
+
+A commit graph, branch compare, comments on any file, and a big idle-CPU fix.
+
+### Features
+- **Git.** The right panel's Git tab is three sub-tabs. **Commit** stages and commits as before, with a Push button badged by the number of commits waiting to go out. **History** is a full-height commit graph: a dense row per commit (lane gutter, ref chips, subject, age), hover for the author, date and full message, click through to any file's diff at that revision. Scope it to this branch, every branch or refs you pick, collapse merged side branches with "First parent only", and search commit messages across the whole branch (git runs the search, so a match ten pages back still comes up first). **Compare** answers what all of it adds up to: one list of every path that differs between any ref and your working tree, committed, staged, unstaged and untracked together, rendered as a tree, and because its right side is the live file, mark-as-viewed and inline comments keep working, so a whole feature can be reviewed file by file without leaving Termic. Committed work used to vanish from the panel the moment the tree went clean, which is the gap all of this closes. In a multi-repo task all three sub-tabs follow the repo pill you picked. The Unstaged and Staged sections collapse, with Stage all / Unstage all still live. Lane colours come from the theme palette. (#199, #208)
+- Select code in any file you are reading and comment on it, the same surface the diff pane has. Several remarks ship as one message, a body is optional, and Shift+Cmd+L stacks a selection from the keyboard. Queued comments follow their code as you edit around them, and the quote is frozen at capture. (#174)
+- Find in files runs on ripgrep when you have it: faster on large repos, Unicode-aware, and its regex is what the results highlight with. Without it, `git grep` exactly as before, named in the dialog. (#181)
+- Find in files gets a `.*` regexp toggle and an `Aa` match-case toggle, both off by default.
+- Right-click any tab pill for Pin, Close, Close others, Close to the right. Pinned tabs sit in their own block outside the scroller, so they stay in reach however far the strip is scrolled, and the flag persists. (#183)
+- Right-clicking a tab also offers Split right, Split down and Move to split. Move to split arms a cursor-following drag with the same ghost and edge highlight as a real one, so a tab can be placed in an existing pane without a grab; the next click drops it, Escape cancels.
+- Right-clicking a task row in the sidebar offers a New submenu, the same rows as the tab strip's "+". (#197)
+- `termic://` links open a pre-filled New Task dialog: `termic://new?project=web&worktree=1&name=fix-login&p=Fix%20the%20login%20bug`. The link only fills the form; a human still presses Create, which is the whole security model for taking a prompt from any page that can navigate to a URL scheme. New Task grows an optional first-message box. (#192)
+- New Task can set the agent's resume arguments before its first spawn, the same override the task menu edits. It replaces a session-ID box that only appeared for agents able to resume by id, so codex and gemini had no field at all. (#169)
+- Set a default location for worktrees in Settings, Tasks, and override it per repository. An invalid or git-tracked path is refused at save time.
+- `termic tab close <task> --tab <sel>` closes a tab from the shell, the one tab verb that also reaches plain shells and custom terminals. (#185)
+- `termic prompts` lists your prompt library and `-P/--library <sel>` fires one from `new`, `send` and `tab`. With `-p` too the library body arrives first: `termic result plan | termic new review --agent codex -P builtin:review -p -`.
+- The archive dialog gets "Don't ask again". With confirmation off the delete-branch choice moves to Settings, Tasks. Note that the command palette's Archive then archives on Enter with no prompt.
+
+### Bug fixes
+- Idle Termic no longer sits on a third of a core doing nothing. An agent TUI re-emits its unchanged window title while it waits, and the setter wrote to the store every time, re-running every selector in every open task. On a 16-terminal window idle CPU drops from 19% to 12.7%. (#212)
+- A slow login shell no longer costs a session its environment for the rest of the app's life. A failed probe used to be cached forever; it now retries in the background and swaps the real environment in for new sessions. (#186)
+- Nix profile directories lead the fallback PATH, so a nix-darwin or home-manager machine no longer hides nix-installed CLIs from spawned sessions. Detection reads the same list. (#187)
+- Narrowing one of an agent's title patterns in Settings no longer deletes the other two. Each field resolves on its own; empty means inherit, so switching one off needs an unmatchable pattern like `(?!)`.
+- A `termic://` link's name fills the branch field too, instead of waiting for you to edit the name first.
+- The "Couldn't resume your previous session" banner is gone. It outlived the failure it described and came back on every relaunch reworded as if nothing had happened. A failed resume now says so once and starts fresh; the agent's own picker (`claude --resume`) is the way back to the old session, which was never deleted.
+- In a multi-repo task the Git tab opens on a repo that actually changed, instead of the empty wrapper.
+- Terminal panes no longer go black after the Mac sleeps or the window sits in the background for hours. WKWebView reclaims the GPU context of a webview it thinks is idle, and every terminal kept compositing its last, empty frame, so restarting each tab by hand was the only way back even though the shell and the scrollback were fine the whole time. The renderer re-attaches on a fresh context now, and if the GPU is genuinely gone it stays on the DOM renderer with a forced repaint rather than black-flashing on a retry loop. It also checks on window focus, for the case where the loss never fires an event at all. (#232)
+- `termic logs --tab <id>` no longer answers "no tab matches" for an id `termic tab` printed a second earlier. Tab lookup consulted only what the window had last reported, which a brand-new tab is not in yet; an exact id now falls back to the durable record. (#185)
+- Clicking a desktop notification only brings the window forward. It used to yank you to that task on any refocus within 15 seconds.
+- The bottom terminal takes focus when you open it, and collapsing the split hands focus back to the pane you came from.
+- A pinned tab holds its width instead of resizing on every title the agent emits.
+- Settings, projects and task metadata are written atomically, so a crash mid-write cannot truncate your configuration.
+- Terminal in the new-task menu asks for a name in main-checkout mode, like every other item in that menu. It used to create the task at once and let Rust name it.
+- The dashed "New task" placeholder in an empty project is the same height as a task row.
+
+### Thanks
+- Preeti Yuankrathok (@earthpyy) for the worktree path settings, atomic writes, and the archive confirmation opt-out.
+- Bohdan Shulha (@bohdan-shulha) for tab pinning and close actions, collapsible git sections, the regexp and match-case toggles, and the terminal focus fixes.
+- Michael Hohlios (@MHohlios) for `termic tab close`, the CLI prompt library, and both shell environment fixes.
+- Adrian Cristea (@cajbecu) for the WebGL context-loss recovery.
+
 ## [0.26.0] - 2026-08-11
 
 CLI tab targeting and worktree adoption, folder browsing in the editor, and image diffs.

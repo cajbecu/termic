@@ -4,12 +4,19 @@
 //   1. Repo sub-tabs   — multi-repo tasks only; one wrapping pill per
 //      repo that has changes (even if just one), each badged with its
 //      changed-file count. Clean repos get no pill.
-//   2. Toolbar         — search filter + view-mode menu (Tree / List /
-//      Combined List + Hide untracked).
+//   2. Toolbar         — Changes / Compare switch, search filter, view-mode
+//      menu (Tree / List / Combined List + Hide untracked). The filter and the
+//      view mode are shared by both modes.
 //   3. Unstaged pane   — resizable, scrollable file list.
 //   4. Resize handle   — drag to repartition the two panes.
 //   5. Staged pane     — resizable, scrollable file list.
 //   6. Commit form     — subject, description, Amend, split Commit button.
+//
+// In Compare mode (issue #208) 3-5 are replaced by ComparePanel: one list of
+// everything this branch differs by against a chosen ref, committed work
+// included, which is the half the staging panes structurally cannot show. The
+// commit form goes with them, since nothing in that list is stageable. The
+// Graph section below (issue #199) is present in both modes.
 //
 // Backend: task_git_status returns staged/unstaged split per repo;
 // task_stage / _unstage / _commit mutate the selected repo. Paths are
@@ -21,7 +28,7 @@ import {
   ChevronRight, ChevronDown, ArrowDown, ArrowUp, List, ListTree, Rows3, Check, Eye, Search, Trash2, MessageSquare, Loader2, GitBranch, GitMerge, RotateCw,
 } from "lucide-react";
 import type { Task, GitStatus, GitRepo, GitFile, UpdateMode, UpdateInfo } from "@/lib/types";
-import { taskStage, taskUnstage, taskCommit, taskDiscard, taskGitBranches, taskGitCheckout, taskGitUpdate, taskGitUpdateInfo } from "@/lib/ipc";
+import { taskStage, taskUnstage, taskCommit, taskDiscard, taskGitBranches, taskGitCheckout, taskGitUpdate, taskGitUpdateInfo, taskGitPush } from "@/lib/ipc";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import { usePrefs } from "@/store/prefs";
@@ -35,13 +42,17 @@ import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownSepa
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from "@/components/ui/ContextMenu";
 import { Tip } from "@/components/ui/Tooltip";
 import { CopyPathItems } from "./CopyPathItems";
+import { HistoryPanel, ScopePicker } from "./HistoryPanel";
+import { ComparePanel } from "./ComparePanel";
 import { fileIconUrl, folderIconUrl } from "@/lib/explorer/iconResolver";
 
 // Per-side status → glyph / color / label. `?` is untracked (rendered as
-// a green +, same as a fresh add).
-const SC: Record<string, string>  = { M: "M", A: "+", "?": "+", D: "D", R: "R", C: "C", U: "U" };
-const COL: Record<string, string> = { M: "var(--color-accent)", A: "var(--color-ok)", "?": "var(--color-ok)", D: "var(--color-err)", R: "var(--color-accent)", C: "var(--color-accent)", U: "var(--color-err)" };
-const LBL: Record<string, string> = { M: "modified", A: "added", "?": "untracked", D: "deleted", R: "renamed", C: "copied", U: "conflict" };
+// a green +, same as a fresh add). Exported so Compare (GH #208)
+// renders a status the same way this one does rather than keeping a second
+// copy that can drift.
+export const SC: Record<string, string>  = { M: "M", A: "+", "?": "+", D: "D", R: "R", C: "C", U: "U" };
+export const COL: Record<string, string> = { M: "var(--color-accent)", A: "var(--color-ok)", "?": "var(--color-ok)", D: "var(--color-err)", R: "var(--color-accent)", C: "var(--color-accent)", U: "var(--color-err)" };
+export const LBL: Record<string, string> = { M: "modified", A: "added", "?": "untracked", D: "deleted", R: "renamed", C: "copied", U: "conflict" };
 
 export type ViewMode = "tree" | "list" | "combined";
 
@@ -49,6 +60,36 @@ const LS_VIEW   = "gitViewMode";
 const LS_HIDE   = "gitHideUntracked";
 const LS_RATIO  = "gitSplitRatio";
 const LS_PUSH   = "gitPushDefault";
+const LS_UCOL   = "gitUnstagedCollapsed";
+const LS_SCOL   = "gitStagedCollapsed";
+/** Which of the three views the Git tab is on. Persisted: someone reviewing a
+ *  feature sits in Compare or History for the length of the review, across
+ *  task switches and relaunches. */
+const LS_VIEWTAB = "gitPanelView";
+
+/** The three questions this tab answers, as one control. Commit is the only
+ *  one you ACT in (stage, discard, commit, push); the other two are read-only
+ *  views of what the branch has already done. */
+export type GitView = "commit" | "compare" | "history";
+const GIT_VIEWS: { id: GitView; label: string; title: string }[] = [
+  { id: "commit",  label: "Commit",  title: "What you can stage right now" },
+  { id: "compare", label: "Compare", title: "Everything this branch differs by against another ref, committed or not" },
+  { id: "history", label: "History", title: "The commit graph for this repo" },
+];
+function readGitView(): GitView {
+  try {
+    const v = localStorage.getItem(LS_VIEWTAB);
+    if (v === "compare" || v === "history") return v;
+  } catch {}
+  return "commit";
+}
+
+/** Every button on the commit footer, so Push and Commit cannot drift apart.
+ *  `box-border` and `leading-none` are the load-bearing half: Push carries a
+ *  1px border and Commit does not, and without both of these the border and
+ *  the line box each add their own height to one button only. */
+const FOOTER_BTN =
+  "box-border flex h-7 items-center whitespace-nowrap text-[12.5px] leading-none font-medium transition-colors";
 
 export function readView(): ViewMode {
   try { const v = localStorage.getItem(LS_VIEW); if (v === "tree" || v === "list" || v === "combined") return v; } catch {}
@@ -57,12 +98,12 @@ export function readView(): ViewMode {
 function readBool(key: string): boolean {
   try { return localStorage.getItem(key) === "1"; } catch { return false; }
 }
-function readRatio(): number {
-  try { const n = parseFloat(localStorage.getItem(LS_RATIO) || ""); if (n >= 0.1 && n <= 0.9) return n; } catch {}
-  return 0.5;
+function readRatio(key = LS_RATIO, fallback = 0.5): number {
+  try { const n = parseFloat(localStorage.getItem(key) || ""); if (n >= 0.1 && n <= 0.9) return n; } catch {}
+  return fallback;
 }
 
-export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff }: {
+export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff, onOpenCommitDiff, onOpenCompareDiff, reloadToken = 0 }: {
   task: Task;
   status: GitStatus | null;
   refresh: () => void;
@@ -71,6 +112,18 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
    *  unstaged → index→worktree. */
   onOpenDiff: (path: string, pane: "unstaged" | "staged") => void;
   onDoubleClickDiff: (path: string) => void;
+  /** Opens a diff of one file at one revision, for the Graph section:
+   *  `sha^` against `sha`, no working-tree side. */
+  onOpenCommitDiff?: (path: string, sha: string, title: string) => void;
+  /** Opens a compare diff: the base commit against the LIVE file. A separate
+   *  prop from onOpenCommitDiff because the two produce different SIDES from
+   *  the same-looking (path, sha, title) call. Routing Compare through the
+   *  commit opener made every compare diff read as a historical one, losing
+   *  the working-tree right side and with it the review affordances that are
+   *  the whole reason to review from here. */
+  onOpenCompareDiff?: (path: string, baseSha: string, title: string) => void;
+  /** Same refresh signals the status poll rides, forwarded to the Graph. */
+  reloadToken?: number;
 }) {
   const pushToast = useUI(s => s.pushToast);
   const nonGit = useApp(s => s.projects.find(p => p.id === task.project_id)?.non_git);
@@ -93,7 +146,31 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
   const [committing, setCommitting] = useState(false);
+  const [pushing, setPushing] = useState(false);
   const [pushDefault, setPushDefault] = useState<boolean>(() => readBool(LS_PUSH));
+  // Section collapse (header-only). Global, not per task, so it is never
+  // reset by the task-switch effect below.
+  const [unstagedCollapsed, setUnstagedCollapsed] = useState<boolean>(() => readBool(LS_UCOL));
+  const [stagedCollapsed, setStagedCollapsed] = useState<boolean>(() => readBool(LS_SCOL));
+  const [view, setView] = useState<GitView>(() => readGitView());
+  const changeView = (v: GitView) => { setView(v); persist(LS_VIEWTAB, v); };
+  // The blame popup's "Show in History": RightPanel has already put this tab on
+  // screen, and the Graph is the only view that can show a commit.
+  const commitReveal = useUI(s => s.commitReveal);
+  const seenRevealAt = useRef(0);
+  useEffect(() => {
+    if (!commitReveal || commitReveal.taskId !== task.id) return;
+    if (commitReveal.at === seenRevealAt.current) return;
+    seenRevealAt.current = commitReveal.at;
+    changeView("history");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [commitReveal, task.id]);
+  // History's scope lives here, not in HistoryPanel: the picker rides this
+  // component's sub-tab row, so this is where the value it edits has to sit.
+  // Reset per repo, since refs belong to one.
+  const [graphAll, setGraphAll] = useState(false);
+  const [graphRefs, setGraphRefs] = useState<string[]>([]);
+  const [graphFirstParent, setGraphFirstParent] = useState(false);
   // Collapsed tree folders, keyed `${pane}\0${dirPath}`.
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   // Selected row, keyed `${pane}\0${path}` (a file can sit in both panes
@@ -139,9 +216,16 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
     setActiveRepoDir(""); setSelected(null); setPinnedRepoDir(null);
   }, [task.id]);
 
+  // Refs belong to one repo, so a repo (or task) switch drops the graph's
+  // scope back to Auto. Carrying it would ask for branches the new repo does
+  // not have, which the backend answers with an empty graph.
+  useEffect(() => { setGraphAll(false); setGraphRefs([]); setGraphFirstParent(false); }, [activeRepoDir, task.id]);
+
   const persist = (key: string, val: string) => { try { localStorage.setItem(key, val); } catch {} };
-  const changeView = (v: ViewMode) => { setViewMode(v); persist(LS_VIEW, v); };
+  const changeViewMode = (v: ViewMode) => { setViewMode(v); persist(LS_VIEW, v); };
   const toggleHide = () => setHideUntracked(h => { const n = !h; persist(LS_HIDE, n ? "1" : "0"); return n; });
+  const toggleUnstagedCollapsed = () => setUnstagedCollapsed(c => { const n = !c; persist(LS_UCOL, n ? "1" : "0"); return n; });
+  const toggleStagedCollapsed   = () => setStagedCollapsed(c => { const n = !c; persist(LS_SCOL, n ? "1" : "0"); return n; });
 
   const repo: GitRepo | undefined = repos.find(r => r.dir_name === activeRepoDir) ?? repos[0];
   // Every group is diffable: the backend's resolve_task_git_path runs
@@ -306,12 +390,28 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
   };
   const setPush = (push: boolean) => { setPushDefault(push); persist(LS_PUSH, push ? "1" : "0"); doCommit(push); };
 
+  /** Push what is already committed. Pins the repo for the same reason
+   *  `doCommit` does: the push clears `ahead`, and an unpinned pill for a
+   *  clean repo would vanish under the user mid-action. */
+  const doPush = () => {
+    if (pushing) return;
+    setPushing(true);
+    setPinnedRepoDir(dir);
+    taskGitPush(task.id, dir)
+      .then(() => { pushToast(ahead > 0 ? `Pushed ${ahead} commit${ahead === 1 ? "" : "s"}` : "Pushed", "success"); refresh(); })
+      .catch(e => pushToast(String(e), "error"))
+      .finally(() => setPushing(false));
+  };
+
   // ── resizable split ──
   // ResizeHandle calls onDrag with the delta since the LAST mousemove, so
   // we MUST accumulate from the latest ratio. Using the render-time `ratio`
   // here would compute every move off the same stale base and make the
   // divider snap back and forth. A functional update reads the live value;
   // a ref carries it into onEnd for the persist.
+  // The ratio only applies while both sections show their file list; a
+  // collapsed one is header-height and the other takes the rest.
+  const bothOpen = !unstagedCollapsed && !stagedCollapsed;
   const bodyRef = useRef<HTMLDivElement>(null);
   const ratioRef = useRef(ratio);
   ratioRef.current = ratio;
@@ -360,7 +460,9 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
   if (!status) {
     return <div className="px-3 py-3 text-[13.5px] text-[var(--color-fg-faint)]">Loading…</div>;
   }
-  if (!repo || (status.total_changed === 0 && !pinnedExists)) {
+  // A repo termic could not read at all (or a plain folder) has nothing to
+  // show and no graph to draw, so it keeps the bare message.
+  if (!repo) {
     return (
       <div className="flex h-full flex-col">
         {!nonGit && <BranchBar task={task} branch={status.repos[0]?.branch ?? task.branch} dir="" />}
@@ -372,6 +474,12 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
       </div>
     );
   }
+  // A CLEAN tree is not the same thing. It used to take the branch above and
+  // return before the toolbar, which meant the Graph and Compare both vanished
+  // the moment you committed: the exact moment they became the only two views
+  // with anything to say (GH #208). The shell renders either way now and the
+  // message takes the file panes' place.
+  const clean = status.total_changed === 0 && !pinnedExists;
 
   // Show repo pills only for repos that actually have changes — even when
   // that's a single repo. Unchanged repos are noise here; the "All files"
@@ -380,6 +488,11 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
   const fileWord = stagedCount === 1 ? "File" : "Files";
   const commitDisabled = committing || !subject.trim() || stagedCount === 0;
   const commitLabel = `Commit ${stagedCount} ${fileWord}${pushDefault ? " and Push" : ""}`;
+  // Commits the upstream does not have. 0 covers both "in sync" and "no
+  // upstream": in the second case the button still works and creates one,
+  // which is why it is not disabled on a 0 count.
+  const ahead = repo?.ahead ?? 0;
+  const pushDisabled = pushing || committing || nonGit;
 
   // ⌘/Ctrl+Enter from either commit field fires the commit button (the
   // remembered Commit / Commit-and-Push mode), so you never have to reach
@@ -403,9 +516,9 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
 
   return (
     <div className="flex h-full flex-col">
-      {/* 0. Current branch + switcher (fork-style: stash, checkout, re-apply) */}
-      {!nonGit && <BranchBar task={task} branch={repo?.branch ?? task.branch} dir={dir} />}
-      {/* 1. Repo sub-tabs (wrapping pills) */}
+      {/* 0. Repo sub-tabs (wrapping pills). OUTERMOST of the three controls
+          here: which repo you are looking at is what the branch bar and all
+          three sub-tabs below are ABOUT, so it cannot sit inside them. */}
       {showSubTabs && (
         <div className="flex shrink-0 flex-wrap gap-1 border-b border-[var(--color-border-soft)] px-2 py-1.5">
           {visibleRepos.map(r => (
@@ -447,42 +560,119 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
         </div>
       )}
 
-      {/* 2. Toolbar: search + view-mode menu */}
+      {/* 1. Current branch + switcher (fork-style: stash, checkout, re-apply),
+          for the repo selected above. */}
+      {!nonGit && (
+        <BranchBar
+          task={task}
+          branch={repo?.branch ?? task.branch}
+          dir={dir}
+          right={<div className="relative ml-auto flex min-w-0 flex-1 items-center">
+            <Search className="pointer-events-none absolute left-2 h-3.5 w-3.5 text-[var(--color-fg-faint)]" />
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder={view === "history" ? "Search messages" : "Filter"}
+              title="Filters files in Commit and Compare. In History it searches commit messages across the whole branch, not just the rows on screen."
+              spellCheck={false} autoCorrect="off" autoCapitalize="off" autoComplete="off"
+              className="h-6 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] pl-7 pr-2 text-[12px] text-[var(--color-fg)] outline-none placeholder:text-[var(--color-fg-faint)] focus:border-[var(--color-accent)]"
+            />
+          </div>}
+        />
+      )}
+
+      {/* 2. Sub-tabs, plus whatever chrome the active one needs on the SAME
+          row. Two rows of tabs would be a lot for a panel that drags down to
+          220px, and the file filter is meaningless in History, so History
+          hands that half of the row to the ref picker instead. */}
       <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-[var(--color-border-soft)] px-2">
-        <div className="relative flex flex-1 items-center">
-          <Search className="pointer-events-none absolute left-2 h-3.5 w-3.5 text-[var(--color-fg-faint)]" />
-          <input
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Filter files"
-            spellCheck={false} autoCorrect="off" autoCapitalize="off" autoComplete="off"
-            className="h-6 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] pl-7 pr-2 text-[12px] text-[var(--color-fg)] outline-none placeholder:text-[var(--color-fg-faint)] focus:border-[var(--color-accent)]"
-          />
-        </div>
-        <DropdownRoot>
-          <DropdownTrigger asChild>
+        <div className="flex shrink-0 items-stretch gap-0.5">
+          {GIT_VIEWS.map(v => (
             <button
-              title="View options"
-              className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]"
+              key={v.id}
+              type="button"
+              data-testid={`git-view-${v.id}`}
+              data-active={view === v.id ? "true" : "false"}
+              onClick={() => changeView(v.id)}
+              title={v.title}
+              className={cn(
+                "flex h-6 items-center rounded-md px-1.5 text-[11.5px] leading-none transition-colors",
+                view === v.id
+                  ? "bg-[var(--color-bg-3)] text-[var(--color-fg)]"
+                  : "text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
+              )}
             >
-              {viewMode === "tree" ? <ListTree className="h-4 w-4" /> : viewMode === "combined" ? <Rows3 className="h-4 w-4" /> : <List className="h-4 w-4" />}
+              {v.label}
             </button>
-          </DropdownTrigger>
-          <DropdownMenu align="end">
-            <ViewItem label="View as Tree"          active={viewMode === "tree"}     onSelect={() => changeView("tree")} />
-            <ViewItem label="View as Combined List" active={viewMode === "combined"} onSelect={() => changeView("combined")} />
-            <ViewItem label="View as List"          active={viewMode === "list"}     onSelect={() => changeView("list")} />
-            <DropdownSeparator />
-            <ViewItem label="Hide untracked files" active={hideUntracked} onSelect={toggleHide} />
-          </DropdownMenu>
-        </DropdownRoot>
+          ))}
+        </div>
+        {view === "history" ? (
+          <div className="ml-auto flex min-w-0 items-center text-[11.5px]">
+            <ScopePicker
+              taskId={task.id}
+              repoDir={dir}
+              branch={repo?.branch ?? task.branch}
+              allBranches={graphAll}
+              picked={graphRefs}
+              firstParent={graphFirstParent}
+              onChange={(all, refs, fp) => { setGraphAll(all); setGraphRefs(refs); setGraphFirstParent(fp); }}
+            />
+          </div>
+        ) : (
+          <DropdownRoot>
+            <DropdownTrigger asChild>
+              <button
+                title="View options"
+                className="ml-auto flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]"
+              >
+                {viewMode === "tree" ? <ListTree className="h-4 w-4" /> : viewMode === "combined" ? <Rows3 className="h-4 w-4" /> : <List className="h-4 w-4" />}
+              </button>
+            </DropdownTrigger>
+            <DropdownMenu align="end">
+              <ViewItem label="View as Tree"          active={viewMode === "tree"}     onSelect={() => changeViewMode("tree")} />
+              <ViewItem label="View as Combined List" active={viewMode === "combined"} onSelect={() => changeViewMode("combined")} />
+              <ViewItem label="View as List"          active={viewMode === "list"}     onSelect={() => changeViewMode("list")} />
+              <DropdownSeparator />
+              <ViewItem label="Hide untracked files" active={hideUntracked} onSelect={toggleHide} />
+            </DropdownMenu>
+          </DropdownRoot>
+        )}
       </div>
 
-      {/* 3-5. Unstaged / handle / Staged */}
+      {/* 3-5. The body: whichever view is active, at full height. The graph
+          used to live in a collapsible section under the file lists, sharing
+          the body by a draggable ratio. It is the one view here that wants
+          vertical space and it was getting whatever two file lists left over,
+          so it is a sub-tab now and the collapse flag, the ratio, the divider
+          and their two localStorage keys are gone with it. */}
       <div ref={bodyRef} className="relative flex min-h-0 flex-1 flex-col">
+        {clean && view === "commit" ? (
+          <div className="px-3 py-3 text-[13.5px] text-[var(--color-fg-faint)]">
+            No changes. Working tree is clean.
+          </div>
+        ) : view === "history" ? (
+          <HistoryPanel
+            task={task}
+            repoDir={dir}
+            scope={{ allBranches: graphAll, refs: graphRefs, firstParent: graphFirstParent }}
+            search={search}
+            reloadToken={reloadToken}
+            onOpenDiff={(path, sha, title) => onOpenCommitDiff?.(path, sha, title)}
+          />
+        ) : view === "compare" ? (
+          <ComparePanel
+            task={task}
+            repoDir={dir}
+            search={search}
+            viewMode={viewMode}
+            reloadToken={reloadToken}
+            onOpenDiff={(path, sha, title) => onOpenCompareDiff?.(path, sha, title)}
+          />
+        ) : (<>
         <Pane
           title="Unstaged" files={unstaged} pane="unstaged" viewMode={viewMode}
           collapsed={collapsed} setCollapsed={setCollapsed}
+          paneCollapsed={unstagedCollapsed} onTogglePane={toggleUnstagedCollapsed}
           clickable={clickable} selectedKey={selected} stageGlyph={stageGlyph}
           taskId={task.id} viewedCount={countViewed(unstaged)}
           headerAction={unstaged.length > 0 ? { label: "Stage all", onClick: () => doStage(unstaged.map(f => f.path)) } : undefined}
@@ -491,14 +681,18 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
           onDiscard={(paths) => doDiscard(paths, paths.length === 1 ? { pane: "unstaged" } : undefined)}
           rowActionIcon="down"
           root={task.path} repoDir={dir} truncated={repo?.truncated}
-          style={{ flexBasis: `${ratio * 100}%`, flexGrow: 0, flexShrink: 0 }}
+          className={unstagedCollapsed ? "shrink-0" : "min-h-0 flex-1"}
+          style={bothOpen ? { flexBasis: `${ratio * 100}%`, flexGrow: 0, flexShrink: 0 } : undefined}
         />
         <div className="relative h-px shrink-0 bg-[var(--color-border-soft)]">
-          <ResizeHandle direction="y" className="top-0" onDrag={onSplitDrag} onEnd={() => persist(LS_RATIO, String(ratioRef.current))} />
+          {bothOpen && (
+            <ResizeHandle direction="y" className="top-0" onDrag={onSplitDrag} onEnd={() => persist(LS_RATIO, String(ratioRef.current))} />
+          )}
         </div>
         <Pane
           title="Staged" files={staged} pane="staged" viewMode={viewMode}
           collapsed={collapsed} setCollapsed={setCollapsed}
+          paneCollapsed={stagedCollapsed} onTogglePane={toggleStagedCollapsed}
           clickable={clickable} selectedKey={selected} stageGlyph={stageGlyph}
           taskId={task.id} viewedCount={countViewed(staged)}
           headerAction={staged.length > 0 ? { label: "Unstage all", onClick: () => doUnstage(staged.map(f => f.path)) } : undefined}
@@ -507,11 +701,15 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
           onDiscard={(paths) => doDiscard(paths, paths.length === 1 ? { pane: "staged" } : undefined)}
           rowActionIcon="up"
           root={task.path} repoDir={dir}
-          className="min-h-0 flex-1"
+          className={stagedCollapsed ? "shrink-0" : "min-h-0 flex-1"}
         />
+        </>)}
       </div>
 
-      {/* 6. Commit form */}
+      {/* 6. Commit form. Changes only: the compare list holds committed work
+          too, so a "Commit N files" button under it would be counting a
+          staging area that is not on screen. */}
+      {view === "commit" && !clean && (
       <div className="flex shrink-0 flex-col gap-1.5 border-t border-[var(--color-border-soft)] p-2">
         <input
           value={subject}
@@ -530,13 +728,53 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
           spellCheck={false} autoCorrect="off" autoCapitalize="off" autoComplete="off"
           className="w-full resize-none rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-[12.5px] leading-snug text-[var(--color-fg)] outline-none placeholder:text-[var(--color-fg-faint)] focus:border-[var(--color-accent)]"
         />
-        {/* Split commit button: main = remembered mode, caret picks. */}
-        <div className="flex justify-end">
+        {/* Split commit button: main = remembered mode, caret picks.
+            Push sits beside it because the commits it sends are usually not
+            the one you are about to make: an agent's, or your own from the
+            terminal. Its badge is how many are waiting. */}
+        <div className="flex items-center justify-end gap-1.5">
+          <button
+            data-testid="git-push"
+            data-ahead={ahead}
+            disabled={pushDisabled}
+            onClick={doPush}
+            title={ahead > 0
+              ? `Push ${ahead} commit${ahead === 1 ? "" : "s"} to the remote`
+              : "Push this branch to the remote"}
+            className={cn(
+              FOOTER_BTN,
+              "mr-auto shrink-0 gap-1.5 rounded-md border border-[var(--color-border)] px-2.5",
+              pushDisabled
+                ? "cursor-not-allowed text-[var(--color-fg-faint)] opacity-50"
+                : "text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
+            )}
+          >
+            {pushing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArrowUp className="h-3.5 w-3.5" />}
+            {pushing ? "Pushing…" : "Push"}
+            {/* Sized as a pill, not as a text box: `h-4` + centering keeps it
+                on the button's optical centre line (a bare span inherits the
+                button's `leading-none`, so its height was whatever the digits
+                happened to be), and `min-w-4` stops "1" from rendering as a
+                sliver next to "15". */}
+            {ahead > 0 && (
+              <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--color-accent-soft)] px-1 text-[10.5px] leading-none tabular-nums text-[var(--color-accent)]">
+                {ahead}
+              </span>
+            )}
+          </button>
+          {/* Commit + its caret are one split button, so they sit in their own
+              flex box with no gap. The pair is what gives way when the panel is
+              narrow: the label truncates on one line instead of wrapping, which
+              broke "Commit 0 Files" across two lines and pushed the row past
+              the panel's edge. */}
+          <div className="flex min-w-0 items-center">
           <button
             disabled={commitDisabled}
             onClick={() => doCommit(pushDefault)}
+            title={commitLabel}
             className={cn(
-              "flex h-7 items-center rounded-l-md bg-[var(--color-accent)] px-3 text-[12.5px] font-medium text-[var(--color-accent-fg)] transition-colors",
+              FOOTER_BTN,
+              "min-w-0 truncate rounded-l-md bg-[var(--color-accent)] px-3 text-[var(--color-accent-fg)]",
               commitDisabled ? "cursor-not-allowed opacity-40" : "hover:brightness-110",
             )}
           >
@@ -548,7 +786,8 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
                 disabled={commitDisabled}
                 title="Commit options"
                 className={cn(
-                  "flex h-7 w-6 items-center justify-center rounded-r-md border-l border-black/15 bg-[var(--color-accent)] text-[var(--color-accent-fg)] transition-colors",
+                  FOOTER_BTN,
+                  "w-6 shrink-0 justify-center rounded-r-md border-l border-black/15 bg-[var(--color-accent)] text-[var(--color-accent-fg)]",
                   commitDisabled ? "cursor-not-allowed opacity-40" : "hover:brightness-110",
                 )}
               >
@@ -566,8 +805,10 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
               </DropdownItem>
             </DropdownMenu>
           </DropdownRoot>
+          </div>
         </div>
       </div>
+      )}
     </div>
   );
 }
@@ -581,10 +822,14 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff 
 // rebase) via task_git_update. Conflicts are surfaced as error toasts, not
 // swallowed - the op is left in progress for the user to resolve in the
 // terminal.
-function BranchBar({ task, branch, dir }: {
+function BranchBar({ task, branch, dir, right }: {
   task: Task;
   branch: string;
   dir: string;
+  /** Rendered on the right of the same row. The branch chip is one short
+   *  control on a full-width row, so the filter rides with it rather than
+   *  spending a row of its own in a panel that drags down to 220px. */
+  right?: React.ReactNode;
 }) {
   const pushToast = useUI(s => s.pushToast);
   const [branches, setBranches] = useState<string[] | null>(null);
@@ -670,7 +915,7 @@ function BranchBar({ task, branch, dir }: {
   };
 
   return (
-    <div className="flex h-8 shrink-0 items-center border-b border-[var(--color-border-soft)] px-2">
+    <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-[var(--color-border-soft)] px-2">
       {/* Load on OPEN, not on the trigger's onClick: Radix opens the menu on
           pointerdown and its modal layer sets pointer-events:none on the rest
           of the page before the mouse button is released, so with a REAL
@@ -751,6 +996,7 @@ function BranchBar({ task, branch, dir }: {
           )}
         </DropdownMenu>
       </DropdownRoot>
+      {right}
     </div>
   );
 }
@@ -773,6 +1019,9 @@ interface PaneProps {
   viewMode: ViewMode;
   collapsed: Set<string>;
   setCollapsed: React.Dispatch<React.SetStateAction<Set<string>>>;
+  /** The whole section is collapsed to its header (no file list). */
+  paneCollapsed: boolean;
+  onTogglePane: () => void;
   clickable: boolean;
   /** Currently selected row key (`${pane} ${path}`), or null. */
   selectedKey: string | null;
@@ -803,13 +1052,24 @@ interface PaneProps {
 }
 
 function Pane({
-  title, files, pane, viewMode, collapsed, setCollapsed, clickable, selectedKey, stageGlyph,
+  title, files, pane, viewMode, collapsed, setCollapsed, paneCollapsed, onTogglePane, clickable, selectedKey, stageGlyph,
   taskId, viewedCount = 0, headerAction, onRowClick, onToggle, onDiscard, rowActionIcon, root, repoDir, truncated, className, style,
 }: PaneProps) {
   return (
     <div className={cn("flex flex-col overflow-hidden", className)} style={style}>
-      <div className="flex h-7 shrink-0 items-center justify-between border-b border-[var(--color-border-soft)] bg-[var(--color-bg-1)] px-2.5">
-        <span className="flex items-center gap-1.5 text-[11.5px] font-medium uppercase tracking-[0.06em] text-[var(--color-fg-dim)]">
+      <div className="group flex h-7 shrink-0 items-center border-b border-[var(--color-border-soft)] bg-[var(--color-bg-1)] hover:bg-[var(--color-hover)]">
+        <button
+          type="button"
+          onClick={onTogglePane}
+          aria-expanded={!paneCollapsed}
+          data-testid="git-pane-header"
+          data-pane={pane}
+          data-collapsed={paneCollapsed}
+          className="flex h-full flex-1 items-center gap-1.5 pl-2.5 pr-1 text-[11.5px] font-medium uppercase tracking-[0.06em] text-[var(--color-fg-dim)] group-hover:text-[var(--color-fg)]"
+        >
+          {paneCollapsed
+            ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />
+            : <ChevronDown  className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />}
           {title}
           <span className="tabular-nums text-[var(--color-fg-faint)]">{files.length}</span>
           {viewedCount > 0 && (
@@ -818,42 +1078,46 @@ function Pane({
               <span className="tabular-nums">{viewedCount}/{files.length}</span>
             </span>
           )}
-        </span>
+        </button>
         {headerAction && (
           <button
             onClick={headerAction.onClick}
-            className="rounded px-1.5 py-0.5 text-[11.5px] text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]"
+            className="mr-2.5 shrink-0 rounded px-1.5 py-0.5 text-[11.5px] text-[var(--color-fg-dim)] hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)]"
           >
             {headerAction.label}
           </button>
         )}
       </div>
-      {truncated && (
+      {!paneCollapsed && truncated && (
         <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-2.5 py-1 text-[11px] text-[var(--color-fg-faint)]">
           File list capped at 5 000 entries. Add large dirs to .gitignore.
         </div>
       )}
-      <div className="min-h-0 flex-1 overflow-hidden">
-        {files.length === 0 ? (
-          <div className="px-3 py-1.5 text-[12px] text-[var(--color-fg-faint)]">
-            {pane === "unstaged" ? "Nothing to stage" : "Nothing staged"}
-          </div>
-        ) : (
-          <FileList
-            files={files} pane={pane} viewMode={viewMode}
-            collapsed={collapsed} setCollapsed={setCollapsed} clickable={clickable}
-            selectedKey={selectedKey} stageGlyph={stageGlyph} taskId={taskId}
-            onRowClick={onRowClick}
-            onToggle={onToggle} onDiscard={onDiscard} rowActionIcon={rowActionIcon}
-            root={root} repoDir={repoDir}
-          />
-        )}
-      </div>
+      {!paneCollapsed && (
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {files.length === 0 ? (
+            <div className="px-3 py-1.5 text-[12px] text-[var(--color-fg-faint)]">
+              {pane === "unstaged" ? "Nothing to stage" : "Nothing staged"}
+            </div>
+          ) : (
+            <FileList
+              files={files} pane={pane} viewMode={viewMode}
+              collapsed={collapsed} setCollapsed={setCollapsed} clickable={clickable}
+              selectedKey={selectedKey} stageGlyph={stageGlyph} taskId={taskId}
+              onRowClick={onRowClick}
+              onToggle={onToggle} onDiscard={onDiscard} rowActionIcon={rowActionIcon}
+              root={root} repoDir={repoDir}
+            />
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function FileList(props: Omit<PaneProps, "title" | "headerAction" | "className" | "style">) {
+type FileListProps = Omit<PaneProps, "title" | "headerAction" | "className" | "style" | "paneCollapsed" | "onTogglePane">;
+
+function FileList(props: FileListProps) {
   const { files, viewMode, collapsed, pane } = props;
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
@@ -893,7 +1157,7 @@ function FileList(props: Omit<PaneProps, "title" | "headerAction" | "className" 
   );
 }
 
-function rowProps(p: Omit<PaneProps, "title" | "headerAction" | "className" | "style">) {
+function rowProps(p: FileListProps) {
   return {
     pane: p.pane,
     selectedKey: p.selectedKey,
@@ -923,12 +1187,17 @@ function collectLeafPaths(node: TreeNode): string[] {
 
 // ── virtual-scroll flat rows ──
 
-type FlatRow =
+export type FlatRow =
   | { kind: "file"; file: GitFile; label: string; depth: number }
   | { kind: "dir"; name: string; dirPath: string; depth: number; leaves: string[]; isCollapsed: boolean }
   | { kind: "dirhdr"; label: string };
 
-function flattenRows(files: GitFile[], viewMode: ViewMode, collapsed: Set<string>, pane: string): FlatRow[] {
+/** Flatten a file list into rows for the active view mode. Exported because
+ *  Compare (GH #208) renders its OWN rows (churn columns, no stage
+ *  buttons) but must group and order them exactly like the Commit tab does —
+ *  two file lists in the same panel that disagreed about where a folder sits
+ *  would read as a bug. `pane` only namespaces the collapsed-folder keys. */
+export function flattenRows(files: GitFile[], viewMode: ViewMode, collapsed: Set<string>, pane: string): FlatRow[] {
   if (viewMode === "list") {
     return [...files]
       .sort((a, b) => a.path.localeCompare(b.path))
@@ -973,7 +1242,7 @@ function flattenRows(files: GitFile[], viewMode: ViewMode, collapsed: Set<string
   return rows;
 }
 
-function renderFlatRow(row: FlatRow, props: Omit<PaneProps, "title" | "headerAction" | "className" | "style">) {
+function renderFlatRow(row: FlatRow, props: FileListProps) {
   if (row.kind === "dirhdr") {
     return (
       <div key={`h:${row.label}`} className="truncate px-2.5 pb-0.5 pt-1.5 text-[11px] font-medium uppercase tracking-wider text-[var(--color-fg-dim)]">
@@ -1027,7 +1296,7 @@ function DirRow({ row, pane, setCollapsed, onToggle, onDiscard, rowActionIcon, s
       <ContextMenuTrigger asChild>
         <div
           onClick={toggle}
-          className="group flex h-[24px] w-full cursor-pointer items-center gap-1.5 px-2 pr-1 text-left text-[12.5px] text-[var(--color-fg)]/85 hover:bg-[var(--color-hover)]"
+          className="group flex h-[26px] w-full cursor-pointer items-center gap-1.5 px-2 pr-1 text-left text-[13px] text-[var(--color-fg)]/85 hover:bg-[var(--color-hover)]"
           style={{ paddingLeft: 6 + depth * 12 }}
         >
           <ChevronRight className={cn("h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)] transition-transform", !isCollapsed && "rotate-90")} />
@@ -1125,7 +1394,7 @@ function buildTree(files: GitFile[]): TreeNode {
   return root;
 }
 
-function TreeView(props: Omit<PaneProps, "title" | "headerAction" | "className" | "style">) {
+function TreeView(props: FileListProps) {
   const { files, pane, collapsed, setCollapsed, onToggle, onDiscard, rowActionIcon, stageGlyph, root, repoDir } = props;
   const tree = useMemo(() => buildTree(files), [files]);
   const DirActionIcon = rowActionIcon === "down" ? ArrowDown : ArrowUp;
@@ -1157,7 +1426,7 @@ function TreeView(props: Omit<PaneProps, "title" | "headerAction" | "className" 
             <ContextMenuTrigger asChild>
               <div
                 onClick={() => toggle(k.path)}
-                className="group flex h-[24px] w-full cursor-pointer items-center gap-1.5 px-2 pr-1 text-left text-[12.5px] text-[var(--color-fg)]/85 hover:bg-[var(--color-hover)]"
+                className="group flex h-[26px] w-full cursor-pointer items-center gap-1.5 px-2 pr-1 text-left text-[13px] text-[var(--color-fg)]/85 hover:bg-[var(--color-hover)]"
                 style={{ paddingLeft: 6 + depth * 12 }}
               >
                 <ChevronRight className={cn("h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)] transition-transform", !isCollapsed && "rotate-90")} />
@@ -1280,7 +1549,11 @@ function FileRow({ file, label, depth = 0, pane, selectedKey, stageGlyph, taskId
         style={{ background: COL[key] || "var(--color-fg-dim)" }}
       >{SC[key] || key}</span>
       <img src={fileIconUrl(label)} alt="" className={cn("h-4 w-4 shrink-0 file-icon", viewed && !selected && "opacity-50")} />
-      <span className={cn("truncate flex-1 font-mono text-[12px]", viewed && !selected && "text-[var(--color-fg-faint)] line-through decoration-[var(--color-fg-faint)]/40")}>{label}</span>
+      {/* Same face and size as the All files tree (13px, medium, not mono).
+          A changed file and the same file in the tree are the same object;
+          rendering one in monospace made them read as different kinds of
+          thing, and mono is wider, so long paths truncated sooner. */}
+      <span className={cn("truncate flex-1 font-medium", viewed && !selected && "text-[var(--color-fg-faint)] line-through decoration-[var(--color-fg-faint)]/40")}>{label}</span>
       {commentCount > 0 && (
         <Tip side="left" content={`${commentCount} inline ${commentCount === 1 ? "comment" : "comments"}`}>
           <span className="flex shrink-0 items-center gap-0.5 rounded bg-[var(--color-bg-3)] px-1 text-[10.5px] tabular-nums text-[var(--color-fg-dim)]">

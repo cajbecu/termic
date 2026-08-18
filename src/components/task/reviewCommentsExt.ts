@@ -179,10 +179,25 @@ const CARD_MARGIN = 28;
  * the next decoration rebuild, which is invisible and cannot desync anything.
  */
 function sizeToPane(el: HTMLElement, view: EditorView) {
-  const w = view.scrollDOM.clientWidth;
+  const scroller = view.scrollDOM.clientWidth;
   // Not laid out yet: leave it to fill the content column, as it always did.
-  if (!w) return;
-  el.style.width = `${Math.round(Math.max(Math.min(w - CARD_MARGIN, CARD_MIN_W), w * 0.5))}px`;
+  if (!scroller) return;
+  // The scroller holds the GUTTERS as well as the content, so its width is not
+  // the room a widget has. Sizing to it made the card wider than the content
+  // box by exactly the line-number column, which widened `.cm-content`, which
+  // gave the whole file a horizontal scrollbar it did not have before and
+  // pushed the code out from under its own gutter.
+  const gutters = view.dom.querySelector<HTMLElement>(".cm-gutters")?.offsetWidth ?? 0;
+  const avail = scroller - gutters;
+  if (avail <= 0) return;
+  // As wide as the content box allows, less the card's own margins. Half the
+  // pane was too mean: a quoted line, a comment and three buttons all had to
+  // fit in it. Floor at CARD_MIN_W only while that still fits.
+  el.style.width = `${Math.round(Math.max(avail - CARD_MARGIN, Math.min(CARD_MIN_W, avail)))}px`;
+  // Sticky parks the card against the left edge of the CONTENT, not of the
+  // scroller: `left: 0` would slide it under the gutters, which are sticky
+  // there themselves. See the `.tc-comment-card` rule for why sticky at all.
+  el.style.left = `${gutters}px`;
 }
 
 // lucide `send` — the same glyph the pending-comments bar puts on its Send
@@ -914,6 +929,16 @@ const baseTheme = EditorView.baseTheme({
     borderLeft: "2.5px solid var(--color-accent)",
     background: "var(--color-bg-2)",
     fontFamily: "system-ui, -apple-system, sans-serif",
+    // A widget is a child of `.cm-content`, which is as wide as the longest
+    // line. In a file that scrolls sideways the card would scroll away with
+    // it, so it sticks to the left edge of the viewport instead. Sticky costs
+    // nothing here: it does not change the box's HEIGHT, which is the only
+    // dimension CodeMirror's height map depends on (GH #157).
+    //
+    // `left` is NOT set here: it has to clear the gutters, whose width varies
+    // with the line count, so `sizeToPane` sets it per view alongside the
+    // width. Until then the card is unstuck, which is the harmless state.
+    position: "sticky",
   },
   ".tc-comment-composer": { background: "var(--color-bg-1)" },
   ".tc-comment-loc": {
@@ -979,8 +1004,26 @@ const baseTheme = EditorView.baseTheme({
     outline: "none",
   },
   ".tc-comment-textarea:focus": { borderColor: "var(--color-accent)" },
-  ".tc-comment-actions": { display: "flex", alignItems: "center", gap: "8px" },
-  ".tc-comment-hint": { fontSize: "11px", color: "var(--color-fg-faint)", marginRight: "auto" },
+  // Wraps rather than squeezes. The card is sized against the pane (half of
+  // it, floor 340px), so in a narrow right panel the hint plus three buttons
+  // do not fit on one line; without this the buttons shrank below their text
+  // and broke mid-word ("Canc el", "Sen d").
+  ".tc-comment-actions": {
+    display: "flex",
+    flexWrap: "wrap",
+    justifyContent: "flex-end",
+    alignItems: "center",
+    gap: "6px 8px",
+  },
+  // Takes the slack while there is any, and is the first thing to give: it is
+  // a reminder, and the buttons carry the actions.
+  ".tc-comment-hint": {
+    fontSize: "11px",
+    color: "var(--color-fg-faint)",
+    marginRight: "auto",
+    minWidth: "0",
+    flexShrink: "1",
+  },
   ".tc-btn": {
     padding: "4px 11px",
     borderRadius: "6px",
@@ -988,6 +1031,10 @@ const baseTheme = EditorView.baseTheme({
     fontWeight: "500",
     cursor: "pointer",
     border: "1px solid transparent",
+    // A button is its label. Never let flex shrink one narrower than the word
+    // it carries.
+    whiteSpace: "nowrap",
+    flexShrink: "0",
   },
   ".tc-btn-ghost": { background: "transparent", color: "var(--color-fg-dim)", borderColor: "var(--color-border)" },
   ".tc-btn-ghost:hover": { background: "var(--color-hover)", color: "var(--color-fg)" },

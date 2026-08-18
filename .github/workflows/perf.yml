@@ -11,7 +11,7 @@ name: Performance (nightly)
 # What DOES gate a PR lives in the normal test job: counts and static facts,
 # which are machine-independent (src/store/selectorFanout.test.ts is the worked
 # example). The full argument, including why Orca can gate its nightly and we
-# cannot, is in docs/research/perf-ci.md.
+# cannot, is in docs/perf-ci.md.
 #
 # So this job reports. It writes a step summary you can read without
 # downloading anything, and uploads the JSON so a series can be assembled
@@ -75,11 +75,16 @@ jobs:
           TERMIC_PERF_GREP: ${{ inputs.grep }}
         run: |
           set -euo pipefail
-          args=()
+          # Two branches rather than building an argv array. macOS runners ship
+          # bash 3.2, where `"${arr[@]}"` on an EMPTY array is an UNSET
+          # expansion, so `set -u` killed the step before it ran a single spec.
+          # Every scheduled run failed that way from the day this landed, while
+          # a manual run WITH a grep passed, which is why it went unnoticed.
           if [ -n "${TERMIC_PERF_GREP:-}" ]; then
-            args+=(--mochaOpts.grep "$TERMIC_PERF_GREP")
+            npm run test:perf -- --mochaOpts.grep "$TERMIC_PERF_GREP"
+          else
+            npm run test:perf
           fi
-          npm run test:perf -- "${args[@]}"
 
       - name: Upload perf report
         # always(): a partial report from a run that lost one spec is still a
@@ -92,3 +97,8 @@ jobs:
           path: .perf/
           retention-days: 90
           if-no-files-found: warn
+          # `.perf/` is a DOT directory and upload-artifact treats hidden paths
+          # as excluded, so the step uploaded nothing while the suite happily
+          # reported "wrote 10 rows" beside it. `if-no-files-found: warn` is a
+          # warning nobody reads on a green job.
+          include-hidden-files: true

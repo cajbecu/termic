@@ -1,6 +1,13 @@
-// Right panel: tab between All Files (filesystem list) and Git (Fork-style
-// staging). Click a file → opens an Editor tab in the main area. Click a
-// change → diff tab.
+// Right panel: tabs for All files (filesystem list) and Git (Fork-style
+// staging of the working tree, with the commit graph as a collapsible Graph
+// section at its foot). Click a file → opens an Editor tab in the main area.
+// Click a change, or a file inside a commit → diff tab.
+//
+// History was its own third tab when #199 landed it. It is inside this one now
+// (GH #208): the graph and the working tree answer halves of one question,
+// "what is in this branch", and a tab switch made comparing them impossible.
+// The tab was renamed "Commit" by #199 because two git surfaces made "Git"
+// ambiguous; folding them back together makes "Git" right again.
 
 import React, { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
@@ -54,6 +61,23 @@ export function RightPanel() {
   // A reveal-in-tree request (editor breadcrumb / locate button) forces the
   // "All files" view so the tree is on screen for FileTree to expand/scroll.
   const revealFile = useApp(s => s.revealFile);
+  // "Show this commit in History" from the editor's blame popup. Same shape as
+  // revealFile above: force the tab that can honour it, and un-hide the panel,
+  // because revealing into a collapsed panel reads as a dead button.
+  const commitReveal = useUI(s => s.commitReveal);
+  // Which request has already been acted on. `task?.id` is a dependency below
+  // (the panel has to know whose commit it is), so without this the effect
+  // re-runs on every task switch and re-applies an old request, which pinned
+  // the panel to the Git tab for the rest of the session.
+  const seenRevealAt = useRef(0);
+  useEffect(() => {
+    if (!commitReveal || !task || commitReveal.taskId !== task.id) return;
+    if (commitReveal.at === seenRevealAt.current) return;
+    seenRevealAt.current = commitReveal.at;
+    setView("changes");
+    if (useApp.getState().rightPanelHidden) useApp.getState().toggleRightPanel();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [commitReveal, task?.id]);
   useEffect(() => {
     if (revealFile && task && revealFile.taskId === task.id) setView("files");
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -499,6 +523,15 @@ export function RightPanel() {
             task={task}
             status={gitStatus}
             refresh={refreshGit}
+            // Same signals the Git status poll rides: the manual refresh, an
+            // agent settling, and the lighter git-only tick a commit bumps.
+            reloadToken={fileTreeReload + fsRevision + gitRevision}
+            onOpenCommitDiff={(path, sha, title) =>
+              useApp.getState().openPreviewTab(task.id, { type: "diff", path, scope: `commit:${sha}`, title })}
+            // `base:` not `commit:`: the compare diff's right side is the live
+            // file, which is what keeps mark-as-viewed and inline comments on.
+            onOpenCompareDiff={(path, sha, title) =>
+              useApp.getState().openPreviewTab(task.id, { type: "diff", path, scope: `base:${sha}`, title })}
             onOpenDiff={(path, pane) => useApp.getState().openPreviewTab(task.id, { type: "diff", path, scope: pane, title: `Δ ${path.split("/").pop()}` })}
             onDoubleClickDiff={(path) => {
               const currentTabs = useApp.getState().tabs[task.id] || [];

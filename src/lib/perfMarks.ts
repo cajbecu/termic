@@ -1,5 +1,5 @@
 // Startup timing marks, read by the nightly perf job (perf/specs/startup.perf.ts)
-// and by `make perf`. See docs/research/perf-ci.md for why this exists and what
+// and by `make perf`. See docs/perf-ci.md for why this exists and what
 // it is allowed to claim.
 //
 // TWO numbers, because they answer different questions and only one of them is

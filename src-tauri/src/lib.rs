@@ -436,12 +436,6 @@ pub struct PersistedTab {
     /// clobbers a freshly minted session.
     #[serde(default)]
     pub session_id: Option<String>,
-    /// The uuid a resume attempt just failed on, stashed here instead of
-    /// discarded so the user can one-click recover it. A transient
-    /// `--resume` fast-exit would otherwise lose the conversation for good
-    /// even though its transcript still exists on disk.
-    #[serde(default)]
-    pub previous_session_id: Option<String>,
     /// Leaf ID of the split pane this tab belongs to (None for main panel tabs).
     #[serde(default)]
     pub pane_leaf_id: Option<String>,
@@ -449,6 +443,10 @@ pub struct PersistedTab {
     /// the run script ("" = host project). Restores the RunPane in its pane.
     #[serde(default)]
     pub run_member: Option<String>,
+    /// Pinned tabs sort before the others in their strip. Persisted so a
+    /// pinned tab comes back pinned and leftmost.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 /// Frontend payload for `task_set_tabs`. `session_id` is only honored
@@ -471,11 +469,11 @@ pub struct PersistedTabInput {
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]
-    pub previous_session_id: Option<String>,
-    #[serde(default)]
     pub pane_leaf_id: Option<String>,
     #[serde(default)]
     pub run_member: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 impl Task {
@@ -592,6 +590,13 @@ pub struct CreateTaskArgs {
     /// is unvalidated by design; the agent owns "session not found".
     #[serde(default)]
     pub resume_session_id: Option<String>,
+    /// Resume-args override, set at create so the FIRST spawn already
+    /// carries it. Identical storage and semantics to
+    /// `task_set_resume_override` (Task.resume_override): the string
+    /// replaces termic's default resume block, placeholders expanded per
+    /// launch. Empty / unset → default resume logic.
+    #[serde(default)]
+    pub resume_override: Option<String>,
 }
 
 // ───────────────────────────── paths ─────────────────────────────
@@ -704,7 +709,12 @@ fn check_tasks_root(root: &Path, repo: &Path) -> Result<(), String> {
 /// "not tracked".
 fn git_tracks_path(repo: &Path, path: &Path) -> bool {
     let arg = path.to_string_lossy().into_owned();
-    git(&["ls-files", "--", &arg], repo).map(|o| !o.trim().is_empty()).unwrap_or(false)
+    // `--no-optional-locks`: this runs on the blame path (a background read on a
+    // cursor move) as well as on task creation, and neither should be able to
+    // hold `index.lock` against the user's own git.
+    git(&["--no-optional-locks", "ls-files", "--", &arg], repo)
+        .map(|o| !o.trim().is_empty())
+        .unwrap_or(false)
 }
 
 /// Does this tasks path name a fixed place on disk (`/…`, `~`, `~/…`), as
@@ -796,6 +806,58 @@ fn project_tasks_root(default_path: &str, p: &Project) -> Result<PathBuf, String
     let root = project_tasks_root_with(default_path, p);
     check_tasks_root(&root, Path::new(&p.root_path))?;
     Ok(root)
+}
+
+/// Crash-safe replacement of a file: write a sibling temp file, sync it, then
+/// atomically `rename()` it over the destination, so a reader never sees a
+/// partial file. The parent dir is deliberately not fsynced: a hard power cut
+/// can lose the last write, but the file always reads as an intact version.
+pub(crate) fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    // Resolve symlinks: rename would replace the link itself with a regular
+    // file; we must write through to its target. canonicalize fails on a
+    // DANGLING link (dotfiles target not created yet), so follow links by
+    // hand in that case rather than clobbering the link.
+    let resolved = fs::canonicalize(dest).unwrap_or_else(|_| {
+        let mut cur = dest.to_path_buf();
+        for _ in 0..8 {
+            match fs::read_link(&cur) {
+                Ok(t) if t.is_absolute() => cur = t,
+                Ok(t) => cur = cur.parent().unwrap_or_else(|| Path::new(".")).join(t),
+                Err(_) => break,
+            }
+        }
+        cur
+    });
+    let dest = resolved.as_path();
+    let dir = dest.parent().unwrap_or_else(|| Path::new("."));
+    let stem = dest.file_name().and_then(|n| n.to_str()).unwrap_or("out");
+    let tmp = dir.join(format!(
+        ".{stem}.tmp.{}.{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed),
+    ));
+    let write = || -> std::io::Result<()> {
+        let mut f = fs::File::create(&tmp)?;
+        // A fresh temp inode gets default perms; carry the old mode so a
+        // tightened (e.g. chmod 600) file stays tightened. Log, don't fail:
+        // some mounts (FUSE/SMB) reject chmod but the write itself is fine.
+        if let Ok(meta) = fs::metadata(dest) {
+            if let Err(e) = f.set_permissions(meta.permissions()) {
+                eprintln!("[write_atomic] could not carry mode onto {}: {e}", dest.display());
+            }
+        }
+        f.write_all(bytes)?;
+        // Bytes must be durable before the rename is visible.
+        f.sync_data()?;
+        drop(f);
+        fs::rename(&tmp, dest)
+    };
+    let res = write();
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    res
 }
 
 // ───────────────────────────── projects IO ─────────────────────────────
@@ -966,7 +1028,8 @@ fn normalize_member(mut m: ProjectMember) -> Result<ProjectMember, String> {
     Ok(m)
 }
 fn save_projects(list: &[Project]) -> Result<()> {
-    fs::write(projects_file()?, serde_json::to_string_pretty(list)?)?;
+    let json = serde_json::to_string_pretty(list)?;
+    write_atomic(&projects_file()?, json.as_bytes())?;
     Ok(())
 }
 
@@ -978,7 +1041,10 @@ fn load_tasks() -> Vec<Task> {
     let mut out = Vec::new();
     if let Ok(rd) = fs::read_dir(&dir) {
         for entry in rd.flatten() {
-            if let Ok(s) = fs::read_to_string(entry.path()) {
+            let path = entry.path();
+            // Only real task records: skip write_atomic staging files, .DS_Store, etc.
+            if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+            if let Ok(s) = fs::read_to_string(&path) {
                 if let Ok(w) = serde_json::from_str::<Task>(&s) {
                     out.push(w);
                 }
@@ -1165,7 +1231,8 @@ fn sort_tasks(list: &mut [Task]) {
 }
 fn save_task(w: &Task) -> Result<()> {
     let f = tasks_dir()?.join(format!("{}.json", w.id));
-    fs::write(&f, serde_json::to_string_pretty(w)?)?;
+    let json = serde_json::to_string_pretty(w)?;
+    write_atomic(&f, json.as_bytes())?;
     Ok(())
 }
 fn delete_task_file(id: &str) -> Result<()> {
@@ -1302,7 +1369,8 @@ fn ensure_git_excluded(repo: &Path, name: &str) {
     }
     body.push_str(name);
     body.push('\n');
-    let _ = fs::write(&exclude, body);
+    // Atomic: a torn rewrite here would eat the user's own exclude entries.
+    let _ = write_atomic(&exclude, body.as_bytes());
 }
 
 /// Write `schema_version = TASKS_SCHEMA_VERSION` into settings.json directly
@@ -1311,11 +1379,7 @@ fn ensure_git_excluded(repo: &Path, name: &str) {
 fn stamp_schema_version() {
     let mut s = settings_load();
     s.schema_version = TASKS_SCHEMA_VERSION;
-    if let Ok(f) = settings_file() {
-        if let Ok(txt) = serde_json::to_string_pretty(&s) {
-            let _ = fs::write(f, txt);
-        }
-    }
+    let _ = save_settings_inner(&s);
 }
 
 /// One-time flip of `cli_enabled` to true for profiles that predate the CLI
@@ -3192,6 +3256,15 @@ fn seeded_session_ids(
     ids
 }
 
+/// Normalize a create-time resume-args override the same way
+/// `task_set_resume_override` does: trimmed, and empty means "no override"
+/// rather than "override with nothing" (which would strip the resume block
+/// entirely). Kept as one function so the create paths and the edit command
+/// can't disagree about what blank means.
+fn normalized_resume_override(raw: Option<String>) -> Option<String> {
+    raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 /// Open the project's main repo checkout as a task (no git worktree).
 /// NOT idempotent: several repo-root sessions may share one checkout, so
 /// every call seeds a new task pointing at `project.root_path`. A
@@ -3214,6 +3287,7 @@ fn task_open_repo(
     sandbox_rw_paths: Option<Vec<String>>,
     sandbox_allowed_hosts: Option<Vec<String>>,
     resume_session_id: Option<String>,
+    resume_override: Option<String>,
 ) -> Result<Task, String> {
     let proj = load_projects().into_iter().find(|p| p.id == project_id)
         .ok_or("project not found")?;
@@ -3396,7 +3470,7 @@ fn task_open_repo(
         extra_named_ports,
         port_block_len,
         custom_command,
-        resume_override: None,
+        resume_override: normalized_resume_override(resume_override),
         persisted_tabs: Vec::new(),
         right_split_tabs: Vec::new(),
                 split_layout: None,
@@ -3498,6 +3572,7 @@ fn task_import_worktree(
     sandbox_rw_paths: Option<Vec<String>>,
     sandbox_allowed_hosts: Option<Vec<String>>,
     resume_session_id: Option<String>,
+    resume_override: Option<String>,
     yolo: Option<bool>,
 ) -> Result<Task, String> {
     let proj = load_projects().into_iter().find(|p| p.id == project_id)
@@ -3611,7 +3686,7 @@ fn task_import_worktree(
         extra_named_ports,
         port_block_len,
         custom_command: None,
-        resume_override: None,
+        resume_override: normalized_resume_override(resume_override),
         persisted_tabs: Vec::new(),
         right_split_tabs: Vec::new(),
                 split_layout: None,
@@ -3908,7 +3983,7 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
         // Set only for `cli == "custom"` worktree tasks (quick "Custom
         // command" in worktree mode); None for agent / shell worktrees.
         custom_command,
-        resume_override: None,
+        resume_override: normalized_resume_override(args.resume_override.clone()),
         persisted_tabs: Vec::new(),
         right_split_tabs: Vec::new(),
                 split_layout: None,
@@ -3956,6 +4031,10 @@ pub struct CreateMultiArgs {
     pub sandbox_rw_paths: Option<Vec<String>>,
     #[serde(default)]
     pub sandbox_allowed_hosts: Option<Vec<String>>,
+    /// Resume-args override for the host task, set at create so the first
+    /// spawn already carries it. Same storage as `task_set_resume_override`.
+    #[serde(default)]
+    pub resume_override: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -4293,7 +4372,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         extra_named_ports,
         port_block_len,
         custom_command: None,
-        resume_override: None,
+        resume_override: normalized_resume_override(args.resume_override.clone()),
         persisted_tabs: Vec::new(),
         right_split_tabs: Vec::new(),
                 split_layout: None,
@@ -4461,7 +4540,8 @@ fn ensure_multirepo_gitignore(wrapper: &Path, member_dirs: &[String]) -> std::io
         next.push('\n');
     }
     next.push_str(END); next.push('\n');
-    fs::write(&path, next)
+    // Atomic: the file carries the user's own rules outside the managed block.
+    write_atomic(&path, next.as_bytes())
 }
 
 /// Persist the sidebar order of ONE project's tasks. `ids` is that
@@ -4589,23 +4669,22 @@ fn task_set_resume_override(id: String, command: String) -> Result<Task, String>
 fn task_set_tabs(id: String, tabs: Vec<PersistedTabInput>) -> Result<(), String> {
     let mut list = load_tasks();
     let w = list.iter_mut().find(|w| w.id == id).ok_or("no such task")?;
-    // Carry forward each surviving tab's session uuids by id (both the live
-    // uuid and the stashed previous one, owned by the dedicated commands).
-    let prior: std::collections::HashMap<String, (Option<String>, Option<String>)> = w
+    // Carry forward each surviving tab's session uuid by id (owned by
+    // task_set_tab_session_id, not by this payload).
+    let prior: std::collections::HashMap<String, Option<String>> = w
         .persisted_tabs
         .iter()
-        .map(|t| (t.id.clone(), (t.session_id.clone(), t.previous_session_id.clone())))
+        .map(|t| (t.id.clone(), t.session_id.clone()))
         .collect();
     let next: Vec<PersistedTab> = tabs
         .into_iter()
         .map(|t| {
-            let p = prior.get(&t.id).cloned().unwrap_or((None, None));
+            let p = prior.get(&t.id).cloned().flatten();
             PersistedTab {
                 // Stored uuid wins; only fall back to the payload's session_id
                 // for a tab we've never seen (migrating a legacy per-cli uuid
                 // onto the default tab on its first persist).
-                session_id: p.0.or(t.session_id),
-                previous_session_id: p.1.or(t.previous_session_id),
+                session_id: p.or(t.session_id),
                 id: t.id,
                 cli: t.cli,
                 title: t.title,
@@ -4614,6 +4693,7 @@ fn task_set_tabs(id: String, tabs: Vec<PersistedTabInput>) -> Result<(), String>
                 command: t.command,
                 pane_leaf_id: t.pane_leaf_id,
                 run_member: t.run_member,
+                pinned: t.pinned,
             }
         })
         .collect();
@@ -4629,9 +4709,9 @@ fn task_set_tabs(id: String, tabs: Vec<PersistedTabInput>) -> Result<(), String>
                 && a.is_default == b.is_default
                 && a.command == b.command
                 && a.session_id == b.session_id
-                && a.previous_session_id == b.previous_session_id
                 && a.pane_leaf_id == b.pane_leaf_id
                 && a.run_member == b.run_member
+                && a.pinned == b.pinned
         });
     if same {
         return Ok(());
@@ -4667,27 +4747,6 @@ fn task_set_tab_session_id(id: String, tab_id: String, uuid: String) -> Result<(
     Ok(())
 }
 
-/// Stash (or clear) the session uuid a resume attempt just failed on, so a
-/// transient `--resume` fast-exit is recoverable instead of permanently
-/// lost. Mirrors `task_set_tab_session_id`; an empty uuid clears the slot
-/// (the user dismissed the offer, or the recover succeeded).
-#[tauri::command]
-fn task_set_tab_previous_session_id(id: String, tab_id: String, uuid: String) -> Result<(), String> {
-    let mut list = load_tasks();
-    let w = list.iter_mut().find(|w| w.id == id).ok_or("no such task")?;
-    let tab = match w.persisted_tabs.iter_mut().find(|t| t.id == tab_id) {
-        Some(t) => t,
-        None => return Ok(()),
-    };
-    let next = if uuid.is_empty() { None } else { Some(uuid) };
-    if tab.previous_session_id == next {
-        return Ok(());
-    }
-    tab.previous_session_id = next;
-    save_task(w).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 /// Persist the JSON-encoded SplitTree for a task so the split layout
 /// can be restored on the next relaunch. Pass `None` to clear (no splits).
 #[tauri::command]
@@ -4709,18 +4768,17 @@ fn task_set_split_layout(id: String, layout: Option<String>) -> Result<(), Strin
 fn task_set_right_tabs(id: String, tabs: Vec<PersistedTabInput>) -> Result<(), String> {
     let mut list = load_tasks();
     let w = list.iter_mut().find(|w| w.id == id).ok_or("no such task")?;
-    let prior: std::collections::HashMap<String, (Option<String>, Option<String>)> = w
+    let prior: std::collections::HashMap<String, Option<String>> = w
         .right_split_tabs
         .iter()
-        .map(|t| (t.id.clone(), (t.session_id.clone(), t.previous_session_id.clone())))
+        .map(|t| (t.id.clone(), t.session_id.clone()))
         .collect();
     let next: Vec<PersistedTab> = tabs
         .into_iter()
         .map(|t| {
-            let p = prior.get(&t.id).cloned().unwrap_or((None, None));
+            let p = prior.get(&t.id).cloned().flatten();
             PersistedTab {
-                session_id: p.0.or(t.session_id),
-                previous_session_id: p.1.or(t.previous_session_id),
+                session_id: p.or(t.session_id),
                 id: t.id,
                 cli: t.cli,
                 title: t.title,
@@ -4729,6 +4787,7 @@ fn task_set_right_tabs(id: String, tabs: Vec<PersistedTabInput>) -> Result<(), S
                 command: t.command,
                 pane_leaf_id: None,
                 run_member: None,
+                pinned: t.pinned,
             }
         })
         .collect();
@@ -4741,7 +4800,6 @@ fn task_set_right_tabs(id: String, tabs: Vec<PersistedTabInput>) -> Result<(), S
                 && a.is_default == b.is_default
                 && a.command == b.command
                 && a.session_id == b.session_id
-                && a.previous_session_id == b.previous_session_id
         });
     if same {
         return Ok(());
@@ -4945,9 +5003,7 @@ fn agent_sandbox_add_allowed_path(agent_id: String, path: String) -> Result<(), 
     if !a.sandbox_allowed_paths.iter().any(|p| p == &stored) {
         a.sandbox_allowed_paths.push(stored);
     }
-    let f = settings_file().map_err(|e| e.to_string())?;
-    fs::write(f, serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    Ok(())
+    save_settings_inner(&s)
 }
 
 #[tauri::command]
@@ -4959,9 +5015,7 @@ fn agent_sandbox_add_allowed_host(agent_id: String, host: String) -> Result<(), 
     if !a.sandbox_allowed_hosts.iter().any(|h| h == &host) {
         a.sandbox_allowed_hosts.push(host);
     }
-    let f = settings_file().map_err(|e| e.to_string())?;
-    fs::write(f, serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    Ok(())
+    save_settings_inner(&s)
 }
 
 /// Append a host to the task's `sandbox_allowed_hosts` list and
@@ -6412,7 +6466,7 @@ fn task_changes(id: String) -> Result<TaskChanges, String> {
 // the repo's own cwd. The frontend re-prefixes with `dir_name` only when
 // it opens a member diff.
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct GitFile {
     /// Single-character status for this side: index status for staged
     /// entries (M/A/D/R/C), worktree status for unstaged (M/D), or "?"
@@ -6425,6 +6479,14 @@ pub struct GitFile {
     /// mark once the agent touches the file again (the fingerprint moves).
     #[serde(default)]
     pub fp: String,
+    /// Lines added / removed for this path. Only Compare (GH #208) fills these
+    /// in (`--numstat` over the whole range); the staging lists leave them
+    /// unset rather than paying for a second git process per status poll.
+    /// `None` also covers a binary file, which numstat reports as `-`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub added: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removed: Option<u32>,
 }
 
 /// Cheap working-tree fingerprint for change detection: modification time
@@ -6469,6 +6531,23 @@ pub struct GitRepo {
     /// than shown. Typical cause: large untracked dirs (e.g. node_modules)
     /// not in .gitignore.
     pub truncated: bool,
+    /// Commits on this branch that its upstream does not have, i.e. what a
+    /// push would send. 0 when there is no upstream, because "everything is
+    /// unpushed" is not a number worth badging: the Push button offers to
+    /// create the upstream instead.
+    pub ahead: usize,
+}
+
+/// `git rev-list --count @{upstream}..HEAD`, or 0 when the branch has no
+/// upstream or no commits. Cheap: a count, not a walk the caller sees.
+fn ahead_count(cwd: &Path) -> usize {
+    if git(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], cwd).is_err() {
+        return 0;
+    }
+    git(&["rev-list", "--count", "@{upstream}..HEAD"], cwd)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 #[derive(Clone, Debug, Serialize, Default)]
@@ -6497,16 +6576,16 @@ fn parse_porcelain_line(line: &str) -> (Option<GitFile>, Option<GitFile>) {
 
     // Untracked: both columns are "?". Treat as a single unstaged add.
     if x == "?" {
-        return (None, Some(GitFile { status: "?".into(), path, fp: String::new() }));
+        return (None, Some(GitFile { status: "?".into(), path, ..Default::default() }));
     }
 
     let staged = if x != " " {
-        Some(GitFile { status: x.into(), path: path.clone(), fp: String::new() })
+        Some(GitFile { status: x.into(), path: path.clone(), ..Default::default() })
     } else {
         None
     };
     let unstaged = if y != " " {
-        Some(GitFile { status: y.into(), path, fp: String::new() })
+        Some(GitFile { status: y.into(), path, ..Default::default() })
     } else {
         None
     };
@@ -6554,6 +6633,7 @@ async fn task_git_status(id: String) -> Result<GitStatus, String> {
                 last_commit_message: last_msg(p),
                 staged, unstaged,
                 truncated,
+                ahead: ahead_count(p),
             }
         };
 
@@ -6927,6 +7007,936 @@ async fn task_git_update_info(id: String, dir_name: String) -> Result<UpdateInfo
     .map_err(|e| e.to_string())?
 }
 
+// ───────────────────────── git graph (issue #199) ─────────────────────────
+//
+// Committed history for the right panel's Graph tab. Agents commit a lot and
+// those commits vanished from the UI the moment the working tree went clean —
+// this is where they come back.
+//
+// One `git log` per page. Fields are separated by US (0x1f) and records by RS
+// (0x1e) rather than newlines, because a commit subject can contain anything
+// except a newline but a REF NAME can't contain either, and %D expands to a
+// comma-list whose length we can't predict.
+
+/// One row of the graph: enough to lay out lanes (`parents`) and draw the row.
+#[derive(Clone, Debug, Serialize)]
+pub struct GitCommit {
+    pub sha: String,
+    /// 7+ char abbreviation git itself chose (unambiguous in this repo).
+    pub short: String,
+    /// Parent shas, FIRST PARENT FIRST. Lane layout depends on that order.
+    pub parents: Vec<String>,
+    pub subject: String,
+    pub author: String,
+    pub email: String,
+    /// Author date, unix seconds. Formatted in the frontend so it follows the
+    /// user's locale and can re-render as "3 minutes ago" without a refetch.
+    pub timestamp: i64,
+    /// Decorations as git prints them, already split: "HEAD -> main",
+    /// "origin/main", "tag: v1.2.0", …
+    pub refs: Vec<String>,
+    /// This commit is not reachable from the branch's upstream, i.e. it is
+    /// still local-only. Drives the "unpushed" marker (VS Code calls these
+    /// outgoing changes). Always false when the branch has no upstream.
+    pub unpushed: bool,
+    /// Message below the subject, trailers included, exactly as committed.
+    /// Empty for a one-line commit. Feeds the row's hover card; the frontend
+    /// pulls `Co-authored-by:` out of it rather than git doing it here, so the
+    /// raw message stays the thing that crossed the wire.
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct GitLogPage {
+    pub commits: Vec<GitCommit>,
+    /// Another page exists below this one (asked for limit+1, got it).
+    pub has_more: bool,
+    /// Branch the log was taken on, "" on a detached HEAD or unborn branch.
+    pub branch: String,
+    /// Upstream ref (`origin/feature-x`), "" when the branch has none. When
+    /// empty the frontend hides the unpushed markers entirely rather than
+    /// claiming every commit is outgoing.
+    pub upstream: String,
+}
+
+/// %H sha, %h short, %P parents, %an author, %ae email, %at date, %D refs,
+/// %s subject, %b body. RS-terminated so a record is unambiguous, which is what
+/// lets the body carry newlines and still be one field.
+///
+/// Shared by the history page and by `task_git_commit_meta`'s single-commit
+/// read, so the blame popup and the History row cannot describe one commit
+/// differently.
+const GIT_LOG_FORMAT: &str = "--pretty=format:%H\u{1f}%h\u{1f}%P\u{1f}%an\u{1f}%ae\u{1f}%at\u{1f}%D\u{1f}%s\u{1f}%b\u{1e}";
+
+/// Parse `git log`'s US/RS-delimited output into commits. Split out from the
+/// command so it can be tested without a repo.
+fn parse_git_log(out: &str, unpushed: &std::collections::HashSet<String>) -> Vec<GitCommit> {
+    let mut commits = Vec::new();
+    for rec in out.split('\u{1e}') {
+        let rec = rec.trim_start_matches('\n');
+        if rec.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = rec.split('\u{1f}').collect();
+        if f.len() < 7 {
+            continue;
+        }
+        let sha = f[0].to_string();
+        commits.push(GitCommit {
+            unpushed: unpushed.contains(&sha),
+            short: f[1].to_string(),
+            parents: f[2].split_whitespace().map(str::to_string).collect(),
+            author: f[3].to_string(),
+            email: f[4].to_string(),
+            timestamp: f[5].trim().parse().unwrap_or(0),
+            // "HEAD -> main, origin/main, tag: v1" → ["HEAD -> main", …].
+            refs: f[6]
+                .split(", ")
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect(),
+            subject: f.get(7).copied().unwrap_or_default().to_string(),
+            // Trailing blank lines are git's, not the author's.
+            body: f.get(8).copied().unwrap_or_default().trim_end().to_string(),
+            sha,
+        });
+    }
+    commits
+}
+
+/// One selectable ref for the History tab's scope picker.
+#[derive(Debug, Clone, Serialize)]
+pub struct GitRef {
+    /// Short name as the user knows it: `main`, `origin/main`, `v1.2.0`.
+    pub name: String,
+    /// Abbreviated sha it points at, shown beside the name.
+    pub sha: String,
+    /// "branch" | "remote" | "tag", so the picker can group and icon them.
+    pub kind: String,
+}
+
+/// Every ref the History scope picker may offer, which is also the ALLOWLIST
+/// the log validates against. Nothing else may reach a `git log` argv: a
+/// caller-supplied revision string is otherwise one `--upload-pack=…` away
+/// from being a flag, and rejecting anything not enumerated here is the only
+/// check that cannot be out-thought by a clever ref name.
+fn git_refs(cwd: &Path) -> Vec<GitRef> {
+    // %(refname:short) is the name a user types; %(objectname:short) the sha
+    // shown beside it. Sorted so the freshest branch is first, which is almost
+    // always the one being looked for.
+    let out = git(
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)\u{1f}%(objectname:short)\u{1f}%(refname)",
+            "refs/heads",
+            "refs/remotes",
+            "refs/tags",
+        ],
+        cwd,
+    )
+    .unwrap_or_default();
+
+    out.lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\u{1f}');
+            let name = parts.next()?.trim();
+            let sha = parts.next()?.trim();
+            let full = parts.next()?.trim();
+            if name.is_empty() || sha.is_empty() {
+                return None;
+            }
+            // `origin/HEAD` is a symbolic alias for another entry in this same
+            // list. Offering it would let the user pick the same history twice
+            // under two names.
+            if name.ends_with("/HEAD") {
+                return None;
+            }
+            let kind = if full.starts_with("refs/heads/") {
+                "branch"
+            } else if full.starts_with("refs/remotes/") {
+                "remote"
+            } else {
+                "tag"
+            };
+            Some(GitRef { name: name.to_string(), sha: sha.to_string(), kind: kind.to_string() })
+        })
+        .collect()
+}
+
+#[tauri::command]
+async fn task_git_refs(id: String, dir_name: String) -> Result<Vec<GitRef>, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<GitRef>, String> {
+        let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        let cwd = repo_cwd(&w, &dir_name)?;
+        Ok(git_refs(&cwd))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Keep only refs that actually exist in `cwd`, preserving the caller's order
+/// and dropping duplicates. An allowlist, deliberately: see `git_refs`.
+fn allowed_refs(cwd: &Path, requested: &[String]) -> Vec<String> {
+    let known: std::collections::HashSet<String> =
+        git_refs(cwd).into_iter().map(|r| r.name).collect();
+    let mut seen = std::collections::HashSet::new();
+    requested
+        .iter()
+        .map(|r| r.trim().to_string())
+        .filter(|r| known.contains(r) && seen.insert(r.clone()))
+        .collect()
+}
+
+/// A page of committed history for the History tab.
+///
+/// Scope, in precedence order: `all_branches` is `--all` (every ref in the
+/// repo, siblings included); otherwise `refs` names the ones to walk, which is
+/// the picker's multi-select; otherwise the default is HEAD alone, the "what
+/// did the agent just do?" question the tab was built for.
+///
+/// Ordered `--topo-order` so a branch reads as one contiguous run of rows
+/// instead of being interleaved by commit date.
+fn git_log_page(
+    cwd: &Path,
+    skip: usize,
+    limit: usize,
+    all_branches: bool,
+    first_parent: bool,
+    grep: &str,
+    refs: &[String],
+) -> GitLogPage {
+    // Bounded: a page is a screenful-ish, and an unbounded limit from a buggy
+    // caller would walk a 200k-commit repo on the UI's behalf.
+    let limit = limit.clamp(1, 1_000);
+
+    let branch = git(&["branch", "--show-current"], cwd)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let upstream = git(
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        cwd,
+    )
+    .map(|s| s.trim().to_string())
+    .unwrap_or_default();
+    // Local-only commits, for the outgoing markers. Cheap (rev-list of the
+    // ahead range) and skipped entirely without an upstream.
+    let unpushed: std::collections::HashSet<String> = if upstream.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        git(&["rev-list", &format!("{upstream}..HEAD")], cwd)
+            .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+            .unwrap_or_default()
+    };
+
+    const FORMAT: &str = GIT_LOG_FORMAT;
+    // One extra row tells us whether a next page exists without a second
+    // walk; it is dropped before returning.
+    let max = (limit + 1).to_string();
+    let skip_s = skip.to_string();
+    let mut args: Vec<&str> = vec![
+        "--no-pager", "log", "--topo-order", FORMAT,
+        "--max-count", &max, "--skip", &skip_s,
+    ];
+    // "What landed on this branch, in order": follow only the first parent of
+    // every merge, so a merged side branch collapses into the merge commit
+    // that brought it in instead of opening a lane of its own. Every commit
+    // git reports is still a genuine ancestor either way; this only chooses
+    // how much of the topology to walk. Ignored under --all, where the point
+    // is to see every tip.
+    if first_parent && !all_branches {
+        args.push("--first-parent");
+    }
+    // Message search, done by git rather than by filtering the page already on
+    // screen: "does this branch have a commit about X" is a question about the
+    // history, and answering it from the loaded rows would make it a question
+    // about how far the user had scrolled.
+    //
+    // FIXED-STRINGS, not a regex: this is a filter box, so `[` or `*` in it is
+    // a character someone typed, not a pattern, and a half-typed regex must
+    // not turn into an error toast mid-keystroke. The query cannot reach argv
+    // as a flag either, being glued to `--grep=` in one element.
+    let grep_arg;
+    if !grep.trim().is_empty() {
+        grep_arg = format!("--grep={}", grep.trim());
+        args.push("--regexp-ignore-case");
+        args.push("--fixed-strings");
+        args.push(&grep_arg);
+    }
+    // Allowlisted before it can reach argv, and appended last so a ref can
+    // never be read as one of the flags above.
+    let picked = if all_branches { Vec::new() } else { allowed_refs(cwd, refs) };
+    if all_branches {
+        args.push("--all");
+    } else {
+        // Every requested ref was unknown (deleted branch, stale UI). Falling
+        // through to the HEAD default would silently answer a different
+        // question, so answer none: an empty page reads as "that scope is
+        // gone" instead of "here is main again".
+        if !refs.is_empty() && picked.is_empty() {
+            return GitLogPage {
+                commits: Vec::new(),
+                has_more: false,
+                branch,
+                upstream,
+            };
+        }
+        args.extend(picked.iter().map(|s| s.as_str()));
+    }
+    // An unborn branch (no commits yet) makes `git log` fail; that is an empty
+    // graph, not an error the user should see.
+    let out = git(&args, cwd).unwrap_or_default();
+    let mut commits = parse_git_log(&out, &unpushed);
+    let has_more = commits.len() > limit;
+    commits.truncate(limit);
+
+    GitLogPage { commits, has_more, branch, upstream }
+}
+
+#[tauri::command]
+async fn task_git_log(
+    id: String,
+    dir_name: String,
+    skip: usize,
+    limit: usize,
+    all_branches: bool,
+    first_parent: Option<bool>,
+    grep: Option<String>,
+    refs: Option<Vec<String>>,
+) -> Result<GitLogPage, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<GitLogPage, String> {
+        let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        let cwd = repo_cwd(&w, &dir_name)?;
+        Ok(git_log_page(
+            &cwd, skip, limit, all_branches,
+            first_parent.unwrap_or(false),
+            grep.as_deref().unwrap_or(""),
+            &refs.unwrap_or_default(),
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// One commit referenced by a blame result, deduped: a file whose 15k lines
+/// come from 169 commits ships 169 of these, not 15k.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct BlameCommit {
+    pub sha: String,
+    /// Author name as recorded on the commit. `.mailmap` is applied by git
+    /// (blame honours it), so this is the canonical name, not the raw one.
+    pub author: String,
+    pub author_email: String,
+    /// Author time, unix seconds. Formatted on the frontend so the relative
+    /// age stays live without re-blaming.
+    pub author_time: i64,
+    /// Commit subject (first line). NOT the body: the annotation is one line
+    /// of dimmed text, and the body would have to be truncated anyway.
+    pub summary: String,
+    /// The all-zero sha git uses for lines that are not committed yet. Split
+    /// out so the frontend does not have to know that convention.
+    pub uncommitted: bool,
+}
+
+/// Whole-file blame, shaped for a per-line lookup on the frontend.
+///
+/// The wire format is deliberately NOT one record per line. `--line-porcelain`
+/// on this repo's own `lib.rs` (15,742 lines) is 7 MB, and `--porcelain` is
+/// still 1.6 MB because it echoes the file content back. Deduping to a commit
+/// table plus a `u32` index per line puts the same information in ~63 KB, and
+/// that matters because this crosses the IPC boundary into a WKWebView.
+#[derive(Clone, Debug, Serialize)]
+pub struct BlameFile {
+    pub commits: Vec<BlameCommit>,
+    /// `lines[n]` is the index into `commits` for 1-based line `n + 1`.
+    /// `u32::MAX` means git attributed no commit to that line, which should
+    /// not happen but is cheaper to tolerate than to trust.
+    pub lines: Vec<u32>,
+    /// HEAD at blame time, so the caller can tell a stale cache entry from a
+    /// fresh one without re-running blame.
+    pub head: String,
+    /// The file was too long to blame (see `BLAME_MAX_LINES`) and `commits` /
+    /// `lines` are empty. A distinct signal from "no blame data", so the UI
+    /// can stay silent instead of looking broken.
+    pub skipped: bool,
+}
+
+/// Blame is skipped above this. It deliberately mirrors `task_file_read`'s own
+/// 2 MB text cap rather than inventing a second policy: a file the editor
+/// refuses to open has no buffer to annotate, and a file it will open is worth
+/// blaming (`lib.rs`, 15,742 lines, is ~200 ms with `--incremental`). Checked
+/// with one `metadata` call, so the guard itself costs nothing.
+const BLAME_MAX_BYTES: u64 = 2_000_000;
+
+/// Absurd-input backstop for the line index. Nothing legitimate reaches it
+/// (2 MB of one-byte lines is a million), it just stops a malformed or hostile
+/// blame header from asking for an arbitrary allocation.
+const BLAME_MAX_LINES: usize = 4_000_000;
+
+/// Parse `git blame --incremental` into the deduped shape above.
+///
+/// `--incremental` is the cheapest of the three machine formats because it
+/// emits no file content at all, and it repeats a commit's header block only
+/// on that commit's FIRST group. Groups arrive commit-major, not line-major,
+/// hence the index write per group rather than a straight push.
+///
+/// Format, per group: a `<sha> <orig-line> <result-line> <num-lines>` header,
+/// then `key value` lines (only for a commit not yet seen), then `filename`.
+fn parse_git_blame_incremental(out: &str) -> (Vec<BlameCommit>, Vec<u32>) {
+    use std::collections::HashMap;
+    let mut commits: Vec<BlameCommit> = Vec::new();
+    let mut index: HashMap<String, u32> = HashMap::new();
+    // Length comes from git's own line numbers rather than from a separate
+    // read of the file: counting newlines ourselves would mean reading every
+    // byte a second time, and a file rewritten between the two reads would
+    // give an index that disagrees with the blame.
+    let mut lines: Vec<u32> = Vec::new();
+    // The group being read: which commit, and which result lines it covers.
+    let mut cur: Option<usize> = None;
+
+    for raw in out.lines() {
+        // A group header is the only line that starts with a 40-hex sha
+        // followed by three numbers. Header keys never look like that.
+        let mut parts = raw.split(' ');
+        let first = parts.next().unwrap_or("");
+        let is_sha = first.len() == 40 && first.bytes().all(|b| b.is_ascii_hexdigit());
+        if is_sha {
+            let nums: Vec<usize> = parts.filter_map(|p| p.parse().ok()).collect();
+            if nums.len() < 3 {
+                continue;
+            }
+            let (result_line, count) = (nums[1], nums[2]);
+            let idx = *index.entry(first.to_string()).or_insert_with(|| {
+                commits.push(BlameCommit {
+                    sha: first.to_string(),
+                    author: String::new(),
+                    author_email: String::new(),
+                    author_time: 0,
+                    summary: String::new(),
+                    uncommitted: first.bytes().all(|b| b == b'0'),
+                });
+                (commits.len() - 1) as u32
+            });
+            // `result_line` is 1-based, and groups arrive commit-major, so a
+            // later group can name an earlier line: grow to fit, never append.
+            let end = result_line.saturating_add(count);
+            if result_line >= 1 && end <= BLAME_MAX_LINES {
+                if end - 1 > lines.len() {
+                    lines.resize(end - 1, u32::MAX);
+                }
+                for n in result_line..end {
+                    lines[n - 1] = idx;
+                }
+            }
+            cur = Some(idx as usize);
+            continue;
+        }
+        let Some(ci) = cur else { continue };
+        let Some((key, val)) = raw.split_once(' ') else { continue };
+        let c = &mut commits[ci];
+        match key {
+            // Only the first group for a commit carries these, so an
+            // already-filled field must not be overwritten by a later
+            // `previous`/`boundary` line that happens to share a prefix.
+            "author" if c.author.is_empty() => c.author = val.to_string(),
+            "author-mail" if c.author_email.is_empty() => {
+                c.author_email = val.trim_start_matches('<').trim_end_matches('>').to_string();
+            }
+            "author-time" if c.author_time == 0 => c.author_time = val.parse().unwrap_or(0),
+            "summary" if c.summary.is_empty() => c.summary = val.to_string(),
+            _ => {}
+        }
+    }
+    (commits, lines)
+}
+
+/// Blame one file of a task's worktree, whole-file, in one shot.
+///
+/// Blames the WORKING TREE (no rev argument), not HEAD: the frontend lines up
+/// the result against the buffer it has on screen, and blaming HEAD would
+/// misalign every line below an uncommitted edit. Uncommitted lines come back
+/// as the all-zero sha, which is what `BlameCommit::uncommitted` marks.
+fn task_git_blame_for_task(w: &Task, path: &str) -> Result<BlameFile, String> {
+    let (cwd, rel) = resolve_task_git_path(w, path)?;
+    let abs = safe_task_path(&cwd, &rel)?;
+    // `--no-optional-locks` on every git in this path. Blame is a BACKGROUND
+    // read triggered by a cursor move, and it must never be the reason the
+    // user's own `git commit` in the embedded terminal fails on a held
+    // `index.lock`. This is what the flag exists for, and what other editors
+    // pass for their background git; it is hygiene, not a fix for a measured
+    // failure.
+    let head = git(&["--no-optional-locks", "rev-parse", "HEAD"], &cwd)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+
+    // Not a repo, or the path is not tracked: no blame, not an error. An
+    // untracked file legitimately has no history, and the editor should just
+    // show nothing rather than surface a git failure per keystroke.
+    if head.is_empty() || !git_tracks_path(&cwd, &abs) {
+        return Ok(BlameFile { commits: Vec::new(), lines: Vec::new(), head, skipped: false });
+    }
+
+    // Size guard, one metadata call, no read. Blame reads the file itself;
+    // reading it here as well just to measure it would double the IO.
+    let too_big = fs::metadata(&abs).map(|m| m.len() > BLAME_MAX_BYTES).unwrap_or(false);
+    if too_big {
+        return Ok(BlameFile { commits: Vec::new(), lines: Vec::new(), head, skipped: true });
+    }
+
+    // `--root` stops the initial commit being treated as a boundary, so the
+    // oldest lines get attributed instead of coming back bare. Same flag VS
+    // Code passes (extensions/git/src/git.ts, `blame2`).
+    let out = git(&["--no-optional-locks", "blame", "--root", "--incremental", "--", &rel], &cwd)
+        .map_err(|e| format!("git blame failed: {e}"))?;
+    let (commits, lines) = parse_git_blame_incremental(&out);
+    Ok(BlameFile { commits, lines, head, skipped: false })
+}
+
+/// Async + `spawn_blocking` per the docs/ipc.md rule: blame forks git and
+/// walks history, which on a large file is a few hundred ms. Run on the
+/// webview's thread it would freeze the window.
+#[tauri::command]
+async fn task_git_blame(id: String, path: String) -> Result<BlameFile, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<BlameFile, String> {
+        let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        task_git_blame_for_task(&w, &path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// One commit in full, for the blame popup's hover card: author, email, date,
+/// subject and the whole message body (trailers included, `Co-authored-by:`
+/// pulled out on the frontend by `splitTrailers`).
+///
+/// Deliberately NOT part of `task_git_blame`'s payload. A file's blame can name
+/// 169 distinct commits, and fetching every message body up front would be 169
+/// `git show`s for the one line the cursor happens to be on. This is fetched
+/// when a popup actually opens, and cached per sha on the frontend.
+///
+/// `path` resolves the repo the same member-aware way blame does, so a
+/// multi-repo task reads the member the file belongs to.
+fn task_git_commit_meta_for_task(w: &Task, path: &str, sha: &str) -> Result<GitCommit, String> {
+    if !is_commit_ish(sha) {
+        return Err("bad commit id".into());
+    }
+    let (cwd, _rel) = resolve_task_git_path(w, path)?;
+    // `--no-walk` so this reads exactly the named commit rather than starting a
+    // traversal at it, and the shared format keeps the parser the same one the
+    // history page is tested against.
+    let out = git(&["--no-optional-locks", "log", "--no-walk", GIT_LOG_FORMAT, sha], &cwd)
+        .map_err(|e| format!("git log failed: {e}"))?;
+    parse_git_log(&out, &std::collections::HashSet::new())
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("no commit {sha}"))
+}
+
+#[tauri::command]
+async fn task_git_commit_meta(id: String, path: String, sha: String) -> Result<GitCommit, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<GitCommit, String> {
+        let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        task_git_commit_meta_for_task(&w, &path, &sha)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// How far back `sha` sits from HEAD: the number of commits reachable from HEAD
+/// but not from it. That is exactly the `skip` offset the history page needs to
+/// land on it, which is what turns "show this commit in History" into one query
+/// instead of paging forward until it turns up.
+///
+/// The paging version was fine on this repo and useless on a real monorepo: a
+/// commit from two years ago is tens of thousands of rows down, and no sane page
+/// budget reaches it. `rev-list --count` answers in one walk that git is built
+/// for, and the caller then fetches ONE page around the answer.
+fn task_git_commit_offset_for_task(w: &Task, dir_name: &str, sha: &str) -> Result<usize, String> {
+    if !is_commit_ish(sha) {
+        return Err("bad commit id".into());
+    }
+    let cwd = repo_cwd(w, dir_name)?;
+    let range = format!("{sha}..HEAD");
+    let out = git(&["--no-optional-locks", "rev-list", "--count", &range], &cwd)
+        .map_err(|e| format!("git rev-list failed: {e}"))?;
+    out.trim().parse::<usize>().map_err(|e| format!("unparseable count: {e}"))
+}
+
+#[tauri::command]
+async fn task_git_commit_offset(id: String, dir_name: String, sha: String) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<usize, String> {
+        let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        task_git_commit_offset_for_task(&w, &dir_name, &sha)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Files a single commit touched, as `GitFile` rows so the History tab can
+/// reuse the Commit tab's status glyphs.
+///
+/// `-m` makes a merge report files at all (plain `diff-tree` prints nothing for
+/// one), `--first-parent` aims that at the branch it merged INTO, and `--root`
+/// makes the initial commit report its files instead of nothing.
+///
+/// `-m` still emits ONE DIFF PER PARENT — `--first-parent` limits which commits
+/// are traversed, not how many diffs a merge prints — so a path touched on both
+/// sides arrives twice, in parent order. Hence the dedupe: first occurrence
+/// wins, which is precisely the first-parent diff. `--cc` would collapse them
+/// in git instead, but a combined diff omits every file that matches ANY
+/// parent, i.e. everything the merge brought in cleanly — the exact thing
+/// someone opens a merge commit to see.
+fn git_commit_files(cwd: &Path, sha: &str) -> Result<Vec<GitFile>, String> {
+    if !is_commit_ish(sha) {
+        return Err("bad commit id".into());
+    }
+    let out = git(
+        &[
+            "--no-pager", "diff-tree", "--no-commit-id", "--name-status",
+            "-r", "-m", "--first-parent", "--root", sha,
+        ],
+        cwd,
+    )
+    .unwrap_or_default();
+    let mut files = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in out.lines() {
+        let mut parts = line.split('\t');
+        let (Some(status), Some(path)) = (parts.next(), parts.next()) else { continue };
+        // Renames/copies print "R100\told\tnew" — keep the new path, the one
+        // `git show <sha>:path` can resolve.
+        let path = parts.next().unwrap_or(path);
+        // Second and later parents of a merge repeat paths (see above). A
+        // duplicate row would also collide on the frontend's per-path key.
+        if !seen.insert(path.to_string()) {
+            continue;
+        }
+        files.push(GitFile {
+            // R100 / C075 carry a similarity score; the glyph map is keyed by
+            // the letter alone.
+            status: status.chars().next().map(|c| c.to_string()).unwrap_or_default(),
+            path: path.to_string(),
+            // A working-tree fingerprint is meaningless for a historical
+            // revision (the "viewed" marks it feeds only track live files).
+            ..Default::default()
+        });
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
+}
+
+#[tauri::command]
+async fn task_git_commit_files(
+    id: String,
+    dir_name: String,
+    sha: String,
+) -> Result<Vec<GitFile>, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<Vec<GitFile>, String> {
+        let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        let cwd = repo_cwd(&w, &dir_name)?;
+        git_commit_files(&cwd, &sha)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Is `s` something safe to hand to git as a revision? Hex sha (any length git
+/// would accept) only — the History tab never passes a user-typed ref, so this
+/// stays deliberately strict rather than trying to sanitize refnames. Blocks
+/// leading-dash argument injection for free.
+fn is_commit_ish(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+// ─────────────────────────── branch compare ───────────────────────────
+//
+// "How does this task read next to some other branch" (issue #208). The
+// Commit tab only ever shows the working tree, so work an agent had already
+// committed was invisible; the History tab (issue #199) shows the commits but
+// never their combined effect. This is the third view: ONE flat file list for
+// the whole delta between a ref and the working tree, committed and
+// uncommitted alike, which is what you want when an agent ate the elephant in
+// six commits and you have to judge the result.
+//
+// Deliberately generic — any local or remote-tracking ref in the repo, not
+// "the PR base". A task's own `base_branch` is only what the picker
+// preselects; comparing a spike branch against a sibling feature branch is
+// the same code path.
+
+/// Is `s` safe to hand to git as a revision? Laxer than `is_commit_ish` (hex
+/// only) because Compare passes REFNAMES a user picked, and much
+/// stricter than "anything": a leading dash reads as an option, and git's own
+/// refname rules already forbid whitespace, control characters and the glob /
+/// rev-syntax bytes. `--end-of-options` at the call site covers the dash on
+/// its own; this is the belt to that pair of braces.
+fn is_safe_rev(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 255
+        && !s.starts_with('-')
+        && !s.contains("..")
+        && !s.chars().any(|c| c.is_whitespace() || c.is_control() || "~^:?*[\\".contains(c))
+}
+
+/// Resolve a user-picked ref to a commit sha. Everything downstream — most of
+/// all the `base:<sha>` diff scope the frontend echoes back on every file
+/// click — then stays hex-only and keeps going through `is_commit_ish`, so a
+/// refname is validated exactly once, here, instead of at four call sites.
+fn resolve_rev(cwd: &Path, rev: &str) -> Result<String, String> {
+    if !is_safe_rev(rev) {
+        return Err(format!("{rev} is not a valid ref name"));
+    }
+    // `^{commit}` peels an annotated tag; --quiet turns "no such ref" into an
+    // empty stdout instead of noise on stderr.
+    let sha = git(
+        &["rev-parse", "--verify", "--quiet", "--end-of-options", &format!("{rev}^{{commit}}")],
+        cwd,
+    )
+    .map(|s| s.trim().to_string())
+    .unwrap_or_default();
+    if sha.is_empty() {
+        return Err(format!("{rev} isn't a branch or commit in this repo"));
+    }
+    Ok(sha)
+}
+
+/// Parse `git diff --name-status -z` into (status letter, path) pairs.
+///
+/// -z rather than the tab-delimited default because a path may contain ANY
+/// byte except NUL — including the tab the default format delimits with, and
+/// the quoting git falls back to would have to be unescaped here instead.
+/// Records are `<status>\0<path>\0`, except R/C which carry a similarity
+/// score and TWO paths (`R075\0old\0new\0`); the new path is the one
+/// `git show <sha>:path` can resolve, so it is the one kept.
+fn parse_name_status_z(out: &str) -> Vec<(String, String)> {
+    let f: Vec<&str> = out.split('\0').collect();
+    let mut rows = Vec::new();
+    let mut i = 0;
+    while i < f.len() {
+        let status = f[i];
+        if status.is_empty() {
+            break; // the stream's trailing NUL
+        }
+        let renamed = status.starts_with('R') || status.starts_with('C');
+        let path_idx = if renamed { i + 2 } else { i + 1 };
+        let Some(path) = f.get(path_idx).filter(|p| !p.is_empty()) else { break };
+        // R100 / C075 carry a similarity score; the glyph map is keyed by the
+        // letter alone.
+        rows.push((status.chars().next().unwrap().to_string(), (*path).to_string()));
+        i = path_idx + 1;
+    }
+    rows
+}
+
+/// Parse `git diff --numstat -z` into (path, added, removed).
+///
+/// Records are `<add>\t<del>\t<path>\0`, except a rename, where the third
+/// tab-field is EMPTY and the two paths follow as their own NUL-terminated
+/// fields (`1\t0\t\0old\0new\0`). A binary file reports `-` for both counts,
+/// which becomes `None` rather than a misleading zero.
+fn parse_numstat_z(out: &str) -> Vec<(String, Option<u32>, Option<u32>)> {
+    let f: Vec<&str> = out.split('\0').collect();
+    let mut rows = Vec::new();
+    let mut i = 0;
+    while i < f.len() {
+        let rec = f[i];
+        if rec.is_empty() {
+            break; // the stream's trailing NUL
+        }
+        let mut parts = rec.splitn(3, '\t');
+        let (Some(a), Some(d), Some(rest)) = (parts.next(), parts.next(), parts.next()) else {
+            break;
+        };
+        let num = |s: &str| s.parse::<u32>().ok();
+        let (path, next) = if rest.is_empty() {
+            // Rename: the destination is the second of the two path fields.
+            match f.get(i + 2).filter(|p| !p.is_empty()) {
+                Some(dst) => ((*dst).to_string(), i + 3),
+                None => break,
+            }
+        } else {
+            (rest.to_string(), i + 1)
+        };
+        rows.push((path, num(a), num(d)));
+        i = next;
+    }
+    rows
+}
+
+/// Lines in an untracked file, for its churn column. `git diff` never sees
+/// these (they aren't in any tree), and running `diff --no-index` per file
+/// would be a process each — so count here and report `None` for anything
+/// oversized or binary rather than stalling on a stray core dump someone
+/// forgot to gitignore.
+///
+/// `budget` is the bytes left to spend across the WHOLE compare, decremented
+/// as files are read. A per-file cap alone is not enough: an un-ignored
+/// `node_modules` is thousands of individually small files, and reading all of
+/// them would freeze the panel on exactly the repo that needs it most. Past
+/// the budget the counts simply stop being reported, which costs a column,
+/// not the list.
+fn untracked_added(path: &Path, budget: &mut u64) -> Option<u32> {
+    const PER_FILE_CAP: u64 = 1 << 20; // 1 MiB
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > PER_FILE_CAP || meta.len() > *budget {
+        return None;
+    }
+    *budget -= meta.len();
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.contains(&0) {
+        return None; // binary
+    }
+    if bytes.is_empty() {
+        return Some(0);
+    }
+    let nl = bytes.iter().filter(|b| **b == b'\n').count() as u32;
+    // A file not ending in a newline still has that last line.
+    Some(if bytes.last() == Some(&b'\n') { nl } else { nl + 1 })
+}
+
+/// Everything that differs between `base` and the working tree.
+#[derive(Serialize)]
+pub struct GitCompare {
+    /// The ref as the user picked it, echoed back for the header.
+    pub base: String,
+    /// The commit every file's LEFT side is read from, and the sha that goes
+    /// into the `base:<sha>` diff scope. The merge base with HEAD in
+    /// `merge_base` mode, otherwise `base`'s own tip.
+    pub base_sha: String,
+    pub base_short: String,
+    /// HEAD's branch, so the header can say which two things are being
+    /// compared. "" on a detached HEAD.
+    pub branch: String,
+    /// True when `merge_base` was asked for but the two histories share no
+    /// ancestor, so this fell back to comparing against the ref's tip. Rare
+    /// (unrelated histories), and silently diffing something else would be
+    /// worse than saying so.
+    pub no_merge_base: bool,
+    pub files: Vec<GitFile>,
+    /// Summed over `files`, so the header's diffstat matches the rows.
+    pub added: u32,
+    pub removed: u32,
+    /// True when the list was capped at MAX_COMPARE_FILES.
+    pub truncated: bool,
+}
+
+/// Same cap the staging lists use: a comparison against a very old base can
+/// legitimately run to tens of thousands of files, and the panel is a review
+/// surface, not a bulk export.
+const MAX_COMPARE_FILES: usize = 5_000;
+
+fn git_compare(cwd: &Path, base: &str, merge_base: bool) -> Result<GitCompare, String> {
+    let tip = resolve_rev(cwd, base)?;
+    // Three-dot semantics by default: "what this branch added", not "how the
+    // two tips differ". Without it, every commit made on the base since the
+    // task branched shows up inverted, as though the task had deleted work it
+    // simply doesn't have yet — the single most confusing thing a compare view
+    // can do. `merge_base: false` is the escape hatch for when the literal
+    // tip-to-tree difference is what you want.
+    let mut no_merge_base = false;
+    let base_sha = if merge_base {
+        match git(&["merge-base", &tip, "HEAD"], cwd).map(|s| s.trim().to_string()) {
+            Ok(s) if !s.is_empty() => s,
+            // Unrelated histories have no common ancestor.
+            _ => {
+                no_merge_base = true;
+                tip.clone()
+            }
+        }
+    } else {
+        tip.clone()
+    };
+
+    // Both halves of the range in one pass each: name-status for the glyph,
+    // numstat for the churn. Two processes over the same range rather than
+    // one, because git has no format that carries both.
+    let names = git(&["--no-pager", "diff", "--name-status", "-M", "-z", &base_sha], cwd)
+        .unwrap_or_default();
+    let stats = git(&["--no-pager", "diff", "--numstat", "-M", "-z", &base_sha], cwd)
+        .unwrap_or_default();
+    let churn: std::collections::HashMap<String, (Option<u32>, Option<u32>)> =
+        parse_numstat_z(&stats).into_iter().map(|(p, a, d)| (p, (a, d))).collect();
+
+    let mut files: Vec<GitFile> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (status, path) in parse_name_status_z(&names) {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let (added, removed) = churn.get(&path).copied().unwrap_or((None, None));
+        files.push(GitFile {
+            status,
+            fp: file_fp(&cwd.join(&path)),
+            path,
+            added,
+            removed,
+        });
+    }
+
+    // Untracked files are part of "different from the base" even though no
+    // tree contains them — an agent's brand-new, not-yet-added file is exactly
+    // the kind of thing this view exists to surface. `git diff` can't see them,
+    // so they come from ls-files and are labelled "?" like the staging pane
+    // does it.
+    let others = git(&["ls-files", "--others", "--exclude-standard", "-z"], cwd)
+        .unwrap_or_default();
+    // Total bytes the churn counts may read across every untracked file. See
+    // untracked_added: without a shared budget an un-ignored dependency tree
+    // turns this into thousands of reads.
+    let mut budget: u64 = 8 << 20; // 8 MiB
+    for path in others.split('\0').filter(|p| !p.is_empty()) {
+        if !seen.insert(path.to_string()) {
+            continue;
+        }
+        let abs = cwd.join(path);
+        files.push(GitFile {
+            status: "?".into(),
+            path: path.to_string(),
+            fp: file_fp(&abs),
+            added: untracked_added(&abs, &mut budget),
+            removed: Some(0),
+        });
+    }
+
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    let truncated = files.len() > MAX_COMPARE_FILES;
+    if truncated {
+        files.truncate(MAX_COMPARE_FILES);
+    }
+    // Summed AFTER the truncation so the header's total describes the rows
+    // actually on screen.
+    let added = files.iter().filter_map(|f| f.added).sum();
+    let removed = files.iter().filter_map(|f| f.removed).sum();
+
+    Ok(GitCompare {
+        base: base.to_string(),
+        base_short: base_sha.chars().take(8).collect(),
+        base_sha,
+        branch: current_branch(cwd).unwrap_or_default(),
+        no_merge_base,
+        files,
+        added,
+        removed,
+        truncated,
+    })
+}
+
+#[tauri::command]
+async fn task_git_compare(
+    id: String,
+    dir_name: String,
+    base: String,
+    merge_base: bool,
+) -> Result<GitCompare, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<GitCompare, String> {
+        let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        let cwd = repo_cwd(&w, &dir_name)?;
+        git_compare(&cwd, &base, merge_base)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Resolve the git cwd for a stage/commit op: the host task path
 /// when `dir_name` is empty, otherwise the matching composition member.
 fn repo_cwd(w: &Task, dir_name: &str) -> Result<PathBuf, String> {
@@ -6988,20 +7998,47 @@ async fn task_commit(
         git(&args, &cwd).map_err(|e| e.to_string())?;
 
         if push {
-            // Try a plain push first (upstream already set). If it fails
-            // (most commonly: no upstream for a fresh worktree branch),
-            // fall back to `-u <remote> <branch>` to set it.
-            if git(&["push"], &cwd).is_err() {
-                let remote = detect_default_remote(&cwd);
-                let branch = git(&["branch", "--show-current"], &cwd)
-                    .map_err(|e| e.to_string())?.trim().to_string();
-                if branch.is_empty() {
-                    return Err("cannot push: detached HEAD".to_string());
-                }
-                git(&["push", "-u", &remote, &branch], &cwd).map_err(|e| e.to_string())?;
-            }
+            git_push(&cwd)?;
         }
         Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Push the current branch. Tries a plain push first (upstream already set);
+/// on failure, most commonly a fresh worktree branch with no upstream, falls
+/// back to `-u <remote> <branch>` to create it.
+///
+/// Shared by `task_commit`'s push half and the standalone Push button, so the
+/// set-upstream behaviour cannot differ between "Commit and Push" and pushing
+/// what is already committed.
+fn git_push(cwd: &Path) -> Result<(), String> {
+    if git(&["push"], cwd).is_ok() {
+        return Ok(());
+    }
+    let remote = detect_default_remote(cwd);
+    let branch = git(&["branch", "--show-current"], cwd)
+        .map_err(|e| e.to_string())?
+        .trim()
+        .to_string();
+    if branch.is_empty() {
+        return Err("cannot push: detached HEAD".to_string());
+    }
+    git(&["push", "-u", &remote, &branch], cwd).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Push a repo's current branch without committing anything, for the Push
+/// button beside Commit. Separate from `task_commit`'s push flag because the
+/// common case it serves is commits that are already made (an agent's, or
+/// yours from the terminal) and only need sending.
+#[tauri::command]
+async fn task_git_push(id: String, dir_name: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        let cwd = repo_cwd(&w, &dir_name)?;
+        git_push(&cwd)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -7362,7 +8399,9 @@ fn task_file_write(id: String, path: String, content: String) -> Result<(), Stri
     let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
     let (cwd, rel) = resolve_task_git_path(&w, &path)?;
     let abs = safe_task_path(&cwd, &rel)?;
-    fs::write(&abs, content).map_err(|e| format!("write failed: {e}"))
+    // Atomic: uncommitted source is unrecoverable if a truncate-write tears.
+    // Tradeoff accepted: the swap installs a new inode (breaks hardlinks).
+    write_atomic(&abs, content.as_bytes()).map_err(|e| format!("write failed: {e}"))
 }
 
 /// Rename a file or directory in the task (file-tree context menu).
@@ -7537,10 +8576,18 @@ fn task_file_diff_sides_for_task(w: &Task, path: &str, scope: Option<&str>) -> R
     let (cwd, rel_path) = resolve_task_git_path(w, path)?;
     // Which two sides to compare depends on where the click came from
     // (GH #122):
-    //   "staged"   → HEAD vs index          (what `git diff --cached` shows)
-    //   "unstaged" → index vs working tree  (what `git diff` shows)
-    //   None       → HEAD vs working tree   (full uncommitted delta; the
-    //                pre-#122 behavior, kept for callers with no pane)
+    //   "staged"    → HEAD vs index          (what `git diff --cached` shows)
+    //   "unstaged"  → index vs working tree  (what `git diff` shows)
+    //   "commit:SHA"→ SHA^ vs SHA            (History tab, issue #199)
+    //   "base:SHA"  → SHA vs working tree    (History › Compare, issue #208)
+    //   None        → HEAD vs working tree   (full uncommitted delta; the
+    //                 pre-#122 behavior, kept for callers with no pane)
+    //
+    // "base:" is the only scope besides the default whose RIGHT side is the
+    // live file, which is why Compare keeps the review affordances the
+    // History tab has to drop: `fp` is a real worktree fingerprint, so a
+    // "viewed" mark clears itself when an agent touches the file again, and a
+    // review comment lands on the version somebody is about to edit.
     // Without the split, a file staged and then edited again showed the
     // full uncommitted diff from BOTH rows.
     //
@@ -7560,9 +8607,17 @@ fn task_file_diff_sides_for_task(w: &Task, path: &str, scope: Option<&str>) -> R
     };
     let show_head = || git_bytes(&["--no-pager", "show", &format!("HEAD:{rel_path}")], &cwd).ok();
     let show_index = || git_bytes(&["--no-pager", "show", &format!(":0:{rel_path}")], &cwd).ok();
-    let (original, modified) = match scope {
-        Some("staged") => (show_head(), show_index()),
-        Some("unstaged") => (show_index(), read_worktree()),
+    // A historical revision has no working-tree side at all: BOTH sides come
+    // out of the object store, and a first commit legitimately has no parent
+    // (`sha^` doesn't resolve) — that is an add, so the left side is missing.
+    let show_at = |rev: &str| git_bytes(&["--no-pager", "show", &format!("{rev}:{rel_path}")], &cwd).ok();
+    let commit_sha = scope.and_then(|s| s.strip_prefix("commit:")).filter(|s| is_commit_ish(s));
+    let base_sha = scope.and_then(|s| s.strip_prefix("base:")).filter(|s| is_commit_ish(s));
+    let (original, modified) = match (commit_sha, base_sha, scope) {
+        (Some(sha), _, _) => (show_at(&format!("{sha}^")), show_at(sha)),
+        (None, Some(sha), _) => (show_at(sha), read_worktree()),
+        (None, None, Some("staged")) => (show_head(), show_index()),
+        (None, None, Some("unstaged")) => (show_index(), read_worktree()),
         _ => (show_head(), read_worktree()),
     };
     let fp = modified_path.as_deref().map(file_fp).unwrap_or_default();
@@ -9005,6 +10060,189 @@ fn task_stop_script(id: String, kind: String, member: Option<String>) -> Result<
 
 // ───────────────────────────── find in files ─────────────────────────────
 
+/// Which program backs find-in-files. ripgrep when the user has it
+/// (faster on big repos, Unicode-aware, and its Rust regex is the same
+/// flavor the frontend highlights with), `git grep` otherwise, so a
+/// machine without rg keeps working exactly as before.
+#[derive(Clone, Copy, PartialEq)]
+enum FindBackend {
+    Ripgrep(&'static str),
+    GitGrep,
+}
+
+impl FindBackend {
+    /// Stable id for the frontend. Not the binary path: this crosses IPC
+    /// and only ever picks wording in the find dialog.
+    fn name(self) -> &'static str {
+        match self {
+            FindBackend::Ripgrep(_) => "ripgrep",
+            FindBackend::GitGrep => "git-grep",
+        }
+    }
+}
+
+/// First executable named `bin` in a colon-separated PATH. Hand-rolled
+/// instead of shelling out to `which` because this runs on the search
+/// path and a process spawn is the expensive part of the probe.
+fn find_on_path(bin: &str, path: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    path.split(':')
+        .filter(|d| !d.is_empty())
+        .map(|d| Path::new(d).join(bin))
+        .find(|p| {
+            fs::metadata(p)
+                .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        })
+}
+
+/// Resolve the backend, memoizing only an answer that can't get better.
+///
+/// Probed against the login-shell PATH, NOT our inherited one: a
+/// GUI-launched .app gets a bare launchd PATH with no /opt/homebrew/bin,
+/// so `rg` would look uninstalled for every Homebrew user (same reason
+/// `git_bytes` injects the resolved env).
+///
+/// That PATH arrives asynchronously though (shell_env probes a login
+/// shell off-thread and serves a static fallback until it lands), so a
+/// search fired in the first moments after launch can miss an rg that IS
+/// installed. Caching THAT verdict would pin git grep for the rest of
+/// the session, so a miss found on the fallback PATH is not cached and
+/// the next search asks again. Cached for good once either the probe has
+/// landed or we've actually found rg (a hit is authoritative: the binary
+/// is right there, however we learned of it).
+///
+/// Re-resolving costs a few `stat`s per PATH entry, no process spawn,
+/// once per search start.
+///
+/// `TERMIC_FIND_BACKEND=git-grep` pins the fallback so the e2e suite can
+/// cover both paths on a machine that has ripgrep installed.
+static FIND_BACKEND: std::sync::OnceLock<FindBackend> = std::sync::OnceLock::new();
+
+/// May this resolution be memoized for the rest of the session?
+///
+/// A hit always: rg is at that path, however we learned of it. A miss
+/// only once the PATH it was computed from is final, because the static
+/// fallback has no Homebrew/nvm/bun dirs and its "not installed" is not
+/// an answer, just an early read.
+fn backend_verdict_is_final(found_rg: bool, path_is_final: bool) -> bool {
+    found_rg || path_is_final
+}
+
+fn find_backend() -> FindBackend {
+    if let Some(b) = FIND_BACKEND.get() { return *b; }
+
+    if std::env::var("TERMIC_FIND_BACKEND").as_deref() == Ok("git-grep") {
+        return *FIND_BACKEND.get_or_init(|| FindBackend::GitGrep);
+    }
+    let (path, path_is_final) = shell_env::resolved_path_final();
+    let found = find_on_path("rg", &path).map(|p| {
+        // Leaked once per process, so the path can live in a Copy enum
+        // that gets moved into the search thread.
+        FindBackend::Ripgrep(Box::leak(p.to_string_lossy().into_owned().into_boxed_str()))
+    });
+    let backend = found.unwrap_or(FindBackend::GitGrep);
+    if backend_verdict_is_final(found.is_some(), path_is_final) {
+        return *FIND_BACKEND.get_or_init(|| backend);
+    }
+    // Provisional: search with git grep now, look for rg again next time.
+    backend
+}
+
+/// Which backend find-in-files will use, for the dialog: it words the
+/// regex tooltip from the flavor and offers the "install ripgrep" hint
+/// only on the fallback.
+///
+/// `settled` is false while the answer could still improve (the login
+/// PATH hasn't landed, so an installed rg may not be visible yet). The
+/// dialog must not memoize an unsettled answer, or it would keep
+/// offering "install ripgrep" to someone who has it.
+#[derive(Serialize)]
+pub struct FindBackendInfo {
+    backend: &'static str,
+    settled: bool,
+}
+
+/// MUST stay async: resolving can wait on the login-shell probe (up to a
+/// second right after launch), and a sync command would pay that on the
+/// main thread and freeze the webview.
+#[tauri::command]
+async fn task_find_backend() -> FindBackendInfo {
+    tauri::async_runtime::spawn_blocking(|| {
+        let backend = find_backend();
+        FindBackendInfo { backend: backend.name(), settled: FIND_BACKEND.get().is_some() }
+    })
+    .await
+    .unwrap_or(FindBackendInfo { backend: "git-grep", settled: false })
+}
+
+/// One match line, backend-agnostic.
+struct RawHit {
+    path: String,
+    line: u32,
+    col: u32,
+    preview: String,
+    /// UTF-16 `[start, end)` offsets of every match on this line. ripgrep
+    /// reports them, so the frontend paints exactly what the search
+    /// engine matched. `git grep` reports only the first column, so this
+    /// stays empty and the frontend re-matches the preview itself.
+    ranges: Vec<[u32; 2]>,
+}
+
+/// Byte offset → UTF-16 offset, the unit JS string indexes use. ripgrep
+/// counts bytes; handing those to the frontend would smear the highlight
+/// right by one per non-ASCII char earlier on the line. Clamps to the
+/// enclosing char for a non-boundary offset.
+fn byte_to_utf16(s: &str, byte: usize) -> u32 {
+    let mut n = 0usize;
+    for (i, ch) in s.char_indices() {
+        if i >= byte { return n as u32; }
+        n += ch.len_utf16();
+    }
+    n as u32
+}
+
+/// `git grep -n --column` line: `path:LINE:COL:preview`.
+fn parse_git_grep_line(line: &str) -> Option<RawHit> {
+    let mut it = line.splitn(4, ':');
+    let path = it.next()?.to_string();
+    let line_no: u32 = it.next()?.parse().ok()?;
+    let col: u32 = it.next()?.parse().ok()?;
+    let preview = it.next().unwrap_or("").to_string();
+    if path.is_empty() || line_no == 0 { return None; }
+    Some(RawHit { path, line: line_no, col, preview, ranges: Vec::new() })
+}
+
+/// One `--json` event from ripgrep. Only `type: "match"` carries a hit;
+/// begin/end/summary events are skipped.
+///
+/// Non-UTF-8 paths and lines arrive as `{"bytes": "<base64>"}` instead of
+/// `{"text": …}` — those are dropped rather than guessing an encoding
+/// (`git grep` would have emitted mojibake for the same file).
+fn parse_rg_json_line(line: &str) -> Option<RawHit> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v.get("type")?.as_str()? != "match" { return None; }
+    let d = v.get("data")?;
+    let path = d.get("path")?.get("text")?.as_str()?.to_string();
+    let line_no = d.get("line_number")?.as_u64()? as u32;
+    let text = d.get("lines")?.get("text")?.as_str()?;
+    let preview = text.trim_end_matches('\n').trim_end_matches('\r').to_string();
+    if path.is_empty() || line_no == 0 { return None; }
+
+    let mut ranges: Vec<[u32; 2]> = Vec::new();
+    for s in d.get("submatches").and_then(|s| s.as_array()).into_iter().flatten() {
+        let (Some(a), Some(b)) = (
+            s.get("start").and_then(|x| x.as_u64()),
+            s.get("end").and_then(|x| x.as_u64()),
+        ) else { continue };
+        ranges.push([byte_to_utf16(&preview, a as usize), byte_to_utf16(&preview, b as usize)]);
+    }
+    // git grep's column is 1-based; keep the contract identical so
+    // `revealAt` doesn't need to know which backend ran.
+    let col = ranges.first().map(|r| r[0] + 1).unwrap_or(1);
+    Some(RawHit { path, line: line_no, col, preview, ranges })
+}
+
 /// Per-task in-flight grep PID. Each new search SIGKILLs the
 /// previous one for the same task so typing doesn't fan out into
 /// dozens of zombie git-grep procs.
@@ -9025,9 +10263,12 @@ fn running_greps_swap(ws_id: &str, new_pid: Option<i32>) -> Option<i32> {
 /// the cap the child is SIGKILLed and `truncated: true` is reported.
 /// Re-entrant safety: any previous grep for the same task is killed
 /// before this one starts (typing fires a new search per keystroke).
-/// `regex` picks POSIX ERE (`-E`) over a literal match (`-F`). Not PCRE
+///
+/// Runs ripgrep when it's installed and `git grep` otherwise (see
+/// `find_backend`), which also decides the regex flavor `regex` selects:
+/// Rust regex under rg, POSIX ERE (`-E`) under git grep. Not git's PCRE
 /// (`-P`) — git is not always compiled with libpcre, Apple's is not.
-/// `case_sensitive` drops the default `-i`.
+/// `case_sensitive` drops the default case folding.
 #[derive(Deserialize)]
 pub struct GrepOpts {
     pub regex: bool,
@@ -9077,11 +10318,49 @@ fn task_grep_start(
     let app_o = app.clone();
     let ws_id_o = id.clone();
     let search_id_o = search_id.clone();
-    // git grep flags: -n line numbers, --column column, -I skip binary,
-    // -F literal / -E POSIX ERE, -i / --no-ignore-case, --untracked
-    // --exclude-standard include new files but respect .gitignore.
-    let match_mode = if opts.regex { "-E" } else { "-F" };
-    let case_flag = if opts.case_sensitive { "--no-ignore-case" } else { "-i" };
+    // One child per repo, spawned in its own process group so the whole
+    // tree dies with a single kill on the negated pid.
+    let spawn_in = move |backend: FindBackend, rcwd: &std::path::Path| {
+        let mut cmd = match backend {
+            // rg flags: --json (implies line numbers + match offsets),
+            // --hidden to match `git grep --untracked`'s view of
+            // non-ignored dotfiles, and !.git/ because --hidden would
+            // otherwise expose the object store. --no-config so a user's
+            // RIPGREP_CONFIG_PATH (say a stray --smart-case or -uu)
+            // can't quietly change what termic finds. Binary files and
+            // .gitignore are handled by rg's defaults.
+            FindBackend::Ripgrep(bin) => {
+                let mut c = std::process::Command::new(bin);
+                c.args(["--json", "--no-config", "--hidden", "--glob", "!.git/"]);
+                if !opts.regex { c.arg("-F"); }
+                c.arg(if opts.case_sensitive { "-s" } else { "-i" });
+                c.args(["-e", &query]);
+                c
+            }
+            // git grep flags: -n line numbers, --column column, -I skip
+            // binary, -F literal / -E POSIX ERE, -i / --no-ignore-case,
+            // --untracked --exclude-standard include new files but
+            // respect .gitignore.
+            FindBackend::GitGrep => {
+                let mut c = std::process::Command::new("git");
+                c.args([
+                    "grep",
+                    "-n", "--column", "-I",
+                    if opts.regex { "-E" } else { "-F" },
+                    if opts.case_sensitive { "--no-ignore-case" } else { "-i" },
+                    "--untracked", "--exclude-standard",
+                    "--no-color",
+                    "-e", &query,
+                ]);
+                c
+            }
+        };
+        cmd.current_dir(rcwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+    };
 
     thread::spawn(move || {
         // process_group(0) to kill the tree. We run one child per repo,
@@ -9102,6 +10381,9 @@ fn task_grep_start(
         };
 
         let mut my_pid: Option<i32> = None;
+        // Resolved HERE, not in the command: this can wait on the
+        // login-shell probe, and task_grep_start is sync (main thread).
+        let mut backend = find_backend();
         'repos: for (rcwd, prefix) in &repos {
             // Before each repo, bail if the slot changed: a newer search
             // (different pid) supersedes us, or a cancel cleared it (None).
@@ -9113,40 +10395,38 @@ fn task_grep_start(
                     break 'repos;
                 }
             }
-            let spawn = std::process::Command::new("git")
-                .args([
-                    "grep",
-                    "-n", "--column", "-I", match_mode, case_flag,
-                    "--untracked", "--exclude-standard",
-                    "--no-color",
-                    "-e", &query,
-                ])
-                .current_dir(rcwd)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .process_group(0)
-                .spawn();
-            let mut child = match spawn { Ok(c) => c, Err(_) => continue 'repos };
+            let mut child = match spawn_in(backend, rcwd) {
+                Ok(c) => c,
+                // rg resolved at probe time but is gone now (upgrade,
+                // uninstall). Degrade to git grep instead of reporting
+                // zero matches, which would read as "nothing here".
+                Err(_) if backend != FindBackend::GitGrep => {
+                    backend = FindBackend::GitGrep;
+                    match spawn_in(backend, rcwd) { Ok(c) => c, Err(_) => continue 'repos }
+                }
+                Err(_) => continue 'repos,
+            };
             let pid = child.id() as i32;
             my_pid = Some(pid);
             running_greps_swap(&ws_id_o, Some(pid));
 
             if let Some(stdout) = child.stdout.take() {
                 for line in BufReader::new(stdout).lines().map_while(|r| r.ok()) {
-                    // git grep -n --column output: "path:LINE:COL:preview"
-                    let mut it = line.splitn(4, ':');
-                    let path = it.next().unwrap_or("").to_string();
-                    let line_no: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-                    let col: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-                    let preview = it.next().unwrap_or("").to_string();
-                    if path.is_empty() || line_no == 0 { continue; }
+                    let hit = match backend {
+                        FindBackend::Ripgrep(_) => parse_rg_json_line(&line),
+                        FindBackend::GitGrep => parse_git_grep_line(&line),
+                    };
+                    // rg emits begin/end/summary events between matches;
+                    // both backends can emit a line we can't read.
+                    let Some(hit) = hit else { continue };
                     if batch.is_empty() { batch_started = std::time::Instant::now(); }
                     batch.push(serde_json::json!({
                         // Prefix member paths so clicks resolve from the wrapper.
-                        "path": format!("{prefix}{path}"),
-                        "line": line_no,
-                        "col": col,
-                        "preview": preview,
+                        "path": format!("{prefix}{}", hit.path),
+                        "line": hit.line,
+                        "col": hit.col,
+                        "preview": hit.preview,
+                        "ranges": hit.ranges,
                     }));
                     count += 1;
                     if batch.len() >= BATCH_MAX
@@ -10329,11 +11609,7 @@ pub(crate) fn load_settings_inner() -> Settings {
     // a read-only filesystem or transient I/O error shouldn't fail the
     // load (in-memory state is still correct).
     if migrated {
-        if let Ok(f) = settings_file() {
-            if let Ok(serialized) = serde_json::to_string_pretty(&s) {
-                let _ = fs::write(f, serialized);
-            }
-        }
+        let _ = save_settings_inner(&s);
     }
     s
 }
@@ -10389,8 +11665,8 @@ fn settings_save(app: AppHandle, s: Settings) -> Result<(), String> {
 /// Settings UI does, instead of growing a second encoder that could drift.
 pub(crate) fn save_settings_inner(s: &Settings) -> Result<(), String> {
     let f = settings_file().map_err(|e| e.to_string())?;
-    fs::write(f, serde_json::to_string_pretty(s).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
+    let json = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
+    write_atomic(&f, json.as_bytes()).map_err(|e| e.to_string())
 }
 
 /// Hide (`dismissed = true`) or restore (`false`) a discovered repo from the
@@ -10427,9 +11703,7 @@ fn agents_save(agents: Vec<Agent>) -> Result<(), String> {
     // lookups). If duplicates, keep the first occurrence.
     let mut seen = std::collections::HashSet::new();
     s.agents = agents.into_iter().filter(|a| seen.insert(a.id.clone())).collect();
-    let f = settings_file().map_err(|e| e.to_string())?;
-    fs::write(f, serde_json::to_string_pretty(&s).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
+    save_settings_inner(&s)
 }
 
 // ───────────────────────────── custom themes ─────────────────────────────
@@ -11400,6 +12674,62 @@ pub(crate) fn leave_windowless(app: &AppHandle) {
     }
 }
 
+// ─── termic:// deep links (GH #192) ──────────────────────────────────────
+// External systems open Termic on a pre-filled New Task dialog with
+// `termic://new?project=…&name=…&prompt=…`. Rust deliberately does NOT
+// parse or validate the URL: the only checks worth making (is this a
+// REGISTERED project?) need the webview's store, so the raw URL crosses
+// once and `src/lib/deepLink.ts` owns the whole contract.
+//
+// The queue exists for cold start. macOS delivers the open-url Apple Event
+// while the webview is still booting, long before any JS listener is
+// attached, so an emit-only design drops exactly the link that launched the
+// app. Instead every arrival lands in this queue and the webview is merely
+// NUDGED; the webview always reads through `deep_link_take_pending`, which
+// drains atomically. That single-reader shape is also why a link arriving
+// while the app is live cannot be handled twice: the nudge carries no
+// payload, so there is nothing to double-handle.
+static PENDING_DEEP_LINKS: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::new());
+
+/// Queue a `termic://` URL and nudge the webview. Safe to call before the
+/// window exists (the emit is dropped, the queue survives).
+pub(crate) fn queue_deep_link(app: &AppHandle, url: &str) {
+    use tauri::Manager;
+    dlog(&format!("[deeplink] queued {url}"));
+    PENDING_DEEP_LINKS.lock().push(url.to_string());
+    // Come to front. A link that opens a dialog (or selects a task) behind a
+    // hidden window is indistinguishable from one that did nothing, and
+    // windowless mode makes that the DEFAULT outcome for a menu-bar-only
+    // instance. macOS activates the app for a link it routes, but that does
+    // not un-hide a window `leave_windowless` put away.
+    //
+    // Gated on the window already existing: during cold-start `setup` this
+    // runs before the window is built, and leave_windowless would flip
+    // SHOWN_ONCE / the activation policy early, ahead of the normal startup
+    // ordering. The webview's own boot drain covers that case.
+    if app.get_webview_window("main").is_some() {
+        leave_windowless(app);
+    }
+    let _ = app.emit("termic://deep-link", ());
+}
+
+/// Drain the queue. The webview calls this on boot AND on every
+/// `termic://deep-link` nudge, so a link that arrived before the listener
+/// existed is picked up by the boot read instead of being lost.
+#[tauri::command]
+fn deep_link_take_pending() -> Vec<String> {
+    std::mem::take(&mut *PENDING_DEEP_LINKS.lock())
+}
+
+/// The `termic://` URL this process was launched with, if any. Only
+/// meaningful on Windows/Linux, where a link spawns a fresh process with
+/// the URL in argv; macOS routes it to the running app as an Apple Event
+/// and leaves argv alone. Read BEFORE the window exists so the
+/// single-instance preflight can hand it over to the surviving instance.
+fn deep_link_from_argv() -> Option<String> {
+    std::env::args().skip(1).find(|a| a.starts_with("termic://"))
+}
+
 // ─── startup timing ──────────────────────────────────────────────────────
 // Stamped as early as `run()` can manage. The webview reads it back at first
 // paint (`src/lib/perfMarks.ts`) so the nightly perf job can report
@@ -11516,6 +12846,13 @@ pub fn run() {
         // because the process plugin also exposes exit/restart APIs we
         // may want for other purposes later (debug 'restart app' etc).
         .plugin(tauri_plugin_process::init())
+        // `termic://` URL scheme (GH #192). Schemes are declared in
+        // tauri.conf.json → plugins.deep-link.desktop, which is what the
+        // bundler turns into CFBundleURLTypes; the handler is registered
+        // in `setup` below. Exposes no IPC command we call from JS (the
+        // webview reads `deep_link_take_pending` instead), so it needs no
+        // capability entry.
+        .plugin(tauri_plugin_deep_link::init())
         // Native PDF preview channel. WKWebView renders a PDF served as a real
         // `application/pdf` resource but shows blank for a `data:` URL, so the
         // file-tree preview pane points an `<embed>` at
@@ -11538,7 +12875,13 @@ pub fn run() {
             // vs beta, a direct binary run) never opens a duplicate that
             // races the shared projects.json/tasks/. Debug is newest-wins.
             // See cli_server::another_instance_running.
-            if cli_server::another_instance_running() {
+            //
+            // A `termic://` link that spawned THIS process (Windows/Linux;
+            // macOS routes links to the running app instead) rides along
+            // with the raise, so the link opens in the instance that
+            // survives rather than dying with the one we exit. GH #192.
+            let argv_link = deep_link_from_argv();
+            if cli_server::another_instance_running(argv_link.as_deref()) {
                 // Say WHY on stderr before going. Exiting silently before the
                 // window exists is indistinguishable from a crash-on-launch,
                 // and the raise above is invisible when the owner is a stale
@@ -11556,6 +12899,34 @@ pub fn run() {
                         .unwrap_or_else(|_| "<unresolved data dir>".into()),
                 );
                 std::process::exit(0);
+            }
+            // `termic://` deep links (GH #192). Registered here, before the
+            // window is built, so a link that LAUNCHED the app is already
+            // queued by the time the webview asks for it. Two sources, both
+            // needed: `get_current` returns the launch URL the plugin
+            // captured before `setup` ran (the cold-start case), while
+            // `on_open_url` covers every link that arrives afterwards
+            // (macOS re-activating an app that is already up). The queue
+            // dedupes nothing on purpose - the two sources are disjoint.
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    for u in urls {
+                        queue_deep_link(app.handle(), u.as_str());
+                    }
+                }
+                // Windows/Linux launch argv, for the case where we ARE the
+                // surviving instance (the handoff above only fires when
+                // somebody else owns the data dir).
+                if let Some(url) = argv_link {
+                    queue_deep_link(app.handle(), &url);
+                }
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for u in event.urls() {
+                        queue_deep_link(&handle, u.as_str());
+                    }
+                });
             }
             // Resolve the user's login-shell PATH off the main thread
             // so the first PTY spawn doesn't wait on shell startup.
@@ -11693,7 +13064,7 @@ pub fn run() {
             // into minimize-to-tray is the kind of default people hate. Those
             // platforms keep Tauri's native close. `--headless` still
             // goes windowless everywhere, because there the user asked for no
-            // window. See docs/plans/windows.md.
+            // window. See docs/ideas/windows.md.
             #[cfg(target_os = "macos")]
             {
                 let handle = app.handle().clone();
@@ -11776,6 +13147,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             perf_boot_elapsed_ms,
+            deep_link_take_pending,
             projects_list, project_add, project_add_multi, project_set_members, project_update, project_remove, project_reorder, project_set_group,
             tasks_list, task_create, task_create_multi, task_open_repo, task_importable_worktrees, task_import_worktree, task_archive, task_set_cli, task_set_custom_command, task_set_resume_override, task_set_sandbox, task_set_yolo,
             sandbox_available, sandbox_deny_counts, sandbox_recent_denied_hosts, sandbox_recent_denied_paths, sandbox_access_counts, sandbox_recent_access_hosts, sandbox_recent_access_paths, sandbox_set_monitor_filters, task_sandbox_add_allowed_host, task_sandbox_add_allowed_path, task_sandbox_remove_allowed_path, agent_sandbox_add_allowed_path, agent_sandbox_add_allowed_host, task_recent_denials,
@@ -11783,13 +13155,14 @@ pub fn run() {
 
             task_reorder,
             task_restore, task_delete, task_run_script, task_run_script_stream, task_ensure_extra_ports, task_stop_script, task_record_spawn, task_set_has_history, task_set_agent_session_id,
-            task_set_tabs, task_set_tab_session_id, task_set_tab_previous_session_id,
+            task_set_tabs, task_set_tab_session_id,
             task_set_split_layout,
             task_set_right_tabs, task_set_right_tab_session_id,
-            task_grep_start, task_grep_cancel,
+            task_grep_start, task_grep_cancel, task_find_backend,
             task_spotlight_start, task_spotlight_stop, task_spotlight_resync, task_spotlight_status,
             task_diff, task_files, task_list_files_for_finder, task_match_ignored_files, task_send_diff_to_main,
             task_changes, task_git_status, task_git_branches, project_git_branches, project_branch_context, task_git_checkout, task_git_update, task_git_update_info, task_stage, task_unstage, task_commit, task_discard,
+            task_git_log, task_git_refs, task_git_push, task_git_commit_files, task_git_compare, task_git_blame, task_git_commit_meta, task_git_commit_offset,
             task_file_diff, task_file_diff_sides, task_file_read, task_file_read_base64, task_file_fp, task_file_write, task_dir_list, task_path_stat,
             task_path_rename, task_path_delete, task_reveal_path,
             task_rename, project_rename,
@@ -12123,6 +13496,153 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    // ── create-time resume-args override ──
+    //
+    // The New Task dialog sets the same field the task menu's "Resume
+    // override" edits, so the two paths have to agree on what a blank box
+    // means: no override, NOT an override that resumes with nothing.
+
+    #[test]
+    fn blank_resume_override_means_no_override() {
+        assert_eq!(normalized_resume_override(None), None);
+        assert_eq!(normalized_resume_override(Some(String::new())), None);
+        assert_eq!(normalized_resume_override(Some("   \n\t ".into())), None);
+    }
+
+    #[test]
+    fn resume_override_is_stored_trimmed_and_verbatim() {
+        // Verbatim to the token: placeholders expand at spawn, and quoting
+        // is the caller's business, so nothing here may rewrite the string.
+        assert_eq!(
+            normalized_resume_override(Some("  --resume {WORKSPACE_NAME}  ".into())),
+            Some("--resume {WORKSPACE_NAME}".to_string()),
+        );
+        assert_eq!(
+            normalized_resume_override(Some("resume --last".into())),
+            Some("resume --last".to_string()),
+        );
+    }
+
+    // ── find-in-files backends (GH #181) ──
+    //
+    // Both parsers feed the same GrepHit contract, so the frontend never
+    // learns which backend ran. These pin the shape of that contract.
+
+    #[test]
+    fn git_grep_line_parses_into_a_hit_without_ranges() {
+        let h = parse_git_grep_line("src/lib.rs:42:7:  let x = 1;").expect("a match line");
+        assert_eq!(h.path, "src/lib.rs");
+        assert_eq!((h.line, h.col), (42, 7));
+        assert_eq!(h.preview, "  let x = 1;");
+        assert!(h.ranges.is_empty(), "git grep can't report match ranges, the frontend re-matches");
+    }
+
+    #[test]
+    fn git_grep_line_keeps_colons_that_belong_to_the_code() {
+        // splitn(4) matters: `a::b` in the preview must not be eaten.
+        let h = parse_git_grep_line("s.rs:1:1:foo::bar(x:y)").expect("a match line");
+        assert_eq!(h.preview, "foo::bar(x:y)");
+    }
+
+    #[test]
+    fn git_grep_rejects_non_match_output() {
+        assert!(parse_git_grep_line("").is_none());
+        assert!(parse_git_grep_line("Binary file x matches").is_none());
+        assert!(parse_git_grep_line("src/lib.rs:0:1:zero line number").is_none());
+    }
+
+    #[test]
+    fn rg_match_event_carries_every_range_on_the_line() {
+        let ev = r#"{"type":"match","data":{"path":{"text":"src/a.ts"},"lines":{"text":"foo bar foo\n"},"line_number":9,"absolute_offset":0,"submatches":[{"match":{"text":"foo"},"start":0,"end":3},{"match":{"text":"foo"},"start":8,"end":11}]}}"#;
+        let h = parse_rg_json_line(ev).expect("a match event");
+        assert_eq!(h.path, "src/a.ts");
+        assert_eq!(h.line, 9);
+        assert_eq!(h.preview, "foo bar foo", "trailing newline must be stripped");
+        assert_eq!(h.ranges, vec![[0, 3], [8, 11]]);
+        assert_eq!(h.col, 1, "col is 1-based, same contract as git grep --column");
+    }
+
+    #[test]
+    fn rg_ranges_are_utf16_not_byte_offsets() {
+        // rg counts bytes. "héllo " is 7 bytes but 6 UTF-16 units, so a
+        // byte-offset range would paint one char to the right of the match.
+        let ev = r#"{"type":"match","data":{"path":{"text":"a.txt"},"lines":{"text":"héllo world\n"},"line_number":1,"submatches":[{"match":{"text":"world"},"start":7,"end":12}]}}"#;
+        let h = parse_rg_json_line(ev).expect("a match event");
+        assert_eq!(h.ranges, vec![[6, 11]]);
+        assert_eq!(&h.preview[..], "héllo world");
+        // Sanity: the UTF-16 range actually spans the matched word.
+        let utf16: Vec<u16> = h.preview.encode_utf16().collect();
+        let picked = String::from_utf16(&utf16[6..11]).unwrap();
+        assert_eq!(picked, "world");
+    }
+
+    #[test]
+    fn rg_skips_events_that_are_not_matches() {
+        assert!(parse_rg_json_line(r#"{"type":"begin","data":{"path":{"text":"a.ts"}}}"#).is_none());
+        assert!(parse_rg_json_line(r#"{"type":"end","data":{"path":{"text":"a.ts"}}}"#).is_none());
+        assert!(parse_rg_json_line("not json at all").is_none());
+    }
+
+    #[test]
+    fn rg_drops_matches_it_cannot_decode() {
+        // Non-UTF-8 path: rg sends {"bytes": base64} instead of {"text"}.
+        // Guessing an encoding would put a garbage row in the results.
+        let ev = r#"{"type":"match","data":{"path":{"bytes":"YS50eHQ="},"lines":{"text":"hit\n"},"line_number":1,"submatches":[{"match":{"text":"hit"},"start":0,"end":3}]}}"#;
+        assert!(parse_rg_json_line(ev).is_none());
+    }
+
+    #[test]
+    fn path_probe_only_accepts_an_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let empty = dir.path().join("empty");
+        let real = dir.path().join("real");
+        fs::create_dir_all(&empty).unwrap();
+        fs::create_dir_all(&real).unwrap();
+
+        // A non-executable file with the right name must not win.
+        fs::write(real.join("rg"), b"#!/bin/sh\n").unwrap();
+        let path = format!("{}:{}", empty.display(), real.display());
+        assert!(find_on_path("rg", &path).is_none(), "a chmod-less file is not a backend");
+
+        fs::set_permissions(real.join("rg"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(find_on_path("rg", &path), Some(real.join("rg")));
+        assert!(find_on_path("rg", "").is_none(), "an empty PATH must not panic");
+    }
+
+    // The backend is memoized for the whole session, and the login-shell
+    // PATH lands asynchronously. Caching a miss read off the static
+    // fallback (no /opt/homebrew/bin) would pin git grep until relaunch
+    // for someone who has rg installed, so only these three combinations
+    // may be kept.
+    #[test]
+    fn a_miss_on_the_fallback_path_is_never_memoized() {
+        assert!(!backend_verdict_is_final(false, false), "ask again once the real PATH lands");
+        assert!(backend_verdict_is_final(false, true), "a miss on the final PATH is the answer");
+    }
+
+    #[test]
+    fn finding_rg_is_final_whatever_path_it_came_from() {
+        // The binary exists at that path; a later PATH can't unfind it.
+        assert!(backend_verdict_is_final(true, false));
+        assert!(backend_verdict_is_final(true, true));
+    }
+
+    #[test]
+    fn path_probe_takes_the_first_hit_in_path_order() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        for d in [&first, &second] {
+            fs::write(d.join("rg"), b"x").unwrap();
+            fs::set_permissions(d.join("rg"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!("{}:{}", first.display(), second.display());
+        assert_eq!(find_on_path("rg", &path), Some(first.join("rg")));
+    }
+
     // CLI graduation (0.26.0): the serde default only reaches profiles with
     // the field absent, so existing installs need the one-time flip. The
     // contract worth pinning is that it is ONE time: without the marker check
@@ -12152,6 +13672,22 @@ mod tests {
         assert!(apply_cli_default_migration(&mut s));
         assert!(s.cli_enabled);
         assert!(s.cli_default_migrated);
+    }
+
+    // Pinned tabs (GH #183). Task JSON has no migration step: `#[serde(default)]`
+    // IS the compatibility story, so a task file written before pinning existed
+    // must still load, and a pinned one must survive a save/load round trip.
+    #[test]
+    fn a_task_file_without_pinned_loads_with_it_off() {
+        let t: PersistedTab = serde_json::from_str(r#"{"id":"t1","cli":"claude"}"#).unwrap();
+        assert!(!t.pinned);
+    }
+
+    #[test]
+    fn pinned_survives_a_round_trip() {
+        let t = PersistedTab { id: "t1".into(), cli: "claude".into(), pinned: true, ..Default::default() };
+        let back: PersistedTab = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert!(back.pinned);
     }
 
     fn role(kind: &str, task: &str) -> PtyRole {
@@ -13321,6 +14857,855 @@ mod tests {
         (main_dir, wt_dir, main, wt)
     }
 
+    // ── git history / graph (issue #199) ──
+
+    #[test]
+    fn parse_git_log_splits_records_and_refs() {
+        let rec = |sha: &str, parents: &str, refs: &str, subject: &str| {
+            format!("{sha}\u{1f}{}\u{1f}{parents}\u{1f}Ada\u{1f}ada@example.com\u{1f}1700000000\u{1f}{refs}\u{1f}{subject}\u{1e}", &sha[..7])
+        };
+        let out = format!(
+            "{}\n{}\n{}",
+            rec("aaaaaaaaaaaa", "bbbbbbbbbbbb cccccccccccc", "HEAD -> main, origin/main, tag: v1", "merge: land it"),
+            rec("bbbbbbbbbbbb", "dddddddddddd", "", "subject, with a comma"),
+            rec("dddddddddddd", "", "", "root"),
+        );
+        let unpushed = ["aaaaaaaaaaaa".to_string()].into_iter().collect();
+        let commits = parse_git_log(&out, &unpushed);
+
+        assert_eq!(commits.len(), 3);
+        // A merge keeps BOTH parents, in git's order — lane layout depends on
+        // first-parent coming first.
+        assert_eq!(commits[0].parents, vec!["bbbbbbbbbbbb", "cccccccccccc"]);
+        assert_eq!(commits[0].refs, vec!["HEAD -> main", "origin/main", "tag: v1"]);
+        assert!(commits[0].unpushed, "rev-list membership must mark the commit outgoing");
+        // A comma inside the SUBJECT must not be mistaken for a ref separator.
+        assert_eq!(commits[1].subject, "subject, with a comma");
+        assert!(commits[1].refs.is_empty());
+        assert!(!commits[1].unpushed);
+        // A root commit has no parents and that is not a parse failure.
+        assert!(commits[2].parents.is_empty());
+        assert_eq!(commits[2].timestamp, 1700000000);
+    }
+
+    #[test]
+    fn parse_git_log_keeps_a_multiline_body_as_one_field() {
+        // The body is the last field and holds newlines. That only parses
+        // because records are RS-terminated, not newline-terminated: a
+        // line-based split would tear every multi-paragraph commit apart.
+        let body = "Why it changed.\n\nCo-authored-by: Ada <ada@example.com>";
+        let out = format!(
+            "abc123456789\u{1f}abc1234\u{1f}\u{1f}Ada\u{1f}ada@example.com\u{1f}1700000000\u{1f}\u{1f}the subject\u{1f}{body}\n\n\u{1e}",
+        );
+        let commits = parse_git_log(&out, &Default::default());
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "the subject");
+        // Trailing blank lines are git's, not the author's.
+        assert_eq!(commits[0].body, body);
+    }
+
+    #[test]
+    fn parse_git_log_leaves_a_one_line_commit_with_an_empty_body() {
+        let out = "abc123456789\u{1f}abc1234\u{1f}\u{1f}Ada\u{1f}ada@example.com\u{1f}1700000000\u{1f}\u{1f}subject only\u{1f}\u{1e}";
+        let commits = parse_git_log(out, &Default::default());
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "subject only");
+        assert!(commits[0].body.is_empty());
+    }
+
+    #[test]
+    fn parse_git_log_tolerates_empty_and_short_records() {
+        assert!(parse_git_log("", &Default::default()).is_empty());
+        // Truncated record (fewer fields than the format promises) is skipped
+        // rather than panicking on an index.
+        assert!(parse_git_log("abc\u{1f}abc\u{1e}", &Default::default()).is_empty());
+    }
+
+    #[test]
+    fn commit_ish_rejects_anything_but_a_sha() {
+        assert!(is_commit_ish("0d86f3a"));
+        assert!(is_commit_ish("0d86f3a6ba24515f2492137483333ba979e3450d"));
+        assert!(!is_commit_ish(""));
+        assert!(!is_commit_ish("HEAD"));
+        assert!(!is_commit_ish("--upload-pack=touch /tmp/pwn"));
+        assert!(!is_commit_ish("main..HEAD"));
+        assert!(!is_commit_ish(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn safe_rev_accepts_refnames_but_not_option_injection() {
+        // The Compare picker hands us real refnames, so unlike is_commit_ish
+        // these must pass.
+        assert!(is_safe_rev("main"));
+        assert!(is_safe_rev("origin/main"));
+        assert!(is_safe_rev("feature/gh-208_compare.v2"));
+        assert!(is_safe_rev("0d86f3a6ba24515f2492137483333ba979e3450d"));
+        // A leading dash is the whole reason this exists.
+        assert!(!is_safe_rev("--upload-pack=touch /tmp/pwn"));
+        assert!(!is_safe_rev("-c"));
+        // Rev SYNTAX is not a refname: the caller peels with ^{commit} itself,
+        // and a range would silently change what is being compared.
+        assert!(!is_safe_rev("main..HEAD"));
+        assert!(!is_safe_rev("HEAD~3"));
+        assert!(!is_safe_rev("main^"));
+        assert!(!is_safe_rev("refs/heads/*"));
+        assert!(!is_safe_rev(""));
+        assert!(!is_safe_rev("has space"));
+        assert!(!is_safe_rev(&"a".repeat(256)));
+    }
+
+    #[test]
+    fn name_status_z_keeps_the_destination_of_a_rename() {
+        // Exactly what `git diff --name-status -M -z` writes: a plain record is
+        // two fields, a rename is three, and the stream ends with a NUL.
+        let rows = parse_name_status_z("M\0keep.txt\0R075\0old.txt\0new.txt\0A\0add.txt\0");
+        assert_eq!(
+            rows,
+            vec![
+                ("M".to_string(), "keep.txt".to_string()),
+                // The similarity score is dropped and the NEW path kept — it is
+                // the one `git show <sha>:path` can resolve.
+                ("R".to_string(), "new.txt".to_string()),
+                ("A".to_string(), "add.txt".to_string()),
+            ],
+        );
+        assert!(parse_name_status_z("").is_empty());
+        // A truncated record is dropped, not panicked on.
+        assert!(parse_name_status_z("R100\0only-one-path\0").is_empty());
+    }
+
+    #[test]
+    fn numstat_z_handles_renames_and_binary_files() {
+        // A rename leaves the third tab-field EMPTY and follows with two
+        // NUL-terminated paths; a binary file reports "-" for both counts.
+        let rows = parse_numstat_z("1\t0\tkeep.txt\04\t2\t\0old.txt\0new.txt\0-\t-\tshot.png\0");
+        assert_eq!(
+            rows,
+            vec![
+                ("keep.txt".to_string(), Some(1), Some(0)),
+                ("new.txt".to_string(), Some(4), Some(2)),
+                // Binary churn is unknown, NOT zero.
+                ("shot.png".to_string(), None, None),
+            ],
+        );
+        assert!(parse_numstat_z("").is_empty());
+    }
+
+    /// A repo on `main` with one committed file, plus a `topic` branch that
+    /// commits one file, edits another without committing, and drops an
+    /// untracked one. The three ways work can exist in a task, in one fixture.
+    fn compare_fixture(repo: &Path) -> String {
+        git_init_with_commit(repo);
+        git_set_identity(repo);
+        git_commit_file(repo, "shared.txt", "one\ntwo\n", "shared on main");
+        let main = git_branch(repo);
+        git_run(repo, &["checkout", "-q", "-b", "topic"]);
+        git_commit_file(repo, "committed.txt", "c\n", "committed on topic");
+        fs::write(repo.join("shared.txt"), "one\ntwo\nthree\n").unwrap();
+        fs::write(repo.join("untracked.txt"), "u\n").unwrap();
+        main
+    }
+
+    #[test]
+    fn git_compare_merges_committed_staged_and_untracked_work() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let main = compare_fixture(&repo);
+
+        let cmp = git_compare(&repo, &main, true).unwrap();
+        assert_eq!(cmp.branch, "topic");
+        assert!(!cmp.no_merge_base);
+        let by: std::collections::HashMap<&str, &GitFile> =
+            cmp.files.iter().map(|f| (f.path.as_str(), f)).collect();
+
+        // The entire point of the view: a file whose only change is a COMMIT
+        // shows up next to one that is merely edited and one git has never seen.
+        assert_eq!(by["committed.txt"].status, "A");
+        assert_eq!(by["shared.txt"].status, "M");
+        assert_eq!(by["untracked.txt"].status, "?");
+        assert_eq!(by.len(), 3);
+
+        assert_eq!(by["shared.txt"].added, Some(1));
+        assert_eq!(by["shared.txt"].removed, Some(0));
+        // Untracked churn can't come from `git diff` (no tree holds the file),
+        // so it is counted directly.
+        assert_eq!(by["untracked.txt"].added, Some(1));
+        // The header total must equal the rows it sits above.
+        assert_eq!(cmp.added, cmp.files.iter().filter_map(|f| f.added).sum::<u32>());
+        // A worktree-side file carries a real fingerprint, which is what keeps
+        // "mark as viewed" working here (unlike a History diff).
+        assert!(!by["shared.txt"].fp.is_empty());
+    }
+
+    #[test]
+    fn git_compare_defaults_to_the_merge_base_so_base_side_work_is_not_inverted() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let main = compare_fixture(&repo);
+        // Someone lands a commit on the base AFTER this task branched.
+        git_run(&repo, &["checkout", "-q", &main]);
+        git_commit_file(&repo, "later-on-main.txt", "later\n", "landed on main");
+        git_run(&repo, &["checkout", "-q", "topic"]);
+
+        let merged = git_compare(&repo, &main, true).unwrap();
+        assert!(
+            !merged.files.iter().any(|f| f.path == "later-on-main.txt"),
+            "three-dot semantics must ignore work the base gained since the branch point",
+        );
+
+        // Two-dot is the escape hatch, and there the same file DOES appear —
+        // as a deletion, because the topic branch genuinely doesn't have it.
+        let direct = git_compare(&repo, &main, false).unwrap();
+        let later = direct.files.iter().find(|f| f.path == "later-on-main.txt")
+            .expect("tip-to-tree compare sees the base's newer commit");
+        assert_eq!(later.status, "D");
+        assert_ne!(merged.base_sha, direct.base_sha, "the two modes read different left sides");
+    }
+
+    #[test]
+    fn blame_parses_incremental_groups_and_dedupes_the_commit_table() {
+        // Two commits, three groups: commit A owns lines 1-2 and 5, commit B
+        // owns 3-4. A's second group repeats only the sha line, which is the
+        // whole reason --incremental is cheap and the reason the parser must
+        // not clear already-filled fields.
+        let a = "1111111111111111111111111111111111111111";
+        let b = "2222222222222222222222222222222222222222";
+        let out = format!(
+"{a} 1 1 2
+author Ada
+author-mail <ada@example.com>
+author-time 1700000000
+author-tz +0000
+summary first subject
+filename f.rs
+{b} 3 3 2
+author Grace
+author-mail <grace@example.com>
+author-time 1700000100
+author-tz +0000
+summary second subject
+filename f.rs
+{a} 5 5 1
+previous 3333333333333333333333333333333333333333 f.rs
+filename f.rs
+");
+        let (commits, lines) = parse_git_blame_incremental(&out);
+
+        assert_eq!(commits.len(), 2, "a commit owning two groups appears once");
+        assert_eq!(commits[0].author, "Ada");
+        assert_eq!(commits[0].author_email, "ada@example.com", "angle brackets are stripped");
+        assert_eq!(commits[0].author_time, 1700000000);
+        assert_eq!(commits[0].summary, "first subject");
+        assert!(!commits[0].uncommitted);
+        assert_eq!(commits[1].author, "Grace");
+
+        // Line index is 0-based over 1-based git line numbers, and the
+        // out-of-order trailing group lands on line 5, not appended.
+        assert_eq!(lines, vec![0, 0, 1, 1, 0]);
+    }
+
+    #[test]
+    fn blame_marks_the_all_zero_sha_as_uncommitted_and_tolerates_gaps() {
+        let zero = "0000000000000000000000000000000000000000";
+        let out = format!(
+"{zero} 1 2 1
+author Not Committed Yet
+author-mail <not.committed.yet>
+author-time 1700000200
+author-tz +0000
+summary Version of f.rs from f.rs
+filename f.rs
+");
+        // Only line 2 is attributed, so line 1 stays sentinel rather than
+        // silently pointing at commit 0, and the index ends where git's
+        // numbers end.
+        let (commits, lines) = parse_git_blame_incremental(&out);
+        assert_eq!(commits.len(), 1);
+        assert!(commits[0].uncommitted, "the all-zero sha is a working-tree line");
+        assert_eq!(lines, vec![u32::MAX, 0]);
+    }
+
+    #[test]
+    fn blame_ignores_a_malformed_group_header_and_refuses_an_absurd_count() {
+        let a = "1111111111111111111111111111111111111111";
+        // First header is malformed (two numbers, not three) and must be
+        // skipped without poisoning the following real group.
+        let out = format!("{a} 1 1\n{a} 1 1 3\nauthor Ada\nsummary s\nfilename f.rs\n");
+        let (commits, lines) = parse_git_blame_incremental(&out);
+        assert_eq!(commits.len(), 1, "the malformed header contributed no commit");
+        assert_eq!(lines, vec![0, 0, 0]);
+
+        // An absurd line count is refused outright rather than allocating for
+        // it. Nothing legitimate gets near BLAME_MAX_LINES.
+        let huge = format!("{a} 1 1 {}\nauthor Ada\nsummary s\nfilename f.rs\n", BLAME_MAX_LINES + 1);
+        let (_c, l) = parse_git_blame_incremental(&huge);
+        assert!(l.is_empty(), "a hostile count must not size the index");
+    }
+
+    #[test]
+    fn blame_reads_a_real_repo_and_attributes_the_working_tree_edit() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+        git_init_with_commit(repo);
+        git_set_identity(repo);
+        git_commit_file(repo, "f.txt", "one\ntwo\n", "add f");
+        let task = Task { path: repo.to_string_lossy().into_owned(), ..Default::default() };
+
+        let blamed = task_git_blame_for_task(&task, "f.txt").unwrap();
+        assert!(!blamed.skipped);
+        assert_eq!(blamed.lines.len(), 2);
+        assert!(!blamed.head.is_empty(), "head is reported for cache keying");
+        let author = &blamed.commits[blamed.lines[0] as usize].author;
+        assert!(!author.is_empty(), "a committed line has an author");
+
+        // Blame runs against the WORKING TREE, so an unsaved-then-saved third
+        // line is attributed to nobody yet instead of shifting the other two.
+        fs::write(repo.join("f.txt"), "one\ntwo\nthree\n").unwrap();
+        let dirty = task_git_blame_for_task(&task, "f.txt").unwrap();
+        assert_eq!(dirty.lines.len(), 3);
+        assert!(
+            dirty.commits[dirty.lines[2] as usize].uncommitted,
+            "the new line is not committed yet",
+        );
+        assert!(
+            !dirty.commits[dirty.lines[0] as usize].uncommitted,
+            "the untouched first line keeps its commit",
+        );
+    }
+
+    #[test]
+    fn commit_offset_locates_a_commit_without_walking_pages() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+        git_init_with_commit(repo);
+        git_set_identity(repo);
+        let first = git_head(repo);
+        for n in 1..=5 {
+            git_commit_file(repo, &format!("f{n}.txt"), "x\n", &format!("c{n}"));
+        }
+        let head = git_head(repo);
+        let task = Task { path: repo.to_string_lossy().into_owned(), ..Default::default() };
+
+        // HEAD is at offset 0; the initial commit is 5 commits back. That IS
+        // the page `skip` needed to land on it, which is the whole point.
+        assert_eq!(task_git_commit_offset_for_task(&task, "", &head).unwrap(), 0);
+        assert_eq!(task_git_commit_offset_for_task(&task, "", &first).unwrap(), 5);
+
+        // Non-hex never reaches git as an argument.
+        assert!(task_git_commit_offset_for_task(&task, "", "--exec=touch /tmp/pwn").is_err());
+        assert!(task_git_commit_offset_for_task(&task, "", "HEAD~2").is_err());
+        // Well-formed but absent is an error, not 0 (which would silently scroll
+        // the panel to the top and look like a successful reveal).
+        assert!(task_git_commit_offset_for_task(&task, "", &"b".repeat(40)).is_err());
+    }
+
+    #[test]
+    fn commit_meta_reads_one_commit_in_full_and_rejects_a_bad_sha() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+        git_init_with_commit(repo);
+        git_set_identity(repo);
+        fs::write(repo.join("f.txt"), "one\n").unwrap();
+        git_run(repo, &["add", "f.txt"]);
+        git_run(repo, &[
+            "commit", "-q", "-m",
+            "feat: the subject\n\nProse that explains it.\n\nCo-authored-by: Ada <ada@example.com>",
+        ]);
+        let head = git_head(repo);
+        let task = Task { path: repo.to_string_lossy().into_owned(), ..Default::default() };
+
+        let c = task_git_commit_meta_for_task(&task, "f.txt", &head).unwrap();
+        assert_eq!(c.sha, head);
+        assert_eq!(c.subject, "feat: the subject");
+        // The whole message below the subject, trailers included: the popup
+        // renders the prose and pulls co-authors out on the frontend.
+        assert!(c.body.contains("Prose that explains it."));
+        assert!(c.body.contains("Co-authored-by: Ada <ada@example.com>"));
+        assert!(!c.author.is_empty() && !c.email.is_empty());
+        assert!(c.timestamp > 0);
+
+        // Anything that is not hex never reaches git as an argument.
+        assert!(task_git_commit_meta_for_task(&task, "f.txt", "--exec=touch /tmp/pwn").is_err());
+        assert!(task_git_commit_meta_for_task(&task, "f.txt", "HEAD~1").is_err());
+        // Well-formed but absent is an error, not an empty commit.
+        assert!(task_git_commit_meta_for_task(&task, "f.txt", &"a".repeat(40)).is_err());
+    }
+
+    #[test]
+    fn blame_is_silent_for_an_untracked_file_and_outside_a_repo() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+        git_init_with_commit(repo);
+        fs::write(repo.join("untracked.txt"), "hi\n").unwrap();
+        let task = Task { path: repo.to_string_lossy().into_owned(), ..Default::default() };
+
+        // Untracked: empty, NOT an error. The editor shows nothing rather than
+        // a git failure on every file it opens.
+        let untracked = task_git_blame_for_task(&task, "untracked.txt").unwrap();
+        assert!(untracked.commits.is_empty() && untracked.lines.is_empty());
+        assert!(!untracked.skipped, "empty is not the same signal as skipped");
+
+        let plain = tempdir().unwrap();
+        fs::write(plain.path().join("f.txt"), "hi\n").unwrap();
+        let non_git = Task { path: plain.path().to_string_lossy().into_owned(), ..Default::default() };
+        let out = task_git_blame_for_task(&non_git, "f.txt").unwrap();
+        assert!(out.commits.is_empty() && out.head.is_empty());
+    }
+
+    #[test]
+    fn git_compare_rejects_a_ref_that_is_not_in_the_repo() {
+        let dir = tempdir().unwrap();
+        git_init_with_commit(dir.path());
+        assert!(git_compare(dir.path(), "no-such-branch", true).is_err());
+        // And never lets a dash reach git as an option.
+        assert!(git_compare(dir.path(), "--exec=touch /tmp/pwn", true).is_err());
+    }
+
+    #[test]
+    fn compare_diff_sides_read_the_base_against_the_working_tree() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let main = compare_fixture(&repo);
+        let cmp = git_compare(&repo, &main, true).unwrap();
+        let scope = format!("base:{}", cmp.base_sha);
+        let task = task_at(&repo);
+
+        // Committed on the branch: absent from the base, present on the right.
+        let added = task_file_diff_sides_for_task(&task, "committed.txt", Some(&scope)).unwrap();
+        assert!(!added.original_exists && added.modified_exists);
+        assert_eq!(added.modified, "c\n");
+
+        // Edited but never committed: the base still has the ORIGINAL, which is
+        // what an unstaged- or staged-scoped diff could not have shown.
+        let edited = task_file_diff_sides_for_task(&task, "shared.txt", Some(&scope)).unwrap();
+        assert_eq!(edited.original, "one\ntwo\n");
+        assert_eq!(edited.modified, "one\ntwo\nthree\n");
+        // The right side is the live file, so the review affordances stay on.
+        assert!(!edited.fp.is_empty());
+
+        // A garbage sha in the scope must not silently fall through to the
+        // default HEAD-vs-worktree sides.
+        let bogus = task_file_diff_sides_for_task(&task, "shared.txt", Some("base:not-hex")).unwrap();
+        assert_eq!(bogus.original, "one\ntwo\n", "an unparseable scope falls back to HEAD");
+    }
+
+    #[test]
+    fn git_log_page_reads_real_history_with_a_merge() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_init_with_commit(&repo);
+        git_set_identity(&repo);
+        git_commit_file(&repo, "a.txt", "a\n", "on main");
+        let main = git_branch(&repo);
+        git_run(&repo, &["checkout", "-q", "-b", "topic"]);
+        git_commit_file(&repo, "t.txt", "t\n", "on topic");
+        git_run(&repo, &["checkout", "-q", &main]);
+        git_run(&repo, &["merge", "--no-ff", "-m", "merge topic", "topic"]);
+
+        let page = git_log_page(&repo, 0, 50, false, false, "", &[]);
+        assert_eq!(page.branch, main);
+        assert!(page.upstream.is_empty(), "a local-only repo has no upstream");
+        let subjects: Vec<&str> = page.commits.iter().map(|c| c.subject.as_str()).collect();
+        assert!(subjects.contains(&"merge topic"));
+        assert!(subjects.contains(&"on topic"), "--topo-order must include the merged-in branch");
+        let merge = page.commits.iter().find(|c| c.subject == "merge topic").unwrap();
+        assert_eq!(merge.parents.len(), 2, "merge must expose both parents to the lane layout");
+        assert!(merge.refs.iter().any(|r| r.contains("HEAD")), "the tip carries the HEAD decoration");
+        // Without an upstream nothing is claimed to be outgoing.
+        assert!(page.commits.iter().all(|c| !c.unpushed));
+    }
+
+
+    #[test]
+    fn grep_searches_the_whole_history_not_the_first_page() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_init_with_commit(&repo);
+        git_set_identity(&repo);
+        git_commit_file(&repo, "needle.txt", "x\n", "Fix the LOGIN bug");
+        for i in 0..12 {
+            git_commit_file(&repo, &format!("f{i}.txt"), "y\n", &format!("filler {i}"));
+        }
+        // A page this small would not reach the match by paging.
+        let page = git_log_page(&repo, 0, 3, false, false, "login", &[]);
+        let subjects: Vec<String> = page.commits.iter().map(|c| c.subject.clone()).collect();
+        assert_eq!(subjects, vec!["Fix the LOGIN bug".to_string()], "case-insensitive, from anywhere in the history");
+        assert!(!page.has_more);
+    }
+
+    #[test]
+    fn grep_is_a_literal_string_not_a_regex() {
+        // The filter box is a filter box: a bracket in it is a character
+        // someone typed, and a half-typed regex must not become an error.
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_init_with_commit(&repo);
+        git_set_identity(&repo);
+        git_commit_file(&repo, "a.txt", "a\n", "fix(git): a [bracketed] subject");
+        git_commit_file(&repo, "b.txt", "b\n", "unrelated");
+
+        let hit = git_log_page(&repo, 0, 50, false, false, "[bracketed]", &[]);
+        assert_eq!(hit.commits.len(), 1);
+        // An unbalanced bracket is a query with no matches, never a crash.
+        let none = git_log_page(&repo, 0, 50, false, false, "[unclosed", &[]);
+        assert!(none.commits.is_empty());
+    }
+
+    #[test]
+    fn grep_matches_the_body_too_and_stacks_with_a_scope() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_init_with_commit(&repo);
+        git_set_identity(&repo);
+        std::fs::write(repo.join("c.txt"), "c\n").unwrap();
+        git_run(&repo, &["add", "-A"]);
+        git_run(&repo, &["commit", "-q", "-m", "terse subject", "-m", "the reason lives in the BODY"]);
+
+        assert_eq!(git_log_page(&repo, 0, 50, false, false, "body", &[]).commits.len(), 1);
+        // Search narrows a scope, it does not replace it: an empty ref list is
+        // still HEAD, and --all is still every ref.
+        assert_eq!(git_log_page(&repo, 0, 50, true, false, "body", &[]).commits.len(), 1);
+        assert!(git_log_page(&repo, 0, 50, false, false, "nothing matches this", &[]).commits.is_empty());
+    }
+
+    #[test]
+    fn first_parent_collapses_a_merged_branch_into_its_merge() {
+        // The complaint this answers: picking "main" still drew a lane per
+        // merged branch, because every commit on those branches IS an ancestor
+        // of main. First-parent walks only the mainline, so the merge is one
+        // row and the side commit is not walked at all.
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_init_with_commit(&repo);
+        git_set_identity(&repo);
+        let main = git_branch(&repo);
+        git_run(&repo, &["checkout", "-q", "-b", "topic"]);
+        git_commit_file(&repo, "t.txt", "t\n", "only on topic");
+        git_run(&repo, &["checkout", "-q", &main]);
+        git_run(&repo, &["merge", "--no-ff", "-m", "merge topic", "topic"]);
+
+        let full = git_log_page(&repo, 0, 50, false, false, "", &[]);
+        let subjects = |p: &GitLogPage| p.commits.iter().map(|c| c.subject.clone()).collect::<Vec<_>>();
+        assert!(subjects(&full).contains(&"only on topic".to_string()));
+
+        let fp = git_log_page(&repo, 0, 50, false, true, "", &[]);
+        assert!(subjects(&fp).contains(&"merge topic".to_string()), "the merge itself must stay");
+        assert!(
+            !subjects(&fp).contains(&"only on topic".to_string()),
+            "the merged side branch must collapse into its merge",
+        );
+        assert!(fp.commits.len() < full.commits.len());
+    }
+
+    #[test]
+    fn first_parent_is_ignored_under_all_refs() {
+        // --all exists to show every tip; pruning the topology under it would
+        // draw tips with no path to them.
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_init_with_commit(&repo);
+        git_set_identity(&repo);
+        let main = git_branch(&repo);
+        git_run(&repo, &["checkout", "-q", "-b", "topic"]);
+        git_commit_file(&repo, "t.txt", "t\n", "only on topic");
+        git_run(&repo, &["checkout", "-q", &main]);
+
+        let all = git_log_page(&repo, 0, 50, true, true, "", &[]);
+        assert!(all.commits.iter().any(|c| c.subject == "only on topic"));
+    }
+
+    #[test]
+    fn git_log_page_paginates_and_reports_more() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_init_with_commit(&repo);
+        git_set_identity(&repo);
+        for i in 0..5 {
+            git_commit_file(&repo, &format!("f{i}.txt"), "x\n", &format!("commit {i}"));
+        }
+        let first = git_log_page(&repo, 0, 2, false, false, "", &[]);
+        assert_eq!(first.commits.len(), 2, "a page must not leak the lookahead row");
+        assert!(first.has_more);
+        let second = git_log_page(&repo, 2, 2, false, false, "", &[]);
+        assert_eq!(second.commits.len(), 2);
+        assert_ne!(first.commits[0].sha, second.commits[0].sha, "skip must advance the page");
+        // The tail page knows it is the tail.
+        let tail = git_log_page(&repo, 0, 500, false, false, "", &[]);
+        assert!(!tail.has_more);
+    }
+
+    /// A repo with an unmerged side branch, which is the only shape where the
+    /// three scopes (HEAD / picked refs / --all) give three different answers.
+    fn repo_with_side_branch(repo: &Path) -> (String, String) {
+        git_init_with_commit(repo);
+        git_set_identity(repo);
+        git_commit_file(repo, "a.txt", "a\n", "on main");
+        let main = git_branch(repo);
+        git_run(repo, &["checkout", "-q", "-b", "side"]);
+        git_commit_file(repo, "s.txt", "s\n", "only on side");
+        git_run(repo, &["checkout", "-q", &main]);
+        (main, "side".to_string())
+    }
+
+    #[test]
+    fn ahead_count_is_zero_without_an_upstream_and_counts_unpushed_after_one() {
+        let origin_dir = tempdir().unwrap();
+        let origin = origin_dir.path().to_path_buf();
+        git_run(&origin, &["init", "-q", "--bare", "-b", "main"]);
+
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_init_with_commit(&repo);
+        git_set_identity(&repo);
+        let branch = git_branch(&repo);
+
+        // No upstream: "everything is unpushed" is not a number worth badging.
+        assert_eq!(ahead_count(&repo), 0);
+
+        git_run(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git_run(&repo, &["push", "-q", "-u", "origin", &branch]);
+        assert_eq!(ahead_count(&repo), 0, "in sync with the upstream");
+
+        git_commit_file(&repo, "a.txt", "a\n", "one");
+        git_commit_file(&repo, "b.txt", "b\n", "two");
+        assert_eq!(ahead_count(&repo), 2, "two commits the remote does not have");
+
+        // The badge clears once they are sent, via the same helper the button
+        // calls, so the button and the count cannot disagree.
+        git_push(&repo).unwrap();
+        assert_eq!(ahead_count(&repo), 0);
+    }
+
+    #[test]
+    fn git_push_sets_the_upstream_when_the_branch_has_none() {
+        let origin_dir = tempdir().unwrap();
+        let origin = origin_dir.path().to_path_buf();
+        git_run(&origin, &["init", "-q", "--bare", "-b", "main"]);
+
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_init_with_commit(&repo);
+        git_set_identity(&repo);
+        git_run(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+
+        // The fresh-worktree case: a plain `git push` fails here, and the
+        // fallback has to create the upstream rather than surface the error.
+        git_push(&repo).unwrap();
+        assert!(
+            git(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], &repo).is_ok(),
+            "push must leave the branch tracking its remote",
+        );
+        assert_eq!(ahead_count(&repo), 0);
+    }
+
+    #[test]
+    fn git_refs_lists_branches_and_tags_without_remote_head() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let (main, side) = repo_with_side_branch(&repo);
+        git_run(&repo, &["tag", "v1"]);
+
+        let refs = git_refs(&repo);
+        let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&main.as_str()));
+        assert!(names.contains(&side.as_str()));
+        assert!(names.contains(&"v1"));
+        // Kinds drive the picker's grouping, so they have to be right.
+        assert_eq!(refs.iter().find(|r| r.name == side).unwrap().kind, "branch");
+        assert_eq!(refs.iter().find(|r| r.name == "v1").unwrap().kind, "tag");
+        // Every entry carries a sha to show beside the name.
+        assert!(refs.iter().all(|r| !r.sha.is_empty()));
+        // `origin/HEAD` is an alias for another row; offering it would let the
+        // same history be picked twice under two names.
+        assert!(!names.iter().any(|n| n.ends_with("/HEAD")));
+    }
+
+    #[test]
+    fn allowed_refs_is_an_allowlist_that_dedupes_and_keeps_order() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let (main, side) = repo_with_side_branch(&repo);
+
+        let asked = vec![side.clone(), main.clone(), side.clone()];
+        assert_eq!(allowed_refs(&repo, &asked), vec![side.clone(), main.clone()]);
+
+        // The whole point: nothing that is not a real ref survives, so a
+        // caller-supplied string can never reach argv as a flag or a path.
+        let hostile = vec![
+            "--all".to_string(),
+            "--upload-pack=touch /tmp/pwned".to_string(),
+            "-n1".to_string(),
+            "no-such-branch".to_string(),
+            "../etc/passwd".to_string(),
+        ];
+        assert!(allowed_refs(&repo, &hostile).is_empty());
+    }
+
+    #[test]
+    fn git_log_page_scopes_to_head_picked_refs_or_all() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let (main, side) = repo_with_side_branch(&repo);
+        let subjects = |p: &GitLogPage| -> Vec<String> {
+            p.commits.iter().map(|c| c.subject.clone()).collect()
+        };
+
+        // Default: HEAD only. The unmerged side commit is not this branch's.
+        let head = git_log_page(&repo, 0, 50, false, false, "", &[]);
+        assert!(subjects(&head).contains(&"on main".to_string()));
+        assert!(!subjects(&head).contains(&"only on side".to_string()));
+
+        // --all wins over everything and brings the sibling in.
+        let all = git_log_page(&repo, 0, 50, true, false, "", &[]);
+        assert!(subjects(&all).contains(&"only on side".to_string()));
+
+        // Picked: just the side branch, which does NOT contain main's tip.
+        let picked = git_log_page(&repo, 0, 50, false, false, "", &[side.clone()]);
+        assert!(subjects(&picked).contains(&"only on side".to_string()));
+
+        // Picked both = the union, which is what --all shows in this repo.
+        let both = git_log_page(&repo, 0, 50, false, false, "", &[main.clone(), side.clone()]);
+        assert_eq!(both.commits.len(), all.commits.len());
+
+        // all_branches beats a refs list rather than intersecting with it.
+        let all_wins = git_log_page(&repo, 0, 50, true, false, "", &[side.clone()]);
+        assert_eq!(all_wins.commits.len(), all.commits.len());
+    }
+
+    #[test]
+    fn git_log_page_returns_nothing_when_every_picked_ref_is_gone() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let (main, _side) = repo_with_side_branch(&repo);
+        // A branch deleted while the picker still lists it. Falling back to
+        // HEAD would answer a different question under the old scope's label.
+        let page = git_log_page(&repo, 0, 50, false, false, "", &["deleted-branch".to_string()]);
+        assert!(page.commits.is_empty());
+        assert!(!page.has_more);
+        // The header still knows where it is, so the panel keeps its chrome.
+        assert_eq!(page.branch, main);
+    }
+
+    #[test]
+    fn git_log_page_is_empty_on_an_unborn_branch() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_run(&repo, &["init", "-q", "-b", "main"]);
+        // No commits yet: `git log` FAILS here. That must read as an empty
+        // history, not an error dialog.
+        let page = git_log_page(&repo, 0, 50, false, false, "", &[]);
+        assert!(page.commits.is_empty());
+        assert!(!page.has_more);
+    }
+
+    #[test]
+    fn commit_files_lists_adds_edits_deletes_merges_and_the_root() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_run(&repo, &["init", "-q", "-b", "main"]);
+        git_set_identity(&repo);
+        // The FIRST commit has no parent — diff-tree needs --root to say
+        // anything at all about it.
+        git_commit_file(&repo, "root.txt", "r\n", "root commit");
+        let root = git_commit_files(&repo, &git_head(&repo)).unwrap();
+        assert_eq!(root.len(), 1, "root commit must list its files");
+        assert_eq!(root[0].path, "root.txt");
+
+        git_commit_file(&repo, "keep.txt", "one\n", "add keep");
+        let add = git_head(&repo);
+        let files = git_commit_files(&repo, &add).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "keep.txt");
+        assert_eq!(files[0].status, "A");
+
+        fs::remove_file(repo.join("keep.txt")).unwrap();
+        git_run(&repo, &["add", "-A"]);
+        git_run(&repo, &["commit", "-m", "drop keep"]);
+        let del = git_commit_files(&repo, &git_head(&repo)).unwrap();
+        assert_eq!(del[0].status, "D");
+
+        // A merge reports its delta against the first parent instead of the
+        // empty output plain `diff-tree` gives for merges.
+        let main = git_branch(&repo);
+        git_run(&repo, &["checkout", "-q", "-b", "side"]);
+        git_commit_file(&repo, "side.txt", "s\n", "side work");
+        git_run(&repo, &["checkout", "-q", &main]);
+        git_run(&repo, &["merge", "--no-ff", "-m", "merge side", "side"]);
+        let merged = git_commit_files(&repo, &git_head(&repo)).unwrap();
+        assert!(merged.iter().any(|f| f.path == "side.txt"), "merge must list what it brought in");
+    }
+
+    #[test]
+    fn commit_files_lists_a_merged_path_once_not_once_per_parent() {
+        // `diff-tree -m` prints one diff PER PARENT, so a file touched on both
+        // sides of a merge comes back twice — duplicate rows in the panel and a
+        // colliding React key. The previous merge test only checked presence,
+        // which a doubled list satisfies; this one pins the count.
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_run(&repo, &["init", "-q", "-b", "main"]);
+        git_set_identity(&repo);
+        git_commit_file(&repo, "shared.txt", "base\n", "root");
+
+        git_run(&repo, &["checkout", "-q", "-b", "side"]);
+        git_commit_file(&repo, "shared.txt", "side\n", "side edit");
+        git_commit_file(&repo, "only-side.txt", "s\n", "side only");
+        git_run(&repo, &["checkout", "-q", "main"]);
+        git_commit_file(&repo, "shared.txt", "main\n", "main edit");
+        // Conflicting merge, resolved by hand: the only shape where BOTH
+        // parents report the same path.
+        let _ = std::process::Command::new("git")
+            .args(["merge", "side", "-m", "merge"]).current_dir(&repo).output().unwrap();
+        fs::write(repo.join("shared.txt"), "resolved\n").unwrap();
+        git_run(&repo, &["add", "-A"]);
+        git_run(&repo, &["commit", "-q", "-m", "merge resolved"]);
+
+        let files = git_commit_files(&repo, &git_head(&repo)).unwrap();
+        let shared: Vec<_> = files.iter().filter(|f| f.path == "shared.txt").collect();
+        assert_eq!(shared.len(), 1, "a path touched on both sides must be listed once, got {files:?}");
+        // The dedupe must not cost the files the merge brought in cleanly —
+        // which is what switching to `--cc` would have done.
+        assert!(files.iter().any(|f| f.path == "only-side.txt"), "cleanly merged files must survive");
+        let mut paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        let before = paths.len();
+        paths.dedup();
+        assert_eq!(paths.len(), before, "no path may repeat");
+    }
+
+    #[test]
+    fn commit_files_refuses_a_non_sha_revision() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_init_with_commit(&repo);
+        assert!(git_commit_files(&repo, "HEAD").is_err());
+        assert!(git_commit_files(&repo, "--output=/tmp/pwn").is_err());
+    }
+
+    #[test]
+    fn diff_sides_of_a_commit_read_both_revisions_not_the_worktree() {
+        let dir = tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        git_init_with_commit(&repo);
+        git_set_identity(&repo);
+        git_commit_file(&repo, "f.txt", "v1\n", "first");
+        git_commit_file(&repo, "f.txt", "v2\n", "second");
+        let second = git_head(&repo);
+        // Dirty the working tree: a commit diff must ignore it entirely.
+        fs::write(repo.join("f.txt"), "scratch\n").unwrap();
+
+        let w = Task { path: repo.to_string_lossy().into(), ..Task::default() };
+        let sides = task_file_diff_sides_for_task(&w, "f.txt", Some(&format!("commit:{second}"))).unwrap();
+        assert_eq!(sides.original, "v1\n", "left side must be the parent revision");
+        assert_eq!(sides.modified, "v2\n", "right side must be the commit, not the worktree");
+
+        // The very first commit of a file has no parent side: that is an add.
+        let first = git_rev(&repo, &format!("{second}^"));
+        let added = task_file_diff_sides_for_task(&w, "f.txt", Some(&format!("commit:{first}"))).unwrap();
+        assert!(!added.original_exists);
+        assert!(added.modified_exists);
+        assert_eq!(added.modified, "v1\n");
+    }
+
     #[test]
     fn update_merge_brings_base_commits() {
         let (_m, _w, main, wt) = update_fixture();
@@ -14337,5 +16722,126 @@ mod tests {
             NamedPort { name: "API_PORT".into(), port: 18103 },
             NamedPort { name: "DB_PORT".into(),  port: 18104 },
         ]);
+    }
+
+    // ── write_atomic (the settings.json / projects.json / task writer) ──
+
+    #[test]
+    fn write_atomic_replaces_the_whole_file_with_no_stale_tail() {
+        let dir = tempdir().unwrap();
+        let f = dir.path().join("settings.json");
+        write_atomic(&f, b"{\"a\":1,\"padding\":\"xxxxxxxxxxxxxxxxxxxx\"}").unwrap();
+        // A shorter payload over a longer one: proof it's a replace, not an
+        // in-place overwrite that could leave the old bytes past the new end.
+        write_atomic(&f, b"{\"a\":2}").unwrap();
+        assert_eq!(fs::read_to_string(&f).unwrap(), "{\"a\":2}");
+    }
+
+    #[test]
+    fn write_atomic_leaves_no_temp_files_behind() {
+        let dir = tempdir().unwrap();
+        let f = dir.path().join("settings.json");
+        write_atomic(&f, b"one").unwrap();
+        write_atomic(&f, b"two").unwrap();
+        let names: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["settings.json"], "staging files must be renamed away, not accumulate");
+    }
+
+    #[test]
+    fn write_atomic_never_exposes_a_partial_file_to_a_concurrent_reader() {
+        let dir = tempdir().unwrap();
+        let f = dir.path().join("settings.json");
+        let small = "s".repeat(64);
+        let big = "b".repeat(256 * 1024);
+        write_atomic(&f, small.as_bytes()).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let (f, stop) = (f.clone(), stop.clone());
+            thread::spawn(move || {
+                let mut seen_partial = None;
+                while !stop.load(Ordering::Relaxed) {
+                    let got = fs::read_to_string(&f).expect("path is never absent mid-write");
+                    if !got.chars().all(|c| c == 's') && !got.chars().all(|c| c == 'b') {
+                        seen_partial = Some(got.len());
+                        break;
+                    }
+                    if got.len() != 64 && got.len() != 256 * 1024 {
+                        seen_partial = Some(got.len());
+                        break;
+                    }
+                }
+                seen_partial
+            })
+        };
+        for i in 0..40 {
+            let body = if i % 2 == 0 { &big } else { &small };
+            write_atomic(&f, body.as_bytes()).unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(reader.join().unwrap(), None, "reader saw a torn file");
+    }
+
+    #[test]
+    fn write_atomic_preserves_the_destination_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let f = dir.path().join("settings.json");
+        fs::write(&f, b"old").unwrap();
+        fs::set_permissions(&f, fs::Permissions::from_mode(0o600)).unwrap();
+        write_atomic(&f, b"new").unwrap();
+        let mode = fs::metadata(&f).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "atomic swap must not relax a tightened file");
+        assert_eq!(fs::read_to_string(&f).unwrap(), "new");
+    }
+
+    #[test]
+    fn write_atomic_writes_through_a_symlinked_destination() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("dotfiles-settings.json");
+        let link = dir.path().join("settings.json");
+        fs::write(&target, b"old").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        write_atomic(&link, b"new").unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+            "the link itself must survive");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new", "target must receive the write");
+    }
+
+    // Dangling link (dotfiles target not created yet): canonicalize fails, so
+    // the manual read_link fallback must still write the target, not clobber
+    // the link with a regular file.
+    #[test]
+    fn write_atomic_creates_the_target_of_a_dangling_symlink() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("dotfiles-settings.json");
+        let link = dir.path().join("settings.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        write_atomic(&link, b"new").unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+            "the link itself must survive");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new", "target must be created");
+    }
+
+    #[test]
+    fn write_atomic_keeps_the_old_file_and_cleans_up_when_the_write_fails() {
+        let dir = tempdir().unwrap();
+        let f = dir.path().join("settings.json");
+        write_atomic(&f, b"good").unwrap();
+        // A directory at the destination makes the rename fail after the temp
+        // file is already written.
+        let blocked = dir.path().join("blocked.json");
+        fs::create_dir(&blocked).unwrap();
+        assert!(write_atomic(&blocked, b"nope").is_err());
+        assert_eq!(fs::read_to_string(&f).unwrap(), "good", "unrelated file untouched");
+        let strays: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(strays.is_empty(), "failed write left staging files: {strays:?}");
     }
 }

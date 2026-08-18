@@ -37,11 +37,63 @@ describe("termic e2e pipeline", () => {
   });
 });
 
+// The top bar teaches its shortcuts through tooltips, and every one of them
+// is built from the LIVE binding, so a rebind can never leave a tooltip naming
+// a key that does nothing. Cases: the palette button, the Prompts dropdown
+// (⌥⌘P opens the searchable palette over the same list), and the right-panel
+// toggle (⌥⌘B).
+describe("top-bar tooltips name their shortcut", () => {
+  let taskId!: string;
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+  });
+
+  // Radix opens a tooltip on pointermove over the trigger; WebDriver's own
+  // hover is unreliable here, so the event goes in directly.
+  const hover = (selector: string) =>
+    browser.execute((sel) => {
+      const el = document.querySelector(sel) as HTMLElement | null;
+      if (!el) throw new Error(`no trigger for ${sel}`);
+      el.dispatchEvent(
+        new PointerEvent("pointermove", { bubbles: true, pointerType: "mouse" }),
+      );
+    }, selector);
+
+  const tipText = () =>
+    browser.execute(() =>
+      [...document.querySelectorAll('[role="tooltip"]')]
+        .map((t) => (t as HTMLElement).textContent ?? "")
+        .join("|"),
+    );
+
+  const expectTip = async (selector: string, needle: string) => {
+    await hover(selector);
+    await browser.waitUntil(async () => (await tipText()).includes(needle), {
+      timeout: 5_000,
+      timeoutMsg: `tooltip for ${selector} never showed "${needle}"`,
+    });
+    // Leave, so the next trigger's tooltip is the only one on screen.
+    await browser.execute((sel) => {
+      const el = document.querySelector(sel) as HTMLElement | null;
+      el?.dispatchEvent(new PointerEvent("pointerleave", { bubbles: false, pointerType: "mouse" }));
+    }, selector);
+  };
+
+  it("names the palette, prompt palette and right-panel bindings", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask("e2e-bar-tips");
+    await expectTip('[data-testid="command-palette-button"]', "Command palette (\u21e7\u2318P)");
+    await expectTip('[data-testid="prompts-menu"]', "Prompts (\u2325\u2318P)");
+    await expectTip('[data-testid="toggle-right-panel"]', "Toggle right panel (\u2325\u2318B)");
+  });
+});
+
 // P1: the command palette (⌘K). Cases: opens and lists commands; filtering
 // narrows the list; running a command performs its action and closes the
 // palette; Escape closes it.
 describe("command palette", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     await browser.execute(() => {
       window.__termic!.useUI.getState().closeCommandPalette?.();
@@ -114,6 +166,32 @@ describe("command palette", () => {
     });
   });
 
+  // The top-bar button is the discoverable half of ⇧⌘P. It toggles, so a
+  // second click has to dismiss the palette rather than no-op.
+  it("the top-bar button toggles the palette", async () => {
+    await browser.execute(() =>
+      window.__termic!.useUI.getState().closeCommandPalette(),
+    );
+    await clickWhenVisible('[data-testid="command-palette-button"]');
+    await browser.waitUntil(async () => (await paletteOpen()) === true, {
+      timeout: 5_000,
+      timeoutMsg: "clicking the palette button did not open the palette",
+    });
+    // The tooltip/aria label carries the live binding, so a rebind can't
+    // leave the button naming a key that no longer opens anything.
+    const ariaLabel = await browser.execute(() =>
+      document
+        .querySelector('[data-testid="command-palette-button"]')
+        ?.getAttribute("aria-label"),
+    );
+    expect(ariaLabel).toBe("Command palette (\u21e7\u2318P)");
+    await clickWhenVisible('[data-testid="command-palette-button"]');
+    await browser.waitUntil(async () => (await paletteOpen()) === false, {
+      timeout: 5_000,
+      timeoutMsg: "clicking the palette button again did not close the palette",
+    });
+  });
+
   it("closes on Escape", async () => {
     // Clear any state the previous command left (its rAF-deferred effect can
     // open the file finder), then reopen and wait for the input to be visible.
@@ -136,12 +214,112 @@ describe("command palette", () => {
     });
     await snap("command-palette.png");
   });
+
+  // The reopen case: run something, come back, and it is the first row. The
+  // section is only meant to appear on an EMPTY query — while searching you
+  // want the best match, not a pinned row pushing it down.
+  const sectionLabels = () =>
+    browser.execute(() =>
+      [...document.querySelectorAll("[data-row]")]
+        .map(r => r.parentElement?.querySelector("div")?.textContent ?? "")
+        .filter(Boolean),
+    ) as Promise<string[]>;
+
+  const firstRowText = () =>
+    browser.execute(() =>
+      (document.querySelector('[data-row="0"]') as HTMLElement | null)?.innerText ?? "",
+    ) as unknown as Promise<string>;
+
+  it("puts the command you just ran in a Recent section on top", async () => {
+    // Self-contained: run a command through the palette HERE rather than
+    // leaning on an earlier case. The File-picker case defers its effect
+    // through requestAnimationFrame, which is frozen while this window is
+    // occluded and then fires late, reopening a dialog mid-assertion.
+    // Recording happens synchronously in runCmd, so a row whose deferred
+    // effect never lands still records — which is all this needs.
+    await browser.execute(() => {
+      const ui = window.__termic!.useUI.getState();
+      ui.closeFileFinder?.(); ui.closeShortcutsHelp?.();
+      localStorage.removeItem("commandPaletteRecent");
+    });
+    await open();
+    await waitVisible('input[placeholder*="Type a command"]', 8_000);
+    await browser.execute(() => {
+      const btn = [...document.querySelectorAll("[data-row]")].find(r =>
+        (r as HTMLElement).innerText.includes("Keyboard shortcuts"));
+      if (!btn) throw new Error("Keyboard shortcuts row not found");
+      (btn as HTMLElement).click();
+    });
+    await browser.waitUntil(async () => (await paletteOpen()) === false, {
+      timeout: 5_000, timeoutMsg: "the command did not close the palette",
+    });
+
+    await browser.execute(() => window.__termic!.useUI.getState().closeShortcutsHelp?.());
+    await open();
+    await waitVisible('input[placeholder*="Type a command"]', 8_000);
+
+    await browser.waitUntil(async () => (await firstRowText()).includes("Keyboard shortcuts"), {
+      timeout: 5_000,
+      timeoutMsg: "the just-run command was not the first row on reopen",
+    });
+    // The first row sits under the Recent header, not under Task/View.
+    expect((await sectionLabels())[0]).toContain("Recent");
+    // Lifted out of its home section rather than duplicated — the same command
+    // twice makes the arrow keys feel broken.
+    // Exact-ish match: "Keyboard shortcuts settings" is a DIFFERENT command
+    // (the Settings deep link), so a bare substring count sees two rows and
+    // reads as a dedupe failure when nothing is wrong.
+    const dupes = await browser.execute(() =>
+      [...document.querySelectorAll("[data-row]")]
+        .map(r => (r as HTMLElement).innerText)
+        .filter(t => t.includes("Keyboard shortcuts") && !t.includes("settings")).length);
+    expect(dupes).toBe(1);
+  });
+
+  it("hides Recent as soon as you type", async () => {
+    await setQuery("settings");
+    await browser.waitUntil(
+      async () => !(await sectionLabels()).some(l => l.startsWith("Recent")),
+      { timeout: 5_000, timeoutMsg: "Recent survived a query" },
+    );
+    await setQuery("");
+    await browser.waitUntil(
+      async () => (await sectionLabels()).some(l => l.startsWith("Recent")),
+      { timeout: 5_000, timeoutMsg: "Recent did not come back on an empty query" },
+    );
+  });
+
+  it("forgets a recent command after an hour", async () => {
+    // Age the stored entry past the TTL rather than waiting an hour. The expiry
+    // rule itself is unit-tested against an injected clock
+    // (lib/paletteRecent.test.ts); this only proves the palette consults it.
+    await browser.execute(() => {
+      const raw = localStorage.getItem("commandPaletteRecent");
+      if (!raw) throw new Error("no recents were recorded");
+      const aged = JSON.parse(raw).map((e: { id: string; at: number }) => ({
+        ...e, at: e.at - 61 * 60 * 1000,
+      }));
+      localStorage.setItem("commandPaletteRecent", JSON.stringify(aged));
+    });
+    // Reopen: recents are re-read per open, so the stale entry drops out.
+    await browser.execute(() => window.__termic!.useUI.getState().closeCommandPalette());
+    await open();
+    await waitVisible('input[placeholder*="Type a command"]', 8_000);
+    await browser.waitUntil(
+      async () => !(await sectionLabels()).some(l => l.startsWith("Recent")),
+      { timeout: 5_000, timeoutMsg: "an expired recent was still shown" },
+    );
+    await browser.execute(() => {
+      localStorage.removeItem("commandPaletteRecent");
+      window.__termic!.useUI.getState().closeCommandPalette();
+    });
+  });
 });
 
 // P2: assorted dialogs/palettes open + close. Guards the wiring of the
 // shortcuts help, prompt palette, and per-task broadcast dialog.
 describe("dialogs & palettes open", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     await browser.execute(() => {
       const ui = window.__termic!.useUI.getState();
@@ -271,7 +449,7 @@ describe("more dialogs open", () => {
 // geometry while windowless; agent output still flows while windowless
 // (the whole point of a daemon); raise restores window + panes.
 describe("windowless mode", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
 
   // Same constant wdio launches the app with, rather than a second hard-coded
   // copy of the path that could drift from it.
@@ -565,5 +743,153 @@ describe("windowless mode", () => {
       return s.windowless === false && s.livePanes > 0;
     }, { timeout: 15_000, timeoutMsg: "raise did not restore the window/panes" });
     await snap("windowless-restored.png");
+  });
+});
+
+// P1: the History view (the archive). Its list is the one place in the app
+// whose height is driven purely by how much the user has accumulated, so the
+// cases here are about it staying INSIDE the window: the pane must be bounded
+// no matter how many tasks are archived, and the overflow must be reachable by
+// scrolling. Regression guard for the archive rendering taller than the window
+// with no scrollbar (the root used `flex-1` inside MainArea's non-flex overlay,
+// where it is inert, so the root sized to its content and the inner scroller
+// never had anything to overflow).
+describe("history view", () => {
+  const created: string[] = [];
+
+  after(async () => {
+    // Hard-delete everything this block made: it archives by design, so leaving
+    // them behind would grow the archive for every later run of the profile.
+    for (const id of created) {
+      await browser.execute(async (i) => {
+        try { await window.__termic!.ipc.taskDelete(i); } catch { /* already gone */ }
+      }, id);
+    }
+    await browser.execute(() => window.__termic!.useApp.getState().loadAll());
+    await clickByText("Dashboard");
+  });
+
+  /** Open a task, archive it immediately, and remember it for teardown. */
+  async function archiveNew(name: string): Promise<void> {
+    const id = await openTask(name, false);
+    created.push(id);
+    await archiveTask(id);
+  }
+
+  const openHistory = async () => {
+    await clickByText("Dashboard");
+    await clickByText("History");
+    await waitVisible('[data-testid="history-list"]');
+  };
+
+  /** Geometry of the scroller + the overlay it must fit inside. */
+  const listBox = () =>
+    browser.execute(() => {
+      const list = document.querySelector('[data-testid="history-list"]') as HTMLElement;
+      const root = document.querySelector('[data-testid="history-root"]') as HTMLElement;
+      return {
+        clientHeight: list.clientHeight,
+        scrollHeight: list.scrollHeight,
+        scrollTop: list.scrollTop,
+        overflowY: getComputedStyle(list).overflowY,
+        bottom: Math.round(list.getBoundingClientRect().bottom),
+        rootHeight: Math.round(root.getBoundingClientRect().height),
+        parentHeight: Math.round((root.parentElement as HTMLElement).getBoundingClientRect().height),
+        rows: document.querySelectorAll("[data-history-row]").length,
+      };
+    });
+
+  it("fills its pane instead of sizing to the archive", async () => {
+    await archiveNew("history-fills-pane");
+    await openHistory();
+    const box = await listBox();
+    // The root taking the overlay's full height is the whole fix: sized to
+    // content it would be a few rows tall and the list could never scroll.
+    expect(box.rootHeight).toBe(box.parentHeight);
+    expect(box.overflowY).toBe("auto");
+    // And the scroller ends at or above the window's bottom edge - never past
+    // it, which is what put rows out of reach.
+    const winH = await browser.execute(() => window.innerHeight);
+    expect(box.bottom).toBeLessThanOrEqual(winH);
+  });
+
+  it("scrolls to the last task when the archive is taller than the window", async () => {
+    await openHistory();
+    // Fill past the fold. Measure one row rather than guessing a row height, so
+    // the case survives a density change in the list; group headers only add
+    // height, so overshooting is safe and undershooting is impossible.
+    const first = await listBox();
+    const rowH = await browser.execute(() => {
+      const r = document.querySelector("[data-history-row]") as HTMLElement;
+      return r.getBoundingClientRect().height;
+    });
+    const need = Math.ceil(first.clientHeight / rowH) + 3 - first.rows;
+    for (let i = 0; i < need; i++) await archiveNew(`history-scroll-${i}`);
+    await openHistory();
+
+    const box = await listBox();
+    expect(box.rows).toBeGreaterThan(first.rows);
+    // Content genuinely overflows, and the overflow lives in the SCROLLER (not
+    // spilling out of the window).
+    expect(box.scrollHeight).toBeGreaterThan(box.clientHeight);
+    const winH = await browser.execute(() => window.innerHeight);
+    expect(box.bottom).toBeLessThanOrEqual(winH);
+
+    // The last row starts out of view and comes into view after scrolling: the
+    // user-facing outcome, not the CSS.
+    const lastVisible = () =>
+      browser.execute(() => {
+        const list = document.querySelector('[data-testid="history-list"]') as HTMLElement;
+        const rows = [...document.querySelectorAll("[data-history-row]")] as HTMLElement[];
+        const last = rows[rows.length - 1].getBoundingClientRect();
+        const view = list.getBoundingClientRect();
+        return last.bottom <= view.bottom + 1 && last.top >= view.top - 1;
+      });
+    expect(await lastVisible()).toBe(false);
+    await browser.execute(() => {
+      const list = document.querySelector('[data-testid="history-list"]') as HTMLElement;
+      list.scrollTop = list.scrollHeight;
+    });
+    await browser.waitUntil(async () => (await listBox()).scrollTop > 0, {
+      timeout: 5_000, timeoutMsg: "history list did not scroll",
+    });
+    expect(await lastVisible()).toBe(true);
+    await snap("history-scrolled.png");
+  });
+
+  it("filters the archive down and back without breaking the scroller", async () => {
+    await openHistory();
+    const all = await listBox();
+    await browser.execute(() => {
+      const input = document.querySelector(
+        'input[placeholder="Filter tasks..."]',
+      ) as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, "value",
+      )!.set!;
+      setter.call(input, "history-fills-pane");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await browser.waitUntil(async () => (await listBox()).rows === 1, {
+      timeout: 5_000, timeoutMsg: "filter did not narrow the archive",
+    });
+    // Filtered short, the pane still owns its full height - the bug's other
+    // half was the container collapsing onto its content.
+    const narrowed = await listBox();
+    expect(narrowed.rootHeight).toBe(narrowed.parentHeight);
+
+    await browser.execute(() => {
+      const input = document.querySelector(
+        'input[placeholder="Filter tasks..."]',
+      ) as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, "value",
+      )!.set!;
+      setter.call(input, "");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await browser.waitUntil(async () => (await listBox()).rows === all.rows, {
+      timeout: 5_000, timeoutMsg: "clearing the filter did not restore the archive",
+    });
   });
 });

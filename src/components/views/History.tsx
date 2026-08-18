@@ -114,7 +114,7 @@ export function HistoryView() {
   }
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden">
+    <div className="h-full flex flex-col overflow-hidden" data-testid="history-root">
       {/* Search bar */}
       <div className="shrink-0 flex items-center gap-2.5 border-b border-[var(--color-border-soft)] px-6 py-3 text-[var(--color-fg-faint)]">
         <Search className="h-4 w-4 shrink-0" />
@@ -148,7 +148,7 @@ export function HistoryView() {
       </div>
 
       {/* List */}
-      <div className="flex-1 overflow-auto px-6 py-4">
+      <div className="min-h-0 flex-1 overflow-auto px-6 py-4" data-testid="history-list">
         <div className="mx-auto max-w-3xl">
           {archived.length === 0 ? (
             <p className="py-8 text-[13.5px] text-[var(--color-fg-dim)]">
@@ -168,6 +168,7 @@ export function HistoryView() {
                 return (
                   <div
                     key={w.id}
+                    data-history-row={w.id}
                     onMouseEnter={() => setHoveredId(w.id)}
                     onMouseLeave={() => setHoveredId(null)}
                     className={cn(

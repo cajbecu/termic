@@ -6,7 +6,7 @@ import { archiveTask, ensureActiveTask, openTask, requireTermicApi, snap, waitFo
 // Guards a custom run: it opens a run tab whose PTY actually executes the
 // command. (No .termic.yaml needed, so the fixture repo stays clean.)
 describe("run tabs", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   const MEMBER = "label:e2e-run";
   after(async () => {
     if (taskId) await archiveTask(taskId);
@@ -89,7 +89,7 @@ describe("run tabs", () => {
 // P2: stopping a running script. Launch a long-running custom run, then kill
 // its PTY (what the Stop button does) and assert the run tab stops.
 describe("run stop", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   const MEMBER = "label:e2e-stop";
   after(async () => {
     if (taskId) await archiveTask(taskId);
@@ -143,7 +143,7 @@ describe("run stop", () => {
 const fixture = process.env.E2E_FIXTURE ?? path.join(process.cwd(), ".e2e", "fixture-repo");
 
 describe("setup script", () => {
-  let taskId: string | undefined;
+  let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
     try {

@@ -21,6 +21,7 @@ import type { Task, Tab, TerminalTab } from "@/lib/types";
 import { useApp, useTaskTabs, useActiveTabId } from "@/store/app";
 import { usePrefs, currentTerminalTheme } from "@/store/prefs";
 import { TabBar, TabPill } from "./TabBar";
+import { TabContextMenu } from "./TabContextMenu";
 import { TerminalPane, FooterBar } from "./TerminalPane";
 import { RunPane } from "./RunPane";
 import { SplitNodeView } from "./SplitView";
@@ -137,6 +138,8 @@ export function TaskView({ task }: { task: Task }) {
   const addBottomTab = useApp(s => s.addBottomTab);
   const closeBottomTab = useApp(s => s.closeBottomTab);
   const setActiveBottom = useApp(s => s.setActiveBottomTab);
+  const pinBottomTab = useApp(s => s.pinBottomTab);
+  const unpinBottomTab = useApp(s => s.unpinBottomTab);
   const setBottomLiveTitle = useApp(s => s.setBottomTabLiveTitle);
 
   // Subscribe to themeMode (and the custom-theme edit counter) so the
@@ -252,6 +255,42 @@ export function TaskView({ task }: { task: Task }) {
       height: `calc(${r.h * 100}% - ${chromePx}px)`,
     };
   };
+
+  // Scratch shells live in a separate `bottomTabs` array, but render through
+  // the SAME TabPill as agent tabs (via a synthetic shell Tab) so every strip
+  // looks identical.
+  const renderBottomPill = (t: NonNullable<typeof bottomTabs>[number]) => (
+    <TabContextMenu
+      key={t.id}
+      tabs={bottomTabs || []}
+      tabId={t.id}
+      pinned={!!t.pinned}
+      onPin={() => pinBottomTab(task.id, t.id)}
+      onUnpin={() => unpinBottomTab(task.id, t.id)}
+      onClose={() => closeBottomTab(task.id, t.id)}
+      // Plain shells: nothing to confirm, nothing to resume.
+      onCloseMany={(ids) => ids.forEach(id => closeBottomTab(task.id, id))}
+    >
+      <TabPill
+        task={task}
+        tab={{ id: t.id, type: "terminal", cli: "shell", title: t.title, liveTitle: t.liveTitle, pinned: t.pinned } as TerminalTab}
+        active={t.id === activeBottom}
+        paneFocused
+        compact
+        onSelect={() => setActiveBottom(task.id, t.id)}
+        onClose={() => closeBottomTab(task.id, t.id)}
+        onUnpin={() => unpinBottomTab(task.id, t.id)}
+        renaming={null}
+        onStartRename={() => {}}
+        onChangeRename={() => {}}
+        onCommitRename={() => {}}
+        onCancelRename={() => {}}
+        dragging={false}
+        dragTx={0}
+        onStartDrag={() => {}}
+      />
+    </TabContextMenu>
+  );
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -452,30 +491,18 @@ export function TaskView({ task }: { task: Task }) {
                 {/* Tabs + New scroll horizontally (no scrollbar) so the queue
                     button on the left and the collapse toggle on the right stay
                     fixed and reachable no matter how many shells are open. */}
-                <div className="flex min-w-0 flex-1 items-stretch gap-0 overflow-x-auto no-scrollbar">
-                  {(bottomTabs || []).map(t => (
-                    // Scratch shells live in a separate `bottomTabs` array, but
-                    // render through the SAME TabPill as agent tabs (via a
-                    // synthetic shell Tab) so every strip looks identical.
-                    <TabPill
-                      key={t.id}
-                      task={task}
-                      tab={{ id: t.id, type: "terminal", cli: "shell", title: t.title, liveTitle: t.liveTitle } as TerminalTab}
-                      active={t.id === activeBottom}
-                      paneFocused
-                      compact
-                      onSelect={() => setActiveBottom(task.id, t.id)}
-                      onClose={() => closeBottomTab(task.id, t.id)}
-                      renaming={null}
-                      onStartRename={() => {}}
-                      onChangeRename={() => {}}
-                      onCommitRename={() => {}}
-                      onCancelRename={() => {}}
-                      dragging={false}
-                      dragTx={0}
-                      onStartDrag={() => {}}
-                    />
-                  ))}
+                {/* Pinned shells sit outside the scroller so they stay in
+                    reach, same as the main strip (issue #183). */}
+                {(bottomTabs || []).some(t => t.pinned) && (
+                  <>
+                    <div data-pinned-strip="" className="flex shrink-0 items-stretch gap-0 overflow-x-auto no-scrollbar max-w-[55%]">
+                      {(bottomTabs || []).filter(t => t.pinned).map(renderBottomPill)}
+                    </div>
+                    <div className="mx-1 h-5 w-px shrink-0 self-center bg-[var(--color-border-soft)]" />
+                  </>
+                )}
+                <div data-scroll-strip="" className="flex min-w-0 flex-1 items-stretch gap-0 overflow-x-auto no-scrollbar">
+                  {(bottomTabs || []).filter(t => !t.pinned).map(renderBottomPill)}
                   <button
                     title="New shell tab"
                     onClick={() => addBottomTab(task.id)}

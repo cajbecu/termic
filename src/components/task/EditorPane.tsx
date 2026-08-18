@@ -4,7 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { EditTab, Task } from "@/lib/types";
 import { EditorState, Compartment, Annotation, type Extension } from "@codemirror/state";
-import { EditorView, ViewPlugin, keymap } from "@codemirror/view";
+import { EditorView, ViewPlugin, keymap, tooltips } from "@codemirror/view";
 import { indentWithTab } from "@codemirror/commands";
 import { basicSetup } from "codemirror";
 import { search } from "@codemirror/search";
@@ -33,6 +33,7 @@ import { proto3 } from "@/lib/protoMode";
 import { taskFileRead, taskFileWrite } from "@/lib/ipc";
 import { attachHiddenScrollRestore } from "@/lib/hiddenScrollRestore";
 import { reviewCommentsExtension, dispatchSelectionComment } from "./reviewCommentsExt";
+import { inlineBlameExtension, invalidateBlame, refreshBlame, markBlameStale } from "./inlineBlameExt";
 import { bindingMatches } from "@/lib/shortcuts";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
@@ -156,6 +157,15 @@ export function EditorPane({ task, tab, active, onContent }: {
   // Theme lives in its own compartment so font-size / ligatures changes can be
   // reconfigured live without recreating the entire EditorView.
   const themeCompRef = useRef(new Compartment());
+  // Blame lives in its own compartment so the pref (and the palette's toggle)
+  // can switch it on and off without rebuilding the view. With it off the
+  // extension is not constructed at all, so nothing is fetched, no state
+  // field exists, and the editor is byte-for-byte what it was before.
+  const blameCompRef = useRef(new Compartment());
+  // Which value the compartment currently holds, so the toggle effect can skip
+  // the run React fires on mount (the view was just built with this value, and
+  // reconfiguring would tear the plugins down and rebuild them for nothing).
+  const blameOnRef = useRef<boolean | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   // Mirrors the tab's `dirty` flag so the CodeMirror updateListener
@@ -168,9 +178,45 @@ export function EditorPane({ task, tab, active, onContent }: {
   // the agent just rewrote refreshes without a window blur/focus cycle —
   // the common case where the agent runs in the same window the user watches.
   const fsRevision = useApp(s => s.fsRevision[task.id] ?? 0);
+  // Bumped by a save here, by the Git panel, and by an agent's commit landing.
+  // Blame's answer changes with it.
+  const gitRevision = useApp(s => s.gitRevision[task.id] ?? 0);
+
+  // ONE definition of the blame extension, shared by the mount and the toggle
+  // effect: two copies of the same `onOpenCommit` would drift.
+  const buildBlame = useCallback((enabled: boolean) => enabled
+    ? inlineBlameExtension(task.id, tab.path, {
+        // A `commit:<sha>` diff, the same scope the History panel opens, so it
+        // lands somewhere that already knows how to render a historical
+        // revision.
+        //
+        // A REAL tab, not `openPreviewTab`: the preview slot is very likely the
+        // file being read (that is where the annotation was hovered), and
+        // recycling it would close the file to show its own history. Reuses an
+        // identical diff if one is already open rather than stacking duplicates.
+        onOpenCommit: sha => {
+          const scope = `commit:${sha}` as const;
+          const existing = (useApp.getState().tabs[task.id] ?? []).find(
+            t => t.type === "diff" && t.path === tab.path && t.scope === scope,
+          );
+          if (existing) {
+            useApp.getState().setActiveTabId(task.id, existing.id);
+            return;
+          }
+          useApp.getState().addTab(task.id, {
+            id: crypto.randomUUID(),
+            type: "diff",
+            path: tab.path,
+            scope,
+            title: `\u0394 ${tab.path.split("/").pop() || tab.path} @ ${sha.slice(0, 7)}`,
+          });
+        },
+      })
+    : [], [task.id, tab.path]);
 
   const editorFontSize = usePrefs(s => s.editorFontSize);
   const codeLigatures  = usePrefs(s => s.codeLigatures);
+  const inlineBlame    = usePrefs(s => s.inlineBlame);
   // Syntax theme (atomone, tokyo-night, …), independently configurable per
   // app mode (#40): a dark-optimized theme can look wrong on a light app
   // surface, and vice versa. "auto" within each still follows the app
@@ -205,6 +251,7 @@ export function EditorPane({ task, tab, active, onContent }: {
       try {
         const content = await taskFileRead(task.id, tab.path);
         if (!alive || !hostRef.current) return;
+        blameOnRef.current = usePrefs.getState().inlineBlame;
         const lang = langForPath(tab.path);
 
         // Flip the tab's dirty dot on the first edit after a load/save.
@@ -230,6 +277,12 @@ export function EditorPane({ task, tab, active, onContent }: {
               // .then(): bumped before the write resolves, the status could
               // be computed against the old file.
               useApp.getState().bumpGitRevision(task.id);
+              // The file on disk is what `git blame` reads, and it just
+              // changed: drop the snapshot and let the extension re-fetch.
+              if (usePrefs.getState().inlineBlame) {
+                invalidateBlame(task.id, tab.path);
+                v.dispatch({ effects: refreshBlame.of() });
+              }
             })
             .catch(e => useUI.getState().pushToast(`Save failed: ${e}`, "error"));
           return true;
@@ -256,6 +309,22 @@ export function EditorPane({ task, tab, active, onContent }: {
               // any input that appears inside the editor's DOM.
               noAutocorrectOnPanelInputs,
               lintGutter(),
+              // Keep every tooltip inside the editor pane. CodeMirror otherwise
+              // assumes the whole document viewport is available space, so a
+              // card anchored at the end of a long line ran under the right
+              // panel, and one near the top ran under the tab bar. Applies to
+              // the blame card and the review-comment tooltip alike, which is
+              // why it is mounted here rather than inside either extension.
+              tooltips({
+                tooltipSpace: view => {
+                  const r = view.scrollDOM.getBoundingClientRect();
+                  const pad = 6;
+                  return {
+                    left: r.left + pad, top: r.top + pad,
+                    right: r.right - pad, bottom: r.bottom - pad,
+                  };
+                },
+              }),
               // Selection → the SAME review-comment surface the diff pane
               // uses (GH #28): select, comment, and it queues in the
               // reviewComments store until the user sends the batch from the
@@ -289,6 +358,7 @@ export function EditorPane({ task, tab, active, onContent }: {
                   onContentRef.current?.(u.view);
                 }
               }),
+              blameCompRef.current.of(buildBlame(blameOnRef.current ?? false)),
               langCompRef.current.of(lang ? [lang] : []),
               themeCompRef.current.of(
                 buildTheme(editorFontSize, codeLigatures, editorThemeId),
@@ -375,8 +445,16 @@ export function EditorPane({ task, tab, active, onContent }: {
         changes: { from: 0, to: v.state.doc.length, insert: content },
         annotations: ExternalReload.of(true),
       });
+    // The buffer now matches disk again, so blame can be trusted again. Same
+    // reasoning as the save path, and the same reason docs/ideas/lsp.md wants
+    // this path to fire a full-document didChange.
+    if (usePrefs.getState().inlineBlame) {
+      invalidateBlame(task.id, tab.path);
+      v.dispatch({ effects: refreshBlame.of() });
+    }
     setDiskChanged(false);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task.id, tab.path]);
 
   // React to an external change (GH #57). An UNTOUCHED buffer (no unsaved
   // edits) just mirrors disk silently — preview tab or not, source or
@@ -443,6 +521,28 @@ export function EditorPane({ task, tab, active, onContent }: {
     revealLine(v, tab.revealAt.line, tab.revealAt.col);
     useApp.getState().consumeReveal(task.id, tab.id);
   }, [tab.revealAt, task.id, tab.id]);
+
+  // Toggling the blame pref reconfigures its compartment in place: no view
+  // rebuild, so the cursor, undo history and scroll position all survive.
+  useEffect(() => {
+    const v = viewRef.current;
+    if (!v || blameOnRef.current === inlineBlame) return;
+    blameOnRef.current = inlineBlame;
+    v.dispatch({ effects: blameCompRef.current.reconfigure(buildBlame(inlineBlame)) });
+  }, [inlineBlame, buildBlame]);
+
+  // A commit landing anywhere (Git panel, or the agent committing in its own
+  // terminal) can re-attribute lines this file's snapshot already described.
+  // Drop the cache, but only MARK the mounted view stale: this tick also fires
+  // for staging and unstaging, and re-blaming eagerly would fork git on every
+  // click in the Git panel, per open editor, to redraw one line that usually
+  // did not change. The refetch rides the reader's next cursor move.
+  useEffect(() => {
+    if (gitRevision === 0 || !inlineBlame) return;
+    invalidateBlame(task.id);
+    viewRef.current?.dispatch({ effects: markBlameStale.of() });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gitRevision, task.id, inlineBlame]);
 
   // Re-apply theme compartment when the user changes font size,
   // ligatures, or the syntax theme — all reconfigure live.

@@ -125,16 +125,27 @@ impl State {
 
     /// Current env, waiting at most `max_wait` for the FIRST attempt to
     /// finish. After that attempt (either way) this never blocks.
+    /// Production reads go through `snapshot_final`; this is the
+    /// env-only view the tests assert on.
+    #[cfg(test)]
     fn snapshot(&self, max_wait: Duration) -> LoginEnv {
+        self.snapshot_final(max_wait).0
+    }
+
+    /// `snapshot` plus whether the env came from a SUCCEEDED probe, read
+    /// under the SAME lock. Two separate calls could straddle a probe
+    /// landing and pair a fallback env with `final = true`, which is the
+    /// one combination a memoizing caller must never see.
+    fn snapshot_final(&self, max_wait: Duration) -> (LoginEnv, bool) {
         let guard = self.inner.lock().unwrap();
         if !guard.first_attempt_done && !max_wait.is_zero() {
             let (guard, _) = self
                 .cvar
                 .wait_timeout_while(guard, max_wait, |i| !i.first_attempt_done)
                 .unwrap();
-            return guard.env.clone();
+            return (guard.env.clone(), guard.succeeded);
         }
-        guard.env.clone()
+        (guard.env.clone(), guard.succeeded)
     }
 
     /// Record a finished probe attempt. `resolved` is `Some` on success
@@ -256,9 +267,13 @@ pub fn warm() {
 }
 
 fn current_env() -> LoginEnv {
+    current_env_final().0
+}
+
+fn current_env_final() -> (LoginEnv, bool) {
     ensure_probe_started();
     let st = state();
-    let env = st.snapshot(FIRST_PROBE_WAIT);
+    let env = st.snapshot_final(FIRST_PROBE_WAIT);
     // Startup retries exhausted without success? Let actual usage kick
     // one more background attempt (cooldown- and count-limited) so a
     // slow login eventually heals instead of pinning the fallback until
@@ -279,6 +294,18 @@ fn current_env() -> LoginEnv {
 /// the probe landing and mix snapshots.
 pub fn resolved_path() -> String {
     current_env().path
+}
+
+/// PATH plus whether it came from a SUCCEEDED probe, from one snapshot.
+///
+/// For callers that MEMOIZE a decision derived from PATH. The static
+/// fallback has no Homebrew/nvm/bun dirs, so "this tool isn't installed"
+/// computed from it is not an answer worth keeping: cache it and the
+/// wrong verdict outlives the probe for the whole session (GH #181, the
+/// find-in-files backend). `false` means "ask again later".
+pub fn resolved_path_final() -> (String, bool) {
+    let (env, resolved) = current_env_final();
+    (env.path, resolved)
 }
 
 /// PATH plus the rc delta, from ONE snapshot. The delta is the user's
@@ -1036,6 +1063,46 @@ mod tests {
         assert_eq!(st.snapshot(Duration::ZERO), fallback_env());
         assert!(st.attempt_finished(Some(real_env()), false));
         assert_eq!(st.snapshot(Duration::ZERO), real_env());
+    }
+
+    // Callers that MEMOIZE something derived from PATH (the find-in-files
+    // backend, GH #181) need to know whether the env they just read is
+    // the real one. The flag has to come from the same lock as the env:
+    // a pair read separately could straddle a probe landing and report a
+    // fallback env as final, which is the one lie that would let a wrong
+    // verdict get cached for the session.
+    #[test]
+    fn snapshot_final_marks_the_fallback_as_not_final() {
+        let st = State::new(fallback_env());
+        assert_eq!(st.snapshot_final(Duration::ZERO), (fallback_env(), false));
+
+        // A failed attempt unblocks readers but still isn't an answer.
+        st.attempt_finished(None, false);
+        assert_eq!(st.snapshot_final(Duration::ZERO), (fallback_env(), false));
+    }
+
+    #[test]
+    fn snapshot_final_marks_a_probed_env_as_final() {
+        let st = State::new(fallback_env());
+        st.attempt_finished(Some(real_env()), false);
+        assert_eq!(st.snapshot_final(Duration::ZERO), (real_env(), true));
+    }
+
+    #[test]
+    fn a_waiter_that_wakes_on_success_sees_final_with_the_real_env() {
+        // The pairing has to survive the wakeup path too, not just the
+        // already-settled read.
+        use std::sync::Arc;
+        let st = Arc::new(State::new(fallback_env()));
+        let publisher = {
+            let st = Arc::clone(&st);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                st.attempt_finished(Some(real_env()), false);
+            })
+        };
+        assert_eq!(st.snapshot_final(Duration::from_secs(5)), (real_env(), true));
+        publisher.join().unwrap();
     }
 
     #[test]

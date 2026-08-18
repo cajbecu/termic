@@ -165,3 +165,20 @@ describe("my feature", () => {
 They are maintained by the WebdriverIO org, but if a version regresses, pin the
 last-known-good `@wdio/*` and `tauri-plugin-wdio` together (they release in
 lockstep). The bridge/`e2e` skill remains as a fallback for manual checks.
+
+## Typechecking the specs
+
+`npm run typecheck:e2e` (`tsc -p e2e/tsconfig.json --noEmit`) covers `e2e/`,
+`perf/` and both wdio configs. None of it is in the app's `tsc -b` project, so
+`npm run build` says nothing about it, and by the time anyone looked there were
+71 errors: mostly spec-scope `let taskId: string | undefined` flowing into
+`browser.execute`, whose callback param then cannot index the store, plus two
+perf report units that were simply not in the union they claimed. It runs in CI
+beside the unit tests now.
+
+Two conventions that keep it clean. Spec-scope ids are declared with a definite
+assignment (`let taskId!: string`) because a before hook assigns them and the
+after hooks still guard at runtime. And anything read out of `window.__termic`
+is annotated at the boundary: the store is loosely typed, so an unannotated
+value passed into another `execute` arrives as WebdriverIO's `HTMLElement`
+union and every use of it is an implicit any.

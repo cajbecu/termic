@@ -23,15 +23,17 @@ import { SandboxIcon } from "@/components/SandboxIcon";
 import { UpdaterBanner } from "@/components/UpdaterBanner";
 import { WaitingAgentsPill } from "@/components/WaitingAgentsPill";
 import { openPath, themesDir, taskSendDiffToMain } from "@/lib/ipc";
-import { archiveAndRefresh } from "@/lib/archiveTask";
+import { confirmAndArchive } from "@/lib/archiveTask";
 import {
   DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownSeparator,
 } from "@/components/ui/Dropdown";
 import { usePromptLibrary } from "@/store/prompts";
 import { useUI } from "@/store/ui";
 import { usePrefs, resolveTheme } from "@/store/prefs";
+import { bindingGlyphs } from "@/lib/shortcuts";
 import { useIsFullscreen } from "@/hooks/useIsFullscreen";
 import { RunControls } from "@/components/task/RunControls";
+import { CommandPaletteButton } from "@/components/CommandPaletteButton";
 import { cn } from "@/lib/utils";
 
 // Reserve enough room for the 3 traffic lights + breathing room before the
@@ -63,6 +65,15 @@ export function UnifiedBar() {
   // The old Monitor/computer icon felt too generic ("display settings")
   // and didn't communicate the resolved theme at a glance.
   const isFullscreen = useIsFullscreen();
+  // Tooltips that name a shortcut read it from the LIVE bindings, never a
+  // hard-coded "⌥⌘P": every one of these is rebindable in settings, and a
+  // tooltip naming a key that no longer does anything is worse than a
+  // tooltip with no key at all.
+  const binds = usePrefs(s => s.shortcuts);
+  const tipWithKey = (text: string, id: import("@/lib/shortcuts").ShortcutId) => {
+    const g = binds[id] ? bindingGlyphs(binds[id]).join("") : "";
+    return g ? `${text} (${g})` : text;
+  };
   const isAuto = themeMode === "auto";
   const resolved = resolveTheme(themeMode);
   const ThemeIcon = (themeMode === "light" || (isAuto && resolved === "light")) ? Sun : Moon;
@@ -192,19 +203,34 @@ export function UnifiedBar() {
         className="flex items-center gap-0.5"
         style={{ WebkitAppRegion: "no-drag" } as any}
       >
+        {/* Command palette. First in the cluster and outside the task guard:
+            it is the only control here that is never task-scoped, and the
+            palette's global commands (new task, project picker, settings)
+            work with nothing selected. */}
+        <CommandPaletteButton />
         {task && proj && (
           <>
+            <div className="mx-1 h-4 w-px bg-[var(--color-border-soft)]" />
             {/* Popped-out run controls (GH #54): Setup + Run/Stop live up
                 here, next to Prompts, while runs open as terminal tabs. */}
             <RunControls task={task} />
             <DropdownRoot>
-              <DropdownTrigger asChild>
-                <Button size="sm" variant="ghost" className="gap-1.5" data-no-drag>
-                  <MessageSquareText className="h-4 w-4" />
-                  <span>Prompts</span>
-                </Button>
-              </DropdownTrigger>
-              <DropdownMenu align="end" className="min-w-[200px]">
+              {/* The dropdown is the mouse path; ⌥⌘P opens the searchable
+                  palette over the same list. Naming the binding here is the
+                  only place the two surfaces meet. Glyphs come from the live
+                  binding, so a rebind can't leave the tooltip lying. */}
+              <Tip content={tipWithKey("Prompts", "prompt-palette")} side="bottom">
+                <DropdownTrigger asChild>
+                  <Button size="sm" variant="ghost" className="gap-1.5" data-no-drag data-testid="prompts-menu">
+                    <MessageSquareText className="h-4 w-4" />
+                    <span>Prompts</span>
+                  </Button>
+                </DropdownTrigger>
+              </Tip>
+              {/* preventDefault on close keeps focus from snapping back to the
+                  trigger, which would re-fire its focus-triggered tooltip and
+                  leave it stuck open after picking a prompt. */}
+              <DropdownMenu align="end" className="min-w-[200px]" onCloseAutoFocus={(e) => e.preventDefault()}>
                 {enabledPrompts.length === 0 && (
                   <div className="px-2 py-1.5 text-[13px] text-[var(--color-fg-faint)]">No prompts yet.</div>
                 )}
@@ -282,41 +308,13 @@ export function UnifiedBar() {
               );
             })()}
             <Tip content="Archive task" side="bottom">
+              {/* Copy, delete-branch checkbox and the "Don't ask again"
+                  opt-out all live in confirmAndArchive - this button used to
+                  inline its own near-copy of the prompt, which then drifted
+                  from the sidebar's. */}
               <Button size="icon" variant="icon"
-                onClick={async () => {
-                  const ok = await useUI.getState().askConfirm({
-                    title: `Archive "${task.name}"?`,
-                    // Repo-root entries aren't worktrees - archiving
-                    // drops the Termic row only; the project checkout
-                    // on disk is untouched and can be re-opened later.
-                    message: task.is_main_checkout
-                      ? "This removes the Termic entry for the project's main checkout. The repo on disk is NOT touched, so you can re-open it any time. Any agent running here will be terminated."
-                      : (task.composition?.length ?? 0) > 0
-                      ? `Branches stay in git, so you can recreate the task later. This removes: the host worktree + every member worktree (${task.composition!.filter(m => m.mode === "worktree").map(m => m.dir_name).join(", ") || "none"}), plus any member symlinks to live checkouts (those live repos are NOT touched). Any running agent will be terminated.`
-                      : "The branch stays in git, so you can spin up a fresh worktree on it later. This removes only the on-disk worktree directory (build artifacts: node_modules, .venv, untracked files) and terminates any running agent. Can't be undone from inside Termic.",
-                    confirmLabel: task.is_main_checkout ? "Remove entry" : "Archive",
-                    destructive: true,
-                    checkbox: task.is_main_checkout
-                      ? undefined
-                      : (task.composition?.length ?? 0) > 0
-                      ? {
-                          label: "Delete the git branches",
-                          defaultValue: false,
-                        }
-                      : {
-                          label: "Delete the git branch:",
-                          branchName: task.branch || undefined,
-                          defaultValue: false,
-                        },
-                  });
-                  const confirmed = typeof ok === "boolean" ? ok : ok.confirmed;
-                  const deleteBranch = typeof ok === "boolean" ? false : ok.checked;
-                  if (!confirmed) return;
-                  try {
-                    useUI.getState().setBusy(`Archiving "${task.name}"…`);
-                    await archiveAndRefresh(task.id, deleteBranch);
-                  } finally { useUI.getState().setBusy(null); }
-                }}
+                onClick={() => { void confirmAndArchive(task); }}
+                data-testid="archive-task"
               ><Archive className="h-4 w-4" /></Button>
             </Tip>
             <Tip content="Open in Finder" side="bottom">
@@ -325,8 +323,8 @@ export function UnifiedBar() {
               </Button>
             </Tip>
             <div className="mx-1 h-4 w-px bg-[var(--color-border-soft)]" />
-            <Tip content="Toggle right panel" side="bottom">
-              <Button size="icon" variant="icon" onClick={toggleRP}>
+            <Tip content={tipWithKey("Toggle right panel", "toggle-right-sidebar")} side="bottom">
+              <Button size="icon" variant="icon" onClick={toggleRP} data-testid="toggle-right-panel">
                 <PanelRight className="h-4 w-4" />
               </Button>
             </Tip>
