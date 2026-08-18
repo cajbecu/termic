@@ -120,6 +120,7 @@ until `make e2e` is green and this file reflects it.
 | ✅ Task sandbox | Enable enforce mode then turn it off (per task) | `settings.e2e.ts` |
 | ✅ Extra named ports (GH #196) | The Repo Settings field autosaves typed names to the personal list and warns inline on invalid/reserved names; a task created after the config freezes consecutive name→port pairs from its own block, a second live task's block never overlaps, clearing the config leaves new tasks extras-free, and a name configured AFTER a task exists tops up into its buffer on the next spawn (task_ensure_extra_ports) | `settings.e2e.ts`, `task.e2e.ts` |
 | ✅ Project add/remove | Add a git repo as a project; remove drops it | `projects.e2e.ts` |
+| ✅ Dashboard empty state | The "No projects yet" card is a focusable button that opens the Add project dialog, and it disappears once a project exists | `projects.e2e.ts` |
 | ✅ Agent settings | Disable/re-enable an agent CLI via agentsSave | `agent.e2e.ts` |
 | ✅ Run config modal | The #124 run-commands manager opens for a project | `run.e2e.ts` |
 | ✅ PDF preview | A hidden PDF tab keeps its `display` (main tab and split pane) while a hidden terminal still goes to display:none; the embed URL is fingerprint-keyed, so only a real rewrite reloads it | `editor.e2e.ts` |

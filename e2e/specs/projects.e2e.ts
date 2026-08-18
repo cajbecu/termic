@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { clickByText, clickMenuItem, dismissOverlays, pointerDrag, requireTermicApi, snap, waitForAppShell, waitVisible } from "../helpers";
+import { clickByText, clickMenuItem, clickWhenVisible, dismissOverlays, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitGone, waitVisible } from "../helpers";
 
 // P1: adding/removing a project. Cases: a git repo can be added as a project
 // (shows in the store); removing it drops it. Uses a throwaway temp repo and
@@ -859,5 +859,86 @@ describe("resume submenu", () => {
       { timeout: 10_000, timeoutMsg: "picking a Resume entry did not restore the task" },
     );
     await snap("resume-submenu.png");
+  });
+});
+
+// Issue #152: the dashboard's "No projects yet" card is the biggest thing a
+// new user sees and reads as actionable, so it must actually be a button that
+// opens the same Add project dialog as the sidebar "+" and the action card.
+// The seeded profile always has fixture-repo, so the empty state is rendered
+// by emptying the store's project list (disk untouched) and restored with
+// loadAll() afterwards.
+describe("dashboard empty state", () => {
+  const CARD = '[data-testid="empty-projects-card"]';
+
+  const showEmptyDashboard = async () => {
+    await browser.execute(() => {
+      window.__termic!.useApp.getState().setView("dashboard");
+      window.__termic!.useApp.setState({ projects: [] });
+    });
+    await waitVisible(CARD);
+  };
+  const closeDialog = async () => {
+    await browser.execute(() => window.__termic!.useUI.getState().closeNewProject());
+    await dismissOverlays();
+  };
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    await dismissOverlays();
+  });
+  after(async () => {
+    await closeDialog();
+    await browser.execute(() => window.__termic!.useApp.getState().loadAll());
+  });
+
+  it("opens the Add project dialog when the card is clicked", async () => {
+    await showEmptyDashboard();
+    await clickWhenVisible(CARD);
+    await waitForText("Add project");
+    await browser.waitUntil(
+      () =>
+        browser.execute(() =>
+          [...document.querySelectorAll('[role="dialog"]')].some((d) =>
+            (d as HTMLElement).innerText.includes("Add project"),
+          ),
+        ),
+      { timeout: 8_000, timeoutMsg: "clicking the empty state did not open the Add project dialog" },
+    );
+    await snap("empty-projects-card.png");
+    await closeDialog();
+  });
+
+  it("is a real button, focusable and activated by the keyboard", async () => {
+    await showEmptyDashboard();
+    const tag = await browser.execute(
+      (sel) => (document.querySelector(sel) as HTMLElement).tagName,
+      CARD,
+    );
+    expect(tag).toEqual("BUTTON");
+
+    // Reachable by Tab and focusable: a <div onClick> fails both. We assert
+    // the tab order rather than pressing Enter, because native button
+    // activation from a WebDriver key event doesn't land on the offscreen
+    // window (the browser supplies that behaviour, we only supply the button).
+    const { tabIndex, disabled, focusable } = await browser.execute((sel) => {
+      const el = document.querySelector(sel) as HTMLButtonElement;
+      el.focus();
+      return {
+        tabIndex: el.tabIndex,
+        disabled: el.disabled,
+        focusable: document.activeElement === el,
+      };
+    }, CARD);
+    expect(tabIndex).toBeGreaterThanOrEqual(0);
+    expect(disabled).toBe(false);
+    expect(focusable).toBe(true);
+  });
+
+  it("goes back to the project list once a project exists", async () => {
+    await showEmptyDashboard();
+    await browser.execute(() => window.__termic!.useApp.getState().loadAll());
+    await waitGone(CARD);
   });
 });

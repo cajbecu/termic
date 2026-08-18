@@ -81,7 +81,7 @@ export function Dashboard() {
 
         {/* Projects */}
         {projects.length === 0 ? (
-          <EmptyProjectsCard />
+          <EmptyProjectsCard onClick={openNewProject} />
         ) : (
           <>
             <div className="mb-3 flex items-baseline justify-between">
@@ -207,9 +207,16 @@ function ProjectCard({ projectId, name, onSettings, children }: {
   );
 }
 
-function EmptyProjectsCard() {
+// The empty state is the biggest thing on a new user's screen and reads as
+// actionable, so it IS actionable: same `openNewProject` the "Add project"
+// card and both sidebar "+" buttons call.
+function EmptyProjectsCard({ onClick }: { onClick: () => void }) {
   return (
-    <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed border-[var(--color-border)] bg-[var(--color-bg-1)] p-8 text-center">
+    <button
+      data-testid="empty-projects-card"
+      onClick={onClick}
+      className="flex w-full flex-col items-center gap-3 rounded-lg border border-dashed border-[var(--color-border)] bg-[var(--color-bg-1)] p-8 text-center transition-colors hover:border-[var(--color-accent-soft)] hover:bg-[var(--color-bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-soft)]"
+    >
       <Boxes className="h-8 w-8 text-[var(--color-fg-faint)]" />
       <div>
         <div className="text-[14px] font-semibold">No projects yet</div>
@@ -217,6 +224,6 @@ function EmptyProjectsCard() {
           Add a git repo from disk to spawn agent tasks in.
         </div>
       </div>
-    </div>
+    </button>
   );
 }
