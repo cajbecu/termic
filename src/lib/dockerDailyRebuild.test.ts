@@ -27,6 +27,17 @@ const baseTask = { id: "t1", name: "my-task", docker_sandbox_enabled: true } as 
 const baseSettings = { docker_sandbox_enabled: true, docker_rebuild_frequency: "daily" as const };
 const baseImage = { available: true, last_built_date: "2000-01-01" }; // ancient - always due
 
+// LOCAL calendar date as YYYY-MM-DD, matching production semantics exactly
+// (isRebuildDue / Rust's chrono::Local). `new Date().toISOString()` is UTC
+// and disagrees with local "today" for part of every day - using it here
+// made this fixture flaky depending on run time/timezone.
+function localToday(): string {
+  const d = new Date();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${mm}-${dd}`;
+}
+
 function wireBuildDone(success: boolean) {
   mockedOnBuildDone.mockImplementation((cb: (d: { success: boolean }) => void) => {
     queueMicrotask(() => cb({ success }));
@@ -121,7 +132,7 @@ describe("maybeRebuildDockerImageForLaunch", () => {
 
   it("does nothing when nothing is due yet per the configured frequency", async () => {
     mockedSettingsLoad.mockResolvedValue(baseSettings);
-    mockedImageStatus.mockResolvedValue({ available: true, last_built_date: new Date().toISOString().slice(0, 10) });
+    mockedImageStatus.mockResolvedValue({ available: true, last_built_date: localToday() });
     await maybeRebuildDockerImageForLaunch(baseTask);
     expect(mockedBuildImage).not.toHaveBeenCalled();
     expect(useUI.getState().dockerRebuildPrompt).toBeNull();
