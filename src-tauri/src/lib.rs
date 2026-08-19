@@ -38,6 +38,13 @@ mod repo_config;
 mod shell_env;
 mod automation;
 mod cli_server;
+// The real implementation is macOS-only libproc/mach FFI and fails to LINK
+// (not just behave wrong) on other platforms — see procmon_other.rs for why
+// the stand-in exists and what it does instead.
+#[cfg(target_os = "macos")]
+mod procmon;
+#[cfg(not(target_os = "macos"))]
+#[path = "procmon_other.rs"]
 mod procmon;
 use sandbox::SandboxBundle;
 
