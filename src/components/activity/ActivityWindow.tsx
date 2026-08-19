@@ -290,7 +290,7 @@ function Header({ cpu, mem, paused, onTogglePause }: {
 }
 
 /** Column header. Kept in one place so the row grid and this cannot drift. */
-const GRID = "grid grid-cols-[minmax(0,1fr)_58px_74px_66px_54px_58px_62px] items-center gap-2 px-3";
+const GRID = "grid grid-cols-[minmax(0,1fr)_58px_74px_66px_58px_62px] items-center gap-2 px-3";
 
 const COLUMNS: { col: SortColumn; label: string; align: "left" | "right"; tip?: string }[] = [
   { col: "name", label: "Process", align: "left" },
@@ -302,7 +302,6 @@ const COLUMNS: { col: SortColumn; label: string; align: "left" | "right"; tip?: 
   },
   { col: "mem", label: "Memory", align: "right", tip: "Sort by memory footprint" },
   { col: "out", label: "Output", align: "right", tip: "Sort by terminal output rate" },
-  { col: "procs", label: "Procs", align: "right", tip: "Sort by process count" },
   { col: "uptime", label: "Uptime", align: "right", tip: "Sort by uptime" },
   { col: "pid", label: "PID", align: "right", tip: "Sort by process id" },
 ];
@@ -371,7 +370,6 @@ function GroupHeader({ icon, name, detail, cpu, mem, level }: {
       <span className="text-right font-mono text-[12px] tabular-nums">{formatBytes(mem)}</span>
       <span />
       <span />
-      <span />
     </div>
   );
 }
@@ -429,9 +427,6 @@ function Row({ row }: { row: ActivityRow }) {
         </span>
         <span className="text-right font-mono text-[11.5px] tabular-nums text-[var(--color-fg-faint)]">
           {formatRate(row.outBps)}
-        </span>
-        <span className="text-right font-mono text-[11.5px] tabular-nums text-[var(--color-fg-faint)]">
-          {row.procCount}
         </span>
         <span className="text-right font-mono text-[11.5px] tabular-nums text-[var(--color-fg-faint)]">
           {formatDuration(row.uptimeMs)}

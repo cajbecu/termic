@@ -126,7 +126,7 @@ describe("Activity monitor", () => {
   it("sorts by any column from its header, CPU descending by default", async () => {
     const state = async () => browser.execute(() =>
       Object.fromEntries(
-        ["name", "cpu", "mem", "out", "procs", "uptime", "pid"].map(c => [
+        ["name", "cpu", "mem", "out", "uptime", "pid"].map(c => [
           c,
           document.querySelector(`[data-testid="activity-sort-${c}"]`)?.getAttribute("data-active") ?? null,
         ]),

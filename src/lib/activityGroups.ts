@@ -30,7 +30,6 @@ export interface Totals {
   cpuSort: number;
   memBytes: number;
   outBps: number | null;
-  procCount: number;
   uptimeMs: number;
   /** A group has no pid of its own; it sorts by its lowest one, which is the
    *  closest thing to "the oldest process in here". */
@@ -51,7 +50,7 @@ export interface ProjectGroup extends Totals {
   tasks: TaskGroup[];
 }
 
-export const SORT_COLUMNS = ["name", "cpu", "mem", "out", "procs", "uptime", "pid"] as const;
+export const SORT_COLUMNS = ["name", "cpu", "mem", "out", "uptime", "pid"] as const;
 export type SortColumn = (typeof SORT_COLUMNS)[number];
 export interface Sort {
   column: SortColumn;
@@ -162,7 +161,6 @@ function totals(rows: ActivityRow[]): Totals {
     cpuSort: rows.reduce((a, r) => a + smoothedCpu(r), 0),
     memBytes: rows.reduce((a, r) => a + r.memBytes, 0),
     outBps: outKnown.length ? outKnown.reduce((a, r) => a + (r.outBps ?? 0), 0) : null,
-    procCount: rows.reduce((a, r) => a + r.procCount, 0),
     // Oldest thing in the group: a task is as old as its longest-lived process.
     uptimeMs: rows.reduce((a, r) => Math.max(a, r.uptimeMs), 0),
     pid: rows.reduce((a, r) => Math.min(a, r.pid), Number.MAX_SAFE_INTEGER),
@@ -176,7 +174,6 @@ function sortValue(v: Totals, column: SortColumn): number {
     case "cpu": return v.cpuSort;
     case "mem": return v.memBytes;
     case "out": return v.outBps ?? -1;
-    case "procs": return v.procCount;
     case "uptime": return v.uptimeMs;
     case "pid": return v.pid;
     case "name": return 0;
@@ -201,7 +198,6 @@ function rowSortable(r: ActivityRow): Sortable {
     cpuSort: smoothedCpu(r),
     memBytes: r.memBytes,
     outBps: r.outBps,
-    procCount: r.procCount,
     uptimeMs: r.uptimeMs,
     pid: r.pid,
     sortName: r.title,

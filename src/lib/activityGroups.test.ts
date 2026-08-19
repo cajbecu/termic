@@ -279,7 +279,6 @@ describe("sorting", () => {
     expect(sorted({ column: "cpu", dir: "asc" })).toEqual(["a", "c", "b"]);
     expect(sorted({ column: "mem", dir: "desc" })).toEqual(["a", "c", "b"]);
     expect(sorted({ column: "mem", dir: "asc" })).toEqual(["b", "c", "a"]);
-    expect(sorted({ column: "procs", dir: "desc" })).toEqual(["a", "c", "b"]);
     expect(sorted({ column: "uptime", dir: "desc" })).toEqual(["b", "a", "c"]);
     // An unmeasured output rate sorts BELOW a real zero, not above everything.
     expect(sorted({ column: "out", dir: "desc" })).toEqual(["b", "a", "c"]);
