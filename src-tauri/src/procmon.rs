@@ -32,7 +32,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
-use serde::Serialize;
+
+use crate::procmon_common::{build_child_map, collect_subtree, cpu_ratio, label_for, signal_from_name, EMPTY_SET};
+// Re-exported: lib.rs reaches these as `procmon::Root` / `procmon::Snapshot`
+// regardless of which platform module `procmon` resolves to.
+pub use crate::procmon_common::{ChildRow, ProcRow, Root, Snapshot};
 
 // ───────────────────────────── libproc FFI ─────────────────────────────
 // These structs are the kernel's, mirrored from <sys/proc_info.h> and
@@ -317,85 +321,12 @@ fn responsible_pid(pid: u32) -> Option<u32> {
     }
 }
 
-// ───────────────────────────── inputs ─────────────────────────────
-
-/// One thing we want a row for. Built by lib.rs from the live PTY map
-/// (which already knows each PTY's task, tab and kind) plus our own
-/// process; the WebKit sidecars are discovered here because only this
-/// module has the pid table.
-#[derive(Clone, Debug)]
-pub struct Root {
-    /// Stable identity across samples, so history/sparklines line up.
-    pub key: String,
-    pub kind: String,
-    pub pty_id: Option<String>,
-    pub task_id: Option<String>,
-    pub tab_id: Option<String>,
-    pub pid: u32,
-    /// Cumulative PTY output bytes, used for the bytes/sec column. `None`
-    /// for rows that are not a PTY.
-    pub out_bytes: Option<u64>,
-}
-
-// ───────────────────────────── outputs ─────────────────────────────
-
-#[derive(Clone, Serialize)]
-pub struct ChildRow {
-    pub pid: u32,
-    pub label: String,
-    pub cpu_pct: Option<f64>,
-    pub mem_bytes: u64,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProcRow {
-    pub key: String,
-    pub kind: String,
-    pub pty_id: Option<String>,
-    pub task_id: Option<String>,
-    pub tab_id: Option<String>,
-    pub pid: u32,
-    /// Process name of the real workload (`sandbox-exec` wrappers are
-    /// skipped, or every caged agent would be named "sandbox-exec").
-    pub label: String,
-    /// None on the first sample after `start` - there is no previous
-    /// snapshot to diff against yet.
-    pub cpu_pct: Option<f64>,
-    /// Sum of `ri_phys_footprint` over the subtree. See the module note on
-    /// why this is not an RSS sum.
-    pub mem_bytes: u64,
-    pub rss_bytes: u64,
-    pub proc_count: u32,
-    pub threads: u32,
-    pub cpu_ms: u64,
-    pub uptime_ms: u64,
-    /// PTY output bytes/sec, the "who is repainting the screen" signal.
-    /// None for non-PTY rows and on the first sample.
-    pub out_bps: Option<f64>,
-    pub alive: bool,
-    /// cpu_pct over the session, oldest first, for the sparkline.
-    pub cpu_history: Vec<f64>,
-    /// The subtree's own processes, heaviest first, capped.
-    pub children: Vec<ChildRow>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Snapshot {
-    pub session: u64,
-    pub unix_ms: f64,
-    pub rows: Vec<ProcRow>,
-    /// Wall-clock cost of producing this snapshot. Surfaced in the UI so
-    /// the monitor's own overhead is visible instead of assumed.
-    pub sample_ms: f64,
-    /// True when WebKit sidecars exist on the machine but none could be
-    /// proved ours: the private responsibility symbol is gone, or this is a
-    /// build launched from a terminal (macOS then makes the TERMINAL the
-    /// responsible process). Lets the UI say so instead of silently
-    /// under-reporting Termic's own memory.
-    pub webkit_unavailable: bool,
-}
+// Root/ChildRow/ProcRow/Snapshot moved to procmon_common.rs (shared with
+// procmon_linux.rs / procmon_other.rs — plain data, nothing macOS-specific
+// about the shapes themselves). The WebKit sidecar attribution this module
+// does (via `responsible_pid` above) is macOS-only; the other platforms
+// never attempt it, so their "Termic itself" row is honestly missing that
+// slice of memory too — see their own `webkit_unavailable: true`.
 
 // ───────────────────────────── session ─────────────────────────────
 
@@ -705,107 +636,6 @@ pub fn sample(session: u64, roots: Vec<Root>) -> Result<Snapshot, String> {
     })
 }
 
-static EMPTY_SET: std::sync::LazyLock<HashSet<u32>> = std::sync::LazyLock::new(HashSet::new);
-
-// ───────────────────────────── pure helpers ─────────────────────────────
-// Everything below is plain data in / plain data out so it can be
-// unit-tested: a real process tree cannot be constructed in a test.
-
-/// Invert pid->ppid into ppid->children.
-pub(crate) fn build_child_map(ppid: &HashMap<u32, u32>) -> HashMap<u32, Vec<u32>> {
-    let mut out: HashMap<u32, Vec<u32>> = HashMap::new();
-    for (&pid, &parent) in ppid {
-        if pid == parent {
-            continue; // defensive: a self-parent would loop the DFS
-        }
-        out.entry(parent).or_default().push(pid);
-    }
-    for kids in out.values_mut() {
-        kids.sort_unstable();
-    }
-    out
-}
-
-/// Every pid in `root`'s subtree, including `root`. `stop` names pids
-/// that belong to a DIFFERENT row: the walk does not enter them, so the
-/// Termic row excludes agents even though agents are our children.
-pub(crate) fn collect_subtree(
-    root: u32,
-    children: &HashMap<u32, Vec<u32>>,
-    stop: &HashSet<u32>,
-) -> Vec<u32> {
-    let mut out = Vec::new();
-    let mut seen: HashSet<u32> = HashSet::new();
-    let mut stack = vec![root];
-    while let Some(pid) = stack.pop() {
-        if !seen.insert(pid) {
-            continue; // cycles cannot happen on macOS; a bad read must not hang us
-        }
-        out.push(pid);
-        if let Some(kids) = children.get(&pid) {
-            for &k in kids {
-                if k != root && !stop.contains(&k) {
-                    stack.push(k);
-                }
-            }
-        }
-    }
-    out.sort_unstable();
-    out
-}
-
-/// CPU busy percentage of one core-second, i.e. 100.0 means one core
-/// saturated and 800.0 means eight. Both inputs are mach absolute time
-/// units, so the ratio needs no timebase conversion at all.
-pub(crate) fn cpu_ratio(cpu_delta: u64, wall_delta: u64) -> f64 {
-    if wall_delta == 0 {
-        return 0.0;
-    }
-    let pct = (cpu_delta as f64 / wall_delta as f64) * 100.0;
-    if pct.is_finite() && pct > 0.0 {
-        pct
-    } else {
-        0.0
-    }
-}
-
-/// Name the workload, not the wrapper. A sandboxed agent's root pid is
-/// `sandbox-exec`, whose only child is the agent - reporting the wrapper
-/// would label every caged task identically. Descends only through
-/// single-child wrappers, so it is stable across samples.
-pub(crate) fn label_for(
-    root: u32,
-    children: &HashMap<u32, Vec<u32>>,
-    comm: &HashMap<u32, String>,
-) -> String {
-    const WRAPPERS: [&str; 2] = ["sandbox-exec", "login"];
-    let mut pid = root;
-    for _ in 0..4 {
-        let name = comm.get(&pid).map(String::as_str).unwrap_or("");
-        if !WRAPPERS.contains(&name) {
-            break;
-        }
-        match children.get(&pid).map(|k| k.as_slice()) {
-            Some([only]) => pid = *only,
-            _ => break,
-        }
-    }
-    comm.get(&pid).cloned().unwrap_or_else(|| "?".into())
-}
-
-/// Signals the monitor is allowed to send. Deliberately small: this is a
-/// process manager for OUR agents, not a general-purpose `kill`.
-pub(crate) fn signal_from_name(name: &str) -> Option<libc::c_int> {
-    match name {
-        "TERM" => Some(libc::SIGTERM),
-        "KILL" => Some(libc::SIGKILL),
-        "INT" => Some(libc::SIGINT),
-        "STOP" => Some(libc::SIGSTOP),
-        "CONT" => Some(libc::SIGCONT),
-        _ => None,
-    }
-}
-
 /// Send `sig` to `pid`, but ONLY if it sits inside the subtree of a PTY we
 /// spawned. Two things this refuses on purpose: pids we cannot prove are
 /// ours (the webview would otherwise be an arbitrary `kill(2)` gadget),
@@ -850,91 +680,9 @@ mod tests {
     /// tests that drive it must not run concurrently with each other.
     static SESSION_TEST: Mutex<()> = Mutex::new(());
 
-    fn tree(pairs: &[(u32, u32)]) -> HashMap<u32, Vec<u32>> {
-        build_child_map(&pairs.iter().copied().collect())
-    }
-
-    #[test]
-    fn subtree_collects_descendants() {
-        // 1 -> 10 -> {100, 101}, 10 -> 11
-        let t = tree(&[(10, 1), (11, 1), (100, 10), (101, 10)]);
-        assert_eq!(collect_subtree(10, &t, &HashSet::new()), vec![10, 100, 101]);
-        assert_eq!(collect_subtree(100, &t, &HashSet::new()), vec![100]);
-    }
-
-    #[test]
-    fn subtree_stops_at_other_roots() {
-        // The app row must not swallow the PTY rows hanging off it.
-        let t = tree(&[(10, 1), (20, 1), (11, 10), (21, 20)]);
-        let stop: HashSet<u32> = [20].into_iter().collect();
-        assert_eq!(collect_subtree(1, &t, &stop), vec![1, 10, 11]);
-    }
-
-    #[test]
-    fn subtree_survives_a_cycle() {
-        // Cannot happen on macOS; must not hang if a racy read implies it.
-        let mut t: HashMap<u32, Vec<u32>> = HashMap::new();
-        t.insert(1, vec![2]);
-        t.insert(2, vec![3]);
-        t.insert(3, vec![1]);
-        let got = collect_subtree(1, &t, &HashSet::new());
-        assert_eq!(got, vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn self_parented_pid_is_dropped() {
-        let t = tree(&[(1, 1), (2, 1)]);
-        assert_eq!(collect_subtree(1, &t, &HashSet::new()), vec![1, 2]);
-    }
-
-    #[test]
-    fn cpu_ratio_is_unitless() {
-        // Half the window on one core.
-        assert_eq!(cpu_ratio(50, 100), 50.0);
-        // Two cores saturated for the whole window.
-        assert_eq!(cpu_ratio(200, 100), 200.0);
-        // No baseline yet / clock did not move.
-        assert_eq!(cpu_ratio(10, 0), 0.0);
-        assert_eq!(cpu_ratio(0, 100), 0.0);
-    }
-
-    #[test]
-    fn label_skips_sandbox_wrapper() {
-        let t = tree(&[(200, 100)]);
-        let comm: HashMap<u32, String> = [(100, "sandbox-exec".into()), (200, "claude".into())]
-            .into_iter()
-            .collect();
-        assert_eq!(label_for(100, &t, &comm), "claude");
-    }
-
-    #[test]
-    fn label_keeps_wrapper_when_it_forked_twice() {
-        // Two children means we cannot say which one IS the workload, so
-        // naming the wrapper is the honest answer.
-        let t = tree(&[(200, 100), (201, 100)]);
-        let comm: HashMap<u32, String> = [
-            (100, "sandbox-exec".into()),
-            (200, "claude".into()),
-            (201, "rg".into()),
-        ]
-        .into_iter()
-        .collect();
-        assert_eq!(label_for(100, &t, &comm), "sandbox-exec");
-    }
-
-    #[test]
-    fn label_falls_back_when_process_vanished() {
-        assert_eq!(label_for(42, &HashMap::new(), &HashMap::new()), "?");
-    }
-
-    #[test]
-    fn only_known_signals_are_allowed() {
-        assert_eq!(signal_from_name("TERM"), Some(libc::SIGTERM));
-        assert_eq!(signal_from_name("CONT"), Some(libc::SIGCONT));
-        assert_eq!(signal_from_name("SIGKILL"), None);
-        assert_eq!(signal_from_name("9"), None);
-        assert_eq!(signal_from_name(""), None);
-    }
+    // subtree/cpu_ratio/label_for/signal_from_name tests moved to
+    // procmon_common.rs with the functions themselves. What's left here
+    // needs the real macOS process table.
 
     #[test]
     fn signal_refuses_our_own_pid() {

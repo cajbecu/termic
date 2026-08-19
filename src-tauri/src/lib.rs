@@ -38,12 +38,19 @@ mod repo_config;
 mod shell_env;
 mod automation;
 mod cli_server;
-// The real implementation is macOS-only libproc/mach FFI and fails to LINK
-// (not just behave wrong) on other platforms — see procmon_other.rs for why
-// the stand-in exists and what it does instead.
+// Row shapes + OS-agnostic logic (subtree walk, cpu_ratio, label_for,
+// signal_from_name) shared by every `procmon` variant below.
+mod procmon_common;
+// macOS: real libproc/mach FFI. Linux: /proc. Everything else: a stub that
+// answers "unsupported on this OS" — see procmon_other.rs's module doc.
+// The macOS FFI fails to LINK (not just behave wrong) if it ends up in a
+// non-macOS build, which is what shipped broken before this 3-way split.
 #[cfg(target_os = "macos")]
 mod procmon;
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+#[path = "procmon_linux.rs"]
+mod procmon;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[path = "procmon_other.rs"]
 mod procmon;
 use sandbox::SandboxBundle;
