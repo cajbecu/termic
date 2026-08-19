@@ -909,6 +909,12 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
         )}>
           {!compact && <span>Projects</span>}
           <div className={cn("flex gap-0.5", compact && "flex-col")}>
+            {/* Expand/collapse-all + expand-mode + hide-inactive controls act
+                on the full project TREE (names, task rows), none of which
+                compact mode renders — the rail is icon-only. Nothing here
+                would do anything if opened, so skip it entirely rather than
+                show a trigger with nothing behind it. */}
+            {!compact && (
             <DropdownRoot>
               <Tip content="Project list options">
                 <DropdownTrigger asChild>
@@ -977,6 +983,7 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                 </DropdownItem>
               </DropdownMenu>
             </DropdownRoot>
+            )}
             <Tip content="Add project (repo)"><Button size="icon" variant="icon" onClick={openNewProject}>
               <FolderPlus className={iconSize(compact)} /></Button></Tip>
           </div>
