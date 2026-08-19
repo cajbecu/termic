@@ -8,6 +8,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 //   - loss → dispose dead addon, attach a fresh one
 //   - repeated losses inside the window → give up, repaint via DOM renderer
 //   - silently-lost context (no event while suspended) → recovered on wake
+//   - RESTORED context → rebuilt, because xterm's in-place repair leaves a
+//     stale glyph atlas and both `onContextLoss` and `isContextLost()` report
+//     the terminal healthy while it paints nothing
+//   - one dead context reported N ways still costs one loss
+//   - a pane with no geometry defers its attach to the reveal edge
 //   - dispose() unhooks the wake listeners
 
 const h = vi.hoisted(() => {
@@ -17,7 +22,10 @@ const h = vi.hoisted(() => {
     lossCb: (() => void) | null = null;
     disposed = false;
     contextLost = false;
-    _renderer = { _gl: { isContextLost: () => this.contextLost } };
+    // A real element: the recovery binds webglcontextlost /
+    // webglcontextrestored on it, which is the whole point of these tests.
+    canvas = document.createElement("canvas");
+    _renderer = { _gl: { isContextLost: () => this.contextLost }, _canvas: this.canvas };
     constructor() {
       if (FakeWebglAddon.throwOnConstruct) throw new Error("no GL");
       FakeWebglAddon.instances.push(this);
@@ -186,6 +194,63 @@ describe("loadTerminalRenderer context-loss recovery", () => {
     window.dispatchEvent(new Event("focus"));
     expect(Fake.instances.length).toBe(1);
     expect(current().disposed).toBe(false);
+    r.dispose();
+  });
+
+  // A restored context is the branch #232 could not see: xterm clears its
+  // own 3s timer (so onContextLoss never fires) and isContextLost() answers
+  // false (the context really did come back), while _charAtlas still points
+  // at the atlas that removeTerminalFromCache just evicted. Healthy on every
+  // signal, blank on screen, and only a tab restart cured it.
+  it("rebuilds the addon when the context is RESTORED rather than lost", () => {
+    const term = makeTerm();
+    const r = loadTerminalRenderer(term);
+    const first = current();
+    first.canvas.dispatchEvent(new Event("webglcontextrestored"));
+    expect(first.disposed).toBe(true);
+    vi.advanceTimersByTime(CONTEXT_REATTACH_DELAY_MS);
+    expect(Fake.instances.length).toBe(2);
+    r.dispose();
+  });
+
+  it("recovers on the raw webglcontextlost, without waiting for xterm's timer", () => {
+    const term = makeTerm();
+    const r = loadTerminalRenderer(term);
+    const first = current();
+    first.canvas.dispatchEvent(new Event("webglcontextlost"));
+    expect(first.disposed).toBe(true); // not 3s later
+    vi.advanceTimersByTime(CONTEXT_REATTACH_DELAY_MS);
+    expect(Fake.instances.length).toBe(2);
+    r.dispose();
+  });
+
+  it("counts one dead context once, however many ways it is reported", () => {
+    const term = makeTerm();
+    const r = loadTerminalRenderer(term);
+    // Every loss now arrives up to three times over. Counting each report
+    // would spend the whole budget on the first GPU blip.
+    for (let i = 0; i < CONTEXT_LOSS_MAX; i++) {
+      const a = current();
+      a.canvas.dispatchEvent(new Event("webglcontextlost"));
+      a.canvas.dispatchEvent(new Event("webglcontextrestored"));
+      a.lossCb?.();                       // xterm's own event, 3s late
+      vi.advanceTimersByTime(CONTEXT_REATTACH_DELAY_MS);
+    }
+    expect(Fake.instances.length).toBe(CONTEXT_LOSS_MAX + 1);
+    expect(term.refresh).not.toHaveBeenCalled();  // budget intact
+    r.dispose();
+  });
+
+  it("defers the attach while the pane has no geometry, and attaches on reveal", () => {
+    const host = { offsetWidth: 0, offsetHeight: 0 };
+    const term = makeTerm();
+    (term as unknown as { element: unknown }).element = host;
+    const r = loadTerminalRenderer(term);
+    expect(Fake.instances.length).toBe(0);  // display:none task/tab
+    host.offsetWidth = 800;
+    host.offsetHeight = 600;
+    window.dispatchEvent(new Event("focus"));
+    expect(Fake.instances.length).toBe(1);
     r.dispose();
   });
 

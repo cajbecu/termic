@@ -44,6 +44,10 @@ const WEBGL_REACH_INS: Record<string, string> = {
   _renderer: "terminalRenderer, atlasCanvasGuard",
   // lib/terminalRenderer.ts — wake-guard probe for silently-lost GL contexts.
   _gl: "terminalRenderer",
+  // lib/terminalRenderer.ts — the canvas we bind webglcontextlost /
+  // webglcontextrestored on, because xterm's derived onContextLoss never
+  // fires for a RESTORED context and its in-place repair leaves a stale atlas.
+  _canvas: "terminalRenderer",
   // lib/atlasCanvasGuard.ts — glyph-atlas scratch canvas adoption.
   _charAtlas: "atlasCanvasGuard",
   _tmpCanvas: "atlasCanvasGuard",

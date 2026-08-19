@@ -1349,7 +1349,10 @@ const captureArmedRef = useRef(false);
     // Without that, a pending render frame fires after term._core._store is
     // nulled and throws "undefined is not an object (... _isDisposed)".
     // Renderer addon — WebGL by default; localStorage override for A/B.
-    const rendererAddon = loadTerminalRenderer(term);
+    // The log sink is read lazily: debugLogRef is wired later, inside the
+    // spawn IIFE, and is null unless localStorage.ptyDebug === "1".
+    const rendererAddon = loadTerminalRenderer(term, (tag, content) =>
+      debugLogRef.current?.(tag, content));
 
     // Decide synchronously — BEFORE the rAF await in the spawn IIFE below —
     // whether this is the task's "primary" agent tab (the one allowed to
