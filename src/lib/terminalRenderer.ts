@@ -122,9 +122,17 @@ export const CONTEXT_LOSS_WINDOW_MS = 60_000;
 export const CONTEXT_LOSS_MAX = 3;
 export const CONTEXT_REATTACH_DELAY_MS = 100;
 
-export function loadTerminalRenderer(term: Terminal): { dispose(): void } {
+/** Optional sink for renderer lifecycle events. TerminalPane forwards its
+ *  per-PTY `ptyDebug` logger, so a "my terminals went black" report can be
+ *  answered from a log file instead of reconstructed from the xterm bundle.
+ *  Which branch of a context loss you hit is invisible from the outside and
+ *  decides whether recovery even runs, so it has to be recorded. */
+export type RendererLog = (tag: string, content: string) => void;
+
+export function loadTerminalRenderer(term: Terminal, log?: RendererLog): { dispose(): void } {
   let addon: WebglAddon | CanvasAddon | null = null;
   let disposed = false;
+  const note = (content: string) => { try { log?.("renderer", content); } catch { /* never fatal */ } };
 
   // Reported symptom: after a long session (sleep, or the window left in the
   // background for hours) every terminal pane is BLACK, and only restarting
@@ -154,8 +162,16 @@ export function loadTerminalRenderer(term: Terminal): { dispose(): void } {
   };
 
   const recoverFromContextLoss = (lost: WebglAddon) => {
+    // Idempotent per addon. ONE dead context is now reported up to three
+    // times — our own `webglcontextlost` listener, a `webglcontextrestored`
+    // that lands on the same canvas afterwards, and xterm's `onContextLoss`
+    // three seconds later — and an addon that is no longer the live one has
+    // nothing left to recover. Without this guard a single GPU blip pushes
+    // three entries into `lossTimes` and spends the whole budget at once,
+    // dropping the terminal to the DOM renderer on the first hiccup.
+    if (lost !== addon) { try { lost.dispose(); } catch { /* already gone */ } return; }
     try { lost.dispose(); } catch { /* already gone */ }
-    if (addon === lost) addon = null;
+    addon = null;
     if (disposed) return;
     lossTimes.push(Date.now());
     if (lossBudgetSpent()) {
@@ -163,10 +179,60 @@ export function loadTerminalRenderer(term: Terminal): { dispose(): void } {
       // pane now, but it only paints rows it is told are dirty and the loss
       // dirtied nothing. Without this the give-up path looks identical to the
       // bug it exists to avoid.
+      note(`loss budget spent (${lossTimes.length} in ${CONTEXT_LOSS_WINDOW_MS}ms) — staying on the DOM renderer`);
       try { term.refresh(0, term.rows - 1); } catch { /* mid-teardown */ }
       return;
     }
+    note(`re-attaching in ${CONTEXT_REATTACH_DELAY_MS}ms (loss ${lossTimes.length}/${CONTEXT_LOSS_MAX})`);
     window.setTimeout(() => { if (!disposed && !addon) attach(); }, CONTEXT_REATTACH_DELAY_MS);
+  };
+
+  // Own the raw canvas events rather than waiting on xterm's derived
+  // `onContextLoss`, because xterm's handling of a RESTORED context is the
+  // hole the pane falls through. Its WebglRenderer answers `webglcontextlost`
+  // with `preventDefault()` plus a 3s timer, and fires `onContextLoss` only if
+  // no `webglcontextrestored` arrives first. When one DOES arrive it repairs
+  // in place: `removeTerminalFromCache(terminal)` (which disposes the glyph
+  // atlas outright when this terminal was its only owner) followed by
+  // `_initializeWebGLState()`, which builds a fresh GlyphRenderer on the new
+  // context but never calls `_refreshCharAtlas()`. So `_charAtlas` still
+  // points at the evicted atlas, no texture is uploaded to the new context,
+  // and the pane draws nothing. The one path that would rebuild it — the
+  // `!_isAttached` branch of `renderRows()` — cannot run, because `_isAttached`
+  // was set true at construction (`screenElement.isConnected`, and a
+  // display:none pane is still connected) and nothing clears it.
+  //
+  // From out here that state is invisible: `onContextLoss` never fires (the
+  // timer was cleared) and `gl.isContextLost()` is FALSE, because the context
+  // genuinely was restored. Both of the signals the recovery is wired to say
+  // the terminal is healthy while it paints nothing, which is why only a tab
+  // restart cured it. Treat a restore as a loss and rebuild the addon: a fresh
+  // context with a fresh atlas is the only state we can reason about.
+  //
+  // Taking `webglcontextlost` directly also removes the 3s of black that the
+  // working path costs today. xterm's own timer still fires afterwards onto an
+  // addon we have already replaced; `recoverFromContextLoss` no-ops on it.
+  // One controller for every canvas this renderer ever owns. Each recovery
+  // attaches a new addon with a new canvas, and the dead ones are collectable
+  // anyway once the addon is disposed, but tying them all to a signal makes
+  // the lifetime explicit rather than a GC argument: dispose() drops every
+  // listener at a known point, in a terminal that may live for days.
+  const canvasWatch = new AbortController();
+
+  const watchCanvas = (a: WebglAddon) => {
+    const canvas = (a as unknown as { _renderer?: { _canvas?: HTMLCanvasElement } })
+      ._renderer?._canvas;
+    if (!canvas?.addEventListener) return;  // xterm rename → event-driven only
+    const { signal } = canvasWatch;
+    canvas.addEventListener("webglcontextlost", () => {
+      note("webglcontextlost");
+      recoverFromContextLoss(a);
+    }, { signal });
+    canvas.addEventListener("webglcontextrestored", () => {
+      // Healthy-looking and blank. See the note above.
+      note("webglcontextrestored (stale atlas) — rebuilding");
+      recoverFromContextLoss(a);
+    }, { signal });
   };
 
   // The event is not guaranteed. A webview that is suspended (window hidden
@@ -179,8 +245,14 @@ export function loadTerminalRenderer(term: Terminal): { dispose(): void } {
   // recovery only" rather than throwing.
   //
   // A null addon here is the other half: an earlier re-attach that ran while
-  // the GPU was still down hit the catch in attach() and left the terminal on
-  // the DOM renderer. Wake is the natural moment to try again.
+  // the GPU was still down hit the catch in attach(), or was deferred because
+  // the pane had no geometry, and either way the terminal is on the DOM
+  // renderer. Wake is the natural moment to try again.
+  //
+  // `isContextLost()` is NOT a health check, only a liveness one: a context
+  // that WebKit restored reads as healthy while the renderer draws nothing
+  // against a stale atlas. That case is caught on the canvas events in
+  // watchCanvas, not here.
   const onWake = () => {
     if (disposed || document.visibilityState === "hidden") return;
     if (addon instanceof WebglAddon) {
@@ -194,9 +266,29 @@ export function loadTerminalRenderer(term: Terminal): { dispose(): void } {
   window.addEventListener("focus", onWake);
   document.addEventListener("visibilitychange", onWake);
 
+  // A pane with no pixels on screen has nothing to repaint, and a GPU outage
+  // is process-wide: every mounted terminal loses its context at the same
+  // moment while at most one of them is visible (MainArea keeps every visited
+  // task mounted under display:none, TaskView every tab). Re-attaching all of
+  // them on that edge spends a live GL context each to draw nothing, and
+  // WebKit caps contexts per process — past the cap it force-loses the oldest,
+  // which is another loss, aimed at whichever pane happens to be next in line.
+  // So attach only where there are pixels, and let the reveal edge do the rest.
+  //
+  // `term.element` is absent before term.open() (and in unit tests): treat that
+  // as "no reason to defer", so this gate can never be the thing that stops a
+  // renderer attaching.
+  const onScreen = () => {
+    const el = term.element;
+    return !el || (el.offsetWidth > 0 && el.offsetHeight > 0);
+  };
+  let pendingAttach = false;
+
   const attach = () => {
     const kind = usePrefs.getState().terminalRenderer;
     if (disposed || addon || kind === "dom") return;
+    if (!onScreen()) { pendingAttach = true; return; }
+    pendingAttach = false;
     try {
       if (kind === "canvas") {
         // No GL context, so no onContextLoss and no shared texture atlas to
@@ -209,19 +301,39 @@ export function loadTerminalRenderer(term: Terminal): { dispose(): void } {
         return;
       }
       const a = new WebglAddon();
-      a.onContextLoss(() => recoverFromContextLoss(a));
+      a.onContextLoss(() => { note("onContextLoss (xterm, not restored)"); recoverFromContextLoss(a); });
       // Atlas swaps (font/theme/dpr). Microtask: the event fires before the
       // renderer stores the new atlas; its warm-up runs later, on idle.
       a.onChangeTextureAtlas(() => queueMicrotask(() => { if (!disposed) keepAtlasCanvasConnected(a); }));
       term.loadAddon(a);
       addon = a;
+      watchCanvas(a);
       // Initial atlas (born inside loadAddon; fires the event too early for
       // the addon to forward it). Park before the idle warm-up rasterizes.
       keepAtlasCanvasConnected(a);
+      note("webgl attached");
     } catch {
       addon = null;  // renderer unsupported → xterm's DOM renderer remains
+      note("webgl attach failed — staying on the DOM renderer");
     }
   };
+
+  // The reveal edge: display:none reports 0x0 and the real size lands when the
+  // tab or task is shown again, which is where a deferred attach gets picked
+  // up. Same edge TerminalPane repairs the viewport scroller on. `onWake` only
+  // covers app-level focus, and switching tabs inside termic fires neither
+  // `focus` nor `visibilitychange`.
+  // Read the entry's contentRect rather than offsetWidth: a layout read inside
+  // a ResizeObserver callback is the classic forced-reflow loop, and the size
+  // we need is already in the entry.
+  const ro = typeof ResizeObserver !== "undefined"
+    ? new ResizeObserver(entries => {
+        if (!pendingAttach || disposed) return;
+        const r = entries[entries.length - 1]?.contentRect;
+        if (r && r.width > 0 && r.height > 0) attach();
+      })
+    : null;
+  if (term.element) { try { ro?.observe(term.element); } catch { /* not an Element */ } }
 
   // GH #70: hold the FIRST attach until the owned faces are genuinely loaded
   // (terminalFontReady is real FontFace handles, not document.fonts.check(),
@@ -250,6 +362,8 @@ export function loadTerminalRenderer(term: Terminal): { dispose(): void } {
   return {
     dispose() {
       disposed = true;
+      canvasWatch.abort();
+      ro?.disconnect();
       window.removeEventListener("focus", onWake);
       document.removeEventListener("visibilitychange", onWake);
       dumpTimers.forEach(t => window.clearTimeout(t));

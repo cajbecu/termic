@@ -8,6 +8,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 //   - loss → dispose dead addon, attach a fresh one
 //   - repeated losses inside the window → give up, repaint via DOM renderer
 //   - silently-lost context (no event while suspended) → recovered on wake
+//   - RESTORED context → rebuilt, because xterm's in-place repair leaves a
+//     stale glyph atlas and both `onContextLoss` and `isContextLost()` report
+//     the terminal healthy while it paints nothing
+//   - one dead context reported N ways still costs one loss
+//   - a pane with no geometry defers its attach to the reveal edge
 //   - dispose() unhooks the wake listeners
 
 const h = vi.hoisted(() => {
@@ -17,7 +22,10 @@ const h = vi.hoisted(() => {
     lossCb: (() => void) | null = null;
     disposed = false;
     contextLost = false;
-    _renderer = { _gl: { isContextLost: () => this.contextLost } };
+    // A real element: the recovery binds webglcontextlost /
+    // webglcontextrestored on it, which is the whole point of these tests.
+    canvas = document.createElement("canvas");
+    _renderer = { _gl: { isContextLost: () => this.contextLost }, _canvas: this.canvas };
     constructor() {
       if (FakeWebglAddon.throwOnConstruct) throw new Error("no GL");
       FakeWebglAddon.instances.push(this);
@@ -29,7 +37,20 @@ const h = vi.hoisted(() => {
   class FakeCanvasAddon {
     dispose() {}
   }
-  return { FakeWebglAddon, FakeCanvasAddon };
+  // happy-dom has no layout, so a real ResizeObserver would never fire. This
+  // stub hands the callback back to the test, which is the only way to drive
+  // the reveal branch (0 -> non-zero) rather than the focus path beside it.
+  type Entry = { contentRect: { width: number; height: number } };
+  class FakeResizeObserver {
+    static instances: FakeResizeObserver[] = [];
+    targets: unknown[] = [];
+    constructor(public cb: (entries: Entry[]) => void) {
+      FakeResizeObserver.instances.push(this);
+    }
+    observe(t: unknown) { this.targets.push(t); }
+    disconnect() { this.targets.length = 0; }
+  }
+  return { FakeWebglAddon, FakeCanvasAddon, FakeResizeObserver };
 });
 
 vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: h.FakeWebglAddon }));
@@ -52,7 +73,10 @@ import {
   CONTEXT_REATTACH_DELAY_MS,
 } from "./terminalRenderer";
 
+vi.stubGlobal("ResizeObserver", h.FakeResizeObserver);
+
 const Fake = h.FakeWebglAddon;
+const RO = h.FakeResizeObserver;
 
 function makeTerm() {
   return { loadAddon: vi.fn(), refresh: vi.fn(), rows: 24 } as unknown as Terminal & {
@@ -76,6 +100,7 @@ describe("loadTerminalRenderer context-loss recovery", () => {
     vi.useFakeTimers();
     Fake.instances = [];
     Fake.throwOnConstruct = false;
+    RO.instances = [];
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -187,6 +212,114 @@ describe("loadTerminalRenderer context-loss recovery", () => {
     expect(Fake.instances.length).toBe(1);
     expect(current().disposed).toBe(false);
     r.dispose();
+  });
+
+  // A restored context is the branch #232 could not see: xterm clears its
+  // own 3s timer (so onContextLoss never fires) and isContextLost() answers
+  // false (the context really did come back), while _charAtlas still points
+  // at the atlas that removeTerminalFromCache just evicted. Healthy on every
+  // signal, blank on screen, and only a tab restart cured it.
+  it("rebuilds the addon when the context is RESTORED rather than lost", () => {
+    const term = makeTerm();
+    const r = loadTerminalRenderer(term);
+    const first = current();
+    first.canvas.dispatchEvent(new Event("webglcontextrestored"));
+    expect(first.disposed).toBe(true);
+    vi.advanceTimersByTime(CONTEXT_REATTACH_DELAY_MS);
+    expect(Fake.instances.length).toBe(2);
+    r.dispose();
+  });
+
+  it("recovers on the raw webglcontextlost, without waiting for xterm's timer", () => {
+    const term = makeTerm();
+    const r = loadTerminalRenderer(term);
+    const first = current();
+    first.canvas.dispatchEvent(new Event("webglcontextlost"));
+    expect(first.disposed).toBe(true); // not 3s later
+    vi.advanceTimersByTime(CONTEXT_REATTACH_DELAY_MS);
+    expect(Fake.instances.length).toBe(2);
+    r.dispose();
+  });
+
+  it("counts one dead context once, however many ways it is reported", () => {
+    const term = makeTerm();
+    const r = loadTerminalRenderer(term);
+    // Every loss now arrives up to three times over. Counting each report
+    // would spend the whole budget on the first GPU blip.
+    for (let i = 0; i < CONTEXT_LOSS_MAX; i++) {
+      const a = current();
+      a.canvas.dispatchEvent(new Event("webglcontextlost"));
+      a.canvas.dispatchEvent(new Event("webglcontextrestored"));
+      a.lossCb?.();                       // xterm's own event, 3s late
+      vi.advanceTimersByTime(CONTEXT_REATTACH_DELAY_MS);
+    }
+    expect(Fake.instances.length).toBe(CONTEXT_LOSS_MAX + 1);
+    expect(term.refresh).not.toHaveBeenCalled();  // budget intact
+    r.dispose();
+  });
+
+  it("defers the attach while the pane has no geometry, and retries on wake", () => {
+    const host = { offsetWidth: 0, offsetHeight: 0 };
+    const term = makeTerm();
+    (term as unknown as { element: unknown }).element = host;
+    const r = loadTerminalRenderer(term);
+    expect(Fake.instances.length).toBe(0);  // display:none task/tab
+    host.offsetWidth = 800;
+    host.offsetHeight = 600;
+    window.dispatchEvent(new Event("focus"));
+    expect(Fake.instances.length).toBe(1);
+    r.dispose();
+  });
+
+  // The wake path above shares the deferral but not the trigger: switching
+  // tabs inside termic fires neither focus nor visibilitychange, so the
+  // 0 -> non-zero geometry edge is the one that actually carries the reveal.
+  it("takes the deferred attach on the ResizeObserver's 0 -> non-zero edge", () => {
+    const host = { offsetWidth: 0, offsetHeight: 0 };
+    const term = makeTerm();
+    (term as unknown as { element: unknown }).element = host;
+    const r = loadTerminalRenderer(term);
+    expect(Fake.instances.length).toBe(0);
+
+    const ro = RO.instances[RO.instances.length - 1];
+    expect(ro.targets).toContain(host);
+
+    // A callback that still reports zero geometry is the collapsed-split case
+    // and must not attach.
+    ro.cb([{ contentRect: { width: 0, height: 0 } }]);
+    expect(Fake.instances.length).toBe(0);
+
+    host.offsetWidth = 800;
+    host.offsetHeight = 600;
+    ro.cb([{ contentRect: { width: 800, height: 600 } }]);
+    expect(Fake.instances.length).toBe(1);
+
+    // Attached now, so a later resize must not stack a second addon on.
+    ro.cb([{ contentRect: { width: 900, height: 600 } }]);
+    expect(Fake.instances.length).toBe(1);
+
+    r.dispose();
+    expect(ro.targets.length).toBe(0);
+  });
+
+  // The canvas listeners outlive their addon's dispose (the dead canvas is
+  // still reachable from the event that killed it), so their teardown has to
+  // be explicit rather than left to GC. Asserted through the log sink, because
+  // the recovery would refuse a disposed renderer anyway: the point is that the
+  // handler does not run at all.
+  it("dispose() unhooks the canvas listeners", () => {
+    const seen: string[] = [];
+    const term = makeTerm();
+    const r = loadTerminalRenderer(term, (_tag, content) => seen.push(content));
+    const first = current();
+    expect(seen).toContain("webgl attached");
+
+    r.dispose();
+    seen.length = 0;
+    first.canvas.dispatchEvent(new Event("webglcontextlost"));
+    first.canvas.dispatchEvent(new Event("webglcontextrestored"));
+    expect(seen).toEqual([]);
+    expect(Fake.instances.length).toBe(1);
   });
 
   it("dispose() unhooks the wake guard and blocks pending re-attach", () => {
