@@ -44,6 +44,18 @@ macOS overlay title bar, hidden title, 84px reserved left for traffic lights. Th
 
 Opt-out with both `data-tauri-drag-region="false"` and `WebkitAppRegion: "no-drag"`. mousedown handler skips `button, input, [data-no-drag]`. `startDragging()` silently fails without `core:window:allow-start-dragging` in capabilities. No `user-select: none` on drag region — put it on inner text spans.
 
+## Activity window (per-agent CPU / memory)
+
+A SECOND window (label `procmon`, its own Vite entry `activity.html`), opened from the pulse icon in the sidebar footer or the palette's "Activity monitor". Not a modal, and that is the whole design: the numbers only mean something while you drive the agent that moves them, which a modal over the app makes impossible. Rows are grouped project → task → tab, sorted by CPU so the culprit is the top row, with Termic's own processes in their own group at the bottom.
+
+Three things to know before touching it:
+
+- **It has no capabilities.** `capabilities/default.json` is scoped `"windows": ["main"]`, so this window gets no core-plugin permissions: no `data-tauri-drag-region` (it keeps a NATIVE title bar, which is what you grab), no `startDragging`, no window-close from JS. App-defined `#[tauri::command]`s are outside the ACL and work fine, which is all the monitor needs. Anything plugin-backed you add here needs a second capability entry first.
+- **Its own entry point, not a branch inside `main.tsx`.** `activity.html` → `src/activity.tsx` → `ActivityWindow.tsx`, which keeps xterm, the WebGL addon and CodeMirror out of the monitor's webview entirely (14 KB entry chunk + the shared React chunk, versus the app's 2.3 MB). A window whose job is reporting memory should not be the second-biggest consumer of it.
+- **Snapshots never touch a Zustand store.** They live in local state in `ActivityWindow`. A 1 Hz write into `app.ts` would copy its ~233 keys and re-run every mounted task's selectors, i.e. the monitor would become the regression (docs/performance.md bear trap 8).
+
+Theme comes from importing `@/store/prefs` (the module applies the persisted palette's CSS vars at load, and localStorage is shared across windows of the same origin). Zustand state does NOT cross webviews, so a theme change in the main window reaches this one when it next opens.
+
 ## Top-bar tooltips that name a shortcut
 
 `CommandPaletteButton.tsx` opens the right-hand cluster in `UnifiedBar.tsx`, before Run and the rest of the task-scoped actions (a divider separates it from them), and renders with or without a task (the palette's global commands do not need one). The palette button is a bare icon (`SquareChevronRight`, the ">" prompt) matching its neighbours: the shortcut lives in the tooltip only, built from the LIVE `command-palette` binding via `bindingGlyphs` rather than a hard-coded "⇧⌘P", so a rebind retitles it. An earlier version printed the glyphs on the button face as a bordered chip, which read as a foreign element in a row of bare icons.

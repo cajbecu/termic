@@ -708,7 +708,10 @@ export function RightPanel() {
                   zIndex: footTab === "term" ? 1 : 0,
                 }}
               >
-                <AuxTerminal taskId={task.id} taskPath={task.path} active={footTab === "term"} />
+                {/* Synthetic tab id: the footer shell has no entry in
+                    `bottomTabs`, but the Activity monitor still needs to
+                    tell it apart from the split shells. */}
+                <AuxTerminal taskId={task.id} tabId="right-footer" taskPath={task.path} active={footTab === "term"} />
               </div>
             )}
           </div>

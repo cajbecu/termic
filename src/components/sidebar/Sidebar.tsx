@@ -7,7 +7,7 @@ import { usePrefs } from "@/store/prefs";
 import { Button } from "@/components/ui/Button";
 import { Tip } from "@/components/ui/Tooltip";
 import { Spinner } from "@/components/ui/Spinner";
-import { LayoutGrid, History, FolderPlus, Settings, Plus, Archive, Layers, Moon, Cog, MoreVertical, GitBranch, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Bell, Bug, Mail, Zap, X, Pencil, Copy, ChevronsDownUp, ChevronsUpDown, Check, AudioWaveform, Radio, SquareChevronRight, CircleStop, Trash2, Folder, FolderMinus, FolderOpen, Megaphone, Keyboard } from "lucide-react";
+import { LayoutGrid, History, FolderPlus, Settings, Plus, Archive, Layers, Moon, Cog, MoreVertical, GitBranch, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Bell, Bug, Mail, Zap, X, Pencil, Copy, ChevronsDownUp, ChevronsUpDown, Check, AudioWaveform, Radio, SquareChevronRight, CircleStop, Trash2, Folder, FolderMinus, FolderOpen, Megaphone, Keyboard, Activity } from "lucide-react";
 import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownSeparator, DropdownLabel, DropdownSub, DropdownSubTrigger, DropdownSubContent } from "@/components/ui/Dropdown";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuLabel, ContextMenuSub, ContextMenuSubTrigger, ContextMenuSubContent } from "@/components/ui/ContextMenu";
 import { ProjectActionsMenuItems } from "./ProjectActionsMenuItems";
@@ -18,7 +18,7 @@ import { useUI } from "@/store/ui";
 import { cn } from "@/lib/utils";
 import { formatTerminalTitle } from "@/lib/terminalTitle";
 import { requestCloseTab } from "@/lib/closeTab";
-import { taskRename, taskReorder, projectRename, openPath, projectReorder, taskSetYolo, projectRemove, projectUpdate, projectSetGroup } from "@/lib/ipc";
+import { taskRename, taskReorder, projectRename, openPath, projectReorder, taskSetYolo, projectRemove, projectUpdate, projectSetGroup, procmonOpenWindow } from "@/lib/ipc";
 import { copyToClipboard } from "@/lib/clipboard";
 import { groupOf, projectSections } from "@/lib/projectGroups";
 import { createQuickTask, derivedBranch, type NewTaskMode } from "@/lib/quickTask";
@@ -1823,6 +1823,20 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
           <Tip content="Keyboard shortcuts">
             <Button size="icon" variant="icon" onClick={() => useUI.getState().openShortcutsHelp()}>
               <Keyboard className={iconSize(compact)} />
+            </Button>
+          </Tip>
+          {/* Activity monitor: per-agent CPU / memory. Opens a SEPARATE
+              window (not a dialog) so it keeps updating while you drive the
+              agent it is measuring. Sampling starts with that window and
+              stops when it closes. */}
+          <Tip content="Activity (CPU / memory per agent)">
+            <Button
+              size="icon"
+              variant="icon"
+              data-testid="open-activity"
+              onClick={() => { void procmonOpenWindow().catch(() => {}); }}
+            >
+              <Activity className={iconSize(compact)} />
             </Button>
           </Tip>
           {/* Right cluster: Add project, then Settings rightmost.

@@ -562,7 +562,17 @@ export interface SpawnArgs {
   /** Mirrors Rust's `PtyRole`. `tab_id` is the stable selector `--tab`
    *  resolves to (index and title both move; the tab uuid does not). */
   role?: { task_id: string; tab_id?: string; kind: "agent" | "aux"; is_default?: boolean };
+  /** Mirrors Rust's `PtyOwner`: REPORTING ONLY, read by the Activity
+   *  monitor to group rows under their project / task / tab. Set it on
+   *  every spawn, including shells and run scripts — unlike `task_id`
+   *  (which arms the sandbox) and `role` (which makes the PTY
+   *  CLI-addressable and allocates a retention ring), this field has no
+   *  behavior attached to it. */
+  owner?: { task_id?: string; tab_id?: string; kind: PtyOwnerKind };
 }
+
+/** What a PTY is running, for the Activity monitor's icon + fallback label. */
+export type PtyOwnerKind = "agent" | "shell" | "aux" | "run" | "setup" | "custom";
 
 /** Sandbox status returned alongside the PTY id - tells the caller
  *  whether the cage actually closed (vs. degraded to "filesystem-only,
@@ -582,6 +592,72 @@ export const ptySpawn  = (a: SpawnArgs) => invoke<SpawnResult>("pty_spawn", { ar
 export const ptyWrite  = (ptyId: string, data: number[]) => invoke<void>("pty_write", { ptyId, data });
 export const ptyResize = (ptyId: string, rows: number, cols: number) => invoke<void>("pty_resize", { ptyId, rows, cols });
 export const ptyKill   = (ptyId: string) => invoke<void>("pty_kill", { ptyId });
+
+// ── Activity monitor (src-tauri/src/procmon.rs) ────────────────────────
+// Sampling is PULL-based: the Activity window's interval is the clock, so
+// nothing is measured while the window is closed. Never poll these from
+// the main window.
+
+/** One process in a row's subtree. */
+export interface ProcChild {
+  pid: number;
+  label: string;
+  cpu_pct: number | null;
+  mem_bytes: number;
+}
+
+/** One monitored subtree: a PTY we spawned, Termic itself, or one of our
+ *  WebKit sidecars. */
+export interface ProcRow {
+  /** Stable across samples, so sparkline history lines up. */
+  key: string;
+  kind: PtyOwnerKind | "app" | `webkit-${string}` | string;
+  ptyId: string | null;
+  taskId: string | null;
+  tabId: string | null;
+  pid: number;
+  /** Process name of the real workload (`sandbox-exec` wrappers skipped). */
+  label: string;
+  /** null on the first sample of a session: CPU% is a delta and there is
+   *  no previous snapshot to diff against yet. Render a dash, never a 0. */
+  cpuPct: number | null;
+  /** Sum of `phys_footprint` over the subtree (what Activity Monitor calls
+   *  "Memory"), NOT an RSS sum, which double-counts shared pages. */
+  memBytes: number;
+  rssBytes: number;
+  procCount: number;
+  threads: number;
+  cpuMs: number;
+  uptimeMs: number;
+  /** PTY output bytes/sec: the "who is repainting the screen" signal. */
+  outBps: number | null;
+  alive: boolean;
+  cpuHistory: number[];
+  children: ProcChild[];
+}
+
+export interface ProcSnapshot {
+  session: number;
+  unixMs: number;
+  rows: ProcRow[];
+  /** What this snapshot cost to take, surfaced in the UI so the monitor's
+   *  own overhead is visible rather than assumed. */
+  sampleMs: number;
+  /** True when the WebKit sidecars could not be attributed to us (the
+   *  private responsibility symbol is gone on this macOS). */
+  webkitUnavailable: boolean;
+}
+
+export const procmonStart  = () => invoke<ProcSnapshot>("procmon_start");
+export const procmonSample = (session: number) =>
+  invoke<ProcSnapshot>("procmon_sample", { session });
+export const procmonStop   = (session: number) => invoke<void>("procmon_stop", { session });
+/** Signals are restricted Rust-side to pids inside one of our PTY subtrees. */
+export const procmonSignal = (pid: number, signal: "TERM" | "KILL" | "INT" | "STOP" | "CONT") =>
+  invoke<void>("procmon_signal", { pid, signal });
+/** Open or re-focus the Activity window (a real window, not a modal, so it
+ *  keeps updating while you drive the agent it is measuring). */
+export const procmonOpenWindow = () => invoke<void>("procmon_open_window");
 
 // The user's login shell ($SHELL, falling back to zsh/bash/fish/sh).
 // See lib/loginShell.ts for the cached wrapper used by the terminals.

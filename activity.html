@@ -1,0 +1,24 @@
+<!doctype html>
+<!--
+  Entry point for the Activity window (the process monitor), a SEPARATE
+  window from the app - see src-tauri/src/procmon.rs and
+  src/components/activity/ActivityWindow.tsx.
+
+  It gets its own HTML entry rather than branching inside main.tsx on a
+  query param so the monitor's webview never loads the app bundle: no
+  xterm, no WebGL addon, no CodeMirror, no font preloading. A window whose
+  job is reporting memory should not itself pull in 2.3 MB of terminal
+  emulator.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Activity</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/activity.tsx"></script>
+  </body>
+</html>

@@ -545,6 +545,7 @@ export function TaskView({ task }: { task: Task }) {
                   >
                     <AuxTerminal
                       taskId={task.id}
+                      tabId={t.id}
                       taskPath={task.path}
                       active={t.id === activeBottom}
                       // Grab focus once the PTY is live, but only for shells

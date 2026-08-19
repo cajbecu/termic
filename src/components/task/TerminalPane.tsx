@@ -1596,6 +1596,19 @@ const captureArmedRef = useRef(false);
                 is_default: isPrimaryTab && tab.cli === task.cli,
               }
             : undefined,
+          // Activity monitor provenance (reporting only). Unlike `task_id`
+          // and `role` above, EVERY tab type sets this: a run script or a
+          // scratch shell eating a core is exactly what the monitor is for,
+          // and without an owner it would show up unattributed.
+          owner: {
+            task_id: task.id,
+            tab_id: tab.id,
+            kind: (tab as TerminalTab).runTab
+              ? ((tab as TerminalTab).runTab!.kind === "setup" ? "setup" : "run")
+              : isShell ? "shell"
+              : isAgent || isRegistryTerminal ? "agent"
+              : "custom",
+          },
           rows, cols,
         });
         const ptyId = spawn.id;

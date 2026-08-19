@@ -47,6 +47,17 @@ export default defineConfig({
     // Splitting the main chunk further buys nothing but lazy-load flicker,
     // so raise the warning limit instead of chasing it.
     chunkSizeWarningLimit: 2500,
+    rollupOptions: {
+      // Two windows, two entries. `activity.html` is the process monitor's
+      // own window (src-tauri/src/procmon.rs): keeping it a separate entry
+      // is what stops its webview from loading xterm, WebGL and CodeMirror
+      // just to draw a table of CPU numbers. Listing `index` explicitly is
+      // required - naming any input replaces Vite's implicit default.
+      input: {
+        index: path.resolve(__dirname, "index.html"),
+        activity: path.resolve(__dirname, "activity.html"),
+      },
+    },
   },
   server: {
     port: devPort,

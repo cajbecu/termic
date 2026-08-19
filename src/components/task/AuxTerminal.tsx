@@ -34,7 +34,7 @@ import { IS_MAC, bindingMatches } from "@/lib/shortcuts";
 // `currentTerminalTheme()` picks the matching palette at mount; the
 // themeMode effect below pushes updates into live instances.
 
-export function AuxTerminal({ taskId, taskPath, active, autoFocus, onExited, onTitle }: { taskId?: string; taskPath: string; active: boolean; autoFocus?: boolean; onExited?: () => void; onTitle?: (title: string) => void }) {
+export function AuxTerminal({ taskId, tabId, taskPath, active, autoFocus, onExited, onTitle }: { taskId?: string; tabId?: string; taskPath: string; active: boolean; autoFocus?: boolean; onExited?: () => void; onTitle?: (title: string) => void }) {
   // Keep the latest onTitle in a ref so the long-lived spawn effect's
   // onTitleChange handler always calls the current callback without
   // re-running (and respawning the PTY) when the parent re-renders.
@@ -225,6 +225,9 @@ export function AuxTerminal({ taskId, taskPath, active, autoFocus, onExited, onT
           // `role` is the sandbox-neutral identity that keeps the shell
           // reachable for `termic attach --shell` / `logs --shell`.
           role: taskId ? { task_id: taskId, kind: "aux" as const } : undefined,
+          // Reporting only (Activity monitor). Safe to set even where
+          // `task_id` above must stay unset: nothing branches on it.
+          owner: { task_id: taskId, tab_id: tabId, kind: "aux" as const },
           rows: Math.max(8, term.rows), cols: Math.max(40, term.cols),
         });
         if (cancelled) { ipc.ptyKill(ptyId).catch(() => {}); return; }

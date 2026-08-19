@@ -12,7 +12,7 @@ import {
   PanelLeft, PanelRight, PanelBottom, Palette, Keyboard, Settings as SettingsIcon,
   FolderCog, RefreshCw, ScrollText, Bug, SlidersHorizontal, Bot, BookText,
   Check, ChevronLeft, ListTodo, Bell, SquareTerminal, FolderPlus, History, Square,
-  Play, Swords, Megaphone, Columns2, Rows2, Clock, UserPen, type LucideIcon,
+  Play, Swords, Megaphone, Columns2, Rows2, Clock, UserPen, Activity, type LucideIcon,
 } from "lucide-react";
 import { useUI } from "@/store/ui";
 import { copyToClipboard } from "@/lib/clipboard";
@@ -24,7 +24,7 @@ import { useUpdate } from "@/store/update";
 import { fuzzyMatch, Highlighted } from "@/lib/fuzzy";
 import { bindingGlyphs, type ShortcutId } from "@/lib/shortcuts";
 import { confirmAndArchive } from "@/lib/archiveTask";
-import { taskSetYolo, openPath } from "@/lib/ipc";
+import { taskSetYolo, openPath, procmonOpenWindow } from "@/lib/ipc";
 import { isCustomId } from "@/lib/customTheme";
 import { effectiveSandboxMode, isSandboxEnforced } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -374,6 +374,12 @@ export function CommandPalette() {
         run: act(() => useApp.getState().openSettings("repositories", proj.id)),
       });
     }
+    cmds.push({
+      id: "activity-monitor", section: "Application", label: "Activity monitor",
+      icon: Activity,
+      keywords: "cpu memory ram process task manager profiling performance slow hog",
+      run: act(() => { void procmonOpenWindow(); }),
+    });
     cmds.push({
       id: "check-updates", section: "Application", label: "Check for updates",
       icon: RefreshCw, keywords: "version upgrade",

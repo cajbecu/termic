@@ -9,7 +9,7 @@ needs. Update this whenever you add/change a spec. Harness + authoring rules
 live in [docs/e2e-tests.md](e2e-tests.md) and the **`e2e` skill**.
 
 - **Run:** `make e2e` (build + run) · `npm run test:e2e` (iterate). ~40s serial.
-- **Specs are grouped by area** into ~10 files (one app launch each; cases run sequentially and self-clean). Add a new test as an `it` in the relevant group file.
+- **Specs are grouped by area** into ~10 files (one app launch each; cases run sequentially and self-clean). Add a new test as an `it` in the relevant group file. `activity.e2e.ts` is the one file that earns its own launch on structure rather than area: it switches WebDriver between window handles, and leaving the wrong window current would break whatever ran next in a shared file.
 - **Specs:** `e2e/specs/*.e2e.ts` · **helpers:** `e2e/helpers.ts`.
 - **Legend:** ✅ covered · ⬜ todo (P0 core / P1 important / P2 nice-to-have).
 
@@ -125,6 +125,7 @@ until `make e2e` is green and this file reflects it.
 | ✅ Agent settings | Disable/re-enable an agent CLI via agentsSave | `agent.e2e.ts` |
 | ✅ Run config modal | The #124 run-commands manager opens for a project | `run.e2e.ts` |
 | ✅ PDF preview | A hidden PDF tab keeps its `display` (main tab and split pane) while a hidden terminal still goes to display:none; the embed URL is fingerprint-keyed, so only a real rewrite reloads it | `editor.e2e.ts` |
+| ✅ Activity monitor | The sidebar footer button opens a SECOND window (its own `activity.html` entry, found by polling the WebDriver handles: a new webview is listed before its document loads); a live agent appears under its project and task; Termic's own processes get their own group and do NOT double-count the agents' subtrees (every PTY is our child, so the app row's stop-set is the invariant); a row reports a real CPU percentage even though the harness window is permanently `document.hidden`, which is the occluded-window back-off working; Pause halts sampling and resume restarts it; re-opening focuses the existing window instead of spawning a second; closing the window drops the sampling session and a fresh one is grantable. Grouping / sorting / formatting are unit-tested in `src/lib/activityGroups.test.ts`, the sampler math + FFI in `procmon.rs` tests | `activity.e2e.ts` |
 
 ## CLI control plane (Phase 1/2)
 

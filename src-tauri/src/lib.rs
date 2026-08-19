@@ -26,7 +26,7 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
@@ -38,6 +38,7 @@ mod repo_config;
 mod shell_env;
 mod automation;
 mod cli_server;
+mod procmon;
 use sandbox::SandboxBundle;
 
 // ───────────────────────────── data model ─────────────────────────────
@@ -1874,6 +1875,19 @@ struct PtySlot {
     role: Option<PtyRole>,
     /// Retained output + live attach taps; allocated iff `role` is set.
     feed: Option<Arc<PtyFeed>>,
+    /// Purely INFORMATIONAL provenance for the Activity monitor, copied
+    /// from `SpawnArgs.owner`. Deliberately separate from both siblings
+    /// above: `task_id` doubles as the sandbox trigger and `role` makes a
+    /// PTY CLI-addressable (and allocates a retention ring), so neither
+    /// can be set on a plain shell or a run-script tab just to label it.
+    /// NOTHING may branch on this field except reporting.
+    owner: Option<PtyOwner>,
+    /// Total bytes this PTY has ever written, bumped by the reader thread.
+    /// Backs the monitor's output-rate column, which is the cheapest way to
+    /// spot a TUI repainting itself to death (docs/performance.md). Two
+    /// relaxed atomic ops per 64 KiB read, next to a mutex lock we already
+    /// take, so a quiet PTY still costs nothing.
+    out_bytes: Arc<AtomicU64>,
     /// Monotonic spawn order. A respawn briefly leaves the killed slot
     /// in the map next to its replacement (the waiter reaps it); role
     /// resolution breaks the tie toward the NEWEST slot.
@@ -1910,6 +1924,30 @@ pub struct PtyRole {
     /// The task's default agent tab: `attach`/`logs`' default target.
     #[serde(default)]
     pub is_default: bool,
+}
+
+/// Where a PTY came from, for reporting only (the Activity monitor groups
+/// rows by project -> task -> tab with it). Every PTY should carry one,
+/// including the ones the sandbox and the CLI deliberately ignore: a
+/// scratch shell burning a core is exactly what the user opened the
+/// monitor to find.
+///
+/// Deserialize-only, like `PtyRole`: it arrives from the webview and is
+/// never sent back in this shape (the monitor re-emits the fields inside
+/// `procmon::ProcRow`).
+#[derive(Clone, Debug, Deserialize)]
+pub struct PtyOwner {
+    /// Task this PTY belongs to. `None` for PTYs outside any task (the
+    /// Settings font preview shell).
+    #[serde(default)]
+    pub task_id: Option<String>,
+    /// The webview tab id, so the monitor can name the row after the tab
+    /// the user is looking at. `None` for surfaces with no tab identity.
+    #[serde(default)]
+    pub tab_id: Option<String>,
+    /// What the PTY is running: "agent" | "shell" | "aux" | "run" |
+    /// "setup" | "custom". Drives the row's icon and its fallback label.
+    pub kind: String,
 }
 
 /// What an attach tap receives. `Data` is raw PTY output; `Detach` is a
@@ -2283,6 +2321,11 @@ pub struct SpawnArgs {
     /// cannot address this PTY and no output is retained for it.
     #[serde(default)]
     pub role: Option<PtyRole>,
+    /// Reporting-only provenance for the Activity monitor (see `PtyOwner`).
+    /// Absent = the PTY shows up as an unattributed row rather than under
+    /// its task, which is a labelling loss and nothing more.
+    #[serde(default)]
+    pub owner: Option<PtyOwner>,
 }
 fn default_rows() -> u16 { 40 }
 fn default_cols() -> u16 { 120 }
@@ -2662,6 +2705,12 @@ fn pty_spawn(
     // address; everything else keeps the zero-overhead path.
     let feed = args.role.as_ref().map(|_| Arc::new(PtyFeed::new()));
 
+    // Output byte counter for the Activity monitor. Unconditional (unlike
+    // `feed`): it is one atomic per read, and the PTYs with no role are
+    // exactly the ones — scratch shells, run scripts — whose output rate
+    // the user has no other way to see.
+    let out_bytes = Arc::new(AtomicU64::new(0));
+
     // Reader thread: drain PTY bytes into the shared buffer and wake the
     // flusher only when there is actually something to flush.
     let buf_r = pty_buf.clone();
@@ -2670,12 +2719,14 @@ fn pty_spawn(
     let id_final = id.clone();
     let id_r = id.clone();
     let feed_r = feed.clone();
+    let out_bytes_r = out_bytes.clone();
     thread::spawn(move || {
         let mut buf = [0u8; 65536];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    out_bytes_r.fetch_add(n as u64, Ordering::Relaxed);
                     buf_r.0.lock().extend_from_slice(&buf[..n]);
                     buf_r.1.notify_all();
                     if let Some(feed) = &feed_r {
@@ -2814,6 +2865,8 @@ fn pty_spawn(
             task_id: args.task_id.clone(),
             role: args.role.clone(),
             feed,
+            owner: args.owner.clone(),
+            out_bytes,
             seq: next_pty_seq(),
         },
     );
@@ -5394,6 +5447,136 @@ pub(crate) fn kill_task_ptys(manager: &PtyManager, task_id: &str) -> usize {
         unsafe { libc::kill(pid as i32, libc::SIGKILL); }
     }
     count
+}
+
+// ─────────────────── Activity monitor (see procmon.rs) ───────────────────
+
+/// Window label for the Activity monitor. It is a SEPARATE window, not a
+/// modal: the whole point is watching an agent's CPU while you type at it,
+/// which a modal makes impossible. The cost is one extra WKWebView content
+/// process, so the monitor reports its own rows too rather than hiding
+/// what it added.
+const PROCMON_WINDOW: &str = "procmon";
+
+/// Copy the live PTY map into sampler inputs. The manager lock is held
+/// only long enough to clone metadata: every syscall the sampler makes
+/// happens outside it, so sweeping a few hundred processes can never stall
+/// `pty_write` on the IPC thread (docs/ipc.md).
+fn procmon_roots(manager: &PtyManager) -> Vec<procmon::Root> {
+    let mut roots: Vec<procmon::Root> = {
+        let map = manager.inner.lock();
+        map.iter()
+            .filter_map(|(id, slot)| {
+                // No pid means the spawn failed; there is nothing to sample.
+                let pid = slot.child_pid?;
+                let owner = slot.owner.as_ref();
+                let role = slot.role.as_ref();
+                Some(procmon::Root {
+                    key: format!("pty:{id}"),
+                    kind: owner
+                        .map(|o| o.kind.clone())
+                        .or_else(|| role.map(|r| r.kind.clone()))
+                        .unwrap_or_else(|| "shell".to_string()),
+                    pty_id: Some(id.clone()),
+                    // Three fallbacks, most specific first: `owner` is the
+                    // reporting field, `role` covers PTYs spawned before it
+                    // existed, and `slot.task_id` covers sandboxed agents
+                    // whose role was somehow absent. Any of them beats
+                    // stranding the row outside its task.
+                    task_id: owner
+                        .and_then(|o| o.task_id.clone())
+                        .or_else(|| role.map(|r| r.task_id.clone()))
+                        .or_else(|| slot.task_id.clone()),
+                    tab_id: owner
+                        .and_then(|o| o.tab_id.clone())
+                        .or_else(|| role.and_then(|r| r.tab_id.clone())),
+                    pid,
+                    out_bytes: Some(slot.out_bytes.load(Ordering::Relaxed)),
+                })
+            })
+            .collect()
+    };
+    // Termic itself, so our own cost sits in the same table as the agents'
+    // instead of being taken on faith. Every PTY is one of our children, so
+    // the sampler excludes their subtrees from this row.
+    roots.push(procmon::Root {
+        key: "app".into(),
+        kind: "app".into(),
+        pty_id: None,
+        task_id: None,
+        tab_id: None,
+        pid: std::process::id(),
+        out_bytes: None,
+    });
+    roots
+}
+
+#[tauri::command]
+fn procmon_start(state: State<'_, PtyManager>) -> procmon::Snapshot {
+    procmon::start(procmon_roots(&state))
+}
+
+#[tauri::command]
+fn procmon_sample(
+    state: State<'_, PtyManager>,
+    session: u64,
+) -> Result<procmon::Snapshot, String> {
+    procmon::sample(session, procmon_roots(&state))
+}
+
+#[tauri::command]
+fn procmon_stop(session: u64) {
+    procmon::stop(session);
+}
+
+/// Signal one process the monitor is showing. `procmon::signal` re-derives
+/// the process tree and refuses any pid that is not inside one of OUR PTY
+/// subtrees, so this is not a general-purpose `kill` exposed to the webview.
+#[tauri::command]
+fn procmon_signal(
+    state: State<'_, PtyManager>,
+    pid: u32,
+    signal: String,
+) -> Result<(), String> {
+    procmon::signal(&procmon_roots(&state), pid, &signal)
+}
+
+/// Open (or re-focus) the Activity window. Created from Rust so no new
+/// `core:window:allow-create` capability has to be granted to the webview.
+/// Sampling is bound to this window's lifetime: closing it drops the
+/// session, and with it every last byte of sampler state.
+#[tauri::command]
+fn procmon_open_window(app: AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    if let Some(win) = app.get_webview_window(PROCMON_WINDOW) {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+        return Ok(());
+    }
+    let win = tauri::WebviewWindowBuilder::new(
+        &app,
+        PROCMON_WINDOW,
+        // Its own Vite entry (activity.html), NOT index.html: the monitor's
+        // webview must not load xterm / WebGL / CodeMirror to draw a table.
+        tauri::WebviewUrl::App("activity.html".into()),
+    )
+    .title("Activity")
+    .inner_size(880.0, 620.0)
+    .min_inner_size(560.0, 320.0)
+    .build()
+    .map_err(|e| e.to_string())?;
+    // A window closed by its red button never unmounts React cleanly, so
+    // the frontend's `procmon_stop` may not run. Drop the session here too:
+    // there is no thread to stop, but a stale session would keep a dead
+    // PTY's history alive until the next `start`.
+    win.on_window_event(|event| {
+        if matches!(event, tauri::WindowEvent::Destroyed) {
+            procmon::stop_all();
+        }
+    });
+    let _ = win.set_focus();
+    Ok(())
 }
 
 /// How long a task's children get to exit on their own after SIGTERM before
@@ -13238,6 +13421,7 @@ pub fn run() {
             task_path_rename, task_path_delete, task_reveal_path,
             task_rename, project_rename,
             pty_spawn, pty_write, pty_resize, pty_kill,
+            procmon_start, procmon_sample, procmon_stop, procmon_signal, procmon_open_window,
             notify, open_path, reveal_path, open_file_external, home_dir, project_tasks_path_default, tasks_path_conflicts, default_shell, path_exists, path_is_git_repo, log_line, pty_debug_append, terminal_stage_file, install_notification_sound, play_completion_sound,
             settings_load, settings_save, discovery_dismiss, agents_save, agents_defaults, run_capture_command, discover_repos, detect_clis,
             automation::automation_result,
