@@ -784,9 +784,13 @@ export function NewTaskDialog() {
             fields and creates in the repo's live checkout. Non-git projects
             can't worktree, so the Worktree button is disabled there. */}
         {!isMulti && !importMode && (
-          <Field label="Task type">
-            <div className="flex flex-col gap-1.5">
-              <div className="inline-flex self-start items-stretch rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-[3px]">
+          <div className="flex flex-col gap-1.5">
+            {/* Label + toggle share one row (not label-above-control like
+                every other Field) — this is the field people re-adjust most
+                often, so it's the one worth the extra vertical inch back. */}
+            <div className="flex items-center justify-between gap-3">
+              <label className="text-[13px] font-medium text-[var(--color-fg)]">Task type</label>
+              <div className="inline-flex shrink-0 items-stretch rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-[3px]">
                 <button
                   type="button"
                   onClick={() => chooseMode("repo_root")}
@@ -813,20 +817,72 @@ export function NewTaskDialog() {
                   <GitBranch className="h-3.5 w-3.5" /> Worktree
                 </button>
               </div>
-              <p className="text-[12px] text-[var(--color-fg-faint)]">
-                {mode === "worktree"
-                  ? "Isolated branch in its own working directory. Run agents in parallel without touching your main checkout."
-                  : "No worktree. The agent runs in the repo's main checkout, on its current branch. Edits land on your real files."}
-              </p>
             </div>
-          </Field>
+            <p className="text-[12px] text-[var(--color-fg-faint)]">
+              {mode === "worktree"
+                ? "Isolated branch in its own working directory. Run agents in parallel without touching your main checkout."
+                : "No worktree. The agent runs in the repo's main checkout, on its current branch. Edits land on your real files."}
+            </p>
+          </div>
         )}
 
-        <Field label="Name">
-          <Input value={name} onChange={e => setName(e.target.value)} placeholder="fix login bug" autoFocus required />
-        </Field>
+        {/* Name + branch fields grouped tightly (gap-2, vs. gap-4 between
+            fields elsewhere): the branch is DERIVED from the name (see
+            `derived` above), so they read as one cluster rather than three
+            unrelated questions. Default CLI (a real question, unrelated to
+            naming) follows as its own field, not folded into this group. */}
+        <div className="flex flex-col gap-2">
+          <Field label="Name">
+            <Input value={name} onChange={e => setName(e.target.value)} placeholder="fix login bug" autoFocus required />
+          </Field>
 
-        <Field label="Default CLI" hint="Auto-launches on first open. You can spawn other agents anytime via the task's + button.">
+          {!importMode && mode === "worktree" && (<>
+          {/* Always editable. Auto-fills as “feature/<name>” while you type
+              the name, then stops the moment you touch it, so pasting a
+              branch from Linear (“username/my-feature”) is a true one-shot:
+              select all, paste, done. No prefix control to fight (#15). */}
+          <FieldInline label="Branch name" hint="Auto-fills from the name.">
+            <Input
+              value={branch}
+              onChange={e => { setBranch(e.target.value); setBranchEdited(true); }}
+              placeholder="feature/fix-login-bug"
+              required
+            />
+          </FieldInline>
+
+          {/* The multi-repo host variant's hint is a full sentence (members
+              fall back separately) — too long for FieldInline's one line,
+              so it keeps Field's stacked layout. */}
+          {isMulti ? (
+            <Field label="Host branch from" hint="Blank = host repo default. Members fall back to their own defaults below.">
+              <Input
+                value={base}
+                onChange={e => { setBase(e.target.value); setBaseUnknown(null); }}
+                placeholder="origin/master"
+              />
+            </Field>
+          ) : (
+            <FieldInline label="Branch from" hint="Blank = repo default.">
+              <div className="flex flex-col gap-1">
+                <Input
+                  value={base}
+                  // Typing here is the user taking ownership of the field, so
+                  // the link's warning stops applying.
+                  onChange={e => { setBase(e.target.value); setBaseUnknown(null); }}
+                  placeholder="origin/master"
+                />
+                {baseUnknown && base === baseUnknown && (
+                  <p data-testid="base-unknown" className="text-[11.5px] text-[var(--color-warn)]">
+                    This link asked to branch from "{baseUnknown}", which this repo has no ref for. Creating will only work if it exists on the remote.
+                  </p>
+                )}
+              </div>
+            </FieldInline>
+          )}
+          </>)}
+        </div>
+
+        <Field label="Default CLI">
           {/* Pulled from the editable agent registry (Settings → Agent
               CLIs), not hard-coded — custom agents show up here. Disabled
               and not-installed agents are filtered out (see cliChoices).
@@ -864,55 +920,20 @@ export function NewTaskDialog() {
           )}
         </Field>
 
-        {!importMode && mode === "worktree" && (<>
-        {/* Always editable. Auto-fills as “feature/<name>” while you type
-            the name, then stops the moment you touch it, so pasting a
-            branch from Linear (“username/my-feature”) is a true one-shot:
-            select all, paste, done. No prefix control to fight (#15). */}
-        <Field
-          label="Branch name"
-          hint="Auto-fills from the name. Edit or paste a full branch directly; once you change it, it stays."
-        >
-          <Input
-            value={branch}
-            onChange={e => { setBranch(e.target.value); setBranchEdited(true); }}
-            placeholder="feature/fix-login-bug"
-            required
-          />
-        </Field>
-
-        <Field label={isMulti ? "Host branch from" : "Branch from"} hint={isMulti ? "Blank = host repo default. Members fall back to their own defaults below." : "Blank = repo default."}>
-          <div className="flex flex-col gap-1">
-            <Input
-              value={base}
-              // Typing here is the user taking ownership of the field, so the
-              // link's warning stops applying.
-              onChange={e => { setBase(e.target.value); setBaseUnknown(null); }}
-              placeholder="origin/master"
-            />
-            {baseUnknown && base === baseUnknown && (
-              <p data-testid="base-unknown" className="text-[11.5px] text-[var(--color-warn)]">
-                This link asked to branch from "{baseUnknown}", which this repo has no ref for. Creating will only work if it exists on the remote.
-              </p>
-            )}
-          </div>
-        </Field>
-        </>)}
-
         {/* Optional first message (GH #192). Sent to the agent once it
             finishes booting. Hidden for a plain terminal, which has no
-            prompt box to type into. */}
+            prompt box to type into. Starts at 1 row — growPrompt() (below)
+            grows it as the user types, so the hint that used to explain
+            "typed once ready, nothing sent until Create" isn't needed to
+            justify the extra height; the placeholder carries that now. */}
         {canPrompt && (
-          <Field
-            label="First message (optional)"
-            hint={`Typed into ${agentLabel} once it's ready. Nothing is sent until you press ${importMode ? "Import" : "Create"}.`}
-          >
+          <Field label="Initial prompt">
             <div className="flex flex-col gap-1">
               <textarea
                 ref={promptRef}
                 value={prompt}
                 onChange={e => setPrompt(e.target.value.slice(0, MAX_PROMPT_CHARS))}
-                rows={3}
+                rows={1}
                 // Enter inserts a newline and nothing else. A textarea
                 // never submits its form on Enter, but the dialog above it
                 // does bind keys, and a multi-line first message must not
@@ -1138,6 +1159,28 @@ function Field({ label, hint, children }: {
     <div className="flex flex-col gap-2">
       <label className="text-[13px] font-medium text-[var(--color-fg)]">{label}</label>
       {hint && <div className="text-[12px] leading-snug text-[var(--color-fg-faint)] -mt-1">{hint}</div>}
+      {children}
+    </div>
+  );
+}
+
+/** Field variant for when the hint is short enough to share the label's
+ *  line instead of wrapping to its own — Branch name / Branch from's hints
+ *  ("Auto-fills from the name.", "Blank = repo default.") are a few words,
+ *  so a whole extra line for them was pure air. Falls back to Field's
+ *  stacked layout the instant a longer hint (e.g. the multi-repo host
+ *  variant) would crowd the label — pass it via `hint` on Field instead. */
+function FieldInline({ label, hint, children }: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-baseline gap-2">
+        <label className="text-[13px] font-medium text-[var(--color-fg)]">{label}</label>
+        {hint && <span className="truncate text-[12px] text-[var(--color-fg-faint)]">{hint}</span>}
+      </div>
       {children}
     </div>
   );
