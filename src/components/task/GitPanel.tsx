@@ -567,7 +567,7 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
           task={task}
           branch={repo?.branch ?? task.branch}
           dir={dir}
-          right={<div className="relative ml-auto flex min-w-0 flex-1 items-center">
+          right={<div className="relative ml-auto flex min-w-[30%] flex-1 items-center">
             <Search className="pointer-events-none absolute left-2 h-3.5 w-3.5 text-[var(--color-fg-faint)]" />
             <input
               value={search}
@@ -926,8 +926,20 @@ function BranchBar({ task, branch, dir, right }: {
         <DropdownTrigger asChild>
           <button
             disabled={switching || updating}
+            data-testid="branch-chip"
             title="Switch branch or update from the base (stashes and re-applies local changes)"
-            className="flex h-6 min-w-0 max-w-full items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 text-[12px] transition-colors hover:border-[var(--color-accent-soft)] disabled:opacity-50"
+            className={cn(
+              "flex h-6 min-w-0 max-w-full items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 text-[12px] transition-colors hover:border-[var(--color-accent-soft)] disabled:opacity-50",
+              // Only when it SHARES the row. The chip is sized to its content
+              // and `right` is a flex-basis-0 item, so a basis-0 item absorbs
+              // none of the shrink: a long branch name took the whole row and
+              // left the filter its padding (a ~36px stub with no room for a
+              // character). The 30% floor on `right` is what actually reserves
+              // the space; this cap is the same rule said from this side, and
+              // it subtracts the row's gap so the two do not add up past 100%
+              // and push each other out.
+              right && "max-w-[calc(70%_-_0.375rem)]",
+            )}
           >
             {switching || updating
               ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--color-fg-faint)]" />

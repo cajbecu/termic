@@ -222,7 +222,14 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
           side being compared TO. Without naming both, a file marked "D" is
           ambiguous (deleted by whom?), which is the single most confusing
           thing a compare view can leave unsaid. */}
-      <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-[var(--color-border-soft)] px-2 text-[11.5px]">
+      {/* WRAPS rather than truncates. Two long names is the normal case, not
+          the edge one, and on one row flexbox splits the deficit in proportion
+          to how long each name already is, so a 30-character branch drove the
+          picker opposite it down to "d…". A second row costs 26px in a panel
+          that only shows it when it is needed; a ref you cannot read costs the
+          whole bar its point. `min-h-8` + `py-1` keeps the one-row case the
+          same 32px it was. */}
+      <div className="flex min-h-8 shrink-0 flex-wrap items-center gap-x-1.5 gap-y-1 border-b border-[var(--color-border-soft)] px-2 py-1 text-[11.5px]">
         <GitCompareIcon className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />
         <DropdownRoot onOpenChange={o => { if (o) loadRefs(); }}>
           <DropdownTrigger asChild>
@@ -233,8 +240,9 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
               // Sized to the ref it holds, not to a share of the row: a
               // `max-w-[55%]` truncated "feature/new-claude-w…" while the
               // three characters of "main" opposite it sat in open space.
-              // It still shrinks (min-w-0) when the two names together do not
-              // fit, which is the only time truncating is the right answer.
+              // It still shrinks (min-w-0) if the picker ALONE outgrows the
+              // row; two names that do not fit together take a row each
+              // instead, which is what the bar's flex-wrap is for.
               className="flex h-6 min-w-0 shrink items-center gap-1 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 transition-colors hover:border-[var(--color-accent-soft)]"
             >
               <span className="truncate font-mono text-[var(--color-fg)]">{base || "Pick a branch"}</span>
@@ -272,7 +280,12 @@ export function ComparePanel({ task, repoDir, search, viewMode, reloadToken, onO
         </DropdownRoot>
         <ArrowRight className="h-3 w-3 shrink-0 text-[var(--color-fg-faint)]" />
         <span
+          // The item that carries the wrap: it is the reliably long one, so
+          // when the two names do not fit together it is the one that takes
+          // the second row, WHOLE. min-w-0 still lets it truncate, but only
+          // once one name alone is wider than the panel.
           className="min-w-0 shrink truncate font-mono text-[var(--color-fg-dim)]"
+          data-testid="compare-target"
           title={`${branchLabel}, including uncommitted changes`}
         >
           {branchLabel}

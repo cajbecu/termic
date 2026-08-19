@@ -1492,3 +1492,137 @@ describe("git multi-repo panel", () => {
     await selectGitView("commit");
   });
 });
+
+// Long branch names are the normal case, and both rows of the Git tab share
+// their width with something else: the filter on Commit, the base-ref picker
+// on Compare. Sized to its content, the name took the whole row and left the
+// other control its own padding (a stub with no room for a character) or a
+// single glyph ("d…"). Geometry, so it can only be measured in a real window:
+// happy-dom has no layout, and asserting the class names would pass just as
+// happily on the markup that broke.
+describe("git branch bar layout", () => {
+  let taskId!: string;
+  let original = "";
+  /** A real branch name off a real report, and the length that matters: on
+   *  its own it fits the panel (265px inner in this window, ~36 monospace
+   *  characters), two of them do not. A name longer than the panel truncates
+   *  however the row is laid out, which would prove nothing about either fix. */
+  const longBranch = "feature/title-authoring-model";
+
+  before(() => {
+    original = execSync(`git -C "${fixture}" rev-parse --abbrev-ref HEAD`).toString().trim();
+    // -B, not -b: a crashed earlier run can leave the branch behind.
+    execSync(`git -C "${fixture}" checkout -q -B ${longBranch}`);
+  });
+
+  after(async () => {
+    await selectGitView("commit").catch(() => {});
+    if (taskId) await archiveTask(taskId);
+    execSync(`git -C "${fixture}" checkout -q ${original}`);
+    try {
+      execSync(`git -C "${fixture}" branch -D ${longBranch}`, { stdio: "ignore" });
+    } catch { /* already gone */ }
+  });
+
+  const openRightTab = (label: "All files" | "Git") =>
+    browser.execute((l) => {
+      const el = document.querySelector(
+        `[data-testid="right-tab"][data-tab="${l}"]`,
+      ) as HTMLElement | null;
+      if (!el) throw new Error(`no right-panel tab: ${l}`);
+      el.click();
+    }, label);
+
+  /** Widths in CSS pixels, plus the row's own content box (its width minus the
+   *  padding its children are laid out inside). */
+  const measure = () =>
+    browser.execute(() => {
+      const box = (el: HTMLElement) => {
+        const r = el.getBoundingClientRect();
+        return {
+          width: r.width, left: r.left, right: r.right, top: r.top, bottom: r.bottom,
+          // A truncated element scrolls wider than it renders. This is how
+          // "did it end in an ellipsis" is asked without reading pixels.
+          clipped: el.scrollWidth > el.clientWidth + 1,
+        };
+      };
+      const rowBox = (el: HTMLElement) => {
+        const row = el.parentElement as HTMLElement;
+        const cs = getComputedStyle(row);
+        const r = row.getBoundingClientRect();
+        return {
+          inner: row.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight),
+          height: r.height,
+          right: r.right - parseFloat(cs.paddingRight),
+        };
+      };
+      const chip = document.querySelector('[data-testid="branch-chip"]') as HTMLElement | null;
+      if (!chip) throw new Error("the branch chip is not on screen");
+      const base = document.querySelector('[data-testid="compare-base"]') as HTMLElement | null;
+      const target = document.querySelector('[data-testid="compare-target"]') as HTMLElement | null;
+      const filter = document.querySelector(
+        'input[placeholder="Filter"], input[placeholder="Search messages"]',
+      ) as HTMLElement | null;
+      return {
+        branchRow: rowBox(chip),
+        chip: box(chip),
+        filter: filter ? box(filter) : null,
+        compareRow: base ? rowBox(base) : null,
+        base: base ? box(base) : null,
+        target: target ? box(target) : null,
+      };
+    });
+
+  it("leaves the filter its 30% of the branch row, however long the name", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask("e2e-branch-bar");
+    await openRightTab("Git");
+    await selectGitView("commit");
+    await waitVisible('[data-testid="branch-chip"]');
+
+    // The chip really is holding the long name — without that, everything
+    // below passes on an empty row and proves nothing.
+    await browser.waitUntil(
+      async () => (await measure()).chip.width > 0,
+      { timeout: 10_000, timeoutMsg: "the branch chip never rendered" },
+    );
+    const m = await measure();
+    expect(m.filter).not.toBe(null);
+
+    // The point of the fix: the filter keeps its share instead of collapsing
+    // to its own padding. Sub-pixel slack, since 30% of an odd width rounds.
+    expect(m.filter!.width).toBeGreaterThanOrEqual(m.branchRow.inner * 0.3 - 1);
+    // And the chip yields rather than overflowing the panel.
+    expect(m.chip.right).toBeLessThanOrEqual(m.branchRow.right + 0.5);
+    expect(m.chip.width).toBeLessThanOrEqual(m.branchRow.inner * 0.7 + 1);
+    // It stays on ONE row: this panel drags down to 220px, so the filter row
+    // is not allowed to grow a second line the way Compare's bar may.
+    expect(m.branchRow.height).toBeLessThanOrEqual(32);
+  });
+
+  it("wraps the compare bar to a second row instead of crushing the base ref", async () => {
+    await selectGitView("compare");
+    await waitVisible('[data-testid="compare-panel"]');
+    await browser.waitUntil(
+      async () => (await measure()).target !== null,
+      { timeout: 10_000, timeoutMsg: "the compare bar never named the target branch" },
+    );
+
+    const m = await measure();
+    // Both names are readable in full. Neither is allowed to end in an
+    // ellipsis while the other one keeps its name, which is what one row of
+    // proportional shrinking did to the picker.
+    expect(m.base!.clipped).toBe(false);
+    expect(m.target!.clipped).toBe(false);
+    // The target took a row of its own: it starts below the picker's bottom.
+    // (A panel wide enough to fit both keeps them on one row, and then the two
+    // assertions above are the ones carrying the weight.)
+    if (m.target!.top >= m.base!.bottom) {
+      expect(m.compareRow!.height).toBeGreaterThan(32);
+    }
+    // Wrapped or not, nothing hangs outside the panel.
+    expect(m.target!.right).toBeLessThanOrEqual(m.compareRow!.right + 0.5);
+    expect(m.base!.right).toBeLessThanOrEqual(m.compareRow!.right + 0.5);
+  });
+});

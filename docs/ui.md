@@ -138,16 +138,21 @@ one repo rather than three places:
 - **Compare** — what this branch adds up to next to another ref (issue #208):
   one list of every path that differs between a chosen ref and the working
   tree, committed and uncommitted alike, because an agent that split a feature
-  over six commits leaves nothing in the staging view to read.
+  over six commits leaves nothing in the staging view to read. Its own bar
+  (`<base> → <branch>`) WRAPS to a second row rather than truncating: two long
+  names is the normal case, and on one row flexbox splits the deficit in
+  proportion to length, which crushed the shorter ref to a single character.
 - **History** — the commit graph (issue #199), full height.
 
 Order of the chrome above them, outermost first: repo pills (multi-repo tasks),
 then the branch bar, then the sub-tabs. Which repo you are looking at is what
 the branch and all three sub-tabs are ABOUT, so it cannot sit inside them.
 
-One box serves all three, on the branch row (the branch chip is one short
-control on a full-width row, so it rides with it rather than spending a row of
-its own). In Commit and Compare it filters the file list. In History it is a
+One box serves all three, on the branch row. The chip is not "one short
+control" the way that row was first written: branch names are routinely long
+enough to fill it, and since the box is a flex-basis-0 item it absorbed none of
+the shrink and collapsed to its own padding. The box holds a 30% floor and the
+chip a matching cap, so a name truncates instead of taking the row. In Commit and Compare it filters the file list. In History it is a
 MESSAGE SEARCH run by git (`--grep`, literal and case-insensitive, subject and
 body) over the whole scope rather than over the rows on screen: "does this
 branch have a commit about X" is a question about the history, and answering it
