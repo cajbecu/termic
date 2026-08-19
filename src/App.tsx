@@ -13,6 +13,7 @@ import { installPointerEventsGuard } from "@/lib/pointerEventsGuard";
 import { initCliRpc } from "@/lib/cliRpc";
 import { initAgentStatePush } from "@/lib/cliAgentState";
 import { initTrayAttention } from "@/lib/trayAttention";
+import { initActivityTitleBridge } from "@/lib/activityTitleBridge";
 import { initDeepLinks } from "@/lib/deepLink";
 import { cn } from "@/lib/utils";
 import { Sidebar } from "@/components/sidebar/Sidebar";
@@ -106,6 +107,9 @@ export function App() {
     // Keep the tray dropdown/badge in sync with tasks waiting on the user
     // or done (lib/trayAttention.ts).
     const stopTrayAttention = initTrayAttention();
+    // Answer the separate Activity window's title requests — it cannot read
+    // this window's Zustand state (lib/activityTitleBridge.ts).
+    const stopActivityTitles = initActivityTitleBridge();
     const onFocus = () => {
       loadAll();
       // Restore focus to whichever terminal/editor was last active when the
@@ -139,6 +143,7 @@ export function App() {
       deepLinks.then(u => u());
       stopAgentPush();
       stopTrayAttention();
+      stopActivityTitles();
     };
   }, [loadAll]);
 

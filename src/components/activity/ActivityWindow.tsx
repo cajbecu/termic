@@ -34,6 +34,7 @@ import {
 } from "@/lib/activityGroups";
 import { cn } from "@/lib/utils";
 import { usePrefs } from "@/store/prefs";
+import { subscribeActivityTitles } from "@/lib/activityTitleBridge";
 
 /** Sampling period while the window is on screen. 1 Hz is what Activity
  *  Monitor and Chrome's task manager use: fast enough to see a spike, slow
@@ -55,8 +56,23 @@ export function ActivityWindow() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [paused, setPaused] = useState(false);
   const [sort, setSort] = useState<Sort>(DEFAULT_SORT);
+  const [liveTitles, setLiveTitles] = useState<Record<string, string>>({});
   const sessionRef = useRef<number | null>(null);
   const tickRef = useRef(0);
+
+  // Live tab titles (what the main window's tab strip actually shows right
+  // now) come from a SEPARATE webview, so they're bridged in on request —
+  // see lib/activityTitleBridge.ts for why this can't just read Zustand.
+  // Subscribed once; `titleBridgeRef.current.request()` is called on the
+  // same cadence as `loadMeta` below (title text is exactly as slow-moving
+  // as the project/task lists — no need for its own 1Hz path).
+  const titleBridgeRef = useRef<{ request: () => void; stop: () => void } | null>(null);
+  useEffect(() => {
+    const bridge = subscribeActivityTitles(setLiveTitles);
+    titleBridgeRef.current = bridge;
+    bridge.request();
+    return () => bridge.stop();
+  }, []);
 
   // Paint in the user's theme. Importing the prefs store is what does it:
   // the module applies the persisted theme's CSS vars at load, and
@@ -69,6 +85,7 @@ export function ActivityWindow() {
     Promise.all([ipc.projectsList(), ipc.tasksList()])
       .then(([p, t]) => { setProjects(p); setTasks(t); })
       .catch(() => { /* names degrade to ids; the numbers still work */ });
+    titleBridgeRef.current?.request();
   }, []);
 
   // Session lifecycle. `start` is what allocates state in Rust and `stop`
@@ -152,8 +169,8 @@ export function ActivityWindow() {
   }, [paused, loadMeta]);
 
   const grouped = useMemo(
-    () => groupRows(snap?.rows ?? [], projects, tasks, sort),
-    [snap, projects, tasks, sort],
+    () => groupRows(snap?.rows ?? [], projects, tasks, sort, liveTitles),
+    [snap, projects, tasks, sort, liveTitles],
   );
 
   return (

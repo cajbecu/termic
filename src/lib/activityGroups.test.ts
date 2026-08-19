@@ -167,6 +167,7 @@ describe("rowTitle", () => {
     ["tab-blank", { title: "   " }],
     ["tab-claude", { cli: "claude" }],
     ["tab-shell", { cli: "shell" }],
+    ["tab-claude-2", { cli: "claude", order: 2 }],
   ]);
 
   it("prefers the tab's persisted title", () => {
@@ -194,6 +195,18 @@ describe("rowTitle", () => {
 
   it("ignores a whitespace-only persisted title", () => {
     expect(rowTitle(row({ tabId: "tab-blank", kind: "shell", label: "zsh" }), titles)).toBe("Shell · zsh");
+  });
+
+  it("names an unrenamed agent tab by its position, not the generic 'Agent' word", () => {
+    // Several tabs in one task can run the same CLI ("Agent · claude" x5,
+    // told apart only by PID) — the tab's position among its task's own
+    // tabs replaces that generic word instead.
+    expect(rowTitle(row({ tabId: "tab-claude-2", kind: "agent", label: "2.1.235" }), titles))
+      .toBe("Tab 2 · claude");
+    // No position known (e.g. the tab isn't in the metadata map at all) ->
+    // falls back to the generic word, same as before.
+    expect(rowTitle(row({ tabId: "tab-claude", kind: "agent", label: "2.1.235" }), titles))
+      .toBe("Agent · claude");
   });
 
   it("drops the process name when it is unknown", () => {
@@ -226,12 +239,31 @@ describe("tabTitleMap", () => {
       task({ id: "t3", project_id: "p1" }),
     ]);
     // An untitled tab still contributes its CLI — that is the whole point of
-    // carrying the metadata rather than just titles.
-    expect(m.get("a")).toEqual({ title: "fix build", cli: "claude" });
-    expect(m.get("b")).toEqual({ title: undefined, cli: "claude" });
-    expect(m.get("c")).toEqual({ title: undefined, cli: "shell" });
-    expect(m.get("d")).toEqual({ title: "docs", cli: "gemini" });
+    // carrying the metadata rather than just titles. `order` is 1-based and
+    // restarts per task (t1's 3 tabs are 1/2/3; t2's lone tab is 1, not 4).
+    expect(m.get("a")).toEqual({ title: "fix build", cli: "claude", order: 1 });
+    expect(m.get("b")).toEqual({ title: undefined, cli: "claude", order: 2 });
+    expect(m.get("c")).toEqual({ title: undefined, cli: "shell", order: 3 });
+    expect(m.get("d")).toEqual({ title: "docs", cli: "gemini", order: 1 });
     expect(m.size).toBe(4);
+  });
+
+  it("prefers a bridged live title over the persisted (on-rename-only) one", () => {
+    // liveTitles comes from the main window (activityTitleBridge.ts) and
+    // covers every live tab, not just renamed ones — "b" has no persisted
+    // title at all, but still gets a real name once the bridge answers.
+    const m = tabTitleMap(
+      [task({
+        id: "t1", project_id: "p1",
+        persisted_tabs: [
+          { id: "a", cli: "claude", title: "fix build" },
+          { id: "b", cli: "claude", title: null },
+        ],
+      })],
+      { a: "Claude Code", b: "Action Required" },
+    );
+    expect(m.get("a")?.title).toBe("Claude Code");
+    expect(m.get("b")?.title).toBe("Action Required");
   });
 });
 

@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "procmon",
+  "description": "Capability for the Activity (procmon) window. It is not listed in default.json's \"windows\" (main only), so without this it gets NO permissions at all — its process-monitor commands (procmon_start/sample/stop/signal) are custom app commands and work regardless, but core:event (listen/emit) is a core plugin and IS capability-gated. This grants just that, for the live-title bridge (lib/activityTitleBridge.ts) it uses to ask the main window what each tab's current title is (Activity is a separate webview and cannot read the main window's in-memory state directly).",
+  "windows": ["procmon"],
+  "permissions": [
+    "core:event:default"
+  ]
+}

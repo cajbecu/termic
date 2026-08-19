@@ -112,10 +112,17 @@ export interface TabMeta {
   title?: string;
   /** Agent id for the tab ("claude" / "gemini" / …), or "shell". */
   cli?: string;
+  /** 1-based position among the task's OWN persisted tabs, in stored
+   *  (display) order. A task can run several tabs on the SAME cli — "Agent
+   *  · claude" x5, indistinguishable except by PID — so an unrenamed agent
+   *  tab falls back to "Tab <order>" instead of the generic "Agent" word,
+   *  which at least tells them apart. */
+  order?: number;
 }
 
 /** Row title. Prefers the tab's persisted title (what the user sees on the
- *  tab strip), then the tab's AGENT id, then the kind plus the process name.
+ *  tab strip), then — for an agent row — a positional "Tab N" paired with
+ *  its CLI, then the kind plus the process name for everything else.
  *
  *  The agent id matters because a CLI's process name is not its name: claude
  *  runs as its version string, so the honest process name is `2.1.235` (macOS
@@ -135,11 +142,15 @@ export function rowTitle(row: ProcRow, tabTitles: Map<string, TabMeta>): string 
   const persisted = meta?.title?.trim();
   if (persisted) return persisted;
   if (row.tabId === "right-footer") return "Panel terminal";
-  const kind = KIND_LABELS[row.kind] ?? row.kind;
   const cli = meta?.cli?.trim();
-  if (row.kind === "agent" && cli && cli !== "shell") return `${kind} · ${cli}`;
+  if (row.kind === "agent" && cli && cli !== "shell") {
+    const name = meta?.order ? `Tab ${meta.order}` : "Agent";
+    return `${name} · ${cli}`;
+  }
+  const kind = KIND_LABELS[row.kind] ?? row.kind;
   // The process name adds information only when it differs from the kind
-  // ("Agent · claude" is useful, "Shell · zsh" less so but still honest).
+  // ("Shell · zsh" is less useful than "Agent · claude" was, but still honest,
+  // and a task rarely runs two of the same non-agent kind at once).
   return row.label && row.label !== "?" ? `${kind} · ${row.label}` : kind;
 }
 
@@ -224,12 +235,21 @@ function comparator(sort: Sort): (a: Sortable, b: Sortable) => number {
 }
 
 /** Build `tabId -> { title, cli }` from every task's persisted tab metadata. */
-export function tabTitleMap(tasks: Task[]): Map<string, TabMeta> {
+/** `liveTitles` overlays the CURRENTLY DISPLAYED title (same value the tab
+ *  strip shows — `tab.customTitle ? tab.title : (tab.liveTitle || tab.title)`,
+ *  see TabBar.tsx) for whichever tabs the main window answered with, bridged
+ *  in from the separate main-window webview (see
+ *  src/lib/activityTitleBridge.ts — Activity cannot read another webview's
+ *  Zustand state directly). Wins over the on-disk persisted title: it is
+ *  strictly fresher, and covers every live tab, not just renamed ones. */
+export function tabTitleMap(tasks: Task[], liveTitles?: Record<string, string>): Map<string, TabMeta> {
   const out = new Map<string, TabMeta>();
   for (const t of tasks) {
-    for (const tab of t.persisted_tabs ?? []) {
-      out.set(tab.id, { title: tab.title ?? undefined, cli: tab.cli });
-    }
+    (t.persisted_tabs ?? []).forEach((tab, i) => {
+      // Order restarts at 1 per task — persisted_tabs is that task's own
+      // array, so "Tab 2" means the second tab of THIS task, not a global count.
+      out.set(tab.id, { title: liveTitles?.[tab.id] ?? tab.title ?? undefined, cli: tab.cli, order: i + 1 });
+    });
   }
   return out;
 }
@@ -239,8 +259,9 @@ export function groupRows(
   projects: Project[],
   tasks: Task[],
   sort: Sort = DEFAULT_SORT,
+  liveTitles?: Record<string, string>,
 ): Grouped {
-  const tabTitles = tabTitleMap(tasks);
+  const tabTitles = tabTitleMap(tasks, liveTitles);
   const taskById = new Map(tasks.map(t => [t.id, t]));
   const projectById = new Map(projects.map(p => [p.id, p]));
 
