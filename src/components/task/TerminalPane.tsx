@@ -39,6 +39,7 @@ import { effectiveSandboxMode, isSandboxEnforced } from "@/lib/types";
 import { SandboxIcon, SANDBOX_VISUALS } from "@/components/SandboxIcon";
 import { TerminalExitedBanner } from "@/components/task/TerminalExitedBanner";
 import * as ipc from "@/lib/ipc";
+import { maybeRebuildDockerImageForLaunch } from "@/lib/dockerDailyRebuild";
 import { loginShell, loginShellArgs } from "@/lib/loginShell";
 import { usePrefs, currentTerminalStack, currentTerminalTheme, currentColorFgBg, currentMinimumContrastRatio } from "@/store/prefs";
 import { spawnArgsForCli, spawnCommandForCli, tryToggleYoloLive, envForCli, agentDisplayName, cliSupportsIdSession, cliSupportsCaptureResume, postLaunchCaptureForCli, decideResume, resumeIdArgsForCli, workDoneCapable, terminalLaunchCommand, isTerminalCli, classifyAgentTitle, compileSignals, hasPendingWork, notificationWantsAttention, PENDING_TAIL_ROWS, STICKY_DONE_MS } from "@/lib/agents";
@@ -1630,6 +1631,16 @@ const captureArmedRef = useRef(false);
             void useApp.getState().loadAll();
           }
         } catch { /* keep the frozen pairs */ }
+        // Daily Docker image refresh (opt-out, on by default): agent CLIs
+        // in the image are unpinned/always-latest, so a task launched
+        // today on an image built yesterday can silently run a stale
+        // binary. No-ops for anything not in Docker mode, already built
+        // today, or with the setting off. Can take 1-2 minutes on a cache
+        // miss (it's a --no-cache rebuild, same as "Update agents") -
+        // re-check cancelled after, the tab may have been closed/navigated
+        // away from while this awaited.
+        if (isAgent) await maybeRebuildDockerImageForLaunch(task);
+        if (cancelled) return;
         const spawn = await ipc.ptySpawn({
           cwd: task.path,
           cmd: spawnCmd,

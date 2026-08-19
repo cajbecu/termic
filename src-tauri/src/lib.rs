@@ -14828,6 +14828,16 @@ pub struct Settings {
     /// own `docker_sandbox_enabled` only takes effect when this is also on.
     /// See docs/plans/docker-sandbox/design.md.
     pub docker_sandbox_enabled: bool,
+    /// Rebuild the Docker sandbox image before the first agent launch of
+    /// each calendar day, so an agent CLI that publishes daily doesn't get
+    /// stuck running a stale binary baked into an old image indefinitely.
+    /// Opt-out: on by default. Checked by the frontend before spawning a
+    /// Docker-mode task's agent (see `docker_image_status().built_today`);
+    /// Rust never rebuilds on the spawn path itself (would freeze the
+    /// webview - build stays an explicit, streamed, frontend-driven action
+    /// same as a manual rebuild).
+    #[serde(default = "default_true")]
+    pub docker_daily_rebuild: bool,
     /// Personal (this-machine) glob patterns hidden from the "All files"
     /// tree across every project. Unioned with each project's committed
     /// `.termic.yaml` `exclude` list. `.git` is always hidden regardless.
@@ -15568,6 +15578,11 @@ fn seeded_defaults() -> Settings {
         // Required field: derive(Default) would give "", which the UI would
         // render as an empty required box on a fresh install.
         default_tasks_path: builtin_tasks_path(),
+        // `..Settings::default()` uses the derived Default (false), not the
+        // `#[serde(default = "default_true")]` that only kicks in for
+        // deserialization - set explicitly so a FRESH install (this path)
+        // opts in the same as an EXISTING install upgrading into the field.
+        docker_daily_rebuild: true,
         ..Settings::default()
     }
 }

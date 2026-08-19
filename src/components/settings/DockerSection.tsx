@@ -185,6 +185,18 @@ export function DockerSection() {
 
       {enabled && (
         <>
+          {/* Daily rebuild. Opt-out (defaults true - undefined reads as
+              on, matching the Rust-side default), so read !== false rather
+              than truthiness. */}
+          <Block>
+            <Toggle
+              label="Rebuild the image daily"
+              hint="Before the first Docker-mode agent launch each day, rebuild the image in the background and let you know. Agent CLIs release constantly; without this an old image can run a stale binary indefinitely. Turn off to only rebuild by hand, below."
+              value={settings.docker_daily_rebuild !== false}
+              onChange={v => patch({ docker_daily_rebuild: v })}
+            />
+          </Block>
+
           {/* Docker availability */}
           <Block>
             <div className="text-[14px] font-medium">Docker status</div>
@@ -296,6 +308,13 @@ function ImageStatusLine({ image, dirty }: { image: DockerImageStatus | null; di
         <span className="flex items-center gap-1.5 text-[var(--color-warn)]">
           <CircleAlert className="h-3.5 w-3.5" />
           Dockerfile edited since the last build. Rebuild to apply your changes (tasks keep using the last built image until then).
+        </span>
+      )}
+      {image.available && !image.stale && !dirty && (
+        <span className="flex items-center gap-1.5 text-[var(--color-fg-faint)]">
+          {image.built_today
+            ? "Built today."
+            : "Not rebuilt today yet - the next Docker-mode agent launch will trigger it, if daily rebuild is on."}
         </span>
       )}
     </div>

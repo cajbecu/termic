@@ -495,10 +495,20 @@ fn last_built_file() -> PathBuf {
     docker_dir().join("last_built_tag")
 }
 
-/// Record a successfully built tag.
+/// File recording the LOCAL calendar date of the last successful build
+/// (`YYYY-MM-DD`), independent of which tag it was. Drives the daily-rebuild
+/// nudge: an agent CLI publishes new releases continuously, so an image
+/// built yesterday can already be running a stale binary even though its
+/// Dockerfile (and therefore its content-addressed tag) hasn't changed.
+fn last_built_date_file() -> PathBuf {
+    docker_dir().join("last_built_date")
+}
+
+/// Record a successfully built tag, and today's date as the build date.
 pub fn record_built_tag(tag: &str) {
     let _ = std::fs::create_dir_all(docker_dir());
     let _ = std::fs::write(last_built_file(), tag);
+    let _ = std::fs::write(last_built_date_file(), today().to_string());
 }
 
 /// The tag of the last successful build, if any.
@@ -507,6 +517,32 @@ pub fn last_built_tag() -> Option<String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Today's LOCAL calendar date. A free function so the "was it built today"
+/// check has one call site to reason about (and to swap in a fixed date for
+/// tests without reaching for a mocking framework).
+fn today() -> chrono::NaiveDate {
+    chrono::Local::now().date_naive()
+}
+
+/// Parse a recorded build-date string (`YYYY-MM-DD`, possibly with
+/// trailing whitespace from the file write). Split out from `built_today`
+/// so the format is unit-testable without touching the filesystem.
+fn parse_build_date(s: &str) -> Option<chrono::NaiveDate> {
+    chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok()
+}
+
+/// Was ANY image successfully built today? A missing/unparsable recorded
+/// date (never built, or upgrading from a version that predates this file)
+/// counts as "not built today" - the caller decides whether that matters
+/// (it doesn't, if nothing has ever been built: `spawn_image_tag` already
+/// refuses that case outright).
+pub fn built_today() -> bool {
+    std::fs::read_to_string(last_built_date_file())
+        .ok()
+        .and_then(|s| parse_build_date(&s))
+        .is_some_and(|d| d == today())
 }
 
 /// Image state for the Settings Docker section + dropdown gating.
@@ -528,6 +564,10 @@ pub struct DockerImageStatus {
     /// Whether Docker mode should be offered in the task dropdown at
     /// all (a usable built image exists).
     pub available: bool,
+    /// Was any image successfully built today (local calendar date)? Drives
+    /// the daily-rebuild nudge before an agent launch - see
+    /// `Settings::docker_daily_rebuild`.
+    pub built_today: bool,
 }
 
 /// Compute the current image status from the on-disk Dockerfile + docker.
@@ -551,6 +591,7 @@ pub fn image_status() -> DockerImageStatus {
         last_built_tag: last,
         last_built_exists,
         stale,
+        built_today: built_today(),
     }
 }
 
@@ -631,5 +672,24 @@ mod tests {
     fn extra_args_checks_every_element() {
         let args = vec!["--memory".to_string(), "4g".to_string(), "--privileged".to_string()];
         assert!(validate_extra_args(&args).is_err());
+    }
+
+    #[test]
+    fn parse_build_date_accepts_iso_date() {
+        let d = parse_build_date("2026-08-19").expect("should parse");
+        assert_eq!(d.to_string(), "2026-08-19");
+    }
+
+    #[test]
+    fn parse_build_date_trims_whitespace() {
+        assert!(parse_build_date("2026-08-19\n").is_some());
+        assert!(parse_build_date("  2026-08-19  ").is_some());
+    }
+
+    #[test]
+    fn parse_build_date_rejects_garbage() {
+        for bad in ["", "not-a-date", "2026/08/19", "08-19-2026"] {
+            assert!(parse_build_date(bad).is_none(), "expected {bad:?} to fail to parse");
+        }
     }
 }

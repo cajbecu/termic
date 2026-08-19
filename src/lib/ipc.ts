@@ -309,6 +309,9 @@ export interface DockerImageStatus {
   stale: boolean;
   is_default: boolean;
   available: boolean;
+  /** Was any image successfully built today (local calendar date)? Drives
+   *  the daily-rebuild nudge before an agent launch. */
+  built_today: boolean;
 }
 
 /** Probe for the `docker` binary + a running daemon. Cheap; no build. */
