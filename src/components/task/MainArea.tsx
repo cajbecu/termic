@@ -21,12 +21,20 @@
 
 import { useApp, useActiveTask } from "@/store/app";
 import { useUI } from "@/store/ui";
+import { usePendingTask } from "@/store/pendingTasks";
 import { Dashboard } from "@/components/views/Dashboard";
 import { HistoryView } from "@/components/views/History";
 import { TaskView } from "@/components/task/TaskView";
+import { CreatingTaskPane } from "@/components/task/CreatingTaskPane";
 
 export function MainArea() {
   const task = useActiveTask();
+  const activeTaskId = useApp(s => s.activeTaskId);
+  // A task mid-creation has an activeTaskId (set the moment the New Task
+  // dialog submits) but no entry in `tasks` yet — `task` above is null for
+  // that case exactly like "nothing selected" is, so this is the only way
+  // to tell the two apart. See CreatingTaskPane / GH #242.
+  const pending = usePendingTask(!task ? activeTaskId : null);
   const view = useApp(s => s.view.page);
   const tasks = useApp(s => s.tasks);
   const mounted = useApp(s => s.mountedTasks);
@@ -54,6 +62,7 @@ export function MainArea() {
   // tasks still render underneath so their PTYs survive.
   const overlay =
     view === "history" && !task ? <HistoryView /> :
+    pending ? <CreatingTaskPane id={pending.id} /> :
     !task ? <Dashboard /> :
     null;
 

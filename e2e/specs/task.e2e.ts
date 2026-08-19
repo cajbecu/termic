@@ -2,7 +2,37 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { archiveTask, clickByText, clickWhenVisible, dismissOverlays, ensureActiveTask, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitVisible } from "../helpers";
+import { archiveTask, clickByText, clickWhenVisible, dismissOverlays, ensureActiveTask, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitForWorkBadge, waitGone, waitVisible } from "../helpers";
+
+// Click a button by its exact text inside the NewTaskDialog specifically
+// (scoped via the name input's dialog — there can be more than one
+// [role="dialog"] in the DOM). Waits for the button first: the dialog renders
+// progressively (the mode toggle lands after an async worktree scan). Module
+// scope so both "create task wizard" and "worktree task" below can drive the
+// real dialog instead of the IPC shortcut.
+async function clickDialogButton(text: string): Promise<void> {
+  await browser.waitUntil(
+    () =>
+      browser.execute((t) => {
+        const dlg = document
+          .querySelector('input[placeholder="fix login bug"]')
+          ?.closest('[role="dialog"]');
+        return [...(dlg?.querySelectorAll("button") ?? [])].some(
+          (b) => b.textContent?.trim() === t,
+        );
+      }, text),
+    { timeout: 8_000, timeoutMsg: `dialog button never appeared: ${text}` },
+  );
+  await browser.execute((t) => {
+    const dlg = document
+      .querySelector('input[placeholder="fix login bug"]')
+      ?.closest('[role="dialog"]');
+    const btn = [...(dlg?.querySelectorAll("button") ?? [])].find(
+      (b) => b.textContent?.trim() === t,
+    );
+    (btn as HTMLElement).click();
+  }, text);
+}
 
 // P0: create a task through the real NewTaskDialog wizard (the primary user
 // path; the other specs take the IPC shortcut). Uses the shell ("Terminal")
@@ -14,34 +44,6 @@ describe("create task wizard", () => {
   after(async () => {
     if (taskId) await archiveTask(taskId);
   });
-
-  // Click a button by its exact text inside the NewTaskDialog specifically
-  // (scoped via the name input's dialog — there can be more than one
-  // [role="dialog"] in the DOM). Waits for the button first: the dialog renders
-  // progressively (the mode toggle lands after an async worktree scan).
-  const clickDialogButton = async (text: string) => {
-    await browser.waitUntil(
-      () =>
-        browser.execute((t) => {
-          const dlg = document
-            .querySelector('input[placeholder="fix login bug"]')
-            ?.closest('[role="dialog"]');
-          return [...(dlg?.querySelectorAll("button") ?? [])].some(
-            (b) => b.textContent?.trim() === t,
-          );
-        }, text),
-      { timeout: 8_000, timeoutMsg: `dialog button never appeared: ${text}` },
-    );
-    await browser.execute((t) => {
-      const dlg = document
-        .querySelector('input[placeholder="fix login bug"]')
-        ?.closest('[role="dialog"]');
-      const btn = [...(dlg?.querySelectorAll("button") ?? [])].find(
-        (b) => b.textContent?.trim() === t,
-      );
-      (btn as HTMLElement).click();
-    }, text);
-  };
 
   it("creates a repo-root shell task via NewTaskDialog", async () => {
     await waitForAppShell();
@@ -103,6 +105,79 @@ describe("create task wizard", () => {
     );
 
     await snap("create-wizard.png");
+  });
+
+  // GH #242: worktree creation used to lock the whole window behind this
+  // dialog until `git worktree add` + the file copy finished. Prove the fix
+  // at the UI level — the dialog is gone the instant Create is clicked, not
+  // once the worktree is actually ready. Worktree mode this time (not
+  // repo-root): that's the path that used to block.
+  it("closes the dialog immediately on Create, before the worktree is ready", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+
+    await browser.execute(() => {
+      const proj = window.__termic!.useApp
+        .getState()
+        .projects.find((p: any) => p.name === "fixture-repo");
+      window.__termic!.useUI.getState().openNewTask(proj.id);
+    });
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          () =>
+            !!document.querySelector(
+              '[role="dialog"] input[placeholder="fix login bug"]',
+            ),
+        ),
+      { timeout: 8_000, timeoutMsg: "NewTaskDialog never opened" },
+    );
+
+    await clickDialogButton("Worktree");
+    await browser.execute(() => {
+      const input = document.querySelector(
+        '[role="dialog"] input[placeholder="fix login bug"]',
+      ) as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      )!.set!;
+      setter.call(input, "e2e-wizard-wt");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await clickDialogButton("Terminal");
+    await clickDialogButton("Create");
+
+    // The dialog closes synchronously with the click — it does not await
+    // `taskCreate` first. A short timeout is the point: this must not need
+    // to wait anywhere near as long as a real worktree add would take.
+    await waitGone('[role="dialog"] input[placeholder="fix login bug"]', 2_000);
+
+    // ...and the worktree still lands once it's actually ready.
+    await browser.waitUntil(
+      () =>
+        browser.execute(() =>
+          window.__termic!.useApp
+            .getState()
+            .tasks.some((t: any) => t.name === "e2e-wizard-wt" && !t.archived),
+        ),
+      { timeout: 15_000, timeoutMsg: "worktree task never landed after the dialog closed early" },
+    );
+    const wtTaskId: string = await browser.execute(
+      () =>
+        window.__termic!.useApp
+          .getState()
+          .tasks.find((t: any) => t.name === "e2e-wizard-wt" && !t.archived)?.id,
+    );
+    await browser.execute(async (id) => {
+      await window.__termic!.ipc.taskArchive(id, true); // deleteBranch
+      await window.__termic!.useApp.getState().loadAll();
+    }, wtTaskId);
+    try {
+      execSync(`git -C "${fixture}" worktree prune`);
+    } catch {
+      /* already gone */
+    }
   });
 });
 
@@ -952,6 +1027,96 @@ describe("worktree task", () => {
         .trim();
       expect(branchSha).toBe(mainSha);
     });
+  });
+});
+
+// GH #242: while a task is mid-creation it's represented as a "pending" entry
+// (no real Task exists yet — see src/store/pendingTasks.ts), which the
+// sidebar and main pane render specially (PendingTaskRow / CreatingTaskPane).
+// The dialog-driven case above proves the dialog itself closes immediately;
+// this covers what the app shows during the (usually sub-second, on this
+// fixture) window that leaves open. Seeded directly via usePendingTasks
+// rather than raced against the real worktree add — see the e2e skill's
+// "Reading real app state" section on why a deterministic seed beats racing
+// something this fast.
+describe("task creation, in progress (GH #242)", () => {
+  let pendingId: string | undefined;
+  afterEach(async () => {
+    if (!pendingId) return;
+    await browser.execute((id) => {
+      window.__termic!.usePendingTasks.getState().remove(id);
+    }, pendingId);
+    pendingId = undefined;
+  });
+
+  it("shows a pending sidebar row and a live log in the main pane, with no blocking dialog", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+
+    pendingId = await browser.execute(() => {
+      const proj = window.__termic!.useApp
+        .getState()
+        .projects.find((p: any) => p.name === "fixture-repo");
+      const id = crypto.randomUUID();
+      window.__termic!.usePendingTasks.getState().add({
+        id, projectId: proj.id, name: "e2e-pending", cli: "fakeagent",
+      });
+      window.__termic!.usePendingTasks.getState().appendLine(id, "Adding worktree at /tmp/e2e-pending…");
+      window.__termic!.useApp.getState().setActiveTask(id);
+      return id;
+    });
+
+    // Sidebar: a spinner-badged row for the pending task — same badge
+    // surface a real working agent uses.
+    await waitVisible(`[data-sidebar-task-id="${pendingId}"]`);
+    await waitForWorkBadge(pendingId, "working");
+
+    // Main pane: the live creation log, not the Dashboard.
+    await waitForText("e2e-pending");
+    await waitVisible('[data-testid="creating-task-log"]');
+    const logText: string = await browser.execute(
+      () => document.querySelector('[data-testid="creating-task-log"]')?.textContent ?? "",
+    );
+    expect(logText).toContain("Adding worktree");
+
+    // Nothing is blocking: no dialog exists while this is in flight, which
+    // is the whole point of GH #242.
+    const dialogPresent = await browser.execute(() => !!document.querySelector('[role="dialog"]'));
+    expect(dialogPresent).toBe(false);
+
+    await snap("creating-task-pending.png");
+  });
+
+  it("turns into a dismissible error state when creation fails", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+
+    pendingId = await browser.execute(() => {
+      const proj = window.__termic!.useApp
+        .getState()
+        .projects.find((p: any) => p.name === "fixture-repo");
+      const id = crypto.randomUUID();
+      window.__termic!.usePendingTasks.getState().add({
+        id, projectId: proj.id, name: "e2e-pending-fail", cli: "fakeagent",
+      });
+      window.__termic!.usePendingTasks.getState().fail(id, "branch already checked out elsewhere");
+      window.__termic!.useApp.getState().setActiveTask(id);
+      return id;
+    });
+
+    await waitForWorkBadge(pendingId, "attention");
+    await waitForText("branch already checked out elsewhere");
+
+    // Dismiss clears both the pending entry and the active selection — no
+    // orphaned row left in the sidebar.
+    await clickByText("Dismiss");
+    await waitForTextGone("branch already checked out elsewhere");
+    const stillPending: boolean = await browser.execute(
+      (id) => id in window.__termic!.usePendingTasks.getState().pending,
+      pendingId,
+    );
+    expect(stillPending).toBe(false);
+    pendingId = undefined; // Dismiss already cleaned it up
   });
 });
 

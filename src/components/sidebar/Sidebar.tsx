@@ -2,6 +2,7 @@
 // Two layout flavors: full (220px) vs compact (56px, icon-only with tooltips).
 
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type FocusEvent as ReactFocusEvent } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { useApp, useTaskTabs, useActiveTabId } from "@/store/app";
 import { usePrefs } from "@/store/prefs";
 import { Button } from "@/components/ui/Button";
@@ -15,6 +16,7 @@ import { NewTabMenuItems } from "@/components/task/NewTabMenuItems";
 import { UpdateCard } from "./UpdateCard";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { useUI } from "@/store/ui";
+import { usePendingTasks } from "@/store/pendingTasks";
 import { cn } from "@/lib/utils";
 import { formatTerminalTitle } from "@/lib/terminalTitle";
 import { requestCloseTab } from "@/lib/closeTab";
@@ -104,6 +106,12 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
   const setGroupColor = useApp(s => s.setGroupColor);
   const setAllTasksCollapsed = useApp(s => s.setAllTasksCollapsed);
   const setAllGroupsCollapsed = useApp(s => s.setAllGroupsCollapsed);
+  // Tasks mid-creation (GH #242): no real Task yet, so they can't come from
+  // `tasks` above — rendered as synthetic rows in the same list, filtered by
+  // project inside renderProject below (a plain object filter, not a hook
+  // call, since renderProject runs per-project inside a loop).
+  const pendingTasksById = usePendingTasks(s => s.pending);
+  const pendingTaskList = Object.values(pendingTasksById);
   // (agents subscription lives inside ProjectActionsMenuItems now —
   // Sidebar itself doesn't need the registry.)
 
@@ -978,6 +986,7 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
           {(() => {
           const renderProject = (p: typeof projects[number]) => {
             const taskList = tasks.filter(w => w.project_id === p.id && !w.archived);
+            const pendingForProject = pendingTaskList.filter(t => t.projectId === p.id);
             // Empty projects default to collapsed (no point pinning a blank
             // expanded row). User overrides stick: explicit true / false
             // wins; undefined falls back to emptiness-based default.
@@ -989,7 +998,7 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
             // "picking the project up"; persisted collapse state is
             // untouched, so the rows return on drop exactly as they were.
             const collapsed = dragProjectId === p.id
-              || (explicit !== undefined ? explicit : taskList.length === 0);
+              || (explicit !== undefined ? explicit : taskList.length === 0 && pendingForProject.length === 0);
             // Compact + collapsed: surface aggregated activity on the
             // project monogram so a collapsed project still signals that
             // something underneath wants attention (attention > done).
@@ -1347,7 +1356,7 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                     New worktree action). One affordance instead of two
                     cramped side-by-side buttons that had to ellipsis at
                     narrow widths. */}
-                {!collapsed && taskList.length === 0 && !compact && pendingRepoRoot?.projectId !== p.id && (
+                {!collapsed && taskList.length === 0 && !compact && pendingRepoRoot?.projectId !== p.id && pendingForProject.length === 0 && (
                   <div
                     className="ml-3 mr-1 mb-px"
                     onClick={e => e.stopPropagation()}
@@ -1405,6 +1414,14 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                     clickSuppressed={taskClickSuppressed}
                   />
                 ))}
+                {/* Tasks mid-creation (GH #242) — a real Task doesn't exist
+                    yet, so these come from pendingTaskList, not taskList.
+                    Rendered after the real rows, compact mode excluded (same
+                    as TaskRow's own compact branch: no room for a labeled
+                    row on the icon rail). */}
+                {!collapsed && !compact && pendingForProject.map(t => (
+                  <PendingTaskRow key={t.id} pending={t} />
+                ))}
                 {/* Inline name prompt renders at the BOTTOM — that's
                     where a newly-created repo-root task lands in
                     the sort order, so the row physically appears in
@@ -1434,20 +1451,31 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                       const ui = useUI.getState();
                       inlineCreatingRef.current = true;
                       if (pr.mode === "worktree") {
-                        // Close the inline row and show the SAME progress UI the
-                        // New Task modal shows on submit (worktree add + copy can
-                        // take seconds; errors surface there too).
+                        // Same non-blocking shape as NewTaskDialog (GH #242):
+                        // pre-generate the id, subscribe to its progress
+                        // channel, register the pending row, THEN close the
+                        // inline row and fire the create in the background —
+                        // no modal, no locked window while worktree add +
+                        // copy runs.
+                        const id = crypto.randomUUID();
+                        const uOut = await listen<{ line: string }>(`setup-output://${id}`, ev => {
+                          usePendingTasks.getState().appendLine(id, ev.payload.line);
+                        });
+                        usePendingTasks.getState().add({
+                          id, projectId: pr.projectId, name, cli: pr.cli,
+                        });
+                        setActive(id);
                         setPendingRepoRoot(null);
-                        ui.setTaskCreateProgress({ phase: "creating", err: null });
                         try {
                           await createQuickTask({
-                            projectId: pr.projectId, mode: "worktree", cli: pr.cli,
+                            id, projectId: pr.projectId, mode: "worktree", cli: pr.cli,
                             name, branch: pr.branch.trim(),
                           });
-                          ui.setTaskCreateProgress(null); // success closes the overlay
+                          usePendingTasks.getState().remove(id);
                         } catch (err) {
-                          ui.setTaskCreateProgress({ phase: "error", err: String(err) });
+                          usePendingTasks.getState().fail(id, String(err));
                         } finally {
+                          uOut();
                           inlineCreatingRef.current = false;
                         }
                       } else {
@@ -1910,6 +1938,45 @@ function iconSize(compact: boolean) {
 // `data-testid="work-badge"` + `data-work-state` are the DOM hook the e2e
 // suite asserts on: this badge is what a user actually sees, so specs read it
 // instead of peeking at `tab.workState` in the store.
+/** Sidebar row for a task still being created (GH #242). No real Task
+ *  exists yet — clicking it just activates the pending id, which MainArea
+ *  resolves to CreatingTaskPane (see usePendingTask there). No tabs, no
+ *  chevron, no menu: there's nothing to expand or act on until the worktree
+ *  is ready and the real TaskRow takes over (same id, so the click target
+ *  doesn't move under the user). */
+function PendingTaskRow({ pending }: { pending: import("@/store/pendingTasks").PendingTask }) {
+  const activeTaskId = useApp(s => s.activeTaskId);
+  const setActive = useApp(s => s.setActiveTask);
+  const isActive = activeTaskId === pending.id;
+  const isError = pending.phase === "error";
+  return (
+    <div className="mb-px" data-sidebar-task-row={pending.id}>
+      <div
+        data-sidebar-task-id={pending.id}
+        data-sidebar-task-project-id={pending.projectId}
+        data-pending-task-phase={pending.phase}
+        onClick={() => setActive(pending.id)}
+        className={cn(
+          "ml-3 flex items-center gap-1.5 rounded-md px-1 py-1 text-[13px] cursor-pointer select-none transition-colors",
+          isActive
+            ? "bg-[var(--color-sel)] text-[var(--color-fg)]"
+            : "text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
+        )}
+      >
+        <span className="shrink-0 h-3.5 w-3.5 mx-0.5" />
+        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+          <span className="min-w-0 truncate font-medium">{pending.name}</span>
+        </div>
+        <Tip content={isError ? (pending.err ?? "Creation failed") : "Creating worktree…"}>
+          <span className="relative flex h-[18px] w-[18px] shrink-0 items-center justify-center">
+            {isError ? <TabBadge reason="attention" /> : <TabBadge reason="working" />}
+          </span>
+        </Tip>
+      </div>
+    </div>
+  );
+}
+
 function TabBadge({ reason }: { reason: "attention" | "done" | "working" }) {
   if (reason === "working") {
     return (

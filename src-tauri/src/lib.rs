@@ -3786,13 +3786,31 @@ fn task_import_worktree(
 /// progress modal opens (the user's exact complaint). See the
 /// "Long-running IPC discipline" section in CLAUDE.md.
 #[tauri::command]
-async fn task_create(args: CreateTaskArgs) -> Result<Task, String> {
-    tauri::async_runtime::spawn_blocking(move || task_create_sync(args))
+async fn task_create(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String> {
+    tauri::async_runtime::spawn_blocking(move || task_create_sync(app, args))
         .await
         .map_err(|e| e.to_string())?
 }
 
-fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
+/// Emits one progress line on the SAME `setup-output://{id}` channel the
+/// setup script streams into after the worktree exists (see
+/// task_create_multi_sync's emits below). Reusing the channel means the
+/// frontend's single listener, registered before `task_create` is invoked,
+/// carries the whole creation timeline (worktree add → file copy → setup
+/// script) with no second event name to wire up. Progress is best-effort:
+/// a dropped event only costs a missing log line, never the creation itself.
+fn emit_create_progress(app: &AppHandle, task_id: &str, line: impl Into<String>) {
+    let _ = app.emit(&format!("setup-output://{task_id}"), serde_json::json!({ "line": line.into() }));
+}
+
+fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String> {
+    // Resolved up front (not at Task construction, further down) so every
+    // progress event below — including ones emitted before the Task exists —
+    // lands on the channel the frontend is already listening on. The dialog
+    // always sends `args.id` (it generates the uuid before invoking, so it
+    // can subscribe before the race window); the fallback only matters for
+    // non-UI callers (CLI `new_task`), which don't listen anyway.
+    let task_id = args.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
     let projects = load_projects();
     let proj = projects.iter().find(|p| p.id == args.project_id)
         .ok_or("project not found")?.clone();
@@ -3901,18 +3919,29 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
         vec!["worktree", "add", wt_arg, &branch]
     };
     let add_result = if branch_exists {
+        emit_create_progress(&app, &task_id, format!("Branch '{branch}' already exists locally, reusing it."));
+        emit_create_progress(&app, &task_id, format!("Adding worktree at {}…", wt_path.display()));
         git(&add_args, &repo)
     } else {
         // Refresh the remote-tracking base ref first so the new branch is cut
         // from the latest remote commit, not a stale local origin/* (GH #79).
         // Best-effort and time-bounded — see git_fetch_base.
         if fetch_before_create_enabled() {
+            emit_create_progress(&app, &task_id, format!("Fetching '{base_full}' from origin…"));
             git_fetch_base(&repo, &base_full);
         }
         // Resolve to a ref that exists (local-only repos have no origin/main).
         let base_ref = resolve_base_ref(&repo, &base_full);
-        match git(&["branch", "--no-track", &branch, &base_ref], &repo) {
-            Ok(_) => git(&add_args, &repo),
+        emit_create_progress(&app, &task_id, format!("Branching '{branch}' from '{base_ref}'…"));
+        let branch_result = match git(&["branch", "--no-track", &branch, &base_ref], &repo) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        };
+        match branch_result {
+            Ok(()) => {
+                emit_create_progress(&app, &task_id, format!("Adding worktree at {}…", wt_path.display()));
+                git(&add_args, &repo)
+            }
             Err(e) => Err(e),
         }
     };
@@ -3925,6 +3954,7 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
         }
         return Err(e.to_string());
     }
+    emit_create_progress(&app, &task_id, "Worktree added.");
 
     // git-crypt: bridge the key dir from the common .git into the new
     // worktree's per-worktree gitdir, then run a full checkout so the
@@ -3934,6 +3964,7 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
     // one. If anything here fails, we leave the half-checked-out
     // worktree in place and bubble up a useful error.
     if has_git_crypt {
+        emit_create_progress(&app, &task_id, "git-crypt detected, bridging the key and checking out…");
         // Per-worktree gitdir = <common>/worktrees/<slug>. Resolve via
         // `git -C <new-worktree> rev-parse --git-dir` to be robust.
         let wt_gitdir_raw = git(&["rev-parse", "--git-dir"], &wt_path)
@@ -3966,7 +3997,11 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
     // Parse `.termic.yaml` once for this creation (files here, extras +
     // sandbox default below).
     let repo_cfg = repo_config_for(&proj);
-    for pat in &effective_files_to_copy_from(&repo_cfg, &proj) {
+    let copy_patterns = effective_files_to_copy_from(&repo_cfg, &proj);
+    if !copy_patterns.is_empty() {
+        emit_create_progress(&app, &task_id, format!("Copying {} file pattern(s): {}", copy_patterns.len(), copy_patterns.join(", ")));
+    }
+    for pat in &copy_patterns {
         copy_matching(&repo, &wt_path, pat);
     }
 
@@ -3976,11 +4011,16 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
     // (Settings.worktree_symlink_paths); each entry is linked only when it
     // exists in the repo and the checkout/copy didn't already provide it.
     for name in &globals.worktree_symlink_paths {
+        let existed = wt_path.join(name).exists();
         link_config_dir(&repo, &wt_path, name);
+        if !existed && wt_path.join(name).exists() {
+            emit_create_progress(&app, &task_id, format!("Linked {name}."));
+        }
     }
 
     // Allocate the task's port block (base + extras + buffer).
     // Released right after save_task below persists the claimed block.
+    emit_create_progress(&app, &task_id, "Allocating ports…");
     let port_guard = PORT_ALLOC_LOCK.lock();
     let extra_names = effective_extra_named_ports_from(&repo_cfg, &proj);
     let (port, extra_named_ports, port_block_len) =
@@ -4036,7 +4076,7 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
     // task-wide flag).
     let agent_session_ids = seeded_session_ids(&cli, args.resume_session_id.as_deref());
     let task = Task {
-        id: args.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+        id: task_id.clone(),
         project_id: proj.id.clone(),
         name: args.name,
         branch,
@@ -4076,6 +4116,7 @@ fn task_create_sync(args: CreateTaskArgs) -> Result<Task, String> {
     };
     save_task(&task).map_err(|e| e.to_string())?;
     drop(port_guard);
+    emit_create_progress(&app, &task_id, format!("Worktree ready (port {port})."));
 
     // Setup no longer runs here. It used to fire in a background thread and
     // stream to the New Task dialog via setup-output/setup-done, which the
@@ -4158,6 +4199,10 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
     if host.project_type != ProjectType::Multi {
         return Err("task_create_multi requires a multi-repo project".into());
     }
+    // Same up-front resolution as task_create_sync: the dialog always sends
+    // `args.id`, generated before invoking so it can subscribe to
+    // `setup-output://{id}` first. See emit_create_progress.
+    let task_id = args.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
 
     let slug = slugify(&args.name);
     // Same empty-slug guard as task_create_sync: an all-punctuation name
@@ -4221,6 +4266,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         // agent running at the wrapper loads them, exactly as it would
         // from a git host worktree. Members get worktree'd / symlinked
         // into the wrapper below, same as the git path.
+        emit_create_progress(&app, &task_id, "Non-git host, creating wrapper dir…");
         fs::create_dir_all(&wrapper).map_err(|e| format!("create wrapper dir failed: {e}"))?;
         for shared in &["CLAUDE.md", "AGENTS.md", "GEMINI.md", ".claude", ".gemini", ".codex"] {
             let src = host_repo.join(shared);
@@ -4240,21 +4286,28 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         // create site for the rationale.
         let branch_exists = git(&["rev-parse", "--verify", &branch], &host_repo).is_ok();
         let create_result = if branch_exists {
+            emit_create_progress(&app, &task_id, format!("Adding host worktree at {}…", wrapper.display()));
             git(&["worktree", "add", wrapper.to_str().unwrap(), &branch], &host_repo)
         } else {
             // Refresh the base ref before cutting the host branch (GH #79).
             if do_fetch {
+                emit_create_progress(&app, &task_id, format!("Fetching '{base_branch}' from origin…"));
                 git_fetch_base(&host_repo, &base_branch);
             }
             let base_ref = resolve_base_ref(&host_repo, &base_branch);
+            emit_create_progress(&app, &task_id, format!("Branching host '{branch}' from '{base_ref}'…"));
             match git(&["branch", "--no-track", &branch, &base_ref], &host_repo) {
-                Ok(_) => git(&["worktree", "add", wrapper.to_str().unwrap(), &branch], &host_repo),
+                Ok(_) => {
+                    emit_create_progress(&app, &task_id, format!("Adding host worktree at {}…", wrapper.display()));
+                    git(&["worktree", "add", wrapper.to_str().unwrap(), &branch], &host_repo)
+                }
                 Err(e) => Err(e),
             }
         };
         if let Err(e) = create_result {
             return Err(format!("host worktree add failed: {e}"));
         }
+        emit_create_progress(&app, &task_id, "Host worktree added.");
     }
 
     // Helper that tears down everything we've created so far on
@@ -4306,6 +4359,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         let target = wrapper.join(&dir_name);
         match spec.mode {
             MemberMode::RepoRoot => {
+                emit_create_progress(&app, &task_id, format!("Linking member '{dir_name}' to its live checkout…"));
                 if let Err(e) = std::os::unix::fs::symlink(&mp.root_path, &target) {
                     rollback(&done);
                     return Err(format!("symlink {dir_name}: {e}"));
@@ -4341,14 +4395,17 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
                 // the remote upstream).
                 let mexists = git(&["rev-parse", "--verify", &mbranch], &mrepo).is_ok();
                 let mres = if mexists {
+                    emit_create_progress(&app, &task_id, format!("Adding member '{dir_name}' worktree on '{mbranch}'…"));
                     git(&["worktree", "add", target.to_str().unwrap(), &mbranch], &mrepo)
                 } else {
                     // Refresh this member's base ref before cutting its branch,
                     // honoring the member's own remote/base (GH #79).
                     if do_fetch {
+                        emit_create_progress(&app, &task_id, format!("Fetching '{mbase}' for member '{dir_name}'…"));
                         git_fetch_base(&mrepo, &mbase);
                     }
                     let mbase_ref = resolve_base_ref(&mrepo, &mbase);
+                    emit_create_progress(&app, &task_id, format!("Branching member '{dir_name}' ('{mbranch}') from '{mbase_ref}'…"));
                     match git(&["branch", "--no-track", &mbranch, &mbase_ref], &mrepo) {
                         Ok(_) => git(&["worktree", "add", target.to_str().unwrap(), &mbranch], &mrepo),
                         Err(e) => Err(e),
@@ -4358,6 +4415,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
                     rollback(&done);
                     return Err(format!("member {dir_name} worktree add failed: {e}"));
                 }
+                emit_create_progress(&app, &task_id, format!("Member '{dir_name}' worktree added."));
                 composition.push(TaskMember {
                     project_id: String::new(),
                     repo_path: mp.root_path.clone(),
@@ -4440,8 +4498,9 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
     let cli = args.cli.unwrap_or_else(|| host.default_cli.clone());
     // Block base allocated above, before the members were created.
     let port = ws_port;
+    emit_create_progress(&app, &task_id, "Worktrees ready, finishing setup…");
     let task = Task {
-        id: args.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+        id: task_id.clone(),
         project_id: host.id.clone(),
         name: args.name,
         branch,

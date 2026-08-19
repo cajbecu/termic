@@ -16,6 +16,7 @@ import { launchSetupTab } from "@/lib/runTabs";
 import { seedPromptWhenReady } from "@/lib/seedPrompt";
 import { MAX_PROMPT_CHARS } from "@/lib/deepLink";
 import { withCreateLock } from "@/lib/createLock";
+import { usePendingTasks } from "@/store/pendingTasks";
 import { uniqueBranch, derivedBranch } from "@/lib/quickTask";
 import { cn } from "@/lib/utils";
 import { Check, Loader2, AlertTriangle, GitBranch, Link2, FolderGit2, Plus, History } from "lucide-react";
@@ -51,6 +52,10 @@ export function NewTaskDialog() {
   // write can't re-render the dialog through it.
   const seedNonce = useUI(s => s.newTaskSeed?.nonce ?? 0);
   const close = useUI(s => s.closeNewTask);
+  const pendingAdd = usePendingTasks(s => s.add);
+  const pendingAppendLine = usePendingTasks(s => s.appendLine);
+  const pendingFail = usePendingTasks(s => s.fail);
+  const pendingRemove = usePendingTasks(s => s.remove);
   const project = useApp(s => projectId ? s.projects.find(p => p.id === projectId) : null);
   const setActive = useApp(s => s.setActiveTask);
   const loadAll = useApp(s => s.loadAll);
@@ -232,12 +237,6 @@ export function NewTaskDialog() {
   // submit() so concurrent calls see the truth immediately.
   const submittingRef = useRef(false);
   const [err, setErr] = useState<string | null>(null);
-  // Progress phase: form (default) → creating (worktree+copy in flight) →
-  // setup (running setup script with live output) → done (success, 2s flash) → error.
-  const [phase, setPhase] = useState<"form" | "creating" | "setup" | "done" | "error">("form");
-  const [setupLog, setSetupLog] = useState<string[]>([]);
-  const [createdTaskId, setCreatedTaskId] = useState<string | null>(null);
-  const outputRef = useRef<HTMLDivElement>(null);
 
   // Reset the form ONLY when the dialog opens for a different project —
   // never on re-fetches of the same project's data. Window-focus events fire
@@ -417,12 +416,6 @@ export function NewTaskDialog() {
     // this only ever catches a project that lost its git dir since.
     setMode(p?.non_git ? "repo_root" : (seed?.mode ?? readLastMode() ?? "repo_root"));
     if (canImp) loadImportable(projectId);
-    setPhase("form"); setSetupLog([]); setCreatedTaskId(null);
-    // CRITICAL: also reset `busy`. On a successful prior creation we
-    // intentionally leave busy=true (so the form can't be re-submitted
-    // during the streaming-setup phase). Without this reset, the NEXT
-    // time the dialog opens, busy is still true → Create button stays
-    // disabled even with all fields filled.
     setBusy(false);
     submittingRef.current = false;
   }, [projectId, seedNonce]);
@@ -436,12 +429,6 @@ export function NewTaskDialog() {
     for (const u of unlistenRef.current) u();
     unlistenRef.current = [];
   }, []);
-
-  // Auto-scroll setup output as new lines arrive.
-  useEffect(() => {
-    const el = outputRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [setupLog]);
 
   // Branch auto-fills from the name, but ONLY until the user touches the
   // branch field — after that it's theirs and we never clobber it (#15:
@@ -569,39 +556,32 @@ export function NewTaskDialog() {
     if (!projectId || !name.trim() || !branch.trim()) return;
     if (submittingRef.current) return;
     submittingRef.current = true;
-    setBusy(true); setErr(null); setPhase("creating"); setSetupLog([]);
     const taskId = crypto.randomUUID();
-    setCreatedTaskId(taskId);
     // Clean up any prior unlisteners from a previous (errored) submission
     // before registering new ones.
     for (const u of unlistenRef.current) u();
     unlistenRef.current = [];
-    // Multi-repo still runs its (possibly several, sequential) member setup
-    // scripts synchronously on the Rust side and streams progress here —
-    // that path is unchanged, so keep waiting on it. Single-repo setup runs
-    // as an unfocused background tab instead (see below), so it needs
-    // neither of these listeners. Pre-generate + `await listen(...)` BEFORE
-    // invoking taskCreateMulti: the earlier useEffect-based subscription
-    // wasn't guaranteed to attach in time — for empty setup scripts Rust
-    // emits setup-done synchronously, so the done event could fire while
-    // React was still scheduling the effect → dialog hung forever on
-    // "Waiting for output…". `await listen()` returns once the
-    // subscription is confirmed by the Tauri backend, eliminating the race.
-    if (isMulti) {
-      const uOut = await listen<{ line: string }>(`setup-output://${taskId}`, ev => {
-        setSetupLog(log => [...log, ev.payload.line]);
-      });
-      const uDone = await listen<{ code: number | null; success: boolean }>(`setup-done://${taskId}`, ev => {
-        if (ev.payload.success) {
-          setPhase("done");
-          window.setTimeout(() => { setActive(taskId); seedFirstMessage(taskId); close(); }, 2000);
-        } else {
-          setPhase("error");
-          setErr(`Setup script exited with code ${ev.payload.code ?? "?"}.`);
-        }
-      });
-      unlistenRef.current = [uOut, uDone];
-    }
+    // Register the progress listener BEFORE invoking taskCreate/
+    // taskCreateMulti — `await listen()` returns once the Tauri backend has
+    // confirmed the subscription, so no line emitted the instant the Rust
+    // side starts running can race past an unmounted listener (the same
+    // ordering guarantee the old setup-output subscription relied on).
+    // Both create paths emit onto this ONE channel now (worktree add, file
+    // copy, port allocation — see emit_create_progress in lib.rs — and,
+    // for single-repo, the setup script that follows via launchSetupTab
+    // below), so the pending pane's log is the whole creation timeline
+    // with no second event name to wire up.
+    const uOut = await listen<{ line: string }>(`setup-output://${taskId}`, ev => {
+      pendingAppendLine(taskId, ev.payload.line);
+    });
+    unlistenRef.current = [uOut];
+    // Represent the in-flight task in the sidebar + main pane right away —
+    // this IS the fix for GH #242 (worktree creation no longer locks the
+    // whole window behind a modal). The dialog closes on the next line;
+    // CreatingTaskPane (MainArea) and PendingTaskRow (Sidebar) take over.
+    pendingAdd({ id: taskId, projectId, name: name.trim(), cli });
+    setActive(taskId);
+    close();
     try {
       // Snap textareas → string[]. Done at submit so blank lines
       // during typing don't roundtrip through the array state.
@@ -630,56 +610,57 @@ export function NewTaskDialog() {
           sandbox_allowed_hosts:  sandbox ? splitLines(sbHosts) : undefined,
           resume_override: resumeOverrideArg(),
         }));
-        await loadAll();
-        setPhase("setup");
-        // On success, submittingRef stays true until the dialog closes —
-        // guards against any re-submit during the streaming-setup phase.
-        return;
+      } else {
+        await withCreateLock(() => taskCreate({
+          id: taskId,
+          project_id: projectId,
+          name: name.trim(),
+          cli,
+          base_branch: base.trim() || null,
+          branch: branch.trim(),
+          // Capability-gated like import: the field hides when the agent has
+          // nothing to resume, but typed state would otherwise ride along.
+          resume_override: resumeOverrideArg(),
+          sandbox_enabled: sandbox,
+          sandbox_mode: sandboxMode,
+          // Only send lists when sandbox is on - keeps the JSON tidy
+          // for unsandboxed tasks (they don't need these saved).
+          sandbox_rw_paths:       sandbox ? splitLines(sbRw)    : undefined,
+          sandbox_allowed_hosts:  sandbox ? splitLines(sbHosts) : undefined,
+        }));
       }
-      await withCreateLock(() => taskCreate({
-        id: taskId,
-        project_id: projectId,
-        name: name.trim(),
-        cli,
-        base_branch: base.trim() || null,
-        branch: branch.trim(),
-        // Capability-gated like import: the field hides when the agent has
-        // nothing to resume, but typed state would otherwise ride along.
-        resume_override: resumeOverrideArg(),
-        sandbox_enabled: sandbox,
-        sandbox_mode: sandboxMode,
-        // Only send lists when sandbox is on - keeps the JSON tidy
-        // for unsandboxed tasks (they don't need these saved).
-        sandbox_rw_paths:       sandbox ? splitLines(sbRw)    : undefined,
-        sandbox_allowed_hosts:  sandbox ? splitLines(sbHosts) : undefined,
-      }));
       await loadAll();
-      // Single-repo worktree: open immediately and focus the main agent —
-      // no blocking "running setup…" phase. If the project has a setup
-      // script, it fires right after as an unfocused background tab
-      // (ensureDefaultTab excludes setup-kind tabs from its "already
-      // mounted" check, so the two can't race each other out).
-      setActive(taskId);
+      // The real task now exists — MainArea/Sidebar prefer it over the
+      // pending entry the moment `tasks` carries it, so drop the pending
+      // entry here rather than leaving a stale duplicate row behind.
+      pendingRemove(taskId);
       seedFirstMessage(taskId);
-      close();
-      launchSetupTab(taskId, { focus: false }).catch(() => {});
+      // Single-repo worktree: no blocking "running setup…" phase — if the
+      // project has a setup script, it fires right after as an unfocused
+      // background tab (ensureDefaultTab excludes setup-kind tabs from its
+      // "already mounted" check, so the two can't race each other out).
+      // Multi-repo's member setup scripts already run this way from the
+      // Rust side (task_create_multi_sync spawns them in a background
+      // thread and returns immediately — see setup-output/-done emits
+      // there), so both paths land the user on a live task with the same
+      // "agent gets focus now, setup streams in its own tab" shape.
+      if (!isMulti) launchSetupTab(taskId, { focus: false }).catch(() => {});
     } catch (e) {
-      setErr(String(e)); setBusy(false); setPhase("error");
+      // Worktree/branch creation itself failed. Leave the pending entry in
+      // place (now in "error" phase) so the sidebar row and, if the user is
+      // still looking at it, the main pane surface exactly what failed —
+      // no separate toast, no reopening a dialog.
+      pendingFail(taskId, String(e));
+    } finally {
       submittingRef.current = false;
-      return;
     }
-    // Success: for multi, submittingRef stays true until the dialog closes
-    // (guards against a re-submit during the streaming-setup phase). For
-    // single-repo, the dialog is already closed above — tidy up so a later
-    // mount of this component starts clean.
-    if (!isMulti) { setBusy(false); submittingRef.current = false; }
   }
 
   return (
     <AppDialog
-      // Lock dialog while creating — clicking outside or Escape would leave
-      // the user staring at no feedback while the worktree/file-copy chugs
-      // for several seconds on big repos.
+      // Locked only while busy — which, since GH #242, is just the brief
+      // window an instant import/repo-root create is actually in flight
+      // (worktree/multi creates close the dialog immediately; see submit()).
       open={!!projectId}
       onOpenChange={(v) => { if (!v && !busy) close(); }}
       title={isMulti ? "New multi-repo task" : importMode ? "Import existing worktree" : mode === "repo_root" ? "New task in the main checkout" : "New task in a worktree"}
@@ -696,30 +677,38 @@ export function NewTaskDialog() {
           ? (isMulti ? "max-w-[95.5rem]" : importMode ? "max-w-[83.5rem]" : "max-w-[71.5rem]")
           : (isMulti ? "max-w-3xl" : importMode ? "max-w-2xl" : "max-w-xl")
       }
+      // A long worktree form (sandbox panel, multi-repo members, …) can
+      // exceed the viewport — pin Cancel/Create to the bottom instead of
+      // letting them scroll away with the fields (the user has to be able
+      // to see and press Create without scrolling to find it).
+      stickyFooter={
+        <>
+          {err && <p className="mb-2 text-[13.5px] text-[var(--color-err)]">{err}</p>}
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" type="button" onClick={close}>Cancel</Button>
+            <Button
+              variant="primary"
+              type="submit"
+              form="new-task-form"
+              disabled={busy || !name.trim() || (mode === "repo_root" ? false : importMode ? !importSelected : !branch.trim())}
+            >
+              {importMode ? "Import" : "Create"}
+            </Button>
+          </div>
+        </>
+      }
     >
-      {/* Phase-aware body: form on start, then progress view while creating
-          + running setup. Form stays unmounted in non-form phases so its
-          state doesn't fight the progress UI. */}
-      {phase !== "form" && (
-        <ProgressBody
-          phase={phase}
-          err={err}
-          setupLog={setupLog}
-          outputRef={outputRef}
-          onClose={() => { if (!busy || phase === "error") { setPhase("form"); setBusy(false); close(); } }}
-        />
-      )}
-      {phase === "form" && (
       <form
+        id="new-task-form"
         onSubmit={(e) => { e.preventDefault(); submit(); }}
-        className="mt-1.5 flex flex-col gap-6"
+        className="mt-1.5 flex flex-col gap-4"
       >
       {/* Columns row: the left form + the sandbox config as a second column
           when a cage is enabled. Left is flex-1 (can't overflow); the sandbox
           column is flex-1 too, and the dialog max-width (below) is sized in REM
           so each column resolves to the SAME width in both states. */}
       <div className="flex">
-      <div className="flex min-w-0 flex-1 flex-col gap-6">
+      <div className="flex min-w-0 flex-1 flex-col gap-4">
         {/* Every field uses the same structure: label on its own line, optional
             hint underneath, control on a new line. Previous version inlined
             the segmented controls next to the label and put hints on the same
@@ -1131,88 +1120,8 @@ export function NewTaskDialog() {
         </div>
       )}
       </div>{/* end columns row */}
-
-      {/* Error + actions row, below the columns. */}
-      <div>
-        {err && <p className="mb-2 text-[13.5px] text-[var(--color-err)]">{err}</p>}
-        <div className="flex justify-end gap-2">
-          <Button variant="ghost" type="button" onClick={close}>Cancel</Button>
-          <Button
-            variant="primary"
-            type="submit"
-            disabled={busy || !name.trim() || (mode === "repo_root" ? false : importMode ? !importSelected : !branch.trim())}
-          >
-            {importMode ? "Import" : "Create"}
-          </Button>
-        </div>
-      </div>
       </form>
-      )}
     </AppDialog>
-  );
-}
-
-/** Progress view shown while creating a task. Three sub-states:
- *  - creating: worktree + file-copy in flight (task_create has not yet returned)
- *  - setup: setup script running; stream stdout/stderr line by line
- *  - done: success flash, dialog auto-closes 2s later
- *  - error: surfaces the failure + lets the user dismiss and try again
- */
-export function ProgressBody({ phase, err, setupLog, outputRef, onClose }: {
-  phase: "creating" | "setup" | "done" | "error";
-  err: string | null;
-  setupLog: string[];
-  outputRef: React.RefObject<HTMLDivElement | null>;
-  onClose: () => void;
-}) {
-  const status =
-    phase === "creating" ? { icon: <Loader2 className="h-5 w-5 animate-spin" />, label: "Creating worktree & copying files…" } :
-    phase === "setup"    ? { icon: <Loader2 className="h-5 w-5 animate-spin" />, label: "Running setup script…" } :
-    phase === "done"     ? { icon: <Check className="h-5 w-5" />, label: "Done." } :
-                           { icon: <AlertTriangle className="h-5 w-5" />, label: "Setup failed." };
-  const tone =
-    phase === "done"  ? "text-[var(--color-ok)]" :
-    phase === "error" ? "text-[var(--color-err)]" :
-                        "text-[var(--color-fg-dim)]";
-  return (
-    // min-w-0 is required because the parent is a CSS grid (`Dialog.Content`
-    // uses `grid`) — grid items default to `min-width: auto` which means
-    // their column refuses to shrink below the intrinsic width of their
-    // content. Long monospace lines (pip dep dumps, etc.) then push the
-    // whole dialog wider than `max-w-md`. min-w-0 lets the column hit zero
-    // and our inner `overflow-auto` actually clip + scroll.
-    <div className="flex min-w-0 flex-col gap-3">
-      <div className={cn("flex items-center gap-2 text-[13px] font-medium", tone)}>
-        {status.icon}
-        <span>{status.label}</span>
-      </div>
-      {(phase === "setup" || phase === "done" || (phase === "error" && setupLog.length > 0)) && (
-        <div
-          ref={outputRef}
-          data-selectable
-          // max-w-full + overflow-x-hidden belt-and-braces against any single
-          // unbreakable token (urls, base64, long hashes) that `break-words`
-          // can't split — those would otherwise stretch the box past the
-          // dialog edge again.
-          className="h-[220px] max-w-full overflow-auto overflow-x-hidden rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-2.5 font-mono text-[11.5px] leading-snug text-[var(--color-fg-dim)]"
-        >
-          {setupLog.length === 0
-            ? <span className="text-[var(--color-fg-faint)]">Waiting for output…</span>
-            : setupLog.map((line, i) => <div key={i} className="whitespace-pre-wrap break-words">{line}</div>)
-          }
-        </div>
-      )}
-      {phase === "error" && err && (
-        <p className="text-[12.5px] text-[var(--color-err)]">{err}</p>
-      )}
-      {(phase === "error" || phase === "done") && (
-        <div className="mt-1 flex justify-end gap-2">
-          <Button variant="ghost" type="button" onClick={onClose}>
-            {phase === "done" ? "Open now" : "Close"}
-          </Button>
-        </div>
-      )}
-    </div>
   );
 }
 

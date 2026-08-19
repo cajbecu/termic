@@ -84,7 +84,10 @@ export function sandboxPins(
 /** Create a task in the given mode and focus it. Worktree tasks also fire
  *  their setup script as an unfocused background tab (same as the dialog).
  *  `command` is only meaningful for `cli === "custom"`. `branch` (worktree
- *  only) falls back to the Rust-side slug when blank. */
+ *  only) falls back to the Rust-side slug when blank. `id`, when given, is
+ *  used as the task's id instead of generating one here — lets a caller
+ *  pre-generate it to subscribe to `setup-output://<id>` (worktree creation
+ *  progress) BEFORE this resolves, same reason NewTaskDialog does it. */
 export async function createQuickTask(opts: {
   projectId: string;
   mode: NewTaskMode;
@@ -92,6 +95,7 @@ export async function createQuickTask(opts: {
   name: string;
   branch?: string;
   command?: string;
+  id?: string;
 }): Promise<Task> {
   const { projectId, mode, cli, name } = opts;
   const trimmedName = name.trim();
@@ -120,7 +124,7 @@ export async function createQuickTask(opts: {
   } else {
     task = await withCreateLock(() =>
       taskCreate({
-        id: crypto.randomUUID(),
+        id: opts.id ?? crypto.randomUUID(),
         project_id: projectId,
         name: trimmedName,
         cli,

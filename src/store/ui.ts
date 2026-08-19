@@ -115,12 +115,6 @@ interface UIState {
    *  closed. Lives in UI store so opening doesn't churn the task
    *  tree. */
   resumeOverrideTaskId: string | null;
-  /** Progress overlay for a QUICK worktree create (sidebar inline row).
-   *  Reuses the New Task dialog's ProgressBody: "creating" shows the
-   *  worktree add / file-copy spinner, "error" surfaces the failure with a
-   *  Close button. null = hidden. Main-checkout creates are instant and
-   *  never set this. */
-  taskCreateProgress: { phase: "creating" | "error"; err: string | null } | null;
   /** Read-only "Keyboard shortcuts" cheat-sheet modal (opened from the
    *  sidebar footer). Distinct from Settings → Shortcuts (which edits them). */
   /** True while Termic is in windowless mode (window closed to the menu bar,
@@ -231,7 +225,6 @@ interface UIState {
   closeRunCommands: () => void;
   openResumeOverride: (taskId: string) => void;
   closeResumeOverride: () => void;
-  setTaskCreateProgress: (p: { phase: "creating" | "error"; err: string | null } | null) => void;
   openShortcutsHelp: () => void;
   closeShortcutsHelp: () => void;
   openWelcome: () => void;
@@ -357,7 +350,6 @@ export const useUI = create<UIState>(set => ({
   editCommandTaskId: null,
   runCommandsDialog: null,
   resumeOverrideTaskId: null,
-  taskCreateProgress: null,
   windowless: false,
   closePromptOpen: false,
   closePromptNonce: 0,
@@ -401,7 +393,6 @@ export const useUI = create<UIState>(set => ({
   closeRunCommands:   () => set({ runCommandsDialog: null }),
   openResumeOverride: (taskId) => set({ resumeOverrideTaskId: taskId }),
   closeResumeOverride:() => set({ resumeOverrideTaskId: null }),
-  setTaskCreateProgress: (p) => set({ taskCreateProgress: p }),
   setWindowless: (v) => set({ windowless: v }),
   setClosePromptOpen: (v) => set({ closePromptOpen: v }),
   requestClosePrompt: () =>

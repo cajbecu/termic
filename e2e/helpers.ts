@@ -81,6 +81,11 @@ export interface TermicApi {
       yolo?: boolean;
     }) => Promise<string[]>;
   };
+  /** Tasks mid-creation (GH #242 — non-blocking worktree create). Seeding an
+   *  entry directly lets specs catch PendingTaskRow / CreatingTaskPane in
+   *  their "creating" state without racing the fixture repo's near-instant
+   *  real worktree add. */
+  usePendingTasks: { getState: () => any };
 }
 
 declare global {

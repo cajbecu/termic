@@ -557,6 +557,68 @@ describe("branch new tasks from", () => {
     createdTaskIds.push((created as any).id);
   });
 
+  // GH #242: the sidebar's quick-create row is a SECOND worktree-creation
+  // implementation, separate from NewTaskDialog, and used to block behind
+  // its own overlay (QuickCreateProgressDialog) the same way the modal did.
+  // Prove the inline row commits without blocking too: the menu/name-input
+  // closes immediately, well before the worktree is actually ready, and the
+  // task still lands on its own branch.
+  it("creates a worktree task from the inline quick-create row without blocking", async () => {
+    const trigger = `[data-testid="project-new-task-${projectId}"]`;
+    await waitVisible(trigger);
+    await browser.execute((sel) => {
+      const el = document.querySelector(sel) as HTMLElement;
+      const opts = { bubbles: true, pointerType: "mouse", button: 0 } as any;
+      el.dispatchEvent(new PointerEvent("pointerdown", opts));
+      el.dispatchEvent(new PointerEvent("pointerup", opts));
+      el.click();
+    }, trigger);
+    await waitVisible('[role="menu"]');
+    await clickByText("Worktree");
+    await clickMenuItem("Terminal");
+
+    const nameInput = 'input[placeholder="Task name"]';
+    await waitVisible(nameInput);
+    await browser.execute((sel) => {
+      const input = document.querySelector(sel) as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      )!.set!;
+      setter.call(input, "e2e-quick-wt");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }, nameInput);
+    await browser.keys("Enter");
+
+    // The inline row (name + branch inputs) is gone right away — it does not
+    // wait for `git worktree add` to finish, same fix as the dialog case in
+    // task.e2e.ts.
+    await waitGone(nameInput, 2_000);
+
+    // ...and the worktree still lands once it's actually ready, on its own
+    // branch (not the main checkout).
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          (pid) =>
+            window.__termic!.useApp
+              .getState()
+              .tasks.some((t: any) => t.project_id === pid && t.name === "e2e-quick-wt"),
+          projectId,
+        ),
+      { timeout: 15_000, timeoutMsg: "quick-create worktree task never landed after the row closed early" },
+    );
+    const created = await browser.execute(
+      (pid) =>
+        window.__termic!.useApp
+          .getState()
+          .tasks.find((t: any) => t.project_id === pid && t.name === "e2e-quick-wt"),
+      projectId,
+    );
+    expect((created as any).is_main_checkout).not.toBe(true);
+    createdTaskIds.push((created as any).id);
+  });
+
   it("offers one flat branch list, pin checked and HEAD marked", async () => {
     // The pin lives IN the list rather than in a separate "Project default"
     // row, so there's one place to look. Mode is remembered app-wide (the

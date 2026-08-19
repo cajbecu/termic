@@ -25,10 +25,17 @@ interface Props {
    *  focusable control). Pass `(e) => e.preventDefault()` for dialogs
    *  where auto-focusing the first control looks wrong (e.g. a tab strip). */
   onOpenAutoFocus?: (e: Event) => void;
+  /** Renders as a non-scrolling bar pinned to the bottom of the dialog
+   *  (border-top separator), always visible regardless of how tall
+   *  `children` gets. Opt-in: without it, Content scrolls as one block
+   *  (the default below) and the caller's own trailing action row scrolls
+   *  away with everything else on a tall form. Pass the action row (Cancel/
+   *  Create, error text, etc.) here for a long dialog — see NewTaskDialog. */
+  stickyFooter?: ReactNode;
   children: ReactNode;
 }
 
-export function AppDialog({ open, onOpenChange, title, description, className, hideClose, overlayClassName, onCloseAutoFocus, onOpenAutoFocus, children }: Props) {
+export function AppDialog({ open, onOpenChange, title, description, className, hideClose, overlayClassName, onCloseAutoFocus, onOpenAutoFocus, stickyFooter, children }: Props) {
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -70,14 +77,16 @@ export function AppDialog({ open, onOpenChange, title, description, className, h
               // the right edge (Browse/Add buttons unreachable, issues #120,
               // #126). Flex-column stretch resolves widths on the plain block
               // path, which doesn't have the rounding bug.
-              "relative flex flex-col w-full max-w-md gap-2 pointer-events-auto",
-              "rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-1)] p-5 shadow-2xl",
-              // Always cap at viewport height with internal scroll so
-              // tall content (multi-repo project create with many
-              // members, etc.) never pushes the action buttons below
-              // the fold. Dialogs that manage their own scrolling can
-              // override these via className.
-              "max-h-[calc(100vh-2rem)] overflow-x-hidden overflow-y-auto",
+              "relative flex flex-col w-full max-w-md pointer-events-auto",
+              "rounded-xl border border-[var(--color-border)] bg-[var(--color-bg-1)] shadow-2xl",
+              // Always cap at viewport height. With no stickyFooter, Content
+              // scrolls itself as one block (the pre-existing behavior —
+              // gap-2 + p-5 live here so that path is pixel-identical).
+              // With a stickyFooter, the padding/gap/scroll move onto the
+              // inner wrapper below instead so the footer can sit outside
+              // the scroll region.
+              "max-h-[calc(100vh-2rem)] overflow-x-hidden",
+              stickyFooter ? "gap-0 p-0" : "gap-2 p-5 overflow-y-auto",
               // Promote to its own compositing layer with an explicit
               // integer-offset transform — WebKit snaps a layer with
               // `translate3d(0,0,0)` to whole pixels, which keeps text
@@ -86,22 +95,29 @@ export function AppDialog({ open, onOpenChange, title, description, className, h
               className,
             )}
           >
-            {(title || description) && (
-              // Title strip = drag region. Same affordance as a macOS
-              // window title bar - the user grabs the chrome at the top
-              // of the dialog and drags the window. Close button below
-              // is positioned absolute and opts out via its own
-              // data-tauri-drag-region="false".
-              <div
-                data-tauri-drag-region
-                style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
-                className="cursor-grab active:cursor-grabbing select-none"
-              >
-                {title && <Dialog.Title className="text-base font-medium break-words pr-6">{title}</Dialog.Title>}
-                {description && <Dialog.Description className="text-xs text-[var(--color-fg-dim)] -mt-1">{description}</Dialog.Description>}
+            <div className={cn(stickyFooter && "flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-5")}>
+              {(title || description) && (
+                // Title strip = drag region. Same affordance as a macOS
+                // window title bar - the user grabs the chrome at the top
+                // of the dialog and drags the window. Close button below
+                // is positioned absolute and opts out via its own
+                // data-tauri-drag-region="false".
+                <div
+                  data-tauri-drag-region
+                  style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+                  className="cursor-grab active:cursor-grabbing select-none"
+                >
+                  {title && <Dialog.Title className="text-base font-medium break-words pr-6">{title}</Dialog.Title>}
+                  {description && <Dialog.Description className="text-xs text-[var(--color-fg-dim)] -mt-1">{description}</Dialog.Description>}
+                </div>
+              )}
+              {children}
+            </div>
+            {stickyFooter && (
+              <div className="shrink-0 border-t border-[var(--color-border-soft)] px-5 py-4">
+                {stickyFooter}
               </div>
             )}
-            {children}
             {!hideClose && (
               <Dialog.Close
                 data-tauri-drag-region="false"
