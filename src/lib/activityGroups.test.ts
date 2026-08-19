@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
-  groupRows, rowTitle, tabTitleMap, isSelfRow,
+  groupRows, rowTitle, tabTitleMap, isSelfRow, nextSort, smoothedCpu, DEFAULT_SORT,
   formatBytes, formatPct, formatRate, formatDuration,
+  type Sort,
 } from "@/lib/activityGroups";
 import type { ProcRow } from "@/lib/ipc";
 import type { Project, Task } from "@/lib/types";
@@ -81,7 +82,7 @@ describe("groupRows", () => {
     expect(g.projects[0].tasks[0].cpuPct).toBe(184);
   });
 
-  it("keeps row order stable when CPU and memory tie", () => {
+  it("keeps row order stable when everything about two rows ties", () => {
     const a = groupRows([
       row({ key: "z", taskId: "t1", cpuPct: 3, memBytes: 10 }),
       row({ key: "a", taskId: "t1", cpuPct: 3, memBytes: 10 }),
@@ -161,7 +162,12 @@ describe("isSelfRow", () => {
 });
 
 describe("rowTitle", () => {
-  const titles = new Map([["tab-1", "review PR"], ["tab-blank", "   "]]);
+  const titles = new Map([
+    ["tab-1", { title: "review PR" }],
+    ["tab-blank", { title: "   " }],
+    ["tab-claude", { cli: "claude" }],
+    ["tab-shell", { cli: "shell" }],
+  ]);
 
   it("prefers the tab's persisted title", () => {
     expect(rowTitle(row({ tabId: "tab-1" }), titles)).toBe("review PR");
@@ -171,6 +177,19 @@ describe("rowTitle", () => {
     expect(rowTitle(row({ tabId: "unknown", kind: "agent", label: "claude" }), titles)).toBe("Agent · claude");
     expect(rowTitle(row({ kind: "run", label: "npm" }), titles)).toBe("Run script · npm");
     expect(rowTitle(row({ kind: "setup", label: "sh" }), titles)).toBe("Setup script · sh");
+  });
+
+  it("names an agent after its CLI, not its process name", () => {
+    // claude's process IS its version string ("2.1.235", same as macOS
+    // Activity Monitor shows), which is useless as a row label.
+    expect(rowTitle(row({ tabId: "tab-claude", kind: "agent", label: "2.1.235" }), titles))
+      .toBe("Agent · claude");
+    // A persisted title still wins over the CLI.
+    expect(rowTitle(row({ tabId: "tab-1", kind: "agent", label: "2.1.235" }), titles))
+      .toBe("review PR");
+    // "shell" is the sentinel for a non-agent tab, never a name to print.
+    expect(rowTitle(row({ tabId: "tab-shell", kind: "shell", label: "zsh" }), titles))
+      .toBe("Shell · zsh");
   });
 
   it("ignores a whitespace-only persisted title", () => {
@@ -193,7 +212,7 @@ describe("rowTitle", () => {
 });
 
 describe("tabTitleMap", () => {
-  it("collects titled persisted tabs across tasks and skips untitled ones", () => {
+  it("collects each persisted tab's title and CLI across tasks", () => {
     const m = tabTitleMap([
       task({
         id: "t1", project_id: "p1",
@@ -206,7 +225,114 @@ describe("tabTitleMap", () => {
       task({ id: "t2", project_id: "p1", persisted_tabs: [{ id: "d", cli: "gemini", title: "docs" }] }),
       task({ id: "t3", project_id: "p1" }),
     ]);
-    expect([...m.entries()]).toEqual([["a", "fix build"], ["d", "docs"]]);
+    // An untitled tab still contributes its CLI — that is the whole point of
+    // carrying the metadata rather than just titles.
+    expect(m.get("a")).toEqual({ title: "fix build", cli: "claude" });
+    expect(m.get("b")).toEqual({ title: undefined, cli: "claude" });
+    expect(m.get("c")).toEqual({ title: undefined, cli: "shell" });
+    expect(m.get("d")).toEqual({ title: "docs", cli: "gemini" });
+    expect(m.size).toBe(4);
+  });
+});
+
+describe("sorting", () => {
+  const busy = (over: Partial<ProcRow>) => row(over);
+
+  it("defaults to CPU descending", () => {
+    expect(DEFAULT_SORT).toEqual({ column: "cpu", dir: "desc" });
+  });
+
+  it("orders CPU on a short average, so jitter cannot swap near-equal rows", () => {
+    // Two rows whose instantaneous values just crossed, but whose recent
+    // history says which one is actually the hog. Ordering on the instant
+    // would swap them this tick and swap them back the next.
+    const hog = busy({ key: "hog", taskId: "t1", cpuPct: 40, cpuHistory: [95, 96, 94, 92] });
+    const quiet = busy({ key: "quiet", taskId: "t1", cpuPct: 42, cpuHistory: [3, 4, 2, 5] });
+    const g = groupRows([quiet, hog], projects, tasks);
+    expect(g.projects[0].tasks[0].rows.map(r => r.key)).toEqual(["hog", "quiet"]);
+    // The DISPLAYED value stays instantaneous — only the order is smoothed.
+    expect(g.projects[0].tasks[0].rows[0].cpuPct).toBe(40);
+  });
+
+  it("smoothedCpu averages the recent window and falls back to the instant", () => {
+    expect(smoothedCpu({ cpuPct: 50, cpuHistory: [] })).toBe(50);
+    expect(smoothedCpu({ cpuPct: null, cpuHistory: [] })).toBe(0);
+    expect(smoothedCpu({ cpuPct: 0, cpuHistory: [100, 0, 100, 0] })).toBe(50);
+    // Only the last 4 samples count, so an old spike ages out.
+    expect(smoothedCpu({ cpuPct: 0, cpuHistory: [999, 10, 10, 10, 10] })).toBe(10);
+  });
+
+  const sorted = (s: Sort) => {
+    const g = groupRows(
+      [
+        busy({ key: "a", taskId: "t1", cpuPct: 5, cpuHistory: [5], memBytes: 300, outBps: 10, procCount: 9, uptimeMs: 1000 }),
+        busy({ key: "b", taskId: "t1", cpuPct: 50, cpuHistory: [50], memBytes: 100, outBps: 999, procCount: 1, uptimeMs: 5000 }),
+        busy({ key: "c", taskId: "t1", cpuPct: 20, cpuHistory: [20], memBytes: 200, outBps: null, procCount: 4, uptimeMs: 300 }),
+      ],
+      projects, tasks, s,
+    );
+    return g.projects[0].tasks[0].rows.map(r => r.key);
+  };
+
+  it("sorts by every column, both directions", () => {
+    expect(sorted({ column: "cpu", dir: "desc" })).toEqual(["b", "c", "a"]);
+    expect(sorted({ column: "cpu", dir: "asc" })).toEqual(["a", "c", "b"]);
+    expect(sorted({ column: "mem", dir: "desc" })).toEqual(["a", "c", "b"]);
+    expect(sorted({ column: "mem", dir: "asc" })).toEqual(["b", "c", "a"]);
+    expect(sorted({ column: "procs", dir: "desc" })).toEqual(["a", "c", "b"]);
+    expect(sorted({ column: "uptime", dir: "desc" })).toEqual(["b", "a", "c"]);
+    // An unmeasured output rate sorts BELOW a real zero, not above everything.
+    expect(sorted({ column: "out", dir: "desc" })).toEqual(["b", "a", "c"]);
+  });
+
+  it("sorts by name using the resolved row title", () => {
+    const g = groupRows(
+      [
+        busy({ key: "z", taskId: "t1", tabId: "tz", kind: "shell", label: "zsh" }),
+        busy({ key: "a", taskId: "t1", tabId: "ta", kind: "agent", label: "claude" }),
+      ],
+      projects, tasks, { column: "name", dir: "asc" },
+    );
+    expect(g.projects[0].tasks[0].rows.map(r => r.title)).toEqual(["Agent · claude", "Shell · zsh"]);
+  });
+
+  it("sorts the project and task groups by the same column", () => {
+    const g = groupRows(
+      [
+        busy({ key: "small", taskId: "t1", cpuPct: 1, cpuHistory: [1], memBytes: 10 }),
+        busy({ key: "big", taskId: "t3", cpuPct: 1, cpuHistory: [1], memBytes: 900 }),
+      ],
+      projects, tasks, { column: "mem", dir: "desc" },
+    );
+    // website (900) outranks termic (10) because memory is the active column.
+    expect(g.projects.map(p => p.projectName)).toEqual(["website", "termic"]);
+  });
+
+  it("orders identically-named rows deterministically", () => {
+    // Two idle claude tabs in one task have the same title AND the same
+    // numbers in every column. With nothing left to separate them the order
+    // falls back to the snapshot's own order, which is Rust HashMap iteration
+    // order and reshuffles every sample — the visible symptom being rows that
+    // swap places while nothing is happening. The key tie-break fixes it.
+    const twins = (order: string[]) =>
+      groupRows(
+        order.map(k => busy({ key: k, taskId: "t1", kind: "agent", label: "claude", cpuPct: 0, cpuHistory: [0] })),
+        projects, tasks,
+      ).projects[0].tasks[0].rows.map(r => r.key);
+    expect(twins(["pty:b", "pty:a"])).toEqual(["pty:a", "pty:b"]);
+    expect(twins(["pty:a", "pty:b"])).toEqual(["pty:a", "pty:b"]);
+  });
+});
+
+describe("nextSort", () => {
+  it("flips direction on the active column", () => {
+    expect(nextSort({ column: "cpu", dir: "desc" }, "cpu")).toEqual({ column: "cpu", dir: "asc" });
+    expect(nextSort({ column: "cpu", dir: "asc" }, "cpu")).toEqual({ column: "cpu", dir: "desc" });
+  });
+
+  it("starts a numeric column biggest-first and the name column A-to-Z", () => {
+    expect(nextSort({ column: "cpu", dir: "asc" }, "mem")).toEqual({ column: "mem", dir: "desc" });
+    expect(nextSort({ column: "cpu", dir: "asc" }, "name")).toEqual({ column: "name", dir: "asc" });
   });
 });
 

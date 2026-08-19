@@ -21,7 +21,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Activity, ChevronRight, Cpu, Folder, MemoryStick, Layers,
+  Activity, Cpu, Folder, MemoryStick, Layers,
   Bot, TerminalSquare, Play, Wrench, Skull, Pause, PlayCircle,
 } from "lucide-react";
 import * as ipc from "@/lib/ipc";
@@ -29,7 +29,8 @@ import type { ProcSnapshot, ProcRow } from "@/lib/ipc";
 import type { Project, Task } from "@/lib/types";
 import {
   groupRows, formatBytes, formatPct, formatRate, formatDuration,
-  type ActivityRow,
+  nextSort, DEFAULT_SORT, childSummary,
+  type ActivityRow, type Sort, type SortColumn,
 } from "@/lib/activityGroups";
 import { cn } from "@/lib/utils";
 import { usePrefs } from "@/store/prefs";
@@ -53,7 +54,7 @@ export function ActivityWindow() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [paused, setPaused] = useState(false);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [sort, setSort] = useState<Sort>(DEFAULT_SORT);
   const sessionRef = useRef<number | null>(null);
   const tickRef = useRef(0);
 
@@ -151,19 +152,18 @@ export function ActivityWindow() {
   }, [paused, loadMeta]);
 
   const grouped = useMemo(
-    () => groupRows(snap?.rows ?? [], projects, tasks),
-    [snap, projects, tasks],
+    () => groupRows(snap?.rows ?? [], projects, tasks, sort),
+    [snap, projects, tasks, sort],
   );
 
-  const toggle = (key: string) =>
-    setExpanded(prev => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key); else next.add(key);
-      return next;
-    });
-
   return (
-    <div className="flex h-screen w-screen flex-col bg-[var(--color-bg)] text-[var(--color-fg)]">
+    // One elevation stop above the app's content background. This is a
+    // floating utility window, not a content area, and at `--color-bg` it read
+    // as a black hole floating over the app (the group headers at
+    // `--color-bg-1` were the only thing separating from it). Same direction
+    // every other piece of chrome in the app elevates: index.css says chrome
+    // sits one stop lighter than content.
+    <div className="flex h-screen w-screen flex-col bg-[var(--color-bg-1)] text-[var(--color-fg)]">
       <Header
         cpu={grouped.totalCpuPct}
         mem={grouped.totalMemBytes}
@@ -178,7 +178,7 @@ export function ActivityWindow() {
           </div>
         )}
 
-        <Columns />
+        <Columns sort={sort} onSort={col => setSort(s => nextSort(s, col))} />
 
         {grouped.projects.length === 0 && grouped.orphans.length === 0 && (
           <div className="px-4 py-6 text-[12.5px] text-[var(--color-fg-faint)]">
@@ -206,12 +206,7 @@ export function ActivityWindow() {
                   level={1}
                 />
                 {t.rows.map(r => (
-                  <Row
-                    key={r.key}
-                    row={r}
-                    open={expanded.has(r.key)}
-                    onToggle={() => toggle(r.key)}
-                  />
+                  <Row key={r.key} row={r} />
                 ))}
               </div>
             ))}
@@ -228,7 +223,7 @@ export function ActivityWindow() {
               level={0}
             />
             {grouped.orphans.map(r => (
-              <Row key={r.key} row={r} open={expanded.has(r.key)} onToggle={() => toggle(r.key)} />
+              <Row key={r.key} row={r} />
             ))}
           </section>
         )}
@@ -248,7 +243,7 @@ export function ActivityWindow() {
               level={0}
             />
             {grouped.self.map(r => (
-              <Row key={r.key} row={r} open={expanded.has(r.key)} onToggle={() => toggle(r.key)} />
+              <Row key={r.key} row={r} />
             ))}
           </section>
         )}
@@ -295,17 +290,57 @@ function Header({ cpu, mem, paused, onTogglePause }: {
 }
 
 /** Column header. Kept in one place so the row grid and this cannot drift. */
-const GRID = "grid grid-cols-[minmax(0,1fr)_58px_74px_66px_54px_58px] items-center gap-2 px-3";
+const GRID = "grid grid-cols-[minmax(0,1fr)_58px_74px_66px_54px_58px_62px] items-center gap-2 px-3";
 
-function Columns() {
+const COLUMNS: { col: SortColumn; label: string; align: "left" | "right"; tip?: string }[] = [
+  { col: "name", label: "Process", align: "left" },
+  {
+    col: "cpu", label: "CPU", align: "right",
+    // Say it in the tooltip rather than let it look like a bug: the ORDER is
+    // smoothed even though the number shown is instantaneous.
+    tip: "Sort by CPU (ordered on a short average, so near-equal rows hold still)",
+  },
+  { col: "mem", label: "Memory", align: "right", tip: "Sort by memory footprint" },
+  { col: "out", label: "Output", align: "right", tip: "Sort by terminal output rate" },
+  { col: "procs", label: "Procs", align: "right", tip: "Sort by process count" },
+  { col: "uptime", label: "Uptime", align: "right", tip: "Sort by uptime" },
+  { col: "pid", label: "PID", align: "right", tip: "Sort by process id" },
+];
+
+function Columns({ sort, onSort }: { sort: Sort; onSort: (col: SortColumn) => void }) {
   return (
-    <div className={cn(GRID, "sticky top-0 z-10 border-b border-[var(--color-border-soft)] bg-[var(--color-bg)] py-1.5 text-[11px] uppercase tracking-wide text-[var(--color-fg-faint)]")}>
-      <span>Process</span>
-      <span className="text-right">CPU</span>
-      <span className="text-right">Memory</span>
-      <span className="text-right">Output</span>
-      <span className="text-right">Procs</span>
-      <span className="text-right">Uptime</span>
+    <div className={cn(
+      GRID,
+      // Opaque, because it is sticky over scrolling rows. Sentence case, not
+      // uppercase: it matches Activity Monitor and Chrome's task manager, and
+      // WebKit resets `text-transform` on <button> anyway now that each header
+      // is a sort control, so an `uppercase` here would be dead CSS.
+      "sticky top-0 z-10 border-b border-[var(--color-border)] bg-[var(--color-bg-1)] text-[11px] text-[var(--color-fg-faint)]",
+    )}>
+      {COLUMNS.map(c => {
+        const active = sort.column === c.col;
+        return (
+          <button
+            key={c.col}
+            onClick={() => onSort(c.col)}
+            title={c.tip}
+            data-testid={`activity-sort-${c.col}`}
+            data-active={active ? sort.dir : undefined}
+            className={cn(
+              "flex items-center gap-1 py-1.5 hover:text-[var(--color-fg)]",
+              c.align === "right" ? "justify-end" : "justify-start",
+              active && "text-[var(--color-fg)]",
+            )}
+          >
+            {c.label}
+            {/* The caret is the only thing that says which column is active,
+                so it holds its 8px of width whether or not it is shown. */}
+            <span className="w-2 text-[9px] leading-none">
+              {active ? (sort.dir === "desc" ? "▼" : "▲") : ""}
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -315,11 +350,14 @@ function GroupHeader({ icon, name, detail, cpu, mem, level }: {
   cpu: number | null; mem: number; level: 0 | 1;
 }) {
   return (
+    // The window sits at --color-bg-1, so a project header has to elevate
+    // AGAIN to read as a band; a task header stays flush and separates by
+    // weight and indent instead, or three stacked bands fight each other.
     <div className={cn(
       GRID,
       "py-1.5",
       level === 0
-        ? "bg-[var(--color-bg-1)] text-[12.5px] font-medium"
+        ? "border-y border-[var(--color-border-soft)] bg-[var(--color-bg-2)] text-[12.5px] font-medium"
         : "text-[12.5px] text-[var(--color-fg-dim)]",
     )}>
       <div className="flex min-w-0 items-center gap-2" style={{ paddingLeft: level * 14 }}>
@@ -347,7 +385,7 @@ function KindIcon({ kind }: { kind: string }) {
   return <TerminalSquare className={cls} />;
 }
 
-function Row({ row, open, onToggle }: { row: ActivityRow; open: boolean; onToggle: () => void }) {
+function Row({ row }: { row: ActivityRow }) {
   const canSignal = row.ptyId !== null;
   return (
     <>
@@ -357,15 +395,11 @@ function Row({ row, open, onToggle }: { row: ActivityRow; open: boolean; onToggl
         data-row-key={row.key}
       >
         <div className="flex min-w-0 items-center gap-1.5" style={{ paddingLeft: 28 }}>
-          <button
-            onClick={onToggle}
-            aria-label={open ? "Collapse processes" : "Expand processes"}
-            className="rounded p-0.5 text-[var(--color-fg-faint)] hover:text-[var(--color-fg)]"
-          >
-            <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", open && "rotate-90")} />
-          </button>
           <KindIcon kind={row.kind} />
-          <span className="truncate text-[12.5px]" title={`${row.label} (pid ${row.pid})`}>
+          {/* No expand affordance: for a one-process row it only repeated the
+              Process and PID columns, which is most rows. The per-child
+              breakdown that DOES add something lives in the tooltip. */}
+          <span className="truncate text-[12.5px]" title={childSummary(row)}>
             {row.title}
           </span>
           {!row.alive && (
@@ -402,24 +436,10 @@ function Row({ row, open, onToggle }: { row: ActivityRow; open: boolean; onToggl
         <span className="text-right font-mono text-[11.5px] tabular-nums text-[var(--color-fg-faint)]">
           {formatDuration(row.uptimeMs)}
         </span>
+        <span className="text-right font-mono text-[11.5px] tabular-nums text-[var(--color-fg-faint)]">
+          {row.pid}
+        </span>
       </div>
-      {open && row.children.map(c => (
-        <div key={c.pid} className={cn(GRID, "py-0.5 text-[var(--color-fg-dim)]")}>
-          <div className="flex min-w-0 items-center gap-2 text-[11.5px]" style={{ paddingLeft: 64 }}>
-            <span className="truncate font-mono">{c.label}</span>
-            <span className="shrink-0 text-[var(--color-fg-faint)]">{c.pid}</span>
-          </div>
-          <span className="text-right font-mono text-[11.5px] tabular-nums">{formatPct(c.cpu_pct)}</span>
-          <span className="text-right font-mono text-[11.5px] tabular-nums">{formatBytes(c.mem_bytes)}</span>
-          <span /><span /><span />
-        </div>
-      ))}
-      {open && row.children.length < row.procCount && (
-        <div className="px-3 py-0.5 text-[11px] text-[var(--color-fg-faint)]" style={{ paddingLeft: 64 }}>
-          {row.procCount - row.children.length} more process
-          {row.procCount - row.children.length === 1 ? "" : "es"} not shown
-        </div>
-      )}
     </>
   );
 }

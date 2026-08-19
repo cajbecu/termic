@@ -123,6 +123,42 @@ describe("Activity monitor", () => {
   });
 
 
+  it("sorts by any column from its header, CPU descending by default", async () => {
+    const state = async () => browser.execute(() =>
+      Object.fromEntries(
+        ["name", "cpu", "mem", "out", "procs", "uptime", "pid"].map(c => [
+          c,
+          document.querySelector(`[data-testid="activity-sort-${c}"]`)?.getAttribute("data-active") ?? null,
+        ]),
+      ));
+
+    // Default: the question the window exists to answer.
+    expect(await state()).toMatchObject({ cpu: "desc", mem: null, name: null });
+
+    await clickWhenVisible('[data-testid="activity-sort-mem"]');
+    // A new column starts biggest-first, and the old one lets go.
+    expect(await state()).toMatchObject({ mem: "desc", cpu: null });
+
+    await clickWhenVisible('[data-testid="activity-sort-mem"]');
+    expect(await state()).toMatchObject({ mem: "asc" });
+
+    await clickWhenVisible('[data-testid="activity-sort-name"]');
+    // The name column reads A-to-Z first, unlike the numeric ones.
+    expect(await state()).toMatchObject({ name: "asc", mem: null });
+
+    await clickWhenVisible('[data-testid="activity-sort-pid"]');
+    expect(await state()).toMatchObject({ pid: "desc" });
+    // The PID column is a column now, not something hidden behind an expander.
+    const pids = await browser.execute(() =>
+      [...document.querySelectorAll('[data-testid="activity-row"]')]
+        .map(el => (el as HTMLElement).innerText.trim().split(/\s+/).pop() ?? ""));
+    expect(pids.length).toBeGreaterThan(0);
+    for (const p of pids) expect(Number(p)).toBeGreaterThan(1);
+
+    await clickWhenVisible('[data-testid="activity-sort-cpu"]');
+    expect(await state()).toMatchObject({ cpu: "desc" });
+  });
+
   it("stops sampling while paused and resumes on demand", async () => {
     await clickWhenVisible('[data-testid="activity-pause"]');
     await browser.waitUntil(

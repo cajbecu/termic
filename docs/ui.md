@@ -46,7 +46,14 @@ Opt-out with both `data-tauri-drag-region="false"` and `WebkitAppRegion: "no-dra
 
 ## Activity window (per-agent CPU / memory)
 
-A SECOND window (label `procmon`, its own Vite entry `activity.html`), opened from the pulse icon in the sidebar footer or the palette's "Activity monitor". Not a modal, and that is the whole design: the numbers only mean something while you drive the agent that moves them, which a modal over the app makes impossible. Rows are grouped project → task → tab, sorted by CPU so the culprit is the top row, with Termic's own processes in their own group at the bottom.
+A SECOND window (label `procmon`, its own Vite entry `activity.html`), opened from the pulse icon in the sidebar footer or the palette's "Activity monitor". Not a modal, and that is the whole design: the numbers only mean something while you drive the agent that moves them, which a modal over the app makes impossible. Rows are grouped project → task → tab, with Termic's own processes in their own group at the bottom.
+
+Every column header sorts (`activityGroups.ts`), default CPU descending, and a group sorts by the aggregate of whichever column is active. Two rules there are not obvious and both exist because the table was unreadable without them:
+
+- **The CPU sort key is a short average, while the displayed number stays instantaneous.** Ordering on the instant makes near-equal rows trade places every tick, which is precisely when several agents are busy and you need to read the table.
+- **The tie-break must be TOTAL** (name, then row key). Two idle claude tabs in one task tie on every column, and a comparator that returns 0 leaves them in snapshot order, i.e. Rust's `HashMap` iteration order — rows visibly reshuffling while nothing happens.
+
+There is no expand affordance. PID is its own (sortable) column, and the per-child process breakdown a tree can have lives in the row's tooltip: for a one-process row, which is most rows, expanding only repeated the Process and PID columns.
 
 Three things to know before touching it:
 
