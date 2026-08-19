@@ -59,7 +59,7 @@ export function TaskSandboxDialog() {
   }, []);
 
   // Docker sandbox: independent cage, mutually exclusive with Seatbelt
-  // (pty_spawn checks it first). Only offered once Settings → Docker Agents has
+  // (pty_spawn checks it first). Only offered once Settings → Docker Sandbox has
   // the master switch on AND an image is built - otherwise there's
   // nothing for the toggle to do. `taskSetDocker` SIGKILLs + saves
   // immediately, decoupled from the Seatbelt Save button above, so it
@@ -275,7 +275,7 @@ export function TaskSandboxDialog() {
                 Filesystem isolation: the agent runs inside a Docker container and can only touch the worktree +
                 its persistent config dir. Network is unrestricted inside the container, unlike Seatbelt's
                 host allowlist. Overrides the mode above - a task can be sandboxed with Docker or Seatbelt,
-                not both. Manage the image in Settings → Docker Agents.
+                not both. Manage the image in Settings → Docker Sandbox.
               </div>
             </div>
           </label>

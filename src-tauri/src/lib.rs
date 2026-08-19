@@ -2840,7 +2840,7 @@ fn pty_spawn(
     if let Some(task) = &spawn_task {
         if task.docker_sandbox_enabled && !docker_globally_enabled {
             return Err(
-                "This task has \"Run in Docker\" enabled, but Docker sandboxing is turned off globally (Settings → Docker Agents). Re-enable it there, or turn off \"Run in Docker\" for this task, before launching."
+                "This task has \"Run in Docker\" enabled, but Docker sandboxing is turned off globally (Settings → Docker Sandbox). Re-enable it there, or turn off \"Run in Docker\" for this task, before launching."
                     .to_string(),
             );
         }
@@ -2851,7 +2851,7 @@ fn pty_spawn(
     let docker_argv: Option<Vec<String>> = if let Some(task) = docker_task {
         let agent = args.agent_id.clone().unwrap_or_else(|| task.cli.clone());
         let image = docker::spawn_image_tag().ok_or_else(|| {
-            "Docker image not built. Open Settings → Docker Agents and build it first.".to_string()
+            "Docker image not built. Open Settings → Docker Sandbox and build it first.".to_string()
         })?;
         // Belt-and-suspenders: remove any stale same-named container left
         // by an unclean shutdown so `--name` doesn't collide on respawn.
@@ -14839,7 +14839,7 @@ pub struct Settings {
     /// editing these later only affects NEW tasks.
     pub sandbox_default_rw_paths: Vec<String>,
     pub sandbox_default_allowed_hosts: Vec<String>,
-    /// Master switch for Docker sandbox mode (Settings → Docker Agents). A task's
+    /// Master switch for Docker sandbox mode (Settings → Docker Sandbox). A task's
     /// own `docker_sandbox_enabled` only takes effect when this is also on.
     /// See docs/plans/docker-sandbox/design.md.
     pub docker_sandbox_enabled: bool,

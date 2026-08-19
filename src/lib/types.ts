@@ -549,7 +549,7 @@ export interface Settings {
    *  Edit Sandbox dialog when the user enables the cage from scratch. */
   sandbox_default_rw_paths?: string[];
   sandbox_default_allowed_hosts?: string[];
-  /** Master switch for Docker sandbox mode (Settings → Docker Agents). While off,
+  /** Master switch for Docker sandbox mode (Settings → Docker Sandbox). While off,
    *  no Docker UI appears anywhere and Docker is never invoked, even if a
    *  task has `docker_sandbox_enabled` set. */
   docker_sandbox_enabled?: boolean;

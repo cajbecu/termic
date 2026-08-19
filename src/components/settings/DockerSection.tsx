@@ -167,13 +167,13 @@ export function DockerSection() {
 
   return (
     <div className="flex flex-col gap-7">
-      <SectionTitle title="Docker Agents" badge="Experimental" />
-      <p className="max-w-2xl text-[12.5px] text-[var(--color-fg-dim)]">
+      <SectionTitle title="Docker Sandbox" badge="Experimental" />
+      <p className="text-[12.5px] text-[var(--color-fg-dim)]">
         This isn't a separate set of agents. It's a containerized way of running the SAME agents you configure
         in Settings → Agents &amp; Terminals: an alternative to the Seatbelt sandbox, where the agent runs inside
         a Docker container instead of under macOS sandbox-exec.
       </p>
-      <p className="max-w-2xl text-[12.5px] text-[var(--color-fg-dim)]">
+      <p className="text-[12.5px] text-[var(--color-fg-dim)]">
         A filesystem cage: the agent can only touch the folders termic mounts (the worktree and its git
         metadata). Everything else on your Mac is invisible to it. Network access inside the container is
         unrestricted, unlike Seatbelt's host allowlist. One image is shared by every Docker task; pick Docker
@@ -197,7 +197,7 @@ export function DockerSection() {
               carry the field yet. */}
           <Block>
             <div className="text-[14px] font-medium">Nudge me to rebuild</div>
-            <div className="mt-0.5 max-w-2xl text-[12.5px] text-[var(--color-fg-dim)]">
+            <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
               Before a Docker-mode task's agent launches, if the image hasn't been rebuilt on this schedule,
               termic asks whether to rebuild first (skip is always one click away). Agent CLIs baked into the
               image update constantly; without this an old image can run a stale binary indefinitely.
@@ -221,7 +221,7 @@ export function DockerSection() {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <div className="text-[14px] font-medium">Dockerfile</div>
-                <div className="mt-0.5 max-w-2xl text-[12.5px] text-[var(--color-fg-dim)]">
+                <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
                   One generic image for all agents. Edit the commented regions to add MCP servers, CLI tools, or
                   baked skills. Personal logins (agent auth, MCP OAuth) are NOT set up here, just run the agent and
                   log in once inside Docker; those persist via your mounted config directory.

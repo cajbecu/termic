@@ -105,7 +105,7 @@ async function promptAndRebuild(task: Task, lastBuiltDate: string | null): Promi
     useUI.getState().pushToast("Docker sandbox image rebuilt.", "success", { ttlMs: 4000 });
   } else {
     useUI.getState().pushToast(
-      "Docker sandbox image rebuild failed - launching with the existing image. Check Settings → Docker Agents.",
+      "Docker sandbox image rebuild failed - launching with the existing image. Check Settings → Docker Sandbox.",
       "error",
       { ttlMs: 8000 },
     );

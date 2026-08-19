@@ -293,7 +293,7 @@ export const agentSandboxAddAllowedHost = (agentId: string, host: string) =>
 
 // ───────────────────────────── docker sandbox ─────────────────────────
 // Stronger opt-in cage: the agent runs inside `docker run` instead of
-// Seatbelt. Global (image-level) config lives in Settings → Docker Agents;
+// Seatbelt. Global (image-level) config lives in Settings → Docker Sandbox;
 // per-task enablement is `taskSetDocker` below. See docs/plans/docker-sandbox.
 
 export interface DockerStatus {
