@@ -790,3 +790,40 @@ export async function requireTermicApi(): Promise<void> {
     );
   }
 }
+
+/**
+ * Run CodeMirror's pending layout measurement NOW, and report how many editors
+ * were flushed.
+ *
+ * CM schedules that measurement with `requestAnimationFrame`, and WebKit
+ * freezes rAF in an occluded window — which the harness window permanently is
+ * (`document.hidden` is true for the whole suite; the Activity spec leans on
+ * the same fact for its back-off case). Until the measurement runs, CM's
+ * height map keeps its UNMEASURED default of 14px per line while the rendered
+ * lines are really 20, so every gutter number sits 6px above its code and the
+ * gap grows down the file. That is the exact shape of the bug an alignment
+ * spec is looking for, manufactured by the harness rather than by the code
+ * under test, and no amount of waiting clears it: the frame never comes.
+ *
+ * `coordsAtPos` is the public read that flushes a pending measure (through
+ * CM's internal `readMeasured`), so ask for a position and drop the answer. A
+ * visible window gets all of this for free on the next frame.
+ *
+ * Call it before reading any geometry OUT of a CodeMirror editor. The count
+ * comes back so a CM upgrade that renames the view handle cannot quietly turn
+ * this into a no-op that reintroduces the drift.
+ */
+export function flushEditorMeasure(): Promise<number> {
+  return browser.execute(() => {
+    let flushed = 0;
+    for (const ed of [...document.querySelectorAll(".cm-editor")]) {
+      if (!(ed as HTMLElement).getBoundingClientRect().height) continue;
+      // EditorView.findFromDOM's own route to the view (@codemirror/view 6.43).
+      const view = (ed.querySelector(".cm-content") as any)?.cmTile?.root?.view;
+      if (typeof view?.coordsAtPos !== "function") continue;
+      view.coordsAtPos(0);
+      flushed++;
+    }
+    return flushed;
+  }) as Promise<number>;
+}

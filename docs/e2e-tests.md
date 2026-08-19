@@ -159,6 +159,31 @@ describe("my feature", () => {
 });
 ```
 
+### The window is hidden, so nothing animates
+
+`document.hidden` is `true` for the whole run: the harness never brings the
+window to the front. WebKit freezes `requestAnimationFrame` in a window it
+believes is occluded, so **no rAF callback ever fires** in a spec. Anything the
+app defers to a frame is deferred forever.
+
+CodeMirror schedules its layout measurement that way. Until it runs, CM's
+height map holds its unmeasured default of 14px per line while the rendered
+lines are really 20, so each gutter number sits 6px above its code and the gap
+grows down the file. A gutter-alignment spec then reports exactly the drift it
+exists to catch, produced entirely by the harness. Waiting does not help: the
+frame is never coming.
+
+`flushEditorMeasure()` in `helpers.ts` runs the pending measure synchronously
+(via `coordsAtPos`, whose public read flushes it) and returns how many editors
+it touched, so a CodeMirror upgrade that moves the view handle fails loudly
+instead of silently going back to measuring nothing. **Call it before reading
+any geometry out of a CodeMirror editor.**
+
+The same applies to product code that leans on rAF: it is invisible in a spec.
+`cd359ba` moved the command palette's deferred effect from rAF to a macrotask
+for the user-facing half of this (a palette command fired minutes late, over
+whatever the user was doing by then, once the window came back).
+
 ## The one maturity caveat
 
 `@wdio/tauri-service` + `tauri-plugin-wdio` are young (1.x, late-2025 / 2026).

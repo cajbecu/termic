@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { archiveTask, clickByText, clickMenuItem, openTask, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitGone, waitVisible } from "../helpers";
+import { archiveTask, clickByText, clickMenuItem, flushEditorMeasure, openTask, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitGone, waitVisible } from "../helpers";
 
 // Git integration is central to termic (every task is a worktree/checkout).
 // This guards the Git panel: switching to it shows the working-tree status.
@@ -1097,8 +1097,14 @@ describe("review comment alignment", () => {
    * it. A constant offset is fine (the columns can share a padding); what #157
    * produced was a SPREAD, the offset growing line by line down the file.
    */
-  const gutterDrift = () =>
-    browser.execute(() => {
+  const gutterDrift = async () => {
+    // The harness window is occluded, so CM's rAF-scheduled measure never
+    // runs and its height map would still hold the unmeasured 14px default:
+    // a 6px-per-line drift that no wait clears and that this spec would
+    // report as the regression it guards. See flushEditorMeasure.
+    const flushed = await flushEditorMeasure();
+    if (!flushed) throw new Error("no CodeMirror editor to flush: has the view handle moved?");
+    return browser.execute(() => {
       const ed = [...document.querySelectorAll(".cm-editor")]
         .find((e) => e.getBoundingClientRect().height > 0);
       if (!ed) return null;
@@ -1119,6 +1125,7 @@ describe("review comment alignment", () => {
         spread: drifts.length ? Math.max(...drifts) - Math.min(...drifts) : NaN,
       };
     });
+  };
 
   /**
    * Leave a comment the way a user does: select the line, click the tooltip
