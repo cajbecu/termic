@@ -1,6 +1,11 @@
 {
   "versions": [
     {
+      "version": "0.28.0",
+      "date": "2026-08-19",
+      "summary": "An Activity monitor for your agents, inline git blame, and a command palette that finally knows what the app can do."
+    },
+    {
       "version": "0.27.3",
       "date": "2026-08-17",
       "summary": "A commit graph, branch compare, comments on any file, and a big idle-CPU fix."
