@@ -179,6 +179,7 @@ pub fn build_spec(
     image: &str,
     cwd: &str,
     extra_args: Vec<String>,
+    spawn_env: &std::collections::HashMap<String, String>,
 ) -> DockerSpec {
     let mut mounts: Vec<Mount> = Vec::new();
 
@@ -268,6 +269,22 @@ pub fn build_spec(
         if let Some((var, val)) = cfg.relocation_env {
             env.push((var.to_string(), val.to_string()));
         }
+    }
+
+    // Per-spawn env overlay: TERMIC_* bookkeeping vars, the extra named
+    // ports, and (this is the part that used to be silently dropped) the
+    // agent's own configured env block from Settings -> Agents & Terminals
+    // (`envForCli`, TerminalPane.tsx). The Seatbelt/unsandboxed spawn path
+    // gets this exact same map via `cmd.env`; Docker mode was only ever
+    // getting TERM/COLORTERM/relocation_env above, so a user's per-agent
+    // env vars silently never reached the container. Appended LAST so it
+    // wins on key collision, same precedence as the unsandboxed path -
+    // last `-e KEY=VAL` for a given key wins with `docker run`. Deliberately
+    // NOT the raw host env (unlike the unsandboxed path): Docker's own
+    // isolation model relies on the mounted config dir for credentials
+    // instead of inherited secrets, and this keeps that boundary intact.
+    for (k, v) in spawn_env {
+        env.push((k.clone(), v.clone()));
     }
 
     DockerSpec {
@@ -687,5 +704,36 @@ mod tests {
         for bad in ["", "not-a-date", "2026/08/19", "08-19-2026"] {
             assert!(parse_build_date(bad).is_none(), "expected {bad:?} to fail to parse");
         }
+    }
+
+    fn stub_task(id: &str, path: &str) -> Task {
+        Task { id: id.to_string(), path: path.to_string(), ..Task::default() }
+    }
+
+    #[test]
+    fn build_spec_forwards_the_per_spawn_env_overlay() {
+        // The per-agent env block from Settings -> Agents & Terminals
+        // (envForCli) rides in as SpawnArgs.env, same as the Seatbelt path.
+        // It used to be dropped entirely for Docker mode - only TERM /
+        // COLORTERM / the agent's relocation var ever reached the container.
+        let task = stub_task("t1", "/tmp/termic-docker-test-does-not-exist");
+        let mut spawn_env = std::collections::HashMap::new();
+        spawn_env.insert("MY_CUSTOM_VAR".to_string(), "hello".to_string());
+        let spec = build_spec(&task, "claude", "termic-sandbox:abc", &task.path, vec![], &spawn_env);
+        assert!(spec.env.iter().any(|(k, v)| k == "MY_CUSTOM_VAR" && v == "hello"));
+        assert!(spec.env.iter().any(|(k, _)| k == "TERM"));
+    }
+
+    #[test]
+    fn build_spec_overlay_wins_on_key_collision() {
+        // Appended AFTER the base TERM/COLORTERM, matching `docker run`'s
+        // own last-`-e`-wins semantics for a duplicate key - and matching
+        // the Seatbelt/unsandboxed path's "per-agent env wins" precedence.
+        let task = stub_task("t2", "/tmp/termic-docker-test-does-not-exist-2");
+        let mut spawn_env = std::collections::HashMap::new();
+        spawn_env.insert("TERM".to_string(), "dumb".to_string());
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &spawn_env);
+        let term_values: Vec<&str> = spec.env.iter().filter(|(k, _)| k == "TERM").map(|(_, v)| v.as_str()).collect();
+        assert_eq!(term_values, vec!["xterm-256color", "dumb"]);
     }
 }

@@ -1,5 +1,5 @@
 // Shared Off / Daily / Weekly pill selector for Settings.docker_rebuild_frequency,
-// used by both Settings → Docker and DockerRebuildPromptDialog (the inline
+// used by both Settings → Docker Agents and DockerRebuildPromptDialog (the inline
 // "change your mind" control on the launch-time nudge).
 import { cn } from "@/lib/utils";
 
