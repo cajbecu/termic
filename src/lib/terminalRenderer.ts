@@ -212,19 +212,27 @@ export function loadTerminalRenderer(term: Terminal, log?: RendererLog): { dispo
   // Taking `webglcontextlost` directly also removes the 3s of black that the
   // working path costs today. xterm's own timer still fires afterwards onto an
   // addon we have already replaced; `recoverFromContextLoss` no-ops on it.
+  // One controller for every canvas this renderer ever owns. Each recovery
+  // attaches a new addon with a new canvas, and the dead ones are collectable
+  // anyway once the addon is disposed, but tying them all to a signal makes
+  // the lifetime explicit rather than a GC argument: dispose() drops every
+  // listener at a known point, in a terminal that may live for days.
+  const canvasWatch = new AbortController();
+
   const watchCanvas = (a: WebglAddon) => {
     const canvas = (a as unknown as { _renderer?: { _canvas?: HTMLCanvasElement } })
       ._renderer?._canvas;
     if (!canvas?.addEventListener) return;  // xterm rename → event-driven only
+    const { signal } = canvasWatch;
     canvas.addEventListener("webglcontextlost", () => {
       note("webglcontextlost");
       recoverFromContextLoss(a);
-    });
+    }, { signal });
     canvas.addEventListener("webglcontextrestored", () => {
       // Healthy-looking and blank. See the note above.
       note("webglcontextrestored (stale atlas) — rebuilding");
       recoverFromContextLoss(a);
-    });
+    }, { signal });
   };
 
   // The event is not guaranteed. A webview that is suspended (window hidden
@@ -354,6 +362,7 @@ export function loadTerminalRenderer(term: Terminal, log?: RendererLog): { dispo
   return {
     dispose() {
       disposed = true;
+      canvasWatch.abort();
       ro?.disconnect();
       window.removeEventListener("focus", onWake);
       document.removeEventListener("visibilitychange", onWake);
