@@ -4,6 +4,33 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
+## [0.28.0] - 
+
+An Activity monitor for your agents, inline git blame, and a command palette that finally knows what the app can do.
+
+### Features
+- **Activity.** A window that answers "which agent is eating my machine?". CPU and memory rolled up over the whole process tree under each agent, grouped project, task, tab, and sorted so the culprit is the top row. Termic's own processes get their own group instead of being taken on faith. Every column sorts (CPU descending by default), PID is its own column, and the per-child breakdown is in the row's tooltip. Open it from the Activity button in the sidebar footer or "Activity monitor" in the command palette. It is a real window, not a modal, so the numbers keep moving while you drive the agent that moves them; sampling is on demand, stops when the window closes, and backs off to 5s while the window is occluded. Memory is `phys_footprint`, the same number macOS Activity Monitor shows, never a sum of RSS.
+- **Inline git blame in the editor.** The line your cursor is on gets `subject, Author (age)` in dimmed text after the code, and resting on it opens a card with the full commit: author, date, short sha, co-authors, message body. Two actions in the card: Open diff (that commit's diff in a real tab) and Show in History (jumps the Git graph straight to the sha, even if it is tens of thousands of rows down). Off by default, togglable in Settings, Appearance, Editor and from the command palette. Cursor line only, and the file is blamed once and cached, so moving the cursor is an array index rather than a git fork. (#234)
+- **The command palette caught up.** It was last extended in July and had missed 95 feature commits. Added: Add project, Run commands, Resume options, Stop task, Prompt library, Agent Race, Broadcast to agents, Broadcast to project, Jump to next waiting agent, Split pane right, Split pane down. Agent Race and both broadcasts had no palette presence at all. Reopening the palette now shows your last three commands under a Recent header, cleared after an hour. Archive and Stop are excluded from it, because the top Recent row is pre-selected and Enter must never mean "archive another task".
+- **The palette has a button.** A boxed `>` in the bar, before Run, so it can be found without reading the shortcuts list. Its tooltip carries the glyphs. Prompts and the right-panel toggle name their shortcuts in their tooltips too, read from the live bindings, so rebinding one retitles it instead of leaving it advertising a dead key.
+- **Extra named ports per task.** Name the environment variables your stack needs (`API_PORT`, `DB_PORT`) in Repo Settings or a committed `.termic.yaml`, and every task gets its own frozen port for each, injected wherever `$TERMIC_PORT` is and expanded in the preview URL. Names added later reach existing tasks on the next tab spawn or run. Invalid or reserved names are refused inline. (#196)
+- A **Fix merge conflicts** built-in prompt.
+- The "No projects yet" card on an empty dashboard is a button now. It looked actionable and did nothing; it opens the new-project dialog, the same one the sidebar + opens. (#152)
+- The confirmation opt-out reads **"Show this every time"** and starts ticked, instead of "Don't ask again" starting unticked, which was the inverse of the setting it wrote. The copy stops implying loss where there is none: archiving keeps the task in History and the branch in git, and closing an agent tab is one click from the + menu's Resume list, so neither gets the red button any more. A pane tab, the one close with no way back, keeps it and says why. A silent archive now toasts "It's in History" with a button that goes there. (#102)
+
+### Bug fixes
+- **Terminal panes going blank, again.** 0.27.3 fixed the case where the GPU context is lost and never comes back. This is the other half: when WebKit restores the context, xterm repairs itself in place and the repair is incomplete, leaving the renderer pointing at an evicted glyph atlas. From outside, that state looks healthy (no loss event fires, and the context genuinely is alive), which is why only restarting the tab cured it. The renderer now rebuilds on the raw lost and restored events on its own canvas, so a fresh context always gets a fresh atlas. That also removes the 3 seconds of black the already-working path used to cost. (#232, #241)
+- A long branch name no longer takes the whole row it shares in the Git tab. On Commit the filter box had collapsed to its own padding, with no room for a character; it keeps 30% of the row now. On Compare the base ref you had picked was the thing that got crushed, down to a single letter, because the two names split the space in proportion to how long each already was. That bar wraps to a second row instead, so both refs stay readable.
+- A folder in the file tree whose read fails no longer hangs on "Loading…" forever. A background refresh dropped any directory that failed to read and replaced the tree with what was left, which is exactly what happens when a build or a generator rewrites a directory mid-refresh. Refreshes merge now, a failed read retries once and then offers a Retry instead of spinning, and a failed root read cannot wipe the tree to empty. (#159)
+- The History archive scrolls when it outgrows the window. Once you had more archived tasks than fit on screen, the rows below the fold were unreachable.
+- A command palette action no longer fires minutes late over whatever you are doing. It was deferred by one animation frame, which macOS freezes while the window is occluded, so the dialog it opens arrived whenever you next looked at the window.
+- Closing and reopening a fresh agent tab before its first prompt no longer resumes a session that never existed ("No conversation found"). The session id was persisted on a timer, before the agent had written its session file.
+- Port allocation is serialized, so concurrent task creates and restores cannot scan the same snapshot and claim the same ports.
+
+### Thanks
+- Preeti Yuankrathok (@earthpyy) for extra named ports and their hardening, the Fix merge conflicts prompt, and the CI fix for forked repos.
+- Adrian Cristea (@cajbecu) for the History scroll fix.
+
 ## [0.27.3] - 2026-08-17
 
 A commit graph, branch compare, comments on any file, and a big idle-CPU fix.
