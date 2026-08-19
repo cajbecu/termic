@@ -508,7 +508,7 @@ fn last_built_date_file() -> PathBuf {
 pub fn record_built_tag(tag: &str) {
     let _ = std::fs::create_dir_all(docker_dir());
     let _ = std::fs::write(last_built_file(), tag);
-    let _ = std::fs::write(last_built_date_file(), today().to_string());
+    let _ = std::fs::write(last_built_date_file(), chrono::Local::now().date_naive().to_string());
 }
 
 /// The tag of the last successful build, if any.
@@ -519,30 +519,26 @@ pub fn last_built_tag() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Today's LOCAL calendar date. A free function so the "was it built today"
-/// check has one call site to reason about (and to swap in a fixed date for
-/// tests without reaching for a mocking framework).
-fn today() -> chrono::NaiveDate {
-    chrono::Local::now().date_naive()
-}
-
 /// Parse a recorded build-date string (`YYYY-MM-DD`, possibly with
-/// trailing whitespace from the file write). Split out from `built_today`
+/// trailing whitespace from the file write). Split out from `last_built_date`
 /// so the format is unit-testable without touching the filesystem.
 fn parse_build_date(s: &str) -> Option<chrono::NaiveDate> {
     chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok()
 }
 
-/// Was ANY image successfully built today? A missing/unparsable recorded
-/// date (never built, or upgrading from a version that predates this file)
-/// counts as "not built today" - the caller decides whether that matters
-/// (it doesn't, if nothing has ever been built: `spawn_image_tag` already
-/// refuses that case outright).
-pub fn built_today() -> bool {
+/// LOCAL calendar date (`YYYY-MM-DD`) any image was last successfully
+/// built, if ever / parsable. Whether that counts as "due for a rebuild"
+/// is a policy call (depends on `Settings.docker_rebuild_frequency`, which
+/// this module knows nothing about) - left to the frontend, which prompts
+/// the user rather than silently rebuilding. `None` covers both "never
+/// built" (which `spawn_image_tag`'s own refusal already handles) and
+/// "recorded but unparsable" (a version upgrade edge case, not a normal
+/// path) identically - the caller should treat either as "definitely due".
+pub fn last_built_date() -> Option<String> {
     std::fs::read_to_string(last_built_date_file())
         .ok()
         .and_then(|s| parse_build_date(&s))
-        .is_some_and(|d| d == today())
+        .map(|d| d.to_string())
 }
 
 /// Image state for the Settings Docker section + dropdown gating.
@@ -564,10 +560,10 @@ pub struct DockerImageStatus {
     /// Whether Docker mode should be offered in the task dropdown at
     /// all (a usable built image exists).
     pub available: bool,
-    /// Was any image successfully built today (local calendar date)? Drives
-    /// the daily-rebuild nudge before an agent launch - see
-    /// `Settings::docker_daily_rebuild`.
-    pub built_today: bool,
+    /// LOCAL calendar date (`YYYY-MM-DD`) of the last successful build, if
+    /// any. Drives the rebuild-frequency nudge before an agent launch - see
+    /// `Settings::docker_rebuild_frequency`.
+    pub last_built_date: Option<String>,
 }
 
 /// Compute the current image status from the on-disk Dockerfile + docker.
@@ -591,7 +587,7 @@ pub fn image_status() -> DockerImageStatus {
         last_built_tag: last,
         last_built_exists,
         stale,
-        built_today: built_today(),
+        last_built_date: last_built_date(),
     }
 }
 

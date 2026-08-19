@@ -23,6 +23,8 @@ import {
   type DockerStatus, type DockerImageStatus,
 } from "@/lib/ipc";
 import { Block, SectionTitle, Toggle, useBackendSettings } from "./Controls";
+import { DockerRebuildFrequencyPicker } from "@/components/DockerRebuildFrequencyPicker";
+import { describeLastBuildDate } from "@/lib/dockerDailyRebuild";
 import { Loader2, CircleCheck, CircleAlert } from "lucide-react";
 
 export function DockerSection() {
@@ -185,16 +187,22 @@ export function DockerSection() {
 
       {enabled && (
         <>
-          {/* Daily rebuild. Opt-out (defaults true - undefined reads as
-              on, matching the Rust-side default), so read !== false rather
-              than truthiness. */}
+          {/* Rebuild nudge frequency. Undefined reads as "daily" (matching
+              the Rust-side default) since a fresh settings object may not
+              carry the field yet. */}
           <Block>
-            <Toggle
-              label="Rebuild the image daily"
-              hint="Before the first Docker-mode agent launch each day, rebuild the image in the background and let you know. Agent CLIs release constantly; without this an old image can run a stale binary indefinitely. Turn off to only rebuild by hand, below."
-              value={settings.docker_daily_rebuild !== false}
-              onChange={v => patch({ docker_daily_rebuild: v })}
-            />
+            <div className="text-[14px] font-medium">Nudge me to rebuild</div>
+            <div className="mt-0.5 max-w-2xl text-[12.5px] text-[var(--color-fg-dim)]">
+              Before a Docker-mode task's agent launches, if the image hasn't been rebuilt on this schedule,
+              termic asks whether to rebuild first (skip is always one click away). Agent CLIs baked into the
+              image update constantly; without this an old image can run a stale binary indefinitely.
+            </div>
+            <div className="mt-2 max-w-xs">
+              <DockerRebuildFrequencyPicker
+                value={settings.docker_rebuild_frequency ?? "daily"}
+                onChange={v => patch({ docker_rebuild_frequency: v })}
+              />
+            </div>
           </Block>
 
           {/* Docker availability */}
@@ -312,9 +320,7 @@ function ImageStatusLine({ image, dirty }: { image: DockerImageStatus | null; di
       )}
       {image.available && !image.stale && !dirty && (
         <span className="flex items-center gap-1.5 text-[var(--color-fg-faint)]">
-          {image.built_today
-            ? "Built today."
-            : "Not rebuilt today yet - the next Docker-mode agent launch will trigger it, if daily rebuild is on."}
+          {describeLastBuildDate(image.last_built_date)}
         </span>
       )}
     </div>

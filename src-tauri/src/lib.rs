@@ -366,6 +366,21 @@ pub enum SandboxMode {
     EnforceFs,
 }
 
+/// How often the frontend should nudge a Docker sandbox image rebuild
+/// before a Docker-mode task's agent launches. `Off` is the opt-out.
+/// `#[default]` on `Daily` means `Settings::default()` (used by both plain
+/// derive AND `seeded_defaults()`'s `..Settings::default()` spread) and
+/// serde's missing-field fallback agree - unlike a bare `bool`, which needs
+/// a `default_true()` helper for the latter and can't help the former.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DockerRebuildFrequency {
+    Off,
+    #[default]
+    Daily,
+    Weekly,
+}
+
 /// One frozen extra named port (GH #196): the env var name the user
 /// configured plus the port allocated from this task's block at
 /// creation. Frozen pairs, so editing the repo config later never
@@ -14828,16 +14843,17 @@ pub struct Settings {
     /// own `docker_sandbox_enabled` only takes effect when this is also on.
     /// See docs/plans/docker-sandbox/design.md.
     pub docker_sandbox_enabled: bool,
-    /// Rebuild the Docker sandbox image before the first agent launch of
-    /// each calendar day, so an agent CLI that publishes daily doesn't get
-    /// stuck running a stale binary baked into an old image indefinitely.
-    /// Opt-out: on by default. Checked by the frontend before spawning a
-    /// Docker-mode task's agent (see `docker_image_status().built_today`);
-    /// Rust never rebuilds on the spawn path itself (would freeze the
-    /// webview - build stays an explicit, streamed, frontend-driven action
-    /// same as a manual rebuild).
-    #[serde(default = "default_true")]
-    pub docker_daily_rebuild: bool,
+    /// How often to nudge a rebuild of the Docker sandbox image before a
+    /// Docker-mode task's agent launches, so an agent CLI that publishes
+    /// constantly doesn't get stuck running a stale binary baked into an
+    /// old image indefinitely. `Off` is the opt-out; default `Daily`.
+    /// Checked by the frontend (see `docker_image_status().last_built_date`),
+    /// which PROMPTS rather than silently rebuilding - a user in a hurry can
+    /// skip it for that one launch. Rust never rebuilds on the spawn path
+    /// itself (would freeze the webview - build stays an explicit, streamed,
+    /// frontend-driven action same as a manual rebuild).
+    #[serde(default)]
+    pub docker_rebuild_frequency: DockerRebuildFrequency,
     /// Personal (this-machine) glob patterns hidden from the "All files"
     /// tree across every project. Unioned with each project's committed
     /// `.termic.yaml` `exclude` list. `.git` is always hidden regardless.
@@ -15578,11 +15594,6 @@ fn seeded_defaults() -> Settings {
         // Required field: derive(Default) would give "", which the UI would
         // render as an empty required box on a fresh install.
         default_tasks_path: builtin_tasks_path(),
-        // `..Settings::default()` uses the derived Default (false), not the
-        // `#[serde(default = "default_true")]` that only kicks in for
-        // deserialization - set explicitly so a FRESH install (this path)
-        // opts in the same as an EXISTING install upgrading into the field.
-        docker_daily_rebuild: true,
         ..Settings::default()
     }
 }

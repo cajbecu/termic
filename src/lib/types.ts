@@ -553,12 +553,12 @@ export interface Settings {
    *  no Docker UI appears anywhere and Docker is never invoked, even if a
    *  task has `docker_sandbox_enabled` set. */
   docker_sandbox_enabled?: boolean;
-  /** Rebuild the Docker sandbox image before the first agent launch of each
-   *  calendar day, so a Docker-mode task doesn't keep running an
-   *  indefinitely stale agent CLI baked into an old image. Opt-out: on by
-   *  default (defaults to `true` when absent - see `default_true()` on the
-   *  Rust side). */
-  docker_daily_rebuild?: boolean;
+  /** How often to nudge a Docker sandbox image rebuild before a Docker-mode
+   *  task's agent launches, so it doesn't keep running an indefinitely
+   *  stale agent CLI baked into an old image. `"off"` is the opt-out.
+   *  Defaults to `"daily"` when absent (both the Rust struct's derived
+   *  Default AND its serde fallback agree - see `DockerRebuildFrequency`). */
+  docker_rebuild_frequency?: "off" | "daily" | "weekly";
   /** Personal (this-machine) glob patterns hidden from the "All files"
    *  tree across every project. Unioned with each project's committed
    *  `.termic.yaml` `exclude`. `.git` is always hidden regardless. */
