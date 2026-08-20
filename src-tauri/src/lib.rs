@@ -12359,16 +12359,18 @@ async fn list_font_families() -> Vec<String> {
 /// the built-ins. `CliInfo.name` is the agent `id` so the frontend can
 /// match each result back to the registry.
 ///
-/// Detection falls back to hard-coded common install locations when
-/// `command -v` returns empty — covers two real cases:
-///   1. The CLI is a shell function (`claude () { ... }`) so `command -v`
-///      returns a function body, not a binary path.
-///   2. termic launched from a stripped-PATH context (Finder / .app)
-///      where /opt/homebrew/bin is missing.
+/// Walks `shell_env::resolved_path()` (the same probed-login-shell PATH,
+/// falling back to the static install-location union, that every other
+/// spawn site in the app uses) rather than shelling out its own
+/// `command -v` — that used to inherit termic's bare launchd env and
+/// only ever source bash's profile chain, so a CLI whose PATH export
+/// lives in `~/.zshrc`/`~/.zprofile` (Homebrew/nvm/volta's usual home)
+/// was invisible from a GUI-launched `.app` no matter how many times it
+/// relaunched, even though a real terminal found it instantly.
 ///
-/// async + spawn_blocking: spawns a `command -v` plus a version probe
-/// per agent, and runs at startup — must stay off the IPC/WKWebView
-/// thread (see the long-running-IPC discipline in CLAUDE.md).
+/// async + spawn_blocking: walks PATH plus a version probe per agent,
+/// and runs at startup — must stay off the IPC/WKWebView thread (see
+/// the long-running-IPC discipline in CLAUDE.md).
 #[tauri::command]
 async fn detect_clis() -> Vec<CliInfo> {
     tauri::async_runtime::spawn_blocking(detect_clis_blocking)
@@ -12378,12 +12380,12 @@ async fn detect_clis() -> Vec<CliInfo> {
 
 fn detect_clis_blocking() -> Vec<CliInfo> {
     let agents = load_settings_inner().agents;
-    // Probe agents concurrently — each agent costs a login-shell spawn
-    // (`sh -lc`, which sources the user's profile and can take hundreds
-    // of ms) plus a `--version` probe. Serially across 5+ agents that
-    // ran 2-5s at startup, long enough that the first popover opened
-    // before detection resolved and fell back to showing every agent.
-    // One thread per agent collapses the wall-clock to a single probe.
+    // Probe agents concurrently — `shell_env::resolved_path()` can block
+    // on the first login-shell probe landing (hundreds of ms), plus a
+    // `--version` probe per agent. Serially across 5+ agents that ran
+    // 2-5s at startup, long enough that the first popover opened before
+    // detection resolved and fell back to showing every agent. One
+    // thread per agent collapses the wall-clock to a single probe.
     let handles: Vec<_> = agents.iter().map(|agent| {
         let id = agent.id.clone();
         let bin = agent.command.trim().to_string();
@@ -12402,32 +12404,22 @@ fn detect_clis_blocking() -> Vec<CliInfo> {
                     path = bin.to_string();
                 }
             } else {
-                // PATH lookup via login shell — the common case.
-                if let Ok(o) = Command::new("/usr/bin/env")
-                    .args(["sh", "-lc", &format!("command -v {} 2>/dev/null", bin)])
-                    .output()
-                {
-                    if o.status.success() {
-                        let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                        // Reject shell-function body lookalikes.
-                        if !p.is_empty() && (p.starts_with('/') || p.starts_with('~')) {
-                            found = true;
-                            path = p;
-                        }
-                    }
-                }
-                // Fallback: probe common install locations directly. Same
-                // list the PATH fallback unions in, and for the same
-                // reason (the login shell that would have found these is
-                // exactly what just failed) — kept in one place so a dir
-                // added there is never missing from the install badge.
-                if !found {
-                    for c in shell_env::fallback_dirs().iter().map(|d| format!("{d}/{bin}")) {
-                        if Path::new(&c).exists() {
-                            found = true;
-                            path = c;
-                            break;
-                        }
+                // PATH lookup — walk the same resolved PATH every other
+                // spawn site in the app uses (shell_env::resolved_path()):
+                // the probed login shell's PATH when available, else the
+                // static fallback union. A hand-rolled `sh -lc "command -v"`
+                // here used to inherit the app's bare launchd env and only
+                // ever source bash's profile chain (never ~/.zshrc /
+                // ~/.zprofile, where Homebrew/nvm/volta typically export
+                // PATH), so a GUI-launched .app could relaunch forever and
+                // still miss a CLI that `command -v` finds instantly from a
+                // real terminal.
+                for dir in shell_env::resolved_path().split(':').filter(|d| !d.is_empty()) {
+                    let c = format!("{dir}/{bin}");
+                    if Path::new(&c).exists() {
+                        found = true;
+                        path = c;
+                        break;
                     }
                 }
             }
