@@ -148,6 +148,28 @@ describe("command palette", () => {
     expect(hasFilePicker).toBe(true);
   });
 
+  // Row order stays fixed by section (see `filtered` in CommandPalette.tsx),
+  // but the highlight should jump to whichever row is the strongest match
+  // even when that row isn't first. "upd" fuzzy-matches "Jump to next
+  // waiting agent" (its own section sorts first) as well as the exact
+  // substring "Check for updates" — the highlight belongs on the latter.
+  it("jumps the highlight to the best match, not just row 0", async () => {
+    await setQuery("upd");
+    await browser.waitUntil(
+      async () => {
+        const activeText = await browser.execute(() => {
+          const active = [...document.querySelectorAll("[data-row]")].find(
+            (r) => (r as HTMLElement).style.background,
+          );
+          return active?.getAttribute("data-cmd-id") ?? "";
+        });
+        return activeText === "check-updates";
+      },
+      { timeout: 5_000, timeoutMsg: "highlight did not land on the best match" },
+    );
+    await setQuery("");
+  });
+
   it("activating a command runs it and closes the palette", async () => {
     // Click the File picker command row. The palette's act() runs close()
     // synchronously then defers the effect via requestAnimationFrame — and rAF

@@ -134,9 +134,7 @@ export function CommandPalette() {
       themeOriginalRef.current = null;
     }
   }, [open]);
-  // Reset the highlight on query change…
-  useEffect(() => { setActiveIdx(0); }, [query]);
-  // …but when entering the theme submenu, start on the CURRENT theme so the
+  // When entering the theme submenu, start on the CURRENT theme so the
   // live preview doesn't jump the instant you open it.
   useEffect(() => {
     if (view === "theme") {
@@ -476,6 +474,22 @@ export function CommandPalette() {
   }, [commands, query, recents]);
 
   const rows = filtered.rows;
+
+  // Jump the highlight to the strongest match on query change, without
+  // touching row order (sections and insertion order stay put — see
+  // `filtered` above). Without this the highlight sat on row 0, i.e.
+  // whichever section happens to sort first, even when a later row is
+  // the obviously-intended match (e.g. "upd" landing on "Jump to next
+  // waiting agent" over "Check for updates").
+  useEffect(() => {
+    if (!query) { setActiveIdx(0); return; }
+    let bestIdx = 0;
+    let bestScore = -Infinity;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].score > bestScore) { bestScore = rows[i].score; bestIdx = i; }
+    }
+    setActiveIdx(bestIdx);
+  }, [query, rows]);
 
   // Clamp the active index to the current row count.
   useEffect(() => {
