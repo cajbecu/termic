@@ -3397,3 +3397,165 @@ describe("svg source/preview toggle", () => {
     expect(await browser.execute(() => localStorage.getItem("svgDefaultView"))).toBe("preview");
   });
 });
+
+// A file the editor cannot decode is a WRONG-VIEWER state, not a failure: it
+// shows a calm centered notice offering "Open in default app" and "Reveal in
+// Finder" rather than red text with no way out. Cases: the notice replaces
+// the red error and carries both buttons; recycling the preview tab onto a
+// real text file clears it; a GENUINE failure (missing file) still gets the
+// red raw error, because offering "Open in default app" for a file that
+// would not read is offering a button that fails again.
+//
+// NEITHER button is ever clicked here. "Open in default app" would launch
+// whatever app is registered for the fixture's extension on the runner, with
+// nothing in the suite able to close it, and "Reveal in Finder" would steal
+// focus from the window WebdriverIO is driving. Presence + labels is the
+// contract worth pinning; the actions themselves are the same helpers the
+// path context menu has always used.
+describe("binary file notice", () => {
+  let taskId!: string;
+  const binName = "e2e-blob.bin";
+  const binPath = path.join(fixture, binName);
+  const NOTICE = '[data-testid="binary-file-notice"]';
+
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+    try {
+      execSync(`git -C "${fixture}" clean -fd`);
+    } catch {
+      /* nothing */
+    }
+  });
+
+  /** Visible text of the whole editor pane for `tab`, main or split. */
+  const paneText = (tabId: string) =>
+    browser.execute((id) => {
+      const el = document.querySelector(
+        `[data-main-tab-id="${id}"], [data-split-leaf][data-tab-id="${id}"]`,
+      ) as HTMLElement | null;
+      return el?.innerText ?? "";
+    }, tabId);
+
+  const editTabFor = (rel: string) =>
+    browser.execute(
+      (id, p) =>
+        (window.__termic!.useApp.getState().tabs[id] ?? []).find(
+          (t: any) => t.type === "edit" && t.path === p,
+        ),
+      taskId,
+      rel,
+    );
+
+  it("shows a friendly notice with both OS actions instead of a red error", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask("e2e-binary");
+
+    // Bytes that can never be valid UTF-8 (a lone 0xFF), written inline
+    // rather than committed: the suite keeps no binary fixtures (see the PDF
+    // case above, which builds its own PDF the same way).
+    writeFileSync(binPath, Buffer.from([0xff, 0xfe, 0x00, 0x01, 0x02, 0xff]));
+    await browser.execute(
+      (id) => window.__termic!.useApp.getState().bumpFsRevision(id),
+      taskId,
+    );
+
+    const sel = `[data-path="${binName}"]`;
+    await browser.waitUntil(
+      () => browser.execute((s) => !!document.querySelector(s), sel),
+      { timeout: 10_000, timeoutMsg: `${binName} never appeared in the tree` },
+    );
+    await browser.execute((s) => {
+      (document.querySelector(s) as HTMLElement).click();
+    }, sel);
+
+    await browser.waitUntil(
+      () => browser.execute((s) => !!document.querySelector(s), NOTICE),
+      { timeout: 10_000, timeoutMsg: "the binary-file notice never rendered" },
+    );
+
+    const tab = await editTabFor(binName);
+    const text = await paneText(tab.id);
+    // The copy the user reads, and the two ways out.
+    expect(text).toContain("This looks like a binary file, so the editor can't show it.");
+    expect(text).toContain("Open in default app");
+    expect(text).toContain("Reveal in Finder");
+    // Neither the raw Rust message nor the old red framing survives.
+    expect(text).not.toContain("UTF-8");
+    expect(text).not.toContain("Error:");
+
+    // Nothing in the pane is painted with the error token. Resolved through a
+    // probe element rather than string-matching the CSS var, so this holds in
+    // any theme (the var is a hex, the computed color an rgb()).
+    const reds = await browser.execute((sel2) => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--color-err)";
+      document.body.appendChild(probe);
+      const err = getComputedStyle(probe).color;
+      probe.remove();
+      const pane = document.querySelector(sel2) as HTMLElement;
+      return [...pane.querySelectorAll("*")]
+        .filter((el) => (el as HTMLElement).innerText?.trim())
+        .filter((el) => getComputedStyle(el).color === err).length;
+    }, NOTICE);
+    expect(reds).toBe(0);
+
+    await snap("binary-file-notice");
+  });
+
+  it("clears the notice when the preview tab recycles onto a text file", async () => {
+    // Same mounted EditorPane, new tab.path: a stale notice would render on
+    // top of the next file's contents.
+    const sel = '[data-path="README.md"]';
+    await browser.waitUntil(
+      () => browser.execute((s) => !!document.querySelector(s), sel),
+      { timeout: 10_000, timeoutMsg: "README row never appeared" },
+    );
+    await browser.execute((s) => {
+      (document.querySelector(s) as HTMLElement).click();
+    }, sel);
+
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          () =>
+            !document.querySelector('[data-testid="binary-file-notice"]') &&
+            (document.querySelector(".cm-content")?.textContent ?? "").includes(
+              "e2e fixture",
+            ),
+        ),
+      { timeout: 10_000, timeoutMsg: "the notice outlived the file it described" },
+    );
+  });
+
+  it("keeps a genuine read failure as a raw error, with no buttons", async () => {
+    const missing = "e2e-not-here.txt";
+    await browser.execute(
+      (id, p) =>
+        window.__termic!.useApp.getState().openPreviewTab(id, {
+          type: "edit",
+          path: p,
+          title: p,
+        }),
+      taskId,
+      missing,
+    );
+
+    const tab = await browser.waitUntil(
+      async () => (await editTabFor(missing)) ?? false,
+      { timeout: 10_000, timeoutMsg: "the missing-file tab never opened" },
+    );
+    await browser.waitUntil(
+      async () => (await paneText((tab as any).id)).includes("Error:"),
+      { timeout: 10_000, timeoutMsg: "a missing file did not report an error" },
+    );
+
+    const text = await paneText((tab as any).id);
+    expect(text).not.toContain("Open in default app");
+    const notice = await browser.execute(
+      (s) => !!document.querySelector(s),
+      NOTICE,
+    );
+    expect(notice).toBe(false);
+  });
+});

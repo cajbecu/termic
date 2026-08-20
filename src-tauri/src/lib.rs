@@ -10070,7 +10070,9 @@ fn read_external_file(path: &str) -> Result<String, String> {
     // regular file) via the fstat on the already-OPEN handle, so a clicked
     // directory lands here as a plain error rather than a huge read.
     let bytes = read_capped_file(abs, 2_000_000)?;
-    String::from_utf8(bytes).map_err(|_| "file is not valid UTF-8".to_string())
+    // Same decode as the in-task read, so an external tab on a binary file
+    // gets the SAME rejection message and therefore the same calm notice.
+    decode_task_file(bytes)
 }
 
 #[tauri::command]
@@ -10083,6 +10085,16 @@ fn task_file_read(id: String, path: String) -> Result<String, String> {
     let abs = safe_task_read_path(&w, &cwd, &rel)?;
     // Refuse binary or huge files for now — viewer is text-only.
     let bytes = read_capped_file(&abs, 2_000_000)?;
+    decode_task_file(bytes)
+}
+
+/// Text-or-nothing decode for the editor's read. Split out ONLY so the
+/// rejection message can be pinned by a test: the frontend matches it
+/// loosely (`/valid UTF-8/i`, see src/lib/editorError.ts) to decide between
+/// the calm "this is a binary file, here is how to open it elsewhere" pane
+/// and a red raw error. That match is silent when it breaks, so a reword
+/// here must fail `cargo test` instead.
+fn decode_task_file(bytes: Vec<u8>) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "file is not valid UTF-8".to_string())
 }
 
@@ -19509,6 +19521,33 @@ mod tests {
             normalized_resume_override(Some("resume --last".into())),
             Some("resume --last".to_string()),
         );
+    }
+
+    // ── the editor's binary-file contract ──
+    //
+    // `task_file_read`'s UTF-8 rejection is not just an error string: the
+    // frontend matches it (`/valid UTF-8/i` in src/lib/editorError.ts) to
+    // decide whether the editor pane shows a calm "binary file, open it
+    // elsewhere" notice with Open/Reveal buttons, or a red raw error. A
+    // reword here would silently drop that pane back to red text with no
+    // way out, and nothing else would fail. Hence this test.
+
+    #[test]
+    fn binary_read_is_rejected_with_the_message_the_editor_matches() {
+        // A lone 0xFF is never valid UTF-8 — the .xlsx/.zip/compiled-blob case.
+        let err = decode_task_file(vec![0xFF, 0xFE, 0x00, 0x01]).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("valid utf-8"),
+            "editorError.ts matches /valid UTF-8/i against this message; got {err:?}",
+        );
+    }
+
+    #[test]
+    fn text_still_decodes_verbatim() {
+        // The other half of the contract: real text must not take the
+        // binary branch, including non-ASCII that is perfectly valid UTF-8.
+        assert_eq!(decode_task_file("héllo\n".as_bytes().to_vec()).unwrap(), "héllo\n");
+        assert_eq!(decode_task_file(Vec::new()).unwrap(), "");
     }
 
     // ── find-in-files backends (GH #181) ──
