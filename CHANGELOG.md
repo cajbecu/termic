@@ -4,7 +4,7 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [0.28.0] - 2026-08-20
+## [0.28.1] - 2026-08-20
 
 An Activity monitor for your agents, inline git blame, and a command palette that finally knows what the app can do.
 
@@ -28,6 +28,7 @@ An Activity monitor for your agents, inline git blame, and a command palette tha
 - A command palette action no longer fires minutes late over whatever you are doing. It was deferred by one animation frame, which macOS freezes while the window is occluded, so the dialog it opens arrived whenever you next looked at the window.
 - Closing and reopening a fresh agent tab before its first prompt no longer resumes a session that never existed ("No conversation found"). The session id was persisted on a timer, before the agent had written its session file.
 - Port allocation is serialized, so concurrent task creates and restores cannot scan the same snapshot and claim the same ports.
+- opencode resumes the conversation you left instead of starting a fresh one. Its session id is created by opencode itself, so Termic reads it back after your first message, and the command that reads it could not find `opencode` on the installed app's PATH. Affects both worktree and main-checkout tasks. (#243)
 
 ### Thanks
 - Preeti Yuankrathok (@earthpyy) for extra named ports and their hardening, the Fix merge conflicts prompt, and the CI fix for forked repos.
