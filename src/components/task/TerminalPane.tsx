@@ -1406,6 +1406,30 @@ const captureArmedRef = useRef(false);
       captureCapable && storedUuid && !failedResumeRef.current
         ? resumeIdArgsForCli(tab.cli, storedUuid).join(" ") || undefined
         : undefined;
+    // Harvest the session ID a capture-resume agent created lazily, once per
+    // tab. Called from two places (5s after the first Enter, and again on
+    // exit as a backstop) and no-ops after either one lands. Every step is
+    // logged: the whole path is silent on failure by design (an empty
+    // capture is indistinguishable from "no session yet"), which is exactly
+    // what made GH #243 impossible to tell apart from a resume bug.
+    const captureSessionId = (reason: string) => {
+      if (!captureCapable) return;
+      const liveTab = useApp.getState().tabs[task.id]?.find(t => t.id === tab.id) as TerminalTab | undefined;
+      if (liveTab?.sessionId) return;
+      const capture = postLaunchCaptureForCli(tab.cli);
+      if (!capture) return;
+      dbg("session-capture", `${reason}: running \`${capture.command}\` in ${task.path}`);
+      ipc.runCaptureCommand(capture.command, task.path)
+        .then(id => {
+          if (id) {
+            dbg("session-capture", `${reason}: captured ${id}`);
+            useApp.getState().setTabSessionId(task.id, tab.id, id);
+          } else {
+            dbg("session-capture", `${reason}: no output (CLI missing from PATH, or no session yet)`);
+          }
+        })
+        .catch(e => dbg("session-capture", `${reason}: failed — ${String(e)}`));
+    };
     const decision = decideResume({
       isAgent,
       idCapable,
@@ -1851,17 +1875,7 @@ const captureArmedRef = useRef(false);
           // Capture-based session resume (opencode): on the first normal exit
           // when no session ID is stored, run the capture command so the next
           // spawn can use --session <id> instead of starting fresh.
-          if (captureCapable) {
-            const liveTab = useApp.getState().tabs[task.id]?.find(t => t.id === tab.id) as import("@/lib/types").TerminalTab | undefined;
-            if (!liveTab?.sessionId) {
-              const capture = postLaunchCaptureForCli(tab.cli);
-              if (capture) {
-                ipc.runCaptureCommand(capture.command, task.path)
-                  .then(id => { if (id) useApp.getState().setTabSessionId(task.id, tab.id, id); })
-                  .catch(() => {});
-              }
-            }
-          }
+          captureSessionId("exit");
           // Clear the PTY id — the process is gone. Otherwise the dead
           // id lingers on the tab and features that enumerate live PTYs
           // (Broadcast) would target a corpse. A Restart respawns and
@@ -1920,17 +1934,10 @@ const captureArmedRef = useRef(false);
             // stored session ID, wait 5s then harvest the session ID the
             // CLI just created. Strictly one-shot per spawn.
             if (captureCapable && !captureArmedRef.current) {
-              const liveTab = useApp.getState().tabs[task.id]?.find(t => t.id === tab.id) as import("@/lib/types").TerminalTab | undefined;
+              const liveTab = useApp.getState().tabs[task.id]?.find(t => t.id === tab.id) as TerminalTab | undefined;
               if (!liveTab?.sessionId) {
-                const capture = postLaunchCaptureForCli(tab.cli);
-                if (capture) {
-                  captureArmedRef.current = true;
-                  window.setTimeout(() => {
-                    ipc.runCaptureCommand(capture.command, task.path)
-                      .then(id => { if (id) useApp.getState().setTabSessionId(task.id, tab.id, id); })
-                      .catch(() => {});
-                  }, 5000);
-                }
+                captureArmedRef.current = true;
+                window.setTimeout(() => captureSessionId("first-submit"), 5000);
               }
             }
           }

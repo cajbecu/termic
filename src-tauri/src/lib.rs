@@ -11964,15 +11964,43 @@ fn settings_load() -> Settings { load_settings_inner() }
 #[tauri::command]
 fn agents_defaults() -> Vec<Agent> { default_agents() }
 
-/// Run a shell command in `cwd` via `sh -lc` and return trimmed stdout.
-/// Used by post_launch_capture to harvest the CLI's session ID after exit.
+/// Run a shell command in `cwd` and return trimmed stdout. Used by
+/// post_launch_capture to harvest a lazily-created CLI session ID
+/// (`opencode session list | …`) so the next spawn can resume it.
+///
+/// Runs under the user's login-shell environment (`shell_env::spawn_env()`),
+/// exactly like the PTY that produced the session. This used to be a bare
+/// `sh -lc`, which inherits the app's launchd env and only sources bash's
+/// profile chain, never ~/.zshrc / ~/.zprofile where an installer like
+/// opencode's puts its PATH export. From a GUI-launched .app the capture
+/// then ran `opencode` as "command not found", returned empty stdout, and
+/// the frontend's `if (id)` guard dropped it silently: the session ID was
+/// never stored, so every relaunch started a fresh conversation (GH #243).
+///
+/// async + spawn_blocking: spawns a shell plus the agent's own CLI, which
+/// can take a second or more — must stay off the IPC/WKWebView thread (see
+/// the long-running-IPC discipline in CLAUDE.md).
 #[tauri::command]
-fn run_capture_command(cmd: String, cwd: String) -> Result<String, String> {
-    let out = std::process::Command::new("sh")
-        .args(["-lc", &cmd])
-        .current_dir(&cwd)
-        .output()
-        .map_err(|e| e.to_string())?;
+async fn run_capture_command(cmd: String, cwd: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || run_capture_command_blocking(&cmd, &cwd))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn run_capture_command_blocking(cmd: &str, cwd: &str) -> Result<String, String> {
+    let mut c = std::process::Command::new("sh");
+    // `-c`, not `-lc`: the login env is injected below, and re-sourcing the
+    // profile chain on top of it would only re-strip PATH on some setups.
+    c.args(["-c", cmd]).current_dir(cwd);
+    let (path, inject) = shell_env::spawn_env();
+    c.env("PATH", path);
+    for (k, v) in inject {
+        c.env(k, v);
+    }
+    // A capture command is a plain query; nothing should be reading stdin.
+    // Leaving it inherited lets a misconfigured one block forever.
+    c.stdin(std::process::Stdio::null());
+    let out = c.output().map_err(|e| e.to_string())?;
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
@@ -13815,6 +13843,47 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    // ── post-launch session capture (GH #243) ──
+    //
+    // The capture harvests a lazily-created agent session ID (opencode) so
+    // the next spawn resumes it instead of starting over. Every failure mode
+    // here is silent by construction (empty stdout looks like "no session
+    // yet"), so the environment it runs in has to be the PTY's, not the
+    // .app's launchd env.
+
+    #[test]
+    fn capture_runs_in_cwd_and_trims_stdout() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("marker"), "ses_abc123\n").unwrap();
+        let cwd = dir.path().to_string_lossy().into_owned();
+        // Pipelines are the whole point of the shell here (the shipped
+        // opencode capture is `… | grep … | cut …`).
+        let out = run_capture_command_blocking("cat marker | cut -d' ' -f1", &cwd).unwrap();
+        assert_eq!(out, "ses_abc123");
+    }
+
+    #[test]
+    fn capture_sees_the_login_shell_path() {
+        // The regression: a CLI installed outside the launchd PATH (opencode
+        // lands in ~/.opencode/bin, Homebrew in /opt/homebrew/bin) has to be
+        // findable, or the capture returns "" and the ID is never stored.
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_string_lossy().into_owned();
+        let seen = run_capture_command_blocking("printf %s \"$PATH\"", &cwd).unwrap();
+        assert_eq!(seen, shell_env::spawn_env().0);
+    }
+
+    #[test]
+    fn capture_reports_stdout_only() {
+        // A "command not found" (the GH #243 failure) writes to stderr and
+        // must not be mistaken for a session ID.
+        let dir = tempdir().unwrap();
+        let cwd = dir.path().to_string_lossy().into_owned();
+        let out = run_capture_command_blocking(
+            "echo noise >&2; definitely-not-a-real-binary-243", &cwd).unwrap();
+        assert_eq!(out, "");
+    }
 
     // ── create-time resume-args override ──
     //
