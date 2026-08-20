@@ -42,6 +42,16 @@ async function waitForActivityHandle(): Promise<string> {
   return found!;
 }
 
+/** One row's visible text per entry, whitespace collapsed. Assumes WebDriver
+ *  is already switched to the Activity window. */
+async function activityRows(): Promise<string[]> {
+  return browser.execute(() =>
+    [...document.querySelectorAll('[data-testid="activity-row"]')].map(
+      el => (el as HTMLElement).innerText.replace(/\s+/g, " ").trim(),
+    ),
+  );
+}
+
 describe("Activity monitor", () => {
   let mainHandle: string;
   let taskId: string;
@@ -85,14 +95,32 @@ describe("Activity monitor", () => {
       },
       { timeout: 20_000, timeoutMsg: "project / task grouping never appeared" },
     );
-    const rows = await browser.execute(() =>
-      [...document.querySelectorAll('[data-testid="activity-row"]')].map(
-        el => (el as HTMLElement).innerText.replace(/\s+/g, " ").trim(),
-      ),
-    );
+    const rows = await activityRows();
     expect(rows.length).toBeGreaterThan(0);
-    // The fixture agent's row is named after its process.
-    expect(rows.join(" | ")).toContain("Agent");
+  });
+
+  it("names the agent row after the tab, not a generic label", async () => {
+    // Every unrenamed agent tab used to read "Agent · claude", so two tabs on
+    // one CLI were indistinguishable (164136b). The Activity window is its own
+    // webview and can't read live tab titles directly, so it ASKS the main
+    // window and falls back to a positional "Tab N · claude" until the reply
+    // lands. Poll rather than read once: a passing one-shot here would only
+    // mean the reply happened to beat us.
+    const FALLBACK = /(?:^|\| )(?:Agent|Tab \d+) · /;
+    let rows: string[] = [];
+    await browser.waitUntil(
+      async () => {
+        rows = await activityRows();
+        // The fixture drives its OSC title to "<glyph> <task name>", the exact
+        // text the tab strip shows, so the task slug is what has to land here.
+        return rows.some(r => r.includes("activity-mon")) && !FALLBACK.test(rows.join(" | "));
+      },
+      { timeout: 20_000, timeoutMsg: "agent row never took the tab's live title" },
+    );
+    // Restate it as an assertion so a pass shows what it matched, and a future
+    // edit that loosens the poll still has to produce a titled row.
+    expect(rows.join(" | ")).toContain("activity-mon");
+    expect(rows.join(" | ")).not.toMatch(FALLBACK);
   });
 
   it("accounts for Termic's own processes", async () => {
