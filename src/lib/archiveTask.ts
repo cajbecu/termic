@@ -12,14 +12,16 @@
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import { usePrefs } from "@/store/prefs";
+import { useArchivingTasks } from "@/store/archivingTasks";
 import { taskArchive } from "@/lib/ipc";
 import type { ConfirmCheckbox } from "@/store/ui";
 import type { Task } from "@/lib/types";
 
 /** Archive `taskId`, then ALWAYS refresh the store — even if the IPC rejects on
  *  a best-effort cleanup error, because the task is already persisted as
- *  archived and the sidebar must reflect that immediately (issue #24). The
- *  caller owns the confirm dialog + busy overlay. */
+ *  archived and the sidebar must reflect that immediately (issue #24). A
+ *  cleanup failure is reported as a toast, never as a rejection (issue #246).
+ *  The caller owns the confirm dialog and the "archiving" row state. */
 export async function archiveAndRefresh(taskId: string, deleteBranch: boolean): Promise<void> {
   try {
     await taskArchive(taskId, deleteBranch);
@@ -27,6 +29,17 @@ export async function archiveAndRefresh(taskId: string, deleteBranch: boolean): 
     // Cleanup warning (the archive flag is still persisted). Surface it for
     // debugging but don't let it strand the sidebar.
     console.error("archive cleanup reported errors:", err);
+    // ...and tell the user, because nothing else will (GH #246). The archive
+    // runs in the background now, so a worktree that failed to remove would
+    // otherwise just vanish from the sidebar with the directory still on
+    // disk and no sign anything went wrong. Read the name BEFORE loadAll
+    // drops the task.
+    const name = useApp.getState().tasks.find(t => t.id === taskId)?.name;
+    useUI.getState().pushToast(
+      `Archived${name ? ` "${name}"` : ""}, but cleanup failed: ${String(err)}`,
+      "error",
+      { ttlMs: 10000 },
+    );
   }
   // The archived task's view is going away — deselect it if it was active
   // so the main pane falls back to the dashboard.
@@ -68,8 +81,8 @@ function archivePrompt(w: Task, deleteBranchDefault: boolean): { message: string
   };
 }
 
-/** Confirm + archive a task, with the busy overlay. The ONLY archive entry
- *  point in the UI (sidebar row menu, unified bar button, command palette) so
+/** Confirm + archive a task. The ONLY archive entry point in the UI
+ *  (sidebar row menu, unified bar button, command palette) so
  *  the copy, the delete-branch checkbox and the "Show this every time" opt-out
  *  can't drift between them. No-op if the user cancels. */
 export async function confirmAndArchive(w: Task): Promise<void> {
@@ -81,13 +94,16 @@ export async function confirmAndArchive(w: Task): Promise<void> {
   // never for a main checkout, which has no worktree branch and never showed
   // the checkbox.
   if (!prefs.confirmBeforeArchiveTask) {
-    await runArchive(w, !w.is_main_checkout && prefs.archiveDeleteBranch);
+    const done = startArchive(w.id, !w.is_main_checkout && prefs.archiveDeleteBranch);
     // No dialog was shown, so the toast is the only feedback that anything
-    // happened — and the only pointer back to where the task went.
+    // happened — and the only pointer back to where the task went. Pushed
+    // BEFORE awaiting: the archive can take tens of seconds (script +
+    // node_modules rmdir) and the confirmation belongs to the click.
     ui.pushToast(`Archived "${w.name}". It's in History.`, "info", {
       ttlMs: 6000,
       action: { label: "History", onClick: () => useApp.getState().setView("history") },
     });
+    await done;
     return;
   }
 
@@ -115,14 +131,41 @@ export async function confirmAndArchive(w: Task): Promise<void> {
     if (!w.is_main_checkout) prefs.setArchiveDeleteBranch(res.checked);
   }
   if (!res.confirmed) return;
-  await runArchive(w, res.checked);
+  await startArchive(w.id, res.checked);
 }
 
-/** Busy overlay + archive. Split out so the confirmed and the "don't ask
- *  again" paths can't diverge on the overlay or the refresh. */
-async function runArchive(w: Task, deleteBranch: boolean): Promise<void> {
-  const ui = useUI.getState();
-  ui.setBusy(`Archiving "${w.name}"…`);
-  try { await archiveAndRefresh(w.id, deleteBranch); }
-  finally { ui.setBusy(null); }
+/** Start the archive and get out of the way (GH #246). Shared by the two
+ *  confirmAndArchive paths (so they can't diverge on the refresh) and by the
+ *  CLI's archive RPC, which gets the same sidebar treatment for free.
+ *
+ *  This used to raise `ui.setBusy`, a `fixed inset-0` click-blocker over the
+ *  whole window, and hold it until `task_archive` AND the `loadAll` refetch
+ *  had returned. That is the wrong blast radius for a per-task operation, and
+ *  a long one: the archive script runs, then `git worktree remove`, then
+ *  `fs::remove_dir_all` over a node_modules-sized tree. Agents in the other
+ *  tasks keep working the whole time and the user could not see them, switch
+ *  to one, or answer a permission prompt. Same fix as GH #242 at the other
+ *  end of a task's life.
+ *
+ *  Everything the user can see now happens synchronously with the click: the
+ *  task is deselected (its pane is going away, and its worktree is being
+ *  deleted underneath it) and its sidebar row flips to the inert "Archiving…"
+ *  spinner state until `loadAll` drops it. The returned promise settles when
+ *  the archive does — for callers that care (specs, the CLI), NOT for the UI.
+ *
+ *  The returned promise never rejects: `archiveAndRefresh` turns a cleanup
+ *  failure into a toast. */
+export function startArchive(taskId: string, deleteBranch: boolean): Promise<void> {
+  const archiving = useArchivingTasks.getState();
+  // Double-fire guard. Without the modal overlay, the row's menu, the unified
+  // bar button and the command palette are all still reachable while the
+  // first archive is in flight.
+  if (archiving.ids[taskId]) return Promise.resolve();
+  archiving.begin(taskId);
+  // Deselect NOW rather than after the IPC returns: the task's TaskView is in
+  // front of the user with a worktree that is being removed under it.
+  if (useApp.getState().activeTaskId === taskId) useApp.getState().setActiveTask(null);
+  return archiveAndRefresh(taskId, deleteBranch).finally(() => {
+    useArchivingTasks.getState().end(taskId);
+  });
 }

@@ -529,6 +529,153 @@ describe("archive confirmation", () => {
   });
 });
 
+// P0: archiving must not lock the window (GH #246). It used to raise the same
+// full-screen `fixed inset-0` click-blocker `ui.setBusy` puts up for anything
+// else, and hold it for the whole archive: the project's archive script, then
+// `git worktree remove`, then an `fs::remove_dir_all` over node_modules. Every
+// other task's agent kept working behind it, unreachable. Two halves are
+// pinned here: a real archive never raises the overlay, and while one is in
+// flight the task's own sidebar row is what says so.
+describe("non-blocking archive (GH #246)", () => {
+  const ARCHIVE_REPO = path.join(process.cwd(), ".e2e", "fixture-repo");
+  const BRANCH = "wt-nonblocking-archive";
+  let prefsOriginal: { confirm: boolean; deleteBranch: boolean } | undefined;
+  let taskId = "";
+
+  const createWorktreeTask = (name: string, branch: string) =>
+    browser.execute(async (n, b) => {
+      const t = window.__termic!;
+      const proj = t.useApp.getState().projects.find((p: any) => p.name === "fixture-repo");
+      const task = await t.ipc.taskCreate({
+        project_id: proj.id, name: n, cli: "fakeagent", base_branch: "main", branch: b,
+      });
+      await t.useApp.getState().loadAll();
+      t.useApp.getState().setActiveTask((task as any).id);
+      return (task as any).id as string;
+    }, name, branch);
+
+  const isArchived = (id: string) =>
+    browser.execute((i) =>
+      window.__termic!.useApp.getState().tasks.find((t: any) => t.id === i)?.archived === true, id);
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    prefsOriginal = await browser.execute(() => {
+      const p = window.__termic!.usePrefs.getState();
+      return { confirm: p.confirmBeforeArchiveTask, deleteBranch: p.archiveDeleteBranch };
+    });
+  });
+
+  after(async () => {
+    if (prefsOriginal) {
+      await browser.execute((o) => {
+        const p = window.__termic!.usePrefs.getState();
+        p.setConfirmBeforeArchiveTask(o.confirm);
+        p.setArchiveDeleteBranch(o.deleteBranch);
+      }, prefsOriginal);
+    }
+    // Never leave a seeded archiving flag behind: it would render every later
+    // spec's row for that task inert.
+    await browser.execute(() => {
+      const a = window.__termic!.useArchivingTasks.getState();
+      for (const id of Object.keys(a.ids)) a.end(id);
+    });
+    try { execSync(`git -C "${ARCHIVE_REPO}" worktree prune`); } catch { /* nothing to prune */ }
+    try { execSync(`git -C "${ARCHIVE_REPO}" branch -D ${BRANCH}`, { stdio: "ignore" }); } catch { /* already gone */ }
+  });
+
+  it("confirming closes the dialog and never raises the full-window overlay", async () => {
+    await browser.execute(() => {
+      const p = window.__termic!.usePrefs.getState();
+      p.setConfirmBeforeArchiveTask(true);
+      p.setArchiveDeleteBranch(true);
+    });
+    taskId = await createWorktreeTask("e2e-archive-nonblocking", BRANCH);
+
+    await clickWhenVisible('[data-testid="archive-task"]');
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(() =>
+          [...document.querySelectorAll('[role="dialog"]')]
+            .some((d) => d.textContent?.includes("Archive \"")))),
+      { timeout: 10_000, timeoutMsg: "archive dialog never opened" },
+    );
+    await browser.execute(() => {
+      const dlg = [...document.querySelectorAll('[role="dialog"]')]
+        .find((d) => d.textContent?.includes("Archive \""));
+      (dlg!.querySelector('[data-testid="confirm-ok"]') as HTMLElement).click();
+    });
+
+    // Poll to completion, checking the overlay on EVERY sample rather than
+    // once at the end: the old code held it up from the confirm click until
+    // `task_archive` + `loadAll` had both returned, which is well over one
+    // sampling interval even on this fixture.
+    let sawOverlay = false;
+    await browser.waitUntil(
+      async () => {
+        if (await browser.execute(() => !!document.querySelector('[data-testid="busy-overlay"]'))) {
+          sawOverlay = true;
+        }
+        return await isArchived(taskId);
+      },
+      { interval: 50, timeout: 20_000, timeoutMsg: "task never became archived" },
+    );
+    expect(sawOverlay).toBe(false);
+    // The store agrees, in case the overlay ever gains an exit animation that
+    // makes the DOM check lag its state.
+    expect(await browser.execute(() => window.__termic!.useUI.getState().busyMessage)).toBe(null);
+
+    // The task's own row is what went away; the rest of the sidebar (the other
+    // projects and their tasks) is still there and still clickable.
+    await browser.waitUntil(
+      () => browser.execute((id) => !document.querySelector(`[data-sidebar-task-id="${id}"]`), taskId),
+      { timeout: 10_000, timeoutMsg: "the archived task's sidebar row never went away" },
+    );
+  });
+
+  it("shows an inert Archiving row while the archive runs", async () => {
+    // Seeded rather than raced: the fixture's worktree has no node_modules, so
+    // a real archive finishes in the time it takes to look for the row. What
+    // is being pinned is the row a slow archive leaves on screen.
+    const other = await createWorktreeTask("e2e-archiving-row", "wt-archiving-row");
+    await browser.execute((id) => {
+      window.__termic!.useArchivingTasks.getState().begin(id);
+    }, other);
+
+    const row = `[data-sidebar-task-id="${other}"]`;
+    await waitVisible(`${row}[data-task-archiving="true"]`);
+    await waitVisible('[data-testid="archiving-badge"]');
+
+    // Inert: clicking it does not select the task that is being torn down.
+    await browser.execute(() => {
+      window.__termic!.useApp.getState().setActiveTask(null);
+    });
+    await browser.execute((sel) => {
+      (document.querySelector(sel) as HTMLElement).click();
+    }, row);
+    expect(await browser.execute(() => window.__termic!.useApp.getState().activeTaskId)).toBe(null);
+    await snap("archiving-row.png");
+
+    // Clearing the flag hands the row back to the normal TaskRow, kebab and
+    // all — the archiving state is a render mode, not a one-way door.
+    await browser.execute((id) => {
+      window.__termic!.useArchivingTasks.getState().end(id);
+    }, other);
+    await browser.waitUntil(
+      () => browser.execute((sel) =>
+        !!document.querySelector(sel) && !document.querySelector(`${sel}[data-task-archiving="true"]`), row),
+      { timeout: 5_000, timeoutMsg: "the row never came back as a normal task row" },
+    );
+
+    await browser.execute(async (id) => {
+      await window.__termic!.ipc.taskArchive(id, true); // deleteBranch
+      await window.__termic!.useApp.getState().loadAll();
+    }, other);
+    try { execSync(`git -C "${ARCHIVE_REPO}" worktree prune`); } catch { /* nothing to prune */ }
+  });
+});
+
 // P1: emptying the archive from History. It's the one destructive bulk action
 // in the app, so both halves matter: the confirmation must be able to say no,
 // and saying yes must actually wipe the records (not just unlist them).

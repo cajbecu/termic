@@ -11,7 +11,7 @@ const h = vi.hoisted(() => ({
   setView: vi.fn(),
   setConfirmBeforeArchiveTask: vi.fn(),
   setArchiveDeleteBranch: vi.fn(),
-  state: { activeTaskId: null as string | null },
+  state: { activeTaskId: null as string | null, tasks: [] as unknown[] },
   prefs: { confirmBeforeArchiveTask: true, archiveDeleteBranch: false },
 }));
 
@@ -20,6 +20,7 @@ vi.mock("@/store/app", () => ({
   useApp: {
     getState: () => ({
       activeTaskId: h.state.activeTaskId,
+      tasks: h.state.tasks,
       setActiveTask: h.setActiveTask,
       loadAll: h.loadAll,
       setView: h.setView,
@@ -42,6 +43,7 @@ vi.mock("@/store/prefs", () => ({
 }));
 
 import { archiveAndRefresh, confirmAndArchive } from "@/lib/archiveTask";
+import { useArchivingTasks } from "@/store/archivingTasks";
 import type { Task } from "@/lib/types";
 
 /** Minimal Task shaped enough for the archive flow (name, branch, and which
@@ -62,8 +64,10 @@ beforeEach(() => {
   h.setConfirmBeforeArchiveTask.mockReset();
   h.setArchiveDeleteBranch.mockReset();
   h.state.activeTaskId = null;
+  h.state.tasks = [];
   h.prefs.confirmBeforeArchiveTask = true;
   h.prefs.archiveDeleteBranch = false;
+  useArchivingTasks.setState({ ids: {} });
 });
 
 describe("archiveAndRefresh (issue #24)", () => {
@@ -198,11 +202,11 @@ describe("confirmAndArchive", () => {
     expect(h.taskArchive).toHaveBeenCalledWith("w1", false);
   });
 
-  it("clears the busy overlay even when the archive IPC rejects", async () => {
+  it("clears the archiving row state even when the archive IPC rejects", async () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     h.taskArchive.mockRejectedValue(new Error("worktree remove: locked"));
     await confirmAndArchive(task());
-    expect(h.setBusy).toHaveBeenLastCalledWith(null);
+    expect(useArchivingTasks.getState().ids).toEqual({});
     spy.mockRestore();
   });
 
@@ -251,5 +255,92 @@ describe("confirmAndArchive", () => {
     expect(req.checkbox.label).toBe("Delete the git branches");
     expect(req.message).toContain("api, web");
     expect(req.dontAskAgain).toBe(true);
+  });
+});
+
+// GH #246: archiving used to raise the full-window busy overlay and hold it
+// until task_archive + loadAll returned — an archive script, a `git worktree
+// remove` and an rm -rf over node_modules, with every other task's agent
+// unreachable behind a click-blocker. Now the work runs in the background and
+// only the archived task's own row changes.
+describe("non-blocking archive (GH #246)", () => {
+  it("never raises the busy overlay", async () => {
+    await confirmAndArchive(task());
+    expect(h.setBusy).not.toHaveBeenCalled();
+  });
+
+  it("marks the task archiving before the IPC settles, and clears it after", async () => {
+    let release: () => void;
+    h.taskArchive.mockReturnValue(new Promise<void>(res => { release = () => res(); }));
+
+    const done = confirmAndArchive(task());
+    // Let askConfirm's promise resolve so runArchive has actually started.
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    expect(useArchivingTasks.getState().ids).toEqual({ w1: true });
+
+    release!();
+    await done;
+    expect(useArchivingTasks.getState().ids).toEqual({});
+  });
+
+  it("deselects the active task immediately, not after the archive finishes", async () => {
+    h.state.activeTaskId = "w1";
+    let release: () => void;
+    h.taskArchive.mockReturnValue(new Promise<void>(res => { release = () => res(); }));
+
+    const done = confirmAndArchive(task());
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    // The task's pane is in front of the user with its worktree being removed
+    // underneath it — it can't wait for the rmdir.
+    expect(h.setActiveTask).toHaveBeenCalledWith(null);
+    expect(h.loadAll).not.toHaveBeenCalled();
+
+    release!();
+    await done;
+    expect(h.loadAll).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a second archive of the same task while one is in flight", async () => {
+    // Without the modal there is nothing stopping the row menu, the unified
+    // bar button and the command palette from all firing.
+    h.prefs.confirmBeforeArchiveTask = false;
+    let release: () => void;
+    h.taskArchive.mockReturnValue(new Promise<void>(res => { release = () => res(); }));
+
+    const first = confirmAndArchive(task());
+    await Promise.resolve(); await Promise.resolve();
+    await confirmAndArchive(task());
+    expect(h.taskArchive).toHaveBeenCalledTimes(1);
+
+    release!();
+    await first;
+  });
+
+  it("toasts a cleanup failure instead of letting the task vanish silently", async () => {
+    // The overlay used to imply something happened. In the background there's
+    // no other signal that a worktree is still sitting on disk.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    h.state.tasks = [{ id: "w1", name: "show approvers" }];
+    h.taskArchive.mockRejectedValue(new Error("worktree remove: locked"));
+
+    await confirmAndArchive(task());
+    const errToast = h.pushToast.mock.calls.find(c => c[1] === "error");
+    expect(errToast).toBeDefined();
+    expect(errToast![0]).toContain("show approvers");
+    expect(errToast![0]).toContain("worktree remove: locked");
+    spy.mockRestore();
+  });
+
+  it("toasts the confirmation-off archive before the archive finishes", async () => {
+    h.prefs.confirmBeforeArchiveTask = false;
+    let release: () => void;
+    h.taskArchive.mockReturnValue(new Promise<void>(res => { release = () => res(); }));
+
+    const done = confirmAndArchive(task());
+    await Promise.resolve(); await Promise.resolve();
+    expect(h.pushToast).toHaveBeenCalledTimes(1);
+
+    release!();
+    await done;
   });
 });

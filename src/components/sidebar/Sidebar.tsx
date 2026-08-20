@@ -17,6 +17,7 @@ import { UpdateCard } from "./UpdateCard";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { useUI } from "@/store/ui";
 import { usePendingTasks } from "@/store/pendingTasks";
+import { useIsArchiving } from "@/store/archivingTasks";
 import { cn } from "@/lib/utils";
 import { formatTerminalTitle } from "@/lib/terminalTitle";
 import { requestCloseTab } from "@/lib/closeTab";
@@ -1411,7 +1412,7 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                     the bottom), and a live drag splices the same array — an
                     extra sort here would fight the drag. */}
                 {!collapsed && taskList.map(w => (
-                  <TaskRow
+                  <TaskRowSlot
                     key={w.id}
                     w={w}
                     compact={compact}
@@ -1945,6 +1946,62 @@ function iconSize(compact: boolean) {
 // `data-testid="work-badge"` + `data-work-state` are the DOM hook the e2e
 // suite asserts on: this badge is what a user actually sees, so specs read it
 // instead of peeking at `tab.workState` in the store.
+/** Picks the row a real task gets: the normal one, or the inert "Archiving…"
+ *  placeholder while its background archive runs (GH #246). A component, not
+ *  a branch inside the project section's map, so the archiving subscription is
+ *  per row — one archive re-renders one row, not every task in the project. */
+function TaskRowSlot(props: React.ComponentProps<typeof TaskRow>) {
+  const archiving = useIsArchiving(props.w.id);
+  if (archiving) return <ArchivingTaskRow w={props.w} compact={props.compact} />;
+  return <TaskRow {...props} />;
+}
+
+/** A task with an archive in flight (GH #246). The Task is still in the store
+ *  (it only leaves on the post-archive loadAll), but its worktree is being
+ *  torn down and its agents killed, so the row is inert: no click, no menu,
+ *  no tab children, nothing to drag. It reads as "on its way out" rather than
+ *  disappearing the moment the user confirms, which would leave a multi-second
+ *  gap where the archive silently might not have worked. */
+function ArchivingTaskRow({ w, compact }: { w: Task; compact: boolean }) {
+  if (compact) {
+    return (
+      <Tip content={`Archiving ${w.name}…`} side="right">
+        <div
+          data-sidebar-task-id={w.id}
+          data-task-archiving="true"
+          className="relative mx-auto flex h-8 w-8 items-center justify-center rounded-md text-[var(--color-fg-faint)] opacity-60"
+        >
+          <Spinner size={14} />
+        </div>
+      </Tip>
+    );
+  }
+  return (
+    <div className="mb-px" data-sidebar-task-row={w.id}>
+      <div
+        data-sidebar-task-id={w.id}
+        data-sidebar-task-project-id={w.project_id}
+        data-task-archiving="true"
+        className="ml-3 flex items-center gap-1.5 rounded-md px-1 py-1 text-[13px] select-none text-[var(--color-fg-faint)] opacity-70"
+      >
+        <span className="shrink-0 h-3.5 w-3.5 mx-0.5" />
+        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+          <span className="min-w-0 truncate font-medium line-through">{w.name}</span>
+        </div>
+        <Tip content="Archiving…">
+          <span
+            data-testid="archiving-badge"
+            aria-label="Archiving"
+            className="relative flex h-[18px] w-[18px] shrink-0 items-center justify-center text-[var(--color-fg-faint)]"
+          >
+            <Spinner size={12} />
+          </span>
+        </Tip>
+      </div>
+    </div>
+  );
+}
+
 /** Sidebar row for a task still being created (GH #242). No real Task
  *  exists yet — clicking it just activates the pending id, which MainArea
  *  resolves to CreatingTaskPane (see usePendingTask there). No tabs, no

@@ -37,7 +37,7 @@ import {
   taskSetYolo,
   tasksList,
 } from "@/lib/ipc";
-import { archiveAndRefresh } from "@/lib/archiveTask";
+import { startArchive } from "@/lib/archiveTask";
 import { withCreateLock } from "@/lib/createLock";
 import { markUnattendedSpawn } from "@/lib/unattendedSpawns";
 import { reportCliPromptDelivery } from "@/lib/cliPromptReports";
@@ -695,7 +695,7 @@ async function archiveTaskHandler(params: unknown): Promise<null> {
   const app = useApp.getState();
   if (!app.tasks.some(t => t.id === taskId)) await app.loadAll();
   if (!useApp.getState().tasks.some(t => t.id === taskId)) throw new Error("no such task");
-  await archiveAndRefresh(taskId, false);
+  await startArchive(taskId, false);
   return null;
 }
 

@@ -77,7 +77,7 @@ Where the pieces live:
 
 ## Long-running IPC discipline
 
-**Any IPC doing heavy IO MUST be `async fn` + `tauri::async_runtime::spawn_blocking`.** Synchronous commands run on the IPC handler thread = same thread driving WKWebView event loop in dev. `fs::remove_dir_all` on a 50k-inode `.venv` froze the entire Mac. Already applied to `task_archive`, `task_delete`, `list_monospace_fonts`. Pair with `useUI.setBusy("…")` overlay so the user knows a multi-second op is in flight — UNLESS the operation is scoped to one task rather than the whole app (see below), in which case a global overlay is the wrong tool.
+**Any IPC doing heavy IO MUST be `async fn` + `tauri::async_runtime::spawn_blocking`.** Synchronous commands run on the IPC handler thread = same thread driving WKWebView event loop in dev. `fs::remove_dir_all` on a 50k-inode `.venv` froze the entire Mac. Already applied to `task_archive`, `task_delete`, `list_monospace_fonts`. Pair with `useUI.setBusy("…")` overlay so the user knows a multi-second op is in flight — UNLESS the operation is scoped to one task rather than the whole app (both sections below), in which case a global overlay is the wrong tool: the other tasks' agents keep working and the user must be able to reach them.
 
 ### Non-blocking task creation (GH #242)
 
@@ -88,3 +88,15 @@ Where the pieces live:
 3. Once `taskCreate` resolves, `loadAll()` picks up the real task and the pending entry is dropped — `PendingTaskRow`/`CreatingTaskPane` are superseded by the normal `TaskRow`/`TaskView` at the same id, so the user's click target never moves. On rejection the pending entry flips to an error state instead (dismissible from the pane), no toast, no reopened dialog.
 
 `QuickCreateProgressDialog` and `useUI().taskCreateProgress` are gone (deleted, not just unused) — don't resurrect them for a new quick-create variant; extend the pendingTasks flow instead. Any future task-scoped long-running create/import flow should follow this shape rather than reaching for `setBusy`.
+
+### Non-blocking archive (GH #246)
+
+The same bug at the other end of a task's life, and the same fix. `archiveTask.ts`'s `runArchive` raised `setBusy("Archiving …")` and held it until `task_archive` AND the post-archive `loadAll` had returned — the project's archive script, then `git worktree remove`, then `fs::remove_dir_all` over a `node_modules`-sized tree, with the whole window under a click-blocker and every other task's agent unreachable. Worst exactly when #242 was worst: archiving several finished tasks in a row.
+
+`startArchive(taskId, deleteBranch)` (exported, also used by the CLI's `archive` RPC in `cliRpc.ts`) does everything visible synchronously with the click and returns a promise the UI does not wait on:
+
+1. `src/store/archivingTasks.ts` gets the id (a separate store, not `useApp` — one transient flag has no business re-running every mounted task's selectors, see performance.md bear trap 8). It also doubles as the double-fire guard, which the modal used to provide for free.
+2. The task is deselected immediately if it was active: its pane is in front of the user with its worktree being deleted underneath it.
+3. `Sidebar.tsx`'s `TaskRowSlot` swaps that one row for `ArchivingTaskRow` — struck-through name, spinner, no click, no menu, no tab children — until `loadAll` drops the task. Nothing else in the window changes.
+
+`archiveAndRefresh` still swallows the IPC rejection (issue #24: the task is already persisted as archived, so the refresh must run regardless), but it now also toasts the cleanup error. In the background that toast is the ONLY signal: a worktree that failed to remove would otherwise vanish from the sidebar with the directory still on disk. Read the task's name for that toast BEFORE `loadAll` drops it.

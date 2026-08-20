@@ -86,6 +86,10 @@ export interface TermicApi {
    *  their "creating" state without racing the fixture repo's near-instant
    *  real worktree add. */
   usePendingTasks: { getState: () => any };
+  /** Tasks mid-archive (GH #246 — non-blocking archive). Same trick as
+   *  usePendingTasks: the fixture repo's archive is far too fast to catch the
+   *  "Archiving…" row by racing a real one. */
+  useArchivingTasks: { getState: () => any };
 }
 
 declare global {
