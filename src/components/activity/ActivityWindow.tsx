@@ -63,9 +63,12 @@ export function ActivityWindow() {
   // Live tab titles (what the main window's tab strip actually shows right
   // now) come from a SEPARATE webview, so they're bridged in on request —
   // see lib/activityTitleBridge.ts for why this can't just read Zustand.
-  // Subscribed once; `titleBridgeRef.current.request()` is called on the
-  // same cadence as `loadMeta` below (title text is exactly as slow-moving
-  // as the project/task lists — no need for its own 1Hz path).
+  // Subscribed once; `titleBridgeRef.current.request()` rides the sample
+  // tick (see the poll loop below), NOT loadMeta's every-tenth: a title is
+  // the one piece of metadata here that moves while you watch, because an
+  // agent rewrites its tab title as it works. The request is an emit of a
+  // small map, and the bridge drops a reply identical to the last one before
+  // it reaches React, so the steady-state cost is the emit alone.
   const titleBridgeRef = useRef<{ request: () => void; stop: () => void } | null>(null);
   useEffect(() => {
     const bridge = subscribeActivityTitles(setLiveTitles);
@@ -85,7 +88,6 @@ export function ActivityWindow() {
     Promise.all([ipc.projectsList(), ipc.tasksList()])
       .then(([p, t]) => { setProjects(p); setTasks(t); })
       .catch(() => { /* names degrade to ids; the numbers still work */ });
-    titleBridgeRef.current?.request();
   }, []);
 
   // Session lifecycle. `start` is what allocates state in Rust and `stop`
@@ -128,6 +130,7 @@ export function ActivityWindow() {
         if (stopped) return;
         setSnap(next);
         setError(null);
+        titleBridgeRef.current?.request();
         if (++tickRef.current % META_EVERY === 0) loadMeta();
       } catch (e) {
         if (stopped) return;

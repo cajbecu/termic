@@ -265,6 +265,35 @@ describe("tabTitleMap", () => {
     expect(m.get("a")?.title).toBe("Claude Code");
     expect(m.get("b")?.title).toBe("Action Required");
   });
+
+  it("names a live tab the task list has not caught up with yet", () => {
+    // The task list is re-read from disk on a slow cadence, so a just-opened
+    // task's tabs can be absent from `persisted_tabs` while the main window is
+    // already showing (and bridging) their titles. Gating the overlay on the
+    // persisted array made such a row read "Agent · bash" until the next
+    // re-read, throwing away a title we already had.
+    const m = tabTitleMap(
+      [task({ id: "t1", project_id: "p1", persisted_tabs: [] })],
+      { fresh: "✳ activity-mon" },
+    );
+    expect(m.get("fresh")).toEqual({ title: "✳ activity-mon" });
+    expect(rowTitle(row({ key: "k", tabId: "fresh", kind: "agent", label: "bash" }), m))
+      .toBe("✳ activity-mon");
+  });
+
+  it("does not let a bridged title outrank the persisted tab's own metadata", () => {
+    // The catch-all above must only fill GAPS: a tab that IS persisted keeps
+    // its cli and order, which the "Tab N · claude" fallback depends on.
+    const m = tabTitleMap(
+      [task({
+        id: "t1", project_id: "p1",
+        persisted_tabs: [{ id: "a", cli: "claude", title: null }],
+      })],
+      { a: "✳ shipping" },
+    );
+    expect(m.get("a")).toEqual({ title: "✳ shipping", cli: "claude", order: 1 });
+    expect(m.size).toBe(1);
+  });
 });
 
 describe("sorting", () => {

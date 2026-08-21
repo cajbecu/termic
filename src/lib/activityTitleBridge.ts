@@ -51,15 +51,33 @@ export function initActivityTitleBridge(): () => void {
   return () => { void unlistenPromise.then(u => u()); };
 }
 
-/** Activity-window side. Subscribes to replies (updating `onTitles` whenever
- *  one arrives) and returns a `request()` function the caller fires on its
- *  own sampling cadence — same shape as `loadMeta` re-reading the project/
- *  task lists. Returns the unlisten/cleanup function. */
+/** True when two replies carry exactly the same tab -> title mapping. Titles
+ *  are requested on the sample tick, but they only actually CHANGE when an
+ *  agent emits a new OSC title, so the overwhelmingly common reply is
+ *  identical to the last one. Delivering it anyway would hand React a fresh
+ *  object identity every second and re-run `groupRows` for nothing — the
+ *  cross-window twin of docs/performance.md bear trap 8. */
+export function sameTitles(a: Record<string, string>, b: Record<string, string>): boolean {
+  const ka = Object.keys(a);
+  if (ka.length !== Object.keys(b).length) return false;
+  for (const k of ka) if (a[k] !== b[k]) return false;
+  return true;
+}
+
+/** Activity-window side. Subscribes to replies (calling `onTitles` whenever
+ *  one arrives that DIFFERS from the last — see `sameTitles`) and returns a
+ *  `request()` function the caller fires on its own sampling cadence.
+ *  Returns the unlisten/cleanup function. */
 export function subscribeActivityTitles(
   onTitles: (titles: Record<string, string>) => void,
 ): { request: () => void; stop: () => void } {
-  const unlistenPromise = listen<{ titles: Record<string, string> }>(REPLY, ev => onTitles(ev.payload.titles))
-    .catch(e => { logBridgeError("activity window: listen(reply)", e); return () => {}; });
+  let last: Record<string, string> | null = null;
+  const unlistenPromise = listen<{ titles: Record<string, string> }>(REPLY, ev => {
+    const next = ev.payload.titles;
+    if (last && sameTitles(last, next)) return;
+    last = next;
+    onTitles(next);
+  }).catch(e => { logBridgeError("activity window: listen(reply)", e); return () => {}; });
   return {
     request: () => { emit(REQUEST).catch(e => logBridgeError("activity window: emit(request)", e)); },
     stop: () => { void unlistenPromise.then(u => u()); },

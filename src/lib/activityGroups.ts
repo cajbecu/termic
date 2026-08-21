@@ -251,6 +251,15 @@ export function tabTitleMap(tasks: Task[], liveTitles?: Record<string, string>):
       out.set(tab.id, { title: liveTitles?.[tab.id] ?? tab.title ?? undefined, cli: tab.cli, order: i + 1 });
     });
   }
+  // A tab the main window is showing but that has not reached disk yet (the
+  // task list here is re-read from disk on its own slow cadence, and a
+  // just-opened task's tabs are persisted asynchronously) still gets its
+  // bridged title. Without this, `persisted_tabs` gates the overlay and such a
+  // row reads "Agent · bash" — a live title we already have in hand, thrown
+  // away because the tab was young.
+  for (const [tabId, title] of Object.entries(liveTitles ?? {})) {
+    if (!out.has(tabId)) out.set(tabId, { title });
+  }
   return out;
 }
 

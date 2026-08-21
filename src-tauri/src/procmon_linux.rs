@@ -398,6 +398,19 @@ mod tests {
     /// tests that drive it must not run concurrently with each other.
     static SESSION_TEST: Mutex<()> = Mutex::new(());
 
+    /// `/proc/uptime` carries two decimals, so the tick counter the sampler
+    /// diffs against only moves every 10ms. Two back-to-back samples can land
+    /// inside the SAME tick, where `delta_wall == 0` means "no time passed"
+    /// and every row honestly reports no CPU delta. Production never hits it
+    /// (the window samples at 1Hz), but a test that samples twice in a row
+    /// does, and it is why this used to fail only on CI's faster /proc.
+    fn wait_for_a_tick() {
+        let start = now_boot_ticks();
+        while now_boot_ticks() == start {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
     #[test]
     fn signal_refuses_our_own_pid() {
         let err = signal(&[], std::process::id(), "TERM").unwrap_err();
@@ -496,6 +509,7 @@ mod tests {
         assert!(snap.rows[0].cpu_pct.is_none());
         assert!(snap.rows[0].alive);
 
+        wait_for_a_tick();
         let second = sample(snap.session, vec![Root {
             key: "app".into(),
             kind: "app".into(),

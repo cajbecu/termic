@@ -64,6 +64,19 @@ describe("Activity monitor", () => {
     // with real children, which is exactly what the sampler rolls up.
     taskId = await openTask("activity-mon");
     await waitForAgentReady(taskId);
+    // `waitForAgentReady` returns on the FIRST sign of life, which is usually
+    // the banner rather than the OSC title. The title case below asserts that
+    // the BRIDGE carries a live title, so the main window has to actually have
+    // one before the Activity window opens — otherwise the case is really
+    // racing fake-agent.sh's first `set_title`, which is how it flaked in CI.
+    await browser.waitUntil(
+      async () => browser.execute((id, want) => {
+        const tab = (window.__termic!.useApp.getState().tabs[id] ?? [])[0] as
+          { liveTitle?: string } | undefined;
+        return !!tab?.liveTitle?.includes(want);
+      }, taskId, "activity-mon"),
+      { timeout: 20_000, timeoutMsg: "agent never drove its OSC title to the task name" },
+    );
   });
 
   after(async () => {
@@ -115,8 +128,15 @@ describe("Activity monitor", () => {
         // text the tab strip shows, so the task slug is what has to land here.
         return rows.some(r => r.includes("activity-mon")) && !FALLBACK.test(rows.join(" | "));
       },
-      { timeout: 20_000, timeoutMsg: "agent row never took the tab's live title" },
-    );
+      { timeout: 20_000 },
+    // Name what the rows DID say: the two ways this fails (the bridge staying
+    // silent, vs. a stray untitled row tripping FALLBACK) are indistinguishable
+    // from a bare timeout, and this only reproduces on CI.
+    ).catch(() => {
+      throw new Error(
+        `agent row never took the tab's live title, rows were ${JSON.stringify(rows)}`,
+      );
+    });
     // Restate it as an assertion so a pass shows what it matched, and a future
     // edit that loosens the poll still has to produce a titled row.
     expect(rows.join(" | ")).toContain("activity-mon");

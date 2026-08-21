@@ -63,6 +63,14 @@ Three things to know before touching it:
 
 Theme comes from importing `@/store/prefs` (the module applies the persisted palette's CSS vars at load, and localStorage is shared across windows of the same origin). Zustand state does NOT cross webviews, so a theme change in the main window reaches this one when it next opens.
 
+**Row names come from the main window, on request** (`lib/activityTitleBridge.ts`). A tab's displayed title is `customTitle ? title : (liveTitle || title)`, and `liveTitle` (the agent's OSC title) lives only in the main window's JS memory, never on disk — so Activity emits `activity://request-titles` and the main window answers with a `tabId -> title` map. Three details are load-bearing:
+
+- **The request rides the sample tick, not `loadMeta`'s every-tenth.** The project/task lists are disk reads and genuinely slow-moving; a title is the one piece of metadata here that changes while you watch it, because an agent rewrites its tab title as it works. On the every-tenth cadence an occluded window lagged 50 s behind, which is also how the e2e case for it flaked.
+- **A reply identical to the last one is dropped before it reaches React** (`sameTitles`). Nearly every reply is unchanged, and passing a fresh object identity through once a second would re-run `groupRows` for nothing — the cross-window twin of [performance.md](performance.md) bear trap 8.
+- **A bridged title applies even to a tab absent from `persisted_tabs`.** The task list is re-read from disk on the slow cadence, so a just-opened task's tabs can still be missing from it while the main window is already showing their titles. Gating the overlay on the persisted array made such a row read "Agent · bash" until the next re-read.
+
+`emit`/`listen` are the core `event` plugin, so — unlike a plain `#[tauri::command]` — they ARE capability-gated per window (`capabilities/procmon.json`). A dropped permission fails silently, with titles quietly reverting to the "Tab N · claude" fallback, which is why both sides log a broken bridge through `log_line`.
+
 ## Top-bar tooltips that name a shortcut
 
 `CommandPaletteButton.tsx` opens the right-hand cluster in `UnifiedBar.tsx`, before Run and the rest of the task-scoped actions (a divider separates it from them), and renders with or without a task (the palette's global commands do not need one). The palette button is a bare icon (`SquareChevronRight`, the ">" prompt) matching its neighbours: the shortcut lives in the tooltip only, built from the LIVE `command-palette` binding via `bindingGlyphs` rather than a hard-coded "⇧⌘P", so a rebind retitles it. An earlier version printed the glyphs on the button face as a bordered chip, which read as a foreign element in a row of bare icons.
