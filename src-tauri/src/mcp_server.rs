@@ -3107,6 +3107,7 @@ mod tests {
                 queued: 0,
                 capable: true,
                 tab_states: Vec::new(),
+                hydrated: true,
             },
         )]);
         spawn_with(host, Box::new(|| true))
