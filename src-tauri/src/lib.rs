@@ -1269,6 +1269,12 @@ fn save_task(w: &Task) -> Result<()> {
 fn delete_task_file(id: &str) -> Result<()> {
     let f = tasks_dir()?.join(format!("{id}.json"));
     let _ = fs::remove_file(f);
+    // The task record is gone for good (History's "Empty archive", or its
+    // project being removed), so its scratchpads have nowhere left to appear.
+    // ARCHIVING deliberately does not come through here: it is recoverable,
+    // and notes about the work are exactly what someone wants back when they
+    // restore a task (GH #244).
+    scratch_purge_task(id);
     Ok(())
 }
 
@@ -8809,6 +8815,317 @@ fn task_file_write(id: String, path: String, content: String) -> Result<(), Stri
     write_atomic(&abs, content.as_bytes()).map_err(|e| format!("write failed: {e}"))
 }
 
+// ──────────────────────────── scratchpads (GH #244) ────────────────────────
+//
+// Sublime-style untitled buffers, scoped to ONE TASK. A pad is an unsaved
+// buffer that survives a relaunch; it is NOT a file with a hidden path, and
+// ⌘S never writes here — it PROMOTES the pad into the worktree (see
+// `scratch_promote`) and the record disappears.
+//
+// Buffers live under the app data dir, never inside the worktree: a scratch
+// file in the repo shows up in `git status`, in the diff the agent reviews,
+// and eventually in a commit.
+//
+//   <data_dir>/scratch/<task_id>/index.json     one record per pad
+//   <data_dir>/scratch/<task_id>/<pad_id>.txt   the buffer
+//
+// The index carries title and syntax because a pad has no filename to
+// re-derive them from on launch, and one index read beats stat-ing N files.
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ScratchRecord {
+    pub id: String,
+    pub title: String,
+    /// Manual "Set syntax" pick (a `lib/languages` id). Persisted, unlike an
+    /// edit tab's session-only one: there is no extension to re-derive it from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syntax: Option<String>,
+    /// Position in the task's tab strip on restore.
+    #[serde(default)]
+    pub order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Serializes the read-modify-write of one task's index. Both the buffer
+/// write and the title derivation ride the typing path and are debounced
+/// independently, so two writes CAN interleave; without this, one would read
+/// the index the other had not yet written and drop its field.
+static SCRATCH_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// Ids come from the renderer (`crypto.randomUUID`), and both a task id and a
+/// pad id become a path segment here. Anything outside this alphabet is
+/// refused rather than sanitized: a silently rewritten id would read a
+/// different pad than the caller asked for.
+fn scratch_id_ok(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn scratch_dir(task_id: &str) -> Result<PathBuf, String> {
+    if !scratch_id_ok(task_id) {
+        return Err(format!("invalid task id: {task_id:?}"));
+    }
+    let p = data_dir().map_err(|e| e.to_string())?.join("scratch").join(task_id);
+    fs::create_dir_all(&p).map_err(|e| format!("create scratch dir failed: {e}"))?;
+    Ok(p)
+}
+
+fn scratch_buffer_path(task_id: &str, id: &str) -> Result<PathBuf, String> {
+    if !scratch_id_ok(id) {
+        return Err(format!("invalid scratchpad id: {id:?}"));
+    }
+    Ok(scratch_dir(task_id)?.join(format!("{id}.txt")))
+}
+
+/// The task's index, ordered. A missing or corrupt index reads as empty
+/// rather than erroring: the buffers are the data, and refusing to list them
+/// because one JSON file tore would strand every pad in the task.
+fn scratch_read_index(task_id: &str) -> Result<Vec<ScratchRecord>, String> {
+    let f = scratch_dir(task_id)?.join("index.json");
+    let mut list: Vec<ScratchRecord> = match fs::read_to_string(&f) {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+    list.sort_by_key(|r| r.order);
+    Ok(list)
+}
+
+fn scratch_write_index(task_id: &str, list: &[ScratchRecord]) -> Result<(), String> {
+    let f = scratch_dir(task_id)?.join("index.json");
+    let json = serde_json::to_string_pretty(list).map_err(|e| e.to_string())?;
+    write_atomic(&f, json.as_bytes()).map_err(|e| format!("index write failed: {e}"))
+}
+
+/// Drop a task's whole pad directory. Called from `delete_task_file`, the one
+/// HARD delete: archiving is recoverable (the task stays in History), and
+/// notes about the work are exactly what a user wants back when they restore
+/// it, so an archive must leave pads alone.
+fn scratch_purge_task(task_id: &str) {
+    if !scratch_id_ok(task_id) {
+        return;
+    }
+    if let Ok(d) = data_dir() {
+        let _ = fs::remove_dir_all(d.join("scratch").join(task_id));
+    }
+}
+
+/// Containment check for a path that does NOT exist yet — `safe_task_path`
+/// canonicalizes the target itself, which errors on a missing file, so it
+/// cannot answer "where may I CREATE this?".
+///
+/// Walks up to the nearest existing ancestor, canonicalizes THAT and checks
+/// containment there (a symlink has to exist to redirect anything), then
+/// rebuilds the target underneath the canonical ancestor. Rebuilding from the
+/// canonical ancestor rather than the caller's string is the point: a
+/// `members/live -> /elsewhere` symlink is resolved before the remainder is
+/// appended, so the write lands where the check looked.
+fn safe_task_path_for_create(ws_path: &Path, rel: &str) -> Result<PathBuf, String> {
+    let pb = reject_escaping_segments(rel)?;
+    if pb.as_os_str().is_empty() {
+        return Err("empty path".into());
+    }
+    let canon_base = fs::canonicalize(ws_path).map_err(|e| format!("{}: {e}", ws_path.display()))?;
+    // Longest existing prefix of `pb`, walking from the full path backwards.
+    let comps: Vec<_> = pb.components().collect();
+    for split in (0..=comps.len()).rev() {
+        let head: PathBuf = comps[..split].iter().collect();
+        let probe = canon_base.join(&head);
+        if !probe.exists() {
+            continue;
+        }
+        let canon_head = fs::canonicalize(&probe).map_err(|e| format!("{}: {e}", probe.display()))?;
+        if !canon_head.starts_with(&canon_base) {
+            return Err(format!("path escapes task: {rel} -> {}", canon_head.display()));
+        }
+        let tail: PathBuf = comps[split..].iter().collect();
+        return Ok(canon_head.join(tail));
+    }
+    // `split == 0` is the task root itself, which always exists, so the loop
+    // above always returns.
+    Err(format!("could not resolve {rel} inside {}", ws_path.display()))
+}
+
+#[tauri::command]
+async fn scratch_list(task_id: String) -> Result<Vec<ScratchRecord>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _g = SCRATCH_LOCK.lock();
+        scratch_read_index(&task_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn scratch_read(task_id: String, id: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let f = scratch_buffer_path(&task_id, &id)?;
+        // A record whose buffer never got written (created, never typed in)
+        // is an empty pad, not an error.
+        Ok(fs::read_to_string(&f).unwrap_or_default())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Create-or-overwrite the buffer and stamp `updated_at`. This is CRASH
+/// SAFETY, not saving: it must never clear the tab's dirty dot, because
+/// nothing has been written anywhere the user chose.
+#[tauri::command]
+async fn scratch_write(task_id: String, id: String, content: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let f = scratch_buffer_path(&task_id, &id)?;
+        write_atomic(&f, content.as_bytes()).map_err(|e| format!("write failed: {e}"))?;
+        let _g = SCRATCH_LOCK.lock();
+        let mut list = scratch_read_index(&task_id)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        match list.iter_mut().find(|r| r.id == id) {
+            Some(r) => r.updated_at = now,
+            None => {
+                let order = list.iter().map(|r| r.order).max().unwrap_or(-1) + 1;
+                list.push(ScratchRecord {
+                    id: id.clone(),
+                    title: String::new(),
+                    syntax: None,
+                    order,
+                    created_at: now.clone(),
+                    updated_at: now,
+                });
+            }
+        }
+        scratch_write_index(&task_id, &list)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Index-only update (derived/renamed title, manual syntax pick, reorder).
+/// Every field is optional so the debounced title derivation can write the
+/// title without racing a syntax pick into a stale value.
+#[tauri::command]
+async fn scratch_set_meta(
+    task_id: String,
+    id: String,
+    title: Option<String>,
+    syntax: Option<String>,
+    order: Option<i64>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if !scratch_id_ok(&id) {
+            return Err(format!("invalid scratchpad id: {id:?}"));
+        }
+        let _g = SCRATCH_LOCK.lock();
+        let mut list = scratch_read_index(&task_id)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let rec = match list.iter_mut().find(|r| r.id == id) {
+            Some(r) => r,
+            None => {
+                let order_next = list.iter().map(|r| r.order).max().unwrap_or(-1) + 1;
+                list.push(ScratchRecord {
+                    id: id.clone(),
+                    title: String::new(),
+                    syntax: None,
+                    order: order_next,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                });
+                list.last_mut().expect("just pushed")
+            }
+        };
+        if let Some(t) = title {
+            rec.title = t;
+        }
+        // An empty string clears the manual pick (back to path/content
+        // resolution); `None` leaves it alone.
+        if let Some(s) = syntax {
+            rec.syntax = if s.is_empty() { None } else { Some(s) };
+        }
+        if let Some(o) = order {
+            rec.order = o;
+        }
+        scratch_write_index(&task_id, &list)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn scratch_delete(task_id: String, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let f = scratch_buffer_path(&task_id, &id)?;
+        let _ = fs::remove_file(&f);
+        let _g = SCRATCH_LOCK.lock();
+        let mut list = scratch_read_index(&task_id)?;
+        list.retain(|r| r.id != id);
+        scratch_write_index(&task_id, &list)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The defining flow: write the pad's buffer to a task-relative path and drop
+/// the pad. ONE command on purpose. Promotion has to resolve its target
+/// through the same `resolve_task_git_path` + containment pair every other
+/// write uses (so member dirs work and nothing escapes the worktree), and
+/// doing it as "read here, write there" from TypeScript would re-implement
+/// that rule in the one place it must not be re-implemented.
+///
+/// Refuses an existing target unless `overwrite` — the caller asks first.
+#[tauri::command]
+async fn scratch_promote(
+    task_id: String,
+    id: String,
+    rel_path: String,
+    overwrite: bool,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let w = load_tasks().into_iter().find(|w| w.id == task_id).ok_or("no task")?;
+        let buf = scratch_buffer_path(&task_id, &id)?;
+        let content = fs::read_to_string(&buf).unwrap_or_default();
+        let (cwd, rel) = resolve_task_git_path(&w, &rel_path)?;
+        if rel.trim().is_empty() || rel.ends_with('/') {
+            return Err(format!("not a file path: {rel_path}"));
+        }
+        let abs = safe_task_path_for_create(&cwd, &rel)?;
+        if abs.exists() && !overwrite {
+            return Err(format!("\"{rel_path}\" already exists"));
+        }
+        if let Some(parent) = abs.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
+        }
+        write_atomic(&abs, content.as_bytes()).map_err(|e| format!("write failed: {e}"))?;
+        // Only now is the pad redundant. A failed write above leaves it
+        // exactly where it was, which is the whole point of promoting rather
+        // than moving.
+        let _ = fs::remove_file(&buf);
+        let _g = SCRATCH_LOCK.lock();
+        let mut list = scratch_read_index(&task_id)?;
+        list.retain(|r| r.id != id);
+        scratch_write_index(&task_id, &list)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Does a task-relative path already exist? The save picker asks before
+/// promoting so it can offer "overwrite?" instead of failing the write.
+/// Unlike `task_path_stat` this tolerates a target whose PARENT is missing
+/// too (the picker lets you type a new folder).
+#[tauri::command]
+async fn scratch_promote_target_exists(task_id: String, rel_path: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let w = load_tasks().into_iter().find(|w| w.id == task_id).ok_or("no task")?;
+        let (cwd, rel) = resolve_task_git_path(&w, &rel_path)?;
+        if rel.trim().is_empty() {
+            return Ok(false);
+        }
+        Ok(safe_task_path_for_create(&cwd, &rel).map(|p| p.exists()).unwrap_or(false))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Rename a file or directory in the task (file-tree context menu).
 /// `new_name` is a bare name (no path separators) — the entry stays in its
 /// current directory. Member-aware + constrained to the worktree via
@@ -13598,6 +13915,8 @@ pub fn run() {
             task_git_log, task_git_refs, task_git_push, task_git_commit_files, task_git_compare, task_git_blame, task_git_commit_meta, task_git_commit_offset,
             task_file_diff, task_file_diff_sides, task_file_read, task_file_read_base64, task_file_fp, task_file_write, task_dir_list, task_path_stat,
             task_path_rename, task_path_delete, task_reveal_path,
+            scratch_list, scratch_read, scratch_write, scratch_set_meta, scratch_delete,
+            scratch_promote, scratch_promote_target_exists,
             task_rename, project_rename,
             pty_spawn, pty_write, pty_resize, pty_kill,
             procmon_start, procmon_sample, procmon_stop, procmon_signal, procmon_open_window,
@@ -14511,6 +14830,110 @@ mod tests {
         // ends up in is as unactionable as the one #250 reported.
         assert!(err.contains("path escapes task: link.png -> "), "{err}");
         assert!(err.contains("secret.png"), "{err}");
+    }
+
+    // ─────────────────── scratchpads (GH #244) ───────────────────
+
+    #[test]
+    fn safe_task_path_for_create_allows_a_missing_target_and_missing_parents() {
+        let ws = tempdir().unwrap();
+        fs::create_dir_all(ws.path().join("docs")).unwrap();
+        // Existing folder, new file.
+        let p = safe_task_path_for_create(ws.path(), "docs/notes.md").unwrap();
+        assert_eq!(p, fs::canonicalize(ws.path()).unwrap().join("docs/notes.md"));
+        // Neither the folder nor the file exists yet: the picker lets you type
+        // a new one, and promote mkdir -p's it.
+        let p = safe_task_path_for_create(ws.path(), "a/b/c/notes.md").unwrap();
+        assert_eq!(p, fs::canonicalize(ws.path()).unwrap().join("a/b/c/notes.md"));
+    }
+
+    #[test]
+    fn safe_task_path_for_create_rejects_escapes_including_through_a_symlink() {
+        let outside = tempdir().unwrap();
+        let ws = tempdir().unwrap();
+        assert!(safe_task_path_for_create(ws.path(), "../escape.md").is_err());
+        assert!(safe_task_path_for_create(ws.path(), "/etc/passwd").is_err());
+        assert!(safe_task_path_for_create(ws.path(), "").is_err());
+        // The dangerous case a naive "does the string contain .. ?" check
+        // misses: an EXISTING in-worktree directory symlinked outside, with
+        // the new file hung underneath it. The target itself never exists, so
+        // `safe_task_path` cannot answer this at all.
+        std::os::unix::fs::symlink(outside.path(), ws.path().join("out")).unwrap();
+        let err = safe_task_path_for_create(ws.path(), "out/notes.md").unwrap_err();
+        assert!(err.contains("path escapes task: out/notes.md -> "), "{err}");
+    }
+
+    // ARCHIVING A TASK MUST LEAVE ITS PADS ALONE. Archiving is recoverable
+    // (the task stays in History, the branch stays in git), and notes about
+    // the work are exactly what someone wants back when they restore it. The
+    // only place pads may be destroyed is `delete_task_file`, the hard delete
+    // behind History's "Empty archive" and project removal.
+    //
+    // A source guard rather than a behavioural test because the alternative
+    // is standing up a real worktree to drive `task_archive_sync`, and what
+    // actually needs pinning is the call site, not the deletion.
+    #[test]
+    fn only_the_hard_delete_purges_scratchpads() {
+        let src = include_str!("lib.rs");
+        let calls: Vec<&str> = src
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.contains("scratch_purge_task(") && !l.starts_with("//"))
+            .collect();
+        // Drop this test's own mentions of the name; what is left is the
+        // definition plus every real call site.
+        let real: Vec<&&str> = calls.iter()
+            .filter(|l| !l.starts_with("assert") && !l.contains("l.contains("))
+            .collect();
+        assert_eq!(
+            real.len(), 2,
+            "scratch_purge_task gained a call site: {real:#?}\n\
+             Only delete_task_file may purge pads — archiving must not.",
+        );
+        assert!(real.iter().any(|l| l.starts_with("fn scratch_purge_task")), "{real:#?}");
+        assert!(real.iter().any(|l| l.starts_with("scratch_purge_task(id);")), "{real:#?}");
+        // And that one call really does sit inside delete_task_file.
+        let body = src
+            .split_once("fn delete_task_file(").expect("delete_task_file exists").1;
+        let body = &body[..body.find("\n}\n").expect("function ends")];
+        assert!(body.contains("scratch_purge_task(id);"), "delete_task_file no longer purges pads");
+    }
+
+    #[test]
+    fn scratch_id_ok_refuses_path_segments() {
+        assert!(scratch_id_ok("2f1c9b4e-0000-4aaa-bbbb-cccccccccccc"));
+        assert!(scratch_id_ok("pad_1"));
+        // Every one of these would become a path segment under data_dir().
+        for bad in ["", "..", "a/b", "a\\b", "a.txt", "../../etc/passwd", "a b"] {
+            assert!(!scratch_id_ok(bad), "{bad:?} must be refused");
+        }
+        assert!(!scratch_id_ok(&"a".repeat(129)));
+    }
+
+    // The index is the only record of a pad's title and syntax — there is no
+    // filename to re-derive them from — so a round-trip through it is the
+    // whole restore path.
+    #[test]
+    fn scratch_index_round_trips_and_orders() {
+        let recs = vec![
+            ScratchRecord { id: "b".into(), title: "second".into(), syntax: Some("json".into()),
+                            order: 1, created_at: "t0".into(), updated_at: "t1".into() },
+            ScratchRecord { id: "a".into(), title: "first".into(), syntax: None,
+                            order: 0, created_at: "t0".into(), updated_at: "t0".into() },
+        ];
+        let json = serde_json::to_string(&recs).unwrap();
+        let mut back: Vec<ScratchRecord> = serde_json::from_str(&json).unwrap();
+        back.sort_by_key(|r| r.order);
+        assert_eq!(back.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(back[1].syntax.as_deref(), Some("json"));
+        assert_eq!(back[0].syntax, None);
+        // Records written before a field existed must still load: a pad that
+        // fails to deserialize is a note the user loses.
+        let old: Vec<ScratchRecord> = serde_json::from_str(
+            r#"[{"id":"a","title":"t","created_at":"x","updated_at":"y"}]"#,
+        ).unwrap();
+        assert_eq!(old[0].order, 0);
+        assert_eq!(old[0].syntax, None);
     }
 
     #[test]

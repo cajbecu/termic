@@ -422,6 +422,46 @@ export const taskPathStat = (id: string, path: string) =>
 export const taskFileWrite = (id: string, path: string, content: string) =>
   invoke<void>("task_file_write", { id, path, content });
 export const taskFiles    = (id: string) => invoke<string[]>("task_files", { id });
+
+// ─────────────────────────── scratchpads (GH #244) ───────────────────────────
+// Untitled buffers scoped to one task, stored under `<data_dir>/scratch/<taskId>/`
+// so nothing ever appears in `git status`. See `ScratchTab` in lib/types.
+
+export type ScratchRecord = {
+  id: string;
+  title: string;
+  syntax?: string;
+  order: number;
+  created_at: string;
+  updated_at: string;
+};
+/** The task's pads, ordered. Read once when a task's tabs are restored. */
+export const scratchList  = (taskId: string) => invoke<ScratchRecord[]>("scratch_list", { taskId });
+export const scratchRead  = (taskId: string, id: string) => invoke<string>("scratch_read", { taskId, id });
+/** Crash safety, NOT saving: this never clears the tab's dirty dot. Debounced
+ *  by the caller and bailed when unchanged (performance.md bear trap 8). */
+export const scratchWrite = (taskId: string, id: string, content: string) =>
+  invoke<void>("scratch_write", { taskId, id, content });
+/** Index-only update. Every field is optional so the debounced title
+ *  derivation can't race a syntax pick into a stale value. Pass `syntax: ""`
+ *  to clear a manual pick. */
+export const scratchSetMeta = (
+  taskId: string, id: string,
+  meta: { title?: string; syntax?: string; order?: number },
+) => invoke<void>("scratch_set_meta", {
+  taskId, id,
+  title: meta.title ?? null, syntax: meta.syntax ?? null, order: meta.order ?? null,
+});
+export const scratchDelete = (taskId: string, id: string) =>
+  invoke<void>("scratch_delete", { taskId, id });
+/** Write the pad's buffer to a task-relative path and drop the pad. ONE
+ *  command so promotion resolves its target through the same member-aware
+ *  containment checks every other write uses. Rejects an existing target
+ *  unless `overwrite`. */
+export const scratchPromote = (taskId: string, id: string, relPath: string, overwrite = false) =>
+  invoke<void>("scratch_promote", { taskId, id, relPath, overwrite });
+export const scratchPromoteTargetExists = (taskId: string, relPath: string) =>
+  invoke<boolean>("scratch_promote_target_exists", { taskId, relPath });
 // `heal` restores any missing repo-root member symlink while listing the
 // root — only worth doing at intentional moments (task launch, manual
 // refresh), not on every agent-settle reload, so the caller opts in.

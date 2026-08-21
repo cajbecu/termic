@@ -6,15 +6,25 @@
 // The pick is per-tab and session-only (`EditTab.syntax`), which is the
 // Sublime behaviour: it overrides what the extension says for this buffer,
 // for as long as the buffer is open, and never rewrites the file or a setting.
+//
+// A SCRATCHPAD (GH #244) is the exception, and the tab type where this picker
+// matters most: with no extension to go on, a manual pick is the only way to
+// say what the buffer is, so `ScratchTab.syntax` is PERSISTED in the scratch
+// index. It is written HERE, in the one place a manual pick is made, and
+// deliberately not from an effect in the pane: picking Markdown swaps the
+// plain editor for the markdown shell, which REMOUNTS EditorPane in the same
+// commit, so a pane-side effect would only ever see the new value as its
+// initial seed and would never write it.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Search, Check } from "lucide-react";
 import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
+import { scratchSetMeta } from "@/lib/ipc";
 import { LANGUAGES, PLAIN_TEXT, effectiveLanguageId, type LanguageDef } from "@/lib/languages";
 import { fuzzyMatch, Highlighted } from "@/lib/fuzzy";
-import type { EditTab } from "@/lib/types";
+import type { EditTab, ScratchTab } from "@/lib/types";
 
 /** Alphabetical, with Plain Text pinned to the top — it is the "turn this
  *  off" row, not a language you go hunting for in the Ps. */
@@ -30,7 +40,9 @@ export function SyntaxPalette() {
   // The tab is read live: it can be closed (or recycled onto another file)
   // while the picker is up, in which case there is nothing left to apply to.
   const tab = useApp(s => target
-    ? (s.tabs[target.taskId] ?? []).find(t => t.id === target.tabId && t.type === "edit") as EditTab | undefined
+    ? (s.tabs[target.taskId] ?? []).find(
+        t => t.id === target.tabId && (t.type === "edit" || t.type === "scratch"),
+      ) as EditTab | ScratchTab | undefined
     : undefined);
   const currentId = effectiveLanguageId(tab);
 
@@ -73,7 +85,14 @@ export function SyntaxPalette() {
   }, [activeIdx, open]);
 
   function pick(lang: LanguageDef) {
-    if (target && tab) useApp.getState().patchTab(target.taskId, target.tabId, { syntax: lang.id });
+    if (target && tab) {
+      useApp.getState().patchTab(target.taskId, target.tabId, { syntax: lang.id });
+      // A pad's pick outlives the session: there is no extension to re-derive
+      // it from, so the scratch index is the only record of it.
+      if (tab.type === "scratch") {
+        scratchSetMeta(target.taskId, tab.scratchId, { syntax: lang.id }).catch(() => {});
+      }
+    }
     close();
   }
 

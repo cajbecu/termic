@@ -44,6 +44,12 @@ export interface ConfirmRequest {
   key?: string;
 }
 
+/** The three ways out of the scratchpad close prompt (GH #244). "save" opens
+ *  the promote picker and the close only happens if that picker goes through;
+ *  "discard" deletes the pad for good; "cancel" (including Esc / click-away)
+ *  leaves both the tab and the pad exactly as they were. */
+export type ScratchCloseChoice = "save" | "discard" | "cancel";
+
 /** How the user chose to share a file dropped onto a sandboxed terminal. */
 export type TerminalDropChoice =
   | { kind: "temp" }          // copy into TMPDIR, insert the staged path
@@ -201,6 +207,17 @@ interface UIState {
   /** Active sandboxed-terminal drop prompt, if any. The resolve callback
    *  fires with the user's choice when the modal closes. */
   terminalDrop: { req: TerminalDropRequest; resolve: (c: TerminalDropChoice) => void } | null;
+  /** Active "close this scratchpad?" prompt (GH #244). null = nothing
+   *  pending. Deliberately NOT built on `confirm`: this has THREE outcomes
+   *  and ConfirmDialog folds dismissal into cancel, exactly the reason
+   *  CloseDialog is its own component too. Here dismissal IS the harmless
+   *  outcome (Esc keeps the pad and the tab), so the mapping works out. */
+  scratchClose: { title: string; resolve: (c: ScratchCloseChoice) => void } | null;
+  /** The "Save to project" picker for a scratchpad: which pad is being
+   *  promoted, and into which task. Resolves true once the pad is a real
+   *  file, so the close flow can tell "saved, now close the tab" from
+   *  "backed out, keep it". null = closed. */
+  scratchSave: { taskId: string; tabId: string; resolve: (saved: boolean) => void } | null;
   /** Tasks whose PTYs are about to be SIGKILL'd because the user
    *  explicitly hit "Save & restart" on a config dialog (Sandbox or
    *  Resume override). The next pty-exit for any PTY belonging to one of
@@ -305,6 +322,14 @@ interface UIState {
    *  sharing strategy (or {kind:"cancel"} on dismiss). */
   askTerminalDrop: (req: TerminalDropRequest) => Promise<TerminalDropChoice>;
   resolveTerminalDrop: (choice: TerminalDropChoice) => void;
+  /** Open the scratchpad close prompt. Resolves with the user's choice
+   *  ("cancel" on dismiss). */
+  askScratchClose: (title: string) => Promise<ScratchCloseChoice>;
+  resolveScratchClose: (choice: ScratchCloseChoice) => void;
+  /** Open the promote picker. Resolves true when the pad became a file,
+   *  false on cancel/dismiss. */
+  askScratchSave: (taskId: string, tabId: string) => Promise<boolean>;
+  resolveScratchSave: (saved: boolean) => void;
   /** Mark a task for auto-restart on the next PTY exit. Called by
    *  dialogs that change spawn-time config and then kill the live agent so
    *  it relaunches with the new settings (the Sandbox dialog before
@@ -379,6 +404,8 @@ export const useUI = create<UIState>(set => ({
   fileTreeNonce: 0,
   confirm: null,
   terminalDrop: null,
+  scratchClose: null,
+  scratchSave: null,
   pendingPtyRestarts: new Set<string>(),
   toasts: [],
 
@@ -485,6 +512,29 @@ export const useUI = create<UIState>(set => ({
     const d = useUI.getState().terminalDrop;
     d?.resolve(choice);
     set({ terminalDrop: null });
+  },
+  askScratchClose: (title) =>
+    // Same macrotask deferral askConfirm uses: this prompt is reached from a
+    // tab context-menu item, and a dialog mounted while Radix still holds its
+    // `pointer-events: none` lock on <body> restores that lock on close and
+    // leaves the whole window unclickable (GH #43).
+    new Promise<ScratchCloseChoice>(resolve =>
+      setTimeout(() => set({ scratchClose: { title, resolve } }), 0)),
+  resolveScratchClose: (choice) => {
+    const c = useUI.getState().scratchClose;
+    c?.resolve(choice);
+    set({ scratchClose: null });
+  },
+  askScratchSave: (taskId, tabId) =>
+    new Promise<boolean>(resolve =>
+      // Deferred like askConfirm / askScratchClose: this can open straight
+      // off the close prompt's "Save…" button, i.e. while another dialog is
+      // still unmounting (GH #43's pointer-events lock).
+      setTimeout(() => set({ scratchSave: { taskId, tabId, resolve } }), 0)),
+  resolveScratchSave: (saved) => {
+    const d = useUI.getState().scratchSave;
+    d?.resolve(saved);
+    set({ scratchSave: null });
   },
   markPendingPtyRestart: (taskId) => set(s => {
     const next = new Set(s.pendingPtyRestarts);

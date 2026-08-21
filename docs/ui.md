@@ -103,7 +103,7 @@ Two flows use it, both writing a Settings › Tasks toggle:
 `confirmBeforeArchiveTask` (`src/lib/archiveTask.ts`) and
 `confirmBeforeCloseAgentTab` (`src/lib/closeTab.ts`). When the confirm is off,
 the action still reports itself with a toast that names the way back (History
-for an archive, the `+` menu's Resume list for a closed tab), because the
+for an archive, the `+` menu's Resume submenu for a closed tab), because the
 dialog was the only other feedback that anything happened.
 
 Copy follows what is actually recoverable, and only a genuinely one-way action
@@ -112,6 +112,18 @@ and the branch in git; a main agent tab auto-resumes; a secondary tab comes
 back from Resume. A **pane** tab is never snapshotted into `closedTabs`, so
 that one is one-way and says so. Red buttons everywhere teach people to ignore
 red buttons.
+
+A **scratchpad** (GH #244) gets its own three-outcome prompt instead
+(`ScratchCloseDialog`, Save… / Discard / Cancel, dismissal = Cancel), because
+it has never been written anywhere the user chose and there is no file to go
+back to. That prompt runs **once per pad, including inside a bulk close**
+("Close others", "Close to the right"): folding several pads into the one
+counting confirm would mean a single click deciding the fate of several notes.
+Cancel there spares that pad and lets the rest of the set close, the only
+reading that survives the fact that the tabs before it are already gone.
+`confirmBulkClose` therefore counts dirty FILES and live agents only, and a set
+of nothing but pads skips it entirely rather than stacking two dialogs on one
+decision.
 
 ## Close vs Quit (windowless mode)
 
@@ -195,6 +207,10 @@ Three tabs. Setup + Run stream via `useScriptRuns`. Terminal is opt-in: click `+
 The bar under the tab strip, for `edit` and `diff` tabs with a path (`EditorBreadcrumb` in `components/task/TaskView.tsx`). Each path segment is a click target: a folder reveals/expands that folder in the tree, the filename reveals the file, and every segment right-clicks to a copy menu. On the right: copy path, open the containing folder in Finder, locate in the tree.
 
 Editor tabs also get a **language button** there, showing what the buffer is highlighted as and opening the "Set syntax" picker (`SyntaxPalette`, also reachable as the command palette's `set-syntax` row). Sublime and VS Code put this bottom-right; termic has no status bar, and inventing one to hold a single control would cost the terminal pane an edge, so it goes on the bar that already exists. Diff tabs deliberately do NOT get it: there is no editable buffer there, so a diff's syntax always follows its path.
+
+A **scratchpad** (GH #244) renders its own variant of this bar: no trail, no copy / Finder / locate buttons (it has no path to point at), a line saying it is not in the project yet, and the language button — which matters more here than anywhere else, since with no extension the content sniffer is the only thing that CAN name the buffer. Its manual pick is PERSISTED, in the scratch index, unlike an edit tab's session-only one (point 1 below): there is no filename to re-derive it from after a relaunch. `SyntaxPalette` writes it at the moment of the pick, not the pane from an effect: picking Markdown swaps panes and remounts the editor in the same commit, so a pane-side effect would only ever see the new value as its initial seed.
+
+Picking **Markdown** on a pad also earns it the source / preview / split shell a `.md` file gets (`MarkdownPane`, routed on `effectiveLanguageId(tab) === "markdown"` rather than on a path, since a pad has no extension). That works because the shell's preview is fed by the EDITOR BUFFER, not by disk, so an unsaved pad has something to render. Relative links and images resolve from the task root (a pad has no directory of its own), and there is no `file.md#heading` reveal to consume. Switching between the two panes remounts CodeMirror once; the pad's unmount flush writes the buffer on the way out, so nothing is lost.
 
 The language itself resolves in `lib/languages.ts`, in strict precedence:
 

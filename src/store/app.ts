@@ -308,6 +308,12 @@ export interface AppState {
    *  so a re-render doesn't re-jump the cursor. */
   consumeReveal: (taskId: string, tabId: string) => void;
   patchTab: (taskId: string, tabId: string, patch: Partial<Tab>) => void;
+  /** Turn a promoted scratchpad (GH #244) into an ordinary `edit` tab on
+   *  `path`. Same tab id and same slot in the strip, so the pad the user was
+   *  looking at is the file they are now looking at. The ONLY path that ends
+   *  a pad's permanent dirty state, because it is the only one that writes
+   *  the buffer somewhere the user chose. No-op if the tab isn't a pad. */
+  promoteScratchTab: (taskId: string, tabId: string, path: string) => void;
   /** Append a message to an agent tab's queue and wake the drain engine.
    *  Shared by the message-queue button and the prompt library so the
    *  queueKick-bump protocol (don't rely on a queueActive false->true edge)
@@ -2003,10 +2009,11 @@ export const useApp = create<AppState>((set, get) => ({
         }
         return Object.keys(patch).length ? { ...t, ...patch } : t;
       }
-      if (t.unread) {
-        const patch: Partial<typeof t> = { unread: null };
-        return { ...t, ...patch };
-      }
+      // Every non-terminal tab type has only `unread` to clear. Spreading a
+      // `Partial<typeof t>` over the union widens `type` back to the union
+      // (TS distributes the spread, not the narrowing), so cast the result
+      // rather than the patch.
+      if (t.unread) return { ...t, unread: null } as Tab;
       return t;
     });
     return {
@@ -2026,6 +2033,30 @@ export const useApp = create<AppState>((set, get) => ({
         return updated;
       }
       return t;
+    });
+    return { tabs: { ...s.tabs, [taskId]: next } };
+  }),
+
+  promoteScratchTab: (taskId, tabId, path) => set(s => {
+    const list = s.tabs[taskId] || [];
+    const cur = list.find(t => t.id === tabId);
+    if (cur?.type !== "scratch") return s;
+    const next = list.map(t => {
+      if (t.id !== tabId) return t;
+      // Build the edit tab from BaseTab fields only. Spreading the old tab
+      // would carry `scratchId` and the pad's persisted `syntax` onto an
+      // EditTab, where the stale override would beat the extension the user
+      // just picked in the save dialog.
+      return {
+        id: t.id,
+        type: "edit",
+        path,
+        title: path.split("/").pop() || path,
+        ...(t.customTitle ? { customTitle: true, title: t.title } : {}),
+        ...(t.pinned ? { pinned: true } : {}),
+        ...(t.paneId ? { paneId: t.paneId } : {}),
+        dirty: false,
+      } as Tab;
     });
     return { tabs: { ...s.tabs, [taskId]: next } };
   }),

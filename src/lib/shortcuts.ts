@@ -36,6 +36,7 @@ export type ShortcutId =
   | "jump-to-tab"
   | "focus-terminal"
   | "new-tab"
+  | "new-scratchpad"
   | "close-tab"
   | "clear-terminal"
   | "split-pane-right"
@@ -115,6 +116,12 @@ export const SHORTCUT_DEFS: ShortcutDef[] = [
     hint: "Modifier + a number key", defaultBinding: B("1-9", { cmd: true }) },
   { id: "new-tab", group: "Tabs", label: "New tab",
     defaultBinding: B("t", { cmd: true }) },
+  { id: "new-scratchpad", group: "Tabs", label: "New scratchpad",
+    // NOT ⌘N — that is already "New task…" and stealing it would cost the
+    // app's most-used create. ⌥⌘N is free (⌥⌘B and ⌥⌘P are the other two
+    // Option-Cmd bindings) and rebindable like everything else.
+    hint: "An untitled buffer in this task. It survives a relaunch; ⌘S saves it into the project.",
+    defaultBinding: B("n", { cmd: true, alt: true }) },
   { id: "close-tab", group: "Tabs", label: "Close active tab",
     defaultBinding: B("w", { cmd: true }) },
 

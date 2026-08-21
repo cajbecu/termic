@@ -179,6 +179,10 @@ export function seed(o = {}) {
   // Task records themselves are swept by wdio.conf's onPrepare, which runs on
   // every `test:e2e` — including the ones that skip this script.
   mkdirSync(path.join(dataDir, "tasks"), { recursive: true });
+  // Scratchpads are keyed by task id under the same profile (GH #244). The
+  // task records are recreated by the specs, so every pad still on disk here
+  // belongs to a task that no longer exists.
+  rmSync(path.join(dataDir, "scratch"), { recursive: true, force: true });
   // Every worktree under `tasksPath` belongs to a previous run: task records
   // are recreated by the specs themselves, so anything still on disk here is
   // debris from a run that was interrupted before its `after` hook. Drop it,

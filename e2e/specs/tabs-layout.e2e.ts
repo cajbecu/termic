@@ -19,6 +19,24 @@ describe("tab management", () => {
       taskId,
     );
 
+  /** Open the tab strip's "+" menu. Radix opens on pointerdown, so a bare
+   *  .click() is not enough. */
+  const openPlusMenu = async () => {
+    await browser.execute(() => {
+      const strip = document.querySelector("[data-main-strip]");
+      const plus = [...(strip?.querySelectorAll("button") ?? [])].find((b) =>
+        b.querySelector("svg.lucide-plus"),
+      );
+      if (!plus) throw new Error("tab '+' button not found");
+      const el = plus as HTMLElement;
+      const opts = { bubbles: true, pointerType: "mouse", button: 0 } as any;
+      el.dispatchEvent(new PointerEvent("pointerdown", opts));
+      el.dispatchEvent(new PointerEvent("pointerup", opts));
+      el.click();
+    });
+    await waitVisible("[role='menu']");
+  };
+
   it("adds a terminal tab via the + menu and switches between tabs", async () => {
     await waitForAppShell();
     await requireTermicApi();
@@ -90,6 +108,56 @@ describe("tab management", () => {
     });
 
     await snap("tabs.png");
+  });
+
+  // The "+" menu's Resume section is a SUBMENU, matching the project launcher
+  // and the sidebar task row. Closed tabs accumulate, and a flat list of them
+  // pushed Terminal / the agents / Scratchpad off the top of a menu that opens
+  // under the "+".
+  it("keeps closed tabs behind one Resume row", async () => {
+    // Close the terminal added above, so there is something to resume. A
+    // secondary agent-less shell is not resumable, so use a fakeagent tab.
+    const spawned = await browser.execute((id) => {
+      const tabId = crypto.randomUUID();
+      window.__termic!.useApp.getState().addTab(id, {
+        id: tabId, type: "terminal", title: "fakeagent", cli: "fakeagent",
+      } as never);
+      return tabId as string;
+    }, taskId) as string;
+    await browser.execute((id, tabId) => {
+      window.__termic!.useApp.getState().closeTab(id, tabId);
+    }, taskId, spawned);
+    await browser.waitUntil(
+      () => browser.execute(
+        (id) => (window.__termic!.useApp.getState().closedTabs[id] ?? []).length > 0, taskId),
+      { timeout: 10_000, timeoutMsg: "closing the agent tab left no Resume entry" },
+    );
+
+    await openPlusMenu();
+    const text = await browser.execute(() =>
+      (document.querySelector("[role='menu']") as HTMLElement | null)?.innerText ?? "");
+    expect(text).toContain("Resume");
+    // The whole point: the sessions are NOT on the top level, so the rows the
+    // user came for stay near the cursor however long the history gets.
+    expect(text).not.toContain("now");
+
+    // Hovering the trigger opens the submenu and reveals them.
+    await browser.execute(() => {
+      const t = [...document.querySelectorAll('[aria-haspopup="menu"]')]
+        .find(e => e.textContent?.includes("Resume")) as HTMLElement | undefined;
+      if (!t) throw new Error("no Resume submenu trigger");
+      const opts = { bubbles: true, pointerType: "mouse" } as any;
+      t.dispatchEvent(new PointerEvent("pointerover", opts));
+      t.dispatchEvent(new PointerEvent("pointermove", opts));
+      t.click();
+    });
+    await browser.waitUntil(
+      () => browser.execute(() =>
+        [...document.querySelectorAll("[role='menuitem']")]
+          .some(e => (e as HTMLElement).innerText.includes("fakeagent"))),
+      { timeout: 8_000, timeoutMsg: "the Resume submenu never listed the closed tab" },
+    );
+    await dismissOverlays();
   });
 });
 

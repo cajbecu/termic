@@ -75,5 +75,10 @@ export const config: WebdriverIO.Config = {
     } catch {
       /* no tasks dir yet */
     }
+    // Scratchpads (GH #244) live in the SAME profile, keyed by task id. The
+    // task records above are being purged, so their pads are orphaned by
+    // definition; leaving them behind means specs eventually start seeing
+    // each other's notes in a strip they expected to be empty.
+    rmSync(path.join(dataDir, "scratch"), { recursive: true, force: true });
   },
 };

@@ -792,7 +792,7 @@ export type { SplitDir, SplitNode, PaneLeaf, SplitTree } from "@/lib/splitTree";
 
 // ───────────────────────────── tab model (frontend only) ─────────────────────────────
 
-export type TabType = "terminal" | "diff" | "edit" | "dir";
+export type TabType = "terminal" | "diff" | "edit" | "dir" | "scratch";
 
 export interface BaseTab {
   id: string;
@@ -1046,7 +1046,42 @@ export interface DirTab extends BaseTab {
   remoteImagesUnblocked?: boolean;
 }
 
-export type Tab = TerminalTab | DiffTab | EditTab | DirTab;
+/** A Sublime-style untitled buffer (GH #244): an unsaved scratchpad that
+ *  happens to survive a relaunch. Scoped to ONE TASK, stored outside the
+ *  worktree under `<data_dir>/scratch/<taskId>/`.
+ *
+ *  A distinct type rather than an `EditTab` with an empty `path`, because
+ *  `EditTab.path` is load-bearing in places a pad must opt out of: inline
+ *  blame, review comments, the changed-on-disk banner, "locate in file tree",
+ *  the breadcrumb. A separate type makes every one of those a compiler error
+ *  to answer rather than a runtime surprise.
+ *
+ *  A pad is DIRTY for its whole life. Nothing has been saved anywhere the user
+ *  chose; the debounced write to the scratch store is crash safety, not saving,
+ *  and must not clear the dot. ⌘S does not write to the store either: it
+ *  PROMOTES the buffer to a real file in the task (see `scratchPromote`), after
+ *  which this is an ordinary `edit` tab and the pad record is gone. */
+export interface ScratchTab extends BaseTab {
+  type: "scratch";
+  /** Record id under `<data_dir>/scratch/<taskId>/`. */
+  scratchId: string;
+  /** Manual "Set syntax" pick. PERSISTED (in the scratch index), unlike
+   *  EditTab's session-only one: a pad has no extension to re-derive from. */
+  syntax?: string;
+  /** Syntax guessed from the CONTENT, exactly as on EditTab. Session-only:
+   *  it is re-sniffed from the buffer on every load. */
+  syntaxAuto?: string;
+  /** Source / preview / split, exactly as on EditTab, and offered on the same
+   *  terms: a pad whose syntax resolves to markdown gets the same shell a
+   *  `.md` file does. Session-only (the SYNTAX is what persists, and the view
+   *  follows from it plus the global default). */
+  mdView?: "source" | "preview" | "split";
+  /** Per-document remote-image unblock for the rendered preview, as on
+   *  EditTab (issue #69). Session-only. */
+  remoteImagesUnblocked?: boolean;
+}
+
+export type Tab = TerminalTab | DiffTab | EditTab | DirTab | ScratchTab;
 
 /** Mirror of `repo_config::RepoConfig` (src-tauri/src/repo_config.rs).
  *  Parsed from the repo-root `.termic.yaml` — committed, team-shared

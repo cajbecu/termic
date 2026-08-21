@@ -7,9 +7,13 @@
 import { useMemo } from "react";
 import type { Agent } from "@/lib/types";
 import { useApp, type ClosedTabEntry } from "@/store/app";
-import { DropdownItem, DropdownLabel, DropdownSeparator } from "@/components/ui/Dropdown";
+import {
+  DropdownItem, DropdownLabel, DropdownSeparator,
+  DropdownSub, DropdownSubTrigger, DropdownSubContent,
+} from "@/components/ui/Dropdown";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { visibleCliIds, isTerminalEntry } from "@/lib/agents";
+import { NotepadText, History, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 // Stable reference for the "no closed tabs yet" case. `s.closedTabs[id] ?? []`
@@ -92,10 +96,12 @@ function ShellTerminalItem({ onSelect }: { onSelect: () => void }) {
  *
  *  Mounted only while its menu is open (Radix portals content on open), so
  *  the store subscriptions here cost nothing on a closed menu. */
-export function NewTabMenuItems({ taskId, onSpawnCli, onSpawnShell, onResume, onMore }: {
+export function NewTabMenuItems({ taskId, onSpawnCli, onSpawnShell, onScratchpad, onResume, onMore }: {
   taskId: string;
   onSpawnCli: (cli: string) => void;
   onSpawnShell: () => void;
+  /** New scratchpad (GH #244) — an untitled buffer in this task's strip. */
+  onScratchpad: () => void;
   /** Reopen a closed tab with its original session id. */
   onResume: (entryId: string) => void;
   /** "More…" under Resume — jump to the full History view. */
@@ -119,12 +125,33 @@ export function NewTabMenuItems({ taskId, onSpawnCli, onSpawnShell, onResume, on
       <DropdownSeparator />
       <DropdownLabel>New agent</DropdownLabel>
       <CliMenuItems entries={registry.filter(a => visibleClis.has(a.id))} onSpawn={onSpawnCli} />
+      <DropdownSeparator />
+      <DropdownItem onSelect={onScratchpad} data-testid="new-scratchpad" className="items-center">
+        <span className="shrink-0 text-[var(--color-fg-dim)]"><NotepadText className="h-4 w-4" /></span>
+        Scratchpad
+      </DropdownItem>
+      {/* Resume is a NESTED submenu, not an inline section. It grows with
+          every closed tab, and a flat list of five "Claude Code" rows pushed
+          the things you actually came here for (Terminal, the agent list,
+          Scratchpad) off the top of a menu that opens under the "+". The
+          sidebar's task row already nests its own Resume this way, so both
+          entry points now read the same. */}
       {closedTabs.length > 0 && (
         <>
           <DropdownSeparator />
-          <DropdownLabel>Resume</DropdownLabel>
-          <ResumeMenuItems entries={closedTabs} agents={registry} onResume={onResume} />
-          <DropdownItem onSelect={onMore}>More…</DropdownItem>
+          <DropdownSub>
+            <DropdownSubTrigger className="justify-between">
+              <span className="flex items-center gap-2">
+                <History className="h-4 w-4 text-[var(--color-fg-dim)]" />
+                <span>Resume</span>
+              </span>
+              <ChevronRight className="h-3.5 w-3.5 text-[var(--color-fg-faint)]" />
+            </DropdownSubTrigger>
+            <DropdownSubContent>
+              <ResumeMenuItems entries={closedTabs} agents={registry} onResume={onResume} />
+              <DropdownItem onSelect={onMore}>More…</DropdownItem>
+            </DropdownSubContent>
+          </DropdownSub>
         </>
       )}
     </>

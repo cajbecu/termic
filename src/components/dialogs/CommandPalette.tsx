@@ -12,12 +12,14 @@ import {
   PanelLeft, PanelRight, PanelBottom, Palette, Keyboard, Settings as SettingsIcon,
   FolderCog, RefreshCw, ScrollText, Bug, SlidersHorizontal, Bot, BookText,
   Check, ChevronLeft, ListTodo, Bell, SquareTerminal, FolderPlus, History, Square,
-  Play, Swords, Megaphone, Columns2, Rows2, Clock, UserPen, Activity, Code2, type LucideIcon,
+  Play, Swords, Megaphone, Columns2, Rows2, Clock, UserPen, Activity, Code2,
+  NotepadText, type LucideIcon,
 } from "lucide-react";
 import { useUI } from "@/store/ui";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useApp } from "@/store/app";
 import { jumpToNextWaiting } from "@/lib/waitingAgents";
+import { newScratchTab } from "@/lib/scratchTabs";
 import { readRecents, recentIds, recordRecent } from "@/lib/paletteRecent";
 import { usePrefs, type BuiltinThemeMode, type ThemeMode } from "@/store/prefs";
 import { useUpdate } from "@/store/update";
@@ -55,6 +57,12 @@ interface Cmd {
   shortcutId?: ShortcutId;
   /** Extra search terms (not shown) so e.g. "palette" finds "Command…". */
   keywords?: string;
+  /** Float this command to the TOP of its section on an empty query. For a
+   *  command whose relevance depends on what is on screen rather than on
+   *  where it was pushed: "Set syntax…" is a minor view preference for a
+   *  file, and the only way to declare what the buffer is for a scratchpad.
+   *  Insertion order decides everything else, so this stays rare. */
+  priority?: boolean;
   destructive?: boolean;
   /** Keep this command OUT of the Recent section. The top Recent row is the
    *  pre-selected one, so Enter on a freshly-opened palette runs it — which is
@@ -121,7 +129,9 @@ export function CommandPalette() {
     const id = s.activeTaskId;
     if (!id) return null;
     const t = (s.tabs[id] ?? []).find(tt => tt.id === s.activeTab[id]);
-    return t?.type === "edit" ? t : null;
+    // Scratchpads too (GH #244): with no extension to go on, the picker is
+    // the only way to tell the buffer what it is.
+    return t?.type === "edit" || t?.type === "scratch" ? t : null;
   });
   const proj = useMemo(() => (task ? projects.find(p => p.id === task.project_id) ?? null : null), [projects, task]);
 
@@ -208,6 +218,12 @@ export function CommandPalette() {
         id: "find-in-files", section: "Task", label: "Find in files",
         icon: Search, shortcutId: "find-in-files", keywords: "grep search ripgrep",
         run: act(() => useUI.getState().openFindInFiles(task.id)),
+      });
+      cmds.push({
+        id: "new-scratchpad", section: "Task", label: "New scratchpad",
+        icon: NotepadText, shortcutId: "new-scratchpad",
+        keywords: "note untitled buffer temporary todo jot draft",
+        run: act(() => { void newScratchTab(task.id); }),
       });
       cmds.push({
         id: "rename-task", section: "Task", label: "Rename task",
@@ -344,10 +360,16 @@ export function CommandPalette() {
       });
     }
     if (task && activeEditTab) {
+      // On a SCRATCHPAD this is not a view preference, it is the only way to
+      // say what the buffer is: there is no extension, so nothing else can
+      // answer. It moves to the front section for that case rather than
+      // sitting third, under View, behind rows about panels and splits.
+      const pad = activeEditTab.type === "scratch";
       cmds.push({
-        id: "set-syntax", section: "View", label: "Set syntax…",
+        id: "set-syntax", section: pad ? "Task" : "View", label: "Set syntax…",
+        priority: pad,
         suffix: languageLabel(effectiveLanguageId(activeEditTab)), icon: Code2,
-        keywords: "language highlighting grammar mode colour color file type",
+        keywords: "language highlighting grammar mode colour color file type markdown json",
         run: act(() => useUI.getState().openSyntaxPalette(task.id, activeEditTab.id)),
       });
     }
@@ -484,6 +506,10 @@ export function CommandPalette() {
       const items = (bySection.get(section) ?? []).filter(s => !recentSet.has(s.cmd.id));
       if (items.length === 0) continue;
       if (query) items.sort((a, b) => b.score - a.score);
+      // Empty query: insertion order, except that a `priority` command floats
+      // to the head of its section. Array.prototype.sort is stable, so every
+      // other row keeps the order it was pushed in.
+      else items.sort((a, b) => Number(!!b.cmd.priority) - Number(!!a.cmd.priority));
       groups.push({ section, items });
     }
     const rows: Scored[] = groups.flatMap(g => g.items);

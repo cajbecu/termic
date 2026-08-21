@@ -8,6 +8,7 @@ import { useTabStripDrag } from "./useTabStripDrag";
 import { Button } from "@/components/ui/Button";
 import { DropdownRoot, DropdownTrigger, DropdownMenu } from "@/components/ui/Dropdown";
 import { NewTabMenuItems } from "./NewTabMenuItems";
+import { newScratchTab } from "@/lib/scratchTabs";
 import { CliIcon, CLI_BRAND_COLOR, CLI_LABEL, resolveIconId } from "@/icons/cli";
 import { Plus, X, GitCompare, FileText, SquareSplitVertical, SquareSplitHorizontal, TerminalSquare, Bell, Megaphone, Pin, Repeat, RotateCw, Square, Play, AlertTriangle } from "lucide-react";
 import { Spinner } from "@/components/ui/Spinner";
@@ -240,6 +241,7 @@ export function TabBar({ task }: { task: Task }) {
               taskId={task.id}
               onSpawnCli={spawnTab}
               onSpawnShell={spawnShellTab}
+              onScratchpad={() => { setOpen(false); void newScratchTab(task.id); }}
               onResume={resumeAndFocus}
               onMore={() => { setOpen(false); setView("history"); }}
             />

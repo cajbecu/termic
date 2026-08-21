@@ -9,13 +9,38 @@
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import { usePrefs } from "@/store/prefs";
-import type { Tab } from "@/lib/types";
+import type { ScratchTab, Tab } from "@/lib/types";
 import { agentDisplayName, isTerminalCli } from "@/lib/agents";
+import { discardScratchPad } from "@/lib/scratchTabs";
+
+/** The scratchpad close prompt (GH #244), resolving true when the pad's tab
+ *  may close. A pad has never been written anywhere the user chose, so
+ *  closing it is destructive in a way quitting is not: a relaunch restores
+ *  every pad untouched, an explicit close asks. Three outcomes, so it gets its
+ *  own prompt rather than a fourth overload on askConfirm.
+ *
+ *  Used by the single-tab path AND by the bulk paths, one prompt per pad: a
+ *  pad closed inside "Close others" is exactly as unsaved as one closed by its
+ *  own ×, and folding several into one confirm would mean one click deciding
+ *  the fate of several notes. */
+async function confirmScratchClose(taskId: string, tab: ScratchTab): Promise<boolean> {
+  const choice = await useUI.getState().askScratchClose(tab.liveTitle || tab.title);
+  if (choice === "cancel") return false;
+  if (choice === "discard") {
+    await discardScratchPad(taskId, tab.scratchId);
+    return true;
+  }
+  // "Save…": the close only happens if the promote actually goes through.
+  // Backing out of the picker must leave the pad AND the tab alone, not
+  // silently fall through to discarding it.
+  return await useUI.getState().askScratchSave(taskId, tab.id);
+}
 
 /** Shared confirm gate: resolves true when closing `tab` is safe (nothing to
  *  lose, or the user confirmed). `paneTab` tweaks the agent copy — pane tabs
  *  are never durable, so closing an agent there always forgets the session. */
-async function confirmTabClose(tab: Tab | undefined, paneTab: boolean): Promise<boolean> {
+async function confirmTabClose(taskId: string, tab: Tab | undefined, paneTab: boolean): Promise<boolean> {
+  if (tab?.type === "scratch") return confirmScratchClose(taskId, tab);
   if (tab?.type === "edit" && tab.dirty) {
     const name = tab.path.split("/").pop() || tab.path;
     // No checkbox in the request → askConfirm resolves a plain boolean; the
@@ -93,6 +118,10 @@ async function confirmBulkClose(tabs: Tab[]): Promise<boolean> {
   const live = tabs.filter(t =>
     t.type === "terminal" && t.cli !== "shell"
     && !(isTerminalCli(t.cli, agents) && !t.ptyId));
+  // Pads are absent from this dialog on purpose: each one gets its OWN
+  // three-way prompt afterwards (see closeSetWithScratchPrompts), because
+  // "discard" on a pad is a per-note decision and there is no file to go back
+  // to. A set of nothing BUT pads therefore skips this confirm entirely.
   if (!dirty.length && (!live.length || !usePrefs.getState().confirmBeforeCloseAgentTab)) return true;
   const parts: string[] = [];
   if (dirty.length) {
@@ -152,7 +181,7 @@ function toastClosedTab(taskId: string, tab: Tab, paneTab: boolean) {
  *  Resolves once the tab is closed or the user backs out. */
 export async function requestCloseTab(taskId: string, tabId: string) {
   const tab = useApp.getState().tabs[taskId]?.find(t => t.id === tabId);
-  if (!(await confirmTabClose(tab, false))) return;
+  if (!(await confirmTabClose(taskId, tab, false))) return;
   const fastClose = tab?.type === "terminal" && tab.cli !== "shell" && !usePrefs.getState().confirmBeforeCloseAgentTab;
   useApp.getState().closeTab(taskId, tabId);
   if (fastClose && tab) toastClosedTab(taskId, tab, false);
@@ -164,11 +193,32 @@ export async function requestCloseTab(taskId: string, tabId: string) {
  *  out. */
 export async function requestClosePaneTab(taskId: string, paneId: string, tabId: string): Promise<boolean> {
   const tab = useApp.getState().tabs[taskId]?.find(t => t.id === tabId);
-  if (!(await confirmTabClose(tab, true))) return false;
+  if (!(await confirmTabClose(taskId, tab, true))) return false;
   const fastClose = tab?.type === "terminal" && tab.cli !== "shell" && !usePrefs.getState().confirmBeforeCloseAgentTab;
   useApp.getState().closePaneTab(taskId, paneId, tabId);
   if (fastClose && tab) toastClosedTab(taskId, tab, true);
   return true;
+}
+
+/** Close every tab in `tabs`, prompting once per scratchpad. Non-pads close
+ *  straight away (the ONE bulk confirm above already covered them); each pad
+ *  asks, and a Cancel keeps THAT pad's tab while the rest of the set still
+ *  closes. Cancel meaning "spare this one" rather than "abort the whole
+ *  thing" is the only reading that survives the fact that the tabs before it
+ *  are already gone by then. */
+async function closeSetWithScratchPrompts(
+  taskId: string, tabs: Tab[], close: (tab: Tab) => void,
+) {
+  for (const t of tabs) {
+    if (t.type === "scratch") {
+      // Re-read: an earlier pad's Save… promoted through a modal, and the
+      // user could have acted on this tab while it was open.
+      const live = (useApp.getState().tabs[taskId] ?? []).find(x => x.id === t.id);
+      if (!live) continue;
+      if (live.type === "scratch" && !(await confirmScratchClose(taskId, live))) continue;
+    }
+    close(t);
+  }
 }
 
 /** Close a set of main-pane tabs behind ONE confirm. Secondary agent tabs still
@@ -178,7 +228,7 @@ export async function requestCloseTabs(taskId: string, tabIds: string[]) {
   const tabs = (useApp.getState().tabs[taskId] ?? []).filter(t => tabIds.includes(t.id));
   if (!tabs.length) return;
   if (!(await confirmBulkClose(tabs))) return;
-  for (const t of tabs) useApp.getState().closeTab(taskId, t.id);
+  await closeSetWithScratchPrompts(taskId, tabs, t => useApp.getState().closeTab(taskId, t.id));
 }
 
 /** Close a set of split-pane tabs behind ONE confirm. The clicked tab always
@@ -187,5 +237,5 @@ export async function requestClosePaneTabs(taskId: string, paneId: string, tabId
   const tabs = (useApp.getState().tabs[taskId] ?? []).filter(t => tabIds.includes(t.id));
   if (!tabs.length) return;
   if (!(await confirmBulkClose(tabs))) return;
-  for (const t of tabs) useApp.getState().closePaneTab(taskId, paneId, t.id);
+  await closeSetWithScratchPrompts(taskId, tabs, t => useApp.getState().closePaneTab(taskId, paneId, t.id));
 }

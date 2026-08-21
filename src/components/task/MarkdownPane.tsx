@@ -1,4 +1,4 @@
-// Wrapper for markdown edit tabs: the shared source / split / preview shell
+// Wrapper for markdown buffers: the shared source / split / preview shell
 // (SourcePreviewShell) over the CodeMirror editor and the rendered
 // MarkdownPreview. The shell owns the toolbar, the split divider and the
 // keep-mounted rules; everything here is markdown-specific — the live buffer
@@ -6,7 +6,7 @@
 
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { EditorView } from "@codemirror/view";
-import type { EditTab, Task } from "@/lib/types";
+import type { EditTab, ScratchTab, Task } from "@/lib/types";
 import { EditorPane } from "./EditorPane";
 import { SourcePreviewShell, type SourceView } from "./SourcePreviewShell";
 import { useApp } from "@/store/app";
@@ -18,7 +18,14 @@ const MarkdownPreview = lazy(() =>
 
 export function MarkdownPane(
   { task, tab, visible, ownsFind }: {
-    task: Task; tab: EditTab;
+    task: Task;
+    /** A `.md` file, or a SCRATCHPAD whose syntax resolves to markdown (GH
+     *  #244). A pad has no path, so relative links and images resolve from
+     *  the task root and there is no `file.md#heading` reveal to consume;
+     *  everything else — the toolbar, the split divider, the live-buffer
+     *  preview — is identical, because the preview is fed by the editor
+     *  buffer rather than by disk. */
+    tab: EditTab | ScratchTab;
     /** Laid out (not a `display:none` background tab in this task). */
     visible: boolean;
     /** Find belongs to this tab. True for one tab app-wide, see TaskView. */
@@ -57,12 +64,16 @@ export function MarkdownPane(
   // tab id), so until EditorPane reloads, the buffer still holds the OLD
   // file. Deriving "" for a mismatched label keeps the preview (and its
   // revealHeading consumption) from ever acting on the previous document.
-  const [buf, setBuf] = useState({ path: tab.path, text: "" });
-  const text = buf.path === tab.path ? buf.text : "";
+  // A pad is never recycled onto another document, but it still needs a
+  // stable label here, so the key is the source rather than the path.
+  const srcKey = tab.type === "edit" ? tab.path : `scratch:${tab.scratchId}`;
+  const filePath = tab.type === "edit" ? tab.path : "";
+  const [buf, setBuf] = useState({ path: srcKey, text: "" });
+  const text = buf.path === srcKey ? buf.text : "";
   const debounceRef = useRef<number | null>(null);
   function onContent(view: EditorView) {
     if (debounceRef.current != null) window.clearTimeout(debounceRef.current);
-    const path = tab.path;
+    const path = srcKey;
     debounceRef.current = window.setTimeout(() => setBuf({ path, text: view.state.doc.toString() }), 200);
   }
   // Keyed on tab.path (not just unmount): a debounced write scheduled for
@@ -72,19 +83,20 @@ export function MarkdownPane(
   // AFTER the tab is back on the original path — its `path` no longer
   // matches `tab.path`, so `text` derives "" and blanks an already-correct
   // preview until the next real content update arrives.
-  useEffect(() => () => { if (debounceRef.current != null) window.clearTimeout(debounceRef.current); }, [tab.path]);
+  useEffect(() => () => { if (debounceRef.current != null) window.clearTimeout(debounceRef.current); }, [srcKey]);
 
   // A pending file.md#heading reveal is only consumable by the rendered
   // preview: a tab sitting in source view switches to preview (tab-local
   // mdView only; the global default-view pref is not touched). Without this
   // the reveal would linger unconsumed and fire as a surprise scroll when
   // the user eventually toggles the view themselves.
+  const revealHeading = tab.type === "edit" ? tab.revealHeading : undefined;
   useEffect(() => {
-    if (tab.revealHeading && view === "source") {
+    if (revealHeading && view === "source") {
       useApp.getState().patchTab(task.id, tab.id, { mdView: "preview" });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab.revealHeading]);
+  }, [revealHeading]);
 
   // Subscribe so the preview/mermaid theme tracks app palette changes.
   const themeMode = usePrefs(s => s.themeMode);
@@ -112,8 +124,8 @@ export function MarkdownPane(
           <MarkdownPreview
             text={text}
             themeDark={themeDark}
-            ctx={{ taskId: task.id, filePath: tab.path, epoch: fsRev, memberDirs }}
-            revealHeading={tab.revealHeading}
+            ctx={{ taskId: task.id, filePath, epoch: fsRev, memberDirs }}
+            revealHeading={revealHeading}
             onRevealConsumed={() => useApp.getState().patchTab(task.id, tab.id, { revealHeading: undefined })}
             // TaskView's flags are about the tab; `showPreview` is the md
             // view mode. A source-view tab keeps this preview mounted but

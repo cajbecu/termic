@@ -2,7 +2,7 @@
 // language (manual pick > path > content sniff, see lib/languages), mounts once.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { EditTab, Task } from "@/lib/types";
+import type { EditTab, ScratchTab, Task } from "@/lib/types";
 import { EditorState, Compartment, Annotation, type Extension } from "@codemirror/state";
 import { EditorView, ViewPlugin, keymap, tooltips } from "@codemirror/view";
 import { indentWithTab } from "@codemirror/commands";
@@ -10,7 +10,7 @@ import { basicSetup } from "codemirror";
 import { search } from "@codemirror/search";
 import { lintGutter } from "@codemirror/lint";
 import { indentUnit } from "@codemirror/language";
-import { taskFileRead, taskFileWrite } from "@/lib/ipc";
+import { taskFileRead, taskFileWrite, scratchRead, scratchWrite, scratchSetMeta } from "@/lib/ipc";
 import { langForId } from "@/lib/languageExts";
 import { effectiveLanguageId, languageIdForPath } from "@/lib/languages";
 import { detectSyntaxFromContent } from "@/lib/detectSyntax";
@@ -22,14 +22,24 @@ import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import { usePrefs, resolveTheme } from "@/store/prefs";
 import { resolveEditorTheme, editorSurfaceTheme } from "@/lib/editorTheme";
+import { deriveScratchTitle } from "@/lib/scratchTitle";
+
+/** How long after the last keystroke a scratchpad's buffer is flushed to the
+ *  scratch store and its title re-derived. Both ride the TYPING path, so both
+ *  are debounced and both bail when the value is unchanged: writing an
+ *  identical title through a store setter copies the whole app state and
+ *  re-runs every mounted task's selectors (docs/performance.md bear trap 8). */
+const SCRATCH_FLUSH_MS = 500;
 
 /** The syntax to highlight this tab with, sniffing the content when the path
  *  claims nothing (an extension-less file, a `.txt` that is really JSON). The
  *  sniff result is remembered on the tab so the breadcrumb button and the
  *  picker agree with what the buffer actually shows; a manual pick and a
  *  recognised extension both take precedence and skip it entirely. */
-function resolveSyntax(taskId: string, tab: EditTab, content: string): string {
-  if (!tab.syntax && !languageIdForPath(tab.path)) {
+function resolveSyntax(taskId: string, tab: EditTab | ScratchTab, content: string): string {
+  // A scratchpad has no path at all, so `languageIdForPath` answers null and
+  // the content sniffer decides — which is the only thing that CAN decide.
+  if (!tab.syntax && !languageIdForPath(tab.type === "edit" ? tab.path : undefined)) {
     const sniffed = detectSyntaxFromContent(content);
     // Bail when unchanged: this runs on every load (and every external
     // reload), and an unconditional write is the store churn docs/performance
@@ -96,7 +106,14 @@ function revealLine(view: EditorView, line: number, col?: number) {
 
 export function EditorPane({ task, tab, active, onContent }: {
   task: Task;
-  tab: EditTab;
+  /** An `edit` tab reads and writes a file in the worktree; a `scratch` tab
+   *  (GH #244) reads and writes an untitled buffer in the scratch store and
+   *  turns OFF everything that needs a path: inline blame, review comments,
+   *  and the changed-on-disk watch. Everything else — the CodeMirror setup,
+   *  the theme and language compartments, find, the ⌘S binding — is shared,
+   *  because a second editor component would drift from this one inside two
+   *  releases. */
+  tab: EditTab | ScratchTab;
   /** True when this tab is the active main tab — mirrors TerminalPane's
    *  `active` prop so the editor self-focuses on tab switch, closing, etc. */
   active?: boolean;
@@ -107,6 +124,15 @@ export function EditorPane({ task, tab, active, onContent }: {
    *  Plain editor tabs pass nothing. */
   onContent?: (view: EditorView) => void;
 }) {
+  const isScratch = tab.type === "scratch";
+  // The one string that identifies what this editor is showing. Both the
+  // mount effect and every path-keyed extension key off it, so a preview tab
+  // recycling to another file and a pad are the same kind of change.
+  const srcKey = tab.type === "scratch" ? `scratch:${tab.scratchId}` : tab.path;
+  // Empty for a pad. Only ever read on branches guarded by `!isScratch`;
+  // it exists so the shared code below does not need a cast per use.
+  const filePath = tab.type === "edit" ? tab.path : "";
+
   const hostRef = useRef<HTMLDivElement>(null);
   // Latest onContent in a ref so the mount effect (which only runs on
   // [task.id, tab.path]) always calls the current callback.
@@ -135,6 +161,13 @@ export function EditorPane({ task, tab, active, onContent }: {
   // only touches the store on the clean→dirty edge, not every
   // keystroke (patchTab re-renders the whole TabBar).
   const dirtyRef = useRef(false);
+  // Scratchpad flush state (GH #244). The last content and title actually
+  // written, so the debounced flush can bail when nothing changed; the
+  // pending timer; and the unmount flush, rebound by every mount.
+  const lastFlushedRef = useRef<string | null>(null);
+  const lastTitleRef = useRef<string | null>(null);
+  const flushTimerRef = useRef<number | null>(null);
+  const flushScratchRef = useRef<(() => void) | null>(null);
 
   // Per-task "files changed" tick. Bumped when an agent terminal
   // settles (see app store). We re-read on its rising edge so an open file
@@ -147,8 +180,8 @@ export function EditorPane({ task, tab, active, onContent }: {
 
   // ONE definition of the blame extension, shared by the mount and the toggle
   // effect: two copies of the same `onOpenCommit` would drift.
-  const buildBlame = useCallback((enabled: boolean) => enabled
-    ? inlineBlameExtension(task.id, tab.path, {
+  const buildBlame = useCallback((enabled: boolean) => enabled && !isScratch
+    ? inlineBlameExtension(task.id, filePath, {
         // A `commit:<sha>` diff, the same scope the History panel opens, so it
         // lands somewhere that already knows how to render a historical
         // revision.
@@ -160,7 +193,7 @@ export function EditorPane({ task, tab, active, onContent }: {
         onOpenCommit: sha => {
           const scope = `commit:${sha}` as const;
           const existing = (useApp.getState().tabs[task.id] ?? []).find(
-            t => t.type === "diff" && t.path === tab.path && t.scope === scope,
+            t => t.type === "diff" && t.path === filePath && t.scope === scope,
           );
           if (existing) {
             useApp.getState().setActiveTabId(task.id, existing.id);
@@ -169,13 +202,13 @@ export function EditorPane({ task, tab, active, onContent }: {
           useApp.getState().addTab(task.id, {
             id: crypto.randomUUID(),
             type: "diff",
-            path: tab.path,
+            path: filePath,
             scope,
-            title: `\u0394 ${tab.path.split("/").pop() || tab.path} @ ${sha.slice(0, 7)}`,
+            title: `\u0394 ${filePath.split("/").pop() || filePath} @ ${sha.slice(0, 7)}`,
           });
         },
       })
-    : [], [task.id, tab.path]);
+    : [], [task.id, filePath, isScratch]);
 
   const editorFontSize = usePrefs(s => s.editorFontSize);
   const codeLigatures  = usePrefs(s => s.codeLigatures);
@@ -212,22 +245,96 @@ export function EditorPane({ task, tab, active, onContent }: {
     setLoading(true);
     (async () => {
       try {
-        const content = await taskFileRead(task.id, tab.path);
+        const content = tab.type === "scratch"
+          ? await scratchRead(task.id, tab.scratchId)
+          : await taskFileRead(task.id, tab.path);
         if (!alive || !hostRef.current) return;
         blameOnRef.current = usePrefs.getState().inlineBlame;
         langIdRef.current = resolveSyntax(task.id, tab, content);
         const lang = langForId(langIdRef.current);
 
-        // Flip the tab's dirty dot on the first edit after a load/save.
+        // Flip the tab's dirty dot on the first edit after a load/save. A
+        // pad is seeded dirty and STAYS dirty for its whole life (nothing has
+        // been saved anywhere the user chose), so this is a no-op there after
+        // the first call.
         const markDirty = () => {
           if (dirtyRef.current) return;
           dirtyRef.current = true;
           useApp.getState().patchTab(task.id, tab.id, { dirty: true });
         };
+        if (tab.type === "scratch") dirtyRef.current = true;
+        // ── scratchpad crash safety (GH #244) ──────────────────────────
+        // The buffer write and the title derivation both ride the TYPING
+        // path, so both are debounced together and both bail when their
+        // value is unchanged (docs/performance.md bear trap 8). Neither is
+        // "saving": the dirty dot stays on, because nothing has been written
+        // anywhere the user chose.
+        const flushScratch = (v: EditorView) => {
+          if (tab.type !== "scratch") return;
+          const text = v.state.doc.toString();
+          if (text !== lastFlushedRef.current) {
+            lastFlushedRef.current = text;
+            scratchWrite(task.id, tab.scratchId, text).catch(() => {});
+          }
+          // Re-sniff the syntax as the buffer fills. An edit tab resolves
+          // this once at mount because its PATH answers, but a pad is always
+          // CREATED EMPTY: sniffing only at mount would ask the question at
+          // the one moment there is nothing to go on, and the answer would
+          // never change however much JSON the user then typed. A manual pick
+          // still wins, and an unchanged guess bails.
+          const cur0 = (useApp.getState().tabs[task.id] ?? []).find(t => t.id === tab.id);
+          if (cur0?.type === "scratch" && !cur0.syntax) {
+            const sniffed = detectSyntaxFromContent(text);
+            if (sniffed && sniffed !== cur0.syntaxAuto) {
+              useApp.getState().patchTab(task.id, tab.id, { syntaxAuto: sniffed });
+            }
+          }
+          const derived = deriveScratchTitle(text);
+          // A double-click rename locks the title, exactly like a renamed
+          // terminal tab locks against the agent's OSC titles.
+          const cur = (useApp.getState().tabs[task.id] ?? []).find(t => t.id === tab.id);
+          if (cur?.type !== "scratch" || cur.customTitle) return;
+          if (derived === lastTitleRef.current || derived === cur.title) {
+            lastTitleRef.current = derived;
+            return;
+          }
+          lastTitleRef.current = derived;
+          useApp.getState().patchTab(task.id, tab.id, { title: derived });
+          scratchSetMeta(task.id, tab.scratchId, { title: derived }).catch(() => {});
+        };
+        const scheduleScratchFlush = (v: EditorView) => {
+          if (flushTimerRef.current !== null) window.clearTimeout(flushTimerRef.current);
+          flushTimerRef.current = window.setTimeout(() => {
+            flushTimerRef.current = null;
+            flushScratch(v);
+          }, SCRATCH_FLUSH_MS);
+        };
+        flushScratchRef.current = () => {
+          // Unmount flush. ONLY while the pad is still a pad: a Discard-close
+          // deletes the record and then unmounts this editor, and re-writing
+          // the buffer on the way out would resurrect the note the user just
+          // threw away. Promotion changes the tab's type, which is the same
+          // check.
+          const cur = (useApp.getState().tabs[task.id] ?? []).find(t => t.id === tab.id);
+          if (cur?.type !== "scratch") return;
+          const v = viewRef.current;
+          if (v) flushScratch(v);
+        };
+        lastFlushedRef.current = content;
+        lastTitleRef.current = null;
+
         // ⌘S → write the buffer to disk. termic NEVER auto-saves; this
         // is the only path that clears `dirty`. Returns true so
         // CodeMirror treats the key as handled and preventDefault's it.
         const saveDoc = (v: EditorView): boolean => {
+          // A pad has nowhere to save TO yet. ⌘S opens the promote picker
+          // instead of writing to the scratch store: quietly filing the note
+          // under `<data_dir>/scratch/` would report success and put it
+          // somewhere the user will never look again (GH #244).
+          if (tab.type === "scratch") {
+            void useUI.getState().askScratchSave(task.id, tab.id);
+            return true;
+          }
           const name = tab.path.split("/").pop() || tab.path;
           taskFileWrite(task.id, tab.path, v.state.doc.toString())
             .then(() => {
@@ -302,7 +409,7 @@ export function EditorPane({ task, tab, active, onContent }: {
               // heavy typing above it can end up quoting the wrong lines. It
               // is bounded (comments are transient, sent then cleared) and
               // clampLine keeps a stale range in bounds.
-              reviewCommentsExtension(task.id, tab.path,
+              isScratch ? [] : reviewCommentsExtension(task.id, filePath,
                 // Quiet surface: no icon chasing the mouse down the gutter, no
                 // labelled pill over the selection. One gutter icon, only
                 // while something is selected. The diff pane keeps both.
@@ -319,6 +426,7 @@ export function EditorPane({ task, tab, active, onContent }: {
                   // or the tab would sprout a phantom "modified" dot.
                   if (!u.transactions.some(t => t.annotation(ExternalReload)))
                     markDirty();
+                  if (isScratch) scheduleScratchFlush(u.view);
                   onContentRef.current?.(u.view);
                 }
               }),
@@ -349,7 +457,12 @@ export function EditorPane({ task, tab, active, onContent }: {
         // Initial jump-to-line for Find-in-Files: do it once the view
         // exists. The other useEffect below handles subsequent jumps
         // (clicking a different match while the tab's already open).
-        if (tab.revealAt) {
+        // A pad opens on an empty buffer with the "Untitled" title already
+        // set; seed the derivation state so a RESTORED pad whose first line
+        // has not changed does not write an identical title back on the first
+        // keystroke.
+        if (tab.type === "scratch") lastTitleRef.current = deriveScratchTitle(content);
+        if (tab.type === "edit" && tab.revealAt) {
           revealLine(view, tab.revealAt.line, tab.revealAt.col);
           useApp.getState().consumeReveal(task.id, tab.id);
         }
@@ -364,9 +477,23 @@ export function EditorPane({ task, tab, active, onContent }: {
         setLoading(false);
       }
     })();
-    return () => { alive = false; detachScrollRestore?.(); viewRef.current?.destroy(); viewRef.current = null; };
+    return () => {
+      alive = false;
+      // Flush the last <500ms of typing before the view goes away (tab
+      // switch, task switch, app teardown). Runs BEFORE destroy(), while the
+      // doc is still readable.
+      if (flushTimerRef.current !== null) {
+        window.clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+      flushScratchRef.current?.();
+      flushScratchRef.current = null;
+      detachScrollRestore?.();
+      viewRef.current?.destroy();
+      viewRef.current = null;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [task.id, tab.path]);
+  }, [task.id, srcKey]);
 
   // True-editor tabs surface a "file changed on disk" prompt instead of
   // silently reloading. Pending until the user acts; rendered only while the
@@ -403,7 +530,7 @@ export function EditorPane({ task, tab, active, onContent }: {
   // confirming the true-editor prompt.
   const applyDiskContent = useCallback((content: string) => {
     const v = viewRef.current;
-    if (!v) return;
+    if (!v || isScratch) return;
     if (content !== v.state.doc.toString())
       v.dispatch({
         changes: { from: 0, to: v.state.doc.length, insert: content },
@@ -413,12 +540,12 @@ export function EditorPane({ task, tab, active, onContent }: {
     // reasoning as the save path, and the same reason docs/ideas/lsp.md wants
     // this path to fire a full-document didChange.
     if (usePrefs.getState().inlineBlame) {
-      invalidateBlame(task.id, tab.path);
+      invalidateBlame(task.id, filePath);
       v.dispatch({ effects: refreshBlame.of() });
     }
     setDiskChanged(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [task.id, tab.path]);
+  }, [task.id, filePath, isScratch]);
 
   // React to an external change (GH #57). An UNTOUCHED buffer (no unsaved
   // edits) just mirrors disk silently — preview tab or not, source or
@@ -428,26 +555,29 @@ export function EditorPane({ task, tab, active, onContent }: {
   // banner: reloading would discard real typing, so the user decides.
   const reloadFromDisk = useCallback(() => {
     const v = viewRef.current;
-    if (!v) return;
-    taskFileRead(task.id, tab.path).then(content => {
+    // A pad has no file on disk to diverge from. Nothing outside this editor
+    // can touch its buffer, so there is nothing to watch and nothing to ask
+    // about (GH #244).
+    if (!v || isScratch) return;
+    taskFileRead(task.id, filePath).then(content => {
       const v2 = viewRef.current;
       if (!v2) return;
       if (content === v2.state.doc.toString()) { setDiskChanged(false); return; }
       if (dirtyRef.current) { setDiskChanged(true); return; }
       applyDiskContent(content);
     }).catch(() => {});
-  }, [task.id, tab.path, applyDiskContent]);
+  }, [task.id, filePath, isScratch, applyDiskContent]);
 
   // User accepted the prompt: re-read (content may have moved on since the
   // change was detected) and swap it in, discarding the buffer's edits — so
   // the dirty flag must clear too or the dot would lie.
   const acceptDiskReload = useCallback(() => {
-    taskFileRead(task.id, tab.path).then(content => {
+    taskFileRead(task.id, filePath).then(content => {
       applyDiskContent(content);
       dirtyRef.current = false;
       useApp.getState().patchTab(task.id, tab.id, { dirty: false });
     }).catch(() => {});
-  }, [task.id, tab.path, tab.id, applyDiskContent]);
+  }, [task.id, filePath, tab.id, applyDiskContent]);
 
   // Reload on window focus: covers external edits while away (another app,
   // a `git` in a real terminal, an agent in a different window).
@@ -481,10 +611,12 @@ export function EditorPane({ task, tab, active, onContent }: {
   // handles the first jump (view doesn't exist yet at that point).
   useEffect(() => {
     const v = viewRef.current;
-    if (!v || !tab.revealAt) return;
-    revealLine(v, tab.revealAt.line, tab.revealAt.col);
+    const revealAt = tab.type === "edit" ? tab.revealAt : undefined;
+    if (!v || !revealAt) return;
+    revealLine(v, revealAt.line, revealAt.col);
     useApp.getState().consumeReveal(task.id, tab.id);
-  }, [tab.revealAt, task.id, tab.id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab.type === "edit" ? tab.revealAt : undefined, task.id, tab.id]);
 
   // Toggling the blame pref reconfigures its compartment in place: no view
   // rebuild, so the cursor, undo history and scroll position all survive.
@@ -515,11 +647,11 @@ export function EditorPane({ task, tab, active, onContent }: {
   // click in the Git panel, per open editor, to redraw one line that usually
   // did not change. The refetch rides the reader's next cursor move.
   useEffect(() => {
-    if (gitRevision === 0 || !inlineBlame) return;
+    if (gitRevision === 0 || !inlineBlame || isScratch) return;
     invalidateBlame(task.id);
     viewRef.current?.dispatch({ effects: markBlameStale.of() });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gitRevision, task.id, inlineBlame]);
+  }, [gitRevision, task.id, inlineBlame, isScratch]);
 
   // Re-apply theme compartment when the user changes font size,
   // ligatures, or the syntax theme — all reconfigure live.

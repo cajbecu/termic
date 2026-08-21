@@ -28,6 +28,7 @@ import { usePrefs, APPEARANCE_DEFAULTS } from "@/store/prefs";
 import { requestCloseTab, requestClosePaneTab } from "@/lib/closeTab";
 import { focusMainTab, focusPaneTab } from "@/lib/tabFocus";
 import { jumpToNextWaiting } from "@/lib/waitingAgents";
+import { newScratchTab } from "@/lib/scratchTabs";
 import { dirHistoryTarget, goDirHistory } from "@/lib/dirTabs";
 import { bindingMatches, eventKeyToken, IS_MAC, SHORTCUT_DEFS, type ShortcutId } from "@/lib/shortcuts";
 import { visualProjectOrder } from "@/lib/projectGroups";
@@ -536,6 +537,15 @@ export function useShortcuts() {
           }
           return;
         }
+
+        // ⌥⌘N → new scratchpad in the active task (GH #244). Needs a task:
+        // pads live in a task's strip, so with none active there is nowhere
+        // to put one.
+        case "new-scratchpad":
+          if (!taskId) return;
+          e.preventDefault();
+          void newScratchTab(taskId);
+          return;
 
         // ⌘K → clear the focused terminal. Only acts when a terminal owns
         // focus; otherwise let the keystroke pass through.

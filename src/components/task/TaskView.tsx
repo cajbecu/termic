@@ -40,6 +40,7 @@ import { useUI } from "@/store/ui";
 import { effectiveLanguageId, languageLabel } from "@/lib/languages";
 import { dirnamePosix, MARKDOWN_EXT_RE } from "@/lib/markdownPaths";
 import { isSvgPath, keepsDisplayWhenHidden, previewKindForPath } from "@/lib/previewPaths";
+import { restoreScratchTabs } from "@/lib/scratchTabs";
 const EditorPane = lazy(() => import("./EditorPane").then(m => ({ default: m.EditorPane })));
 const DiffPane   = lazy(() => import("./DiffPane").then(m => ({ default: m.DiffPane })));
 const MarkdownPane = lazy(() => import("./MarkdownPane").then(m => ({ default: m.MarkdownPane })));
@@ -66,6 +67,27 @@ function EditorBreadcrumb({ task }: { task: Task }) {
   const revealInTree = useApp(s => s.revealInTree);
   const openSyntaxPalette = useUI(s => s.openSyntaxPalette);
   const [copied, setCopied] = useState(false);
+  // A scratchpad has no path, so there is no trail to render and nothing to
+  // copy, locate or open in Finder. It DOES get the syntax button: with no
+  // extension to go on, the content sniffer's guess (and the user's override)
+  // is the only thing that says how the buffer is being highlighted.
+  if (tab?.type === "scratch") {
+    return (
+      <div className="flex h-7 shrink-0 items-center gap-1 border-b border-[var(--color-border-soft)] bg-[var(--color-bg-1)] px-2 text-[12px]">
+        <span className="min-w-0 flex-1 truncate text-[var(--color-fg-faint)]">
+          Scratchpad, not saved to the project yet. ⌘S picks a place for it.
+        </span>
+        <button
+          data-testid="syntax-button"
+          onClick={() => openSyntaxPalette(task.id, tab.id)}
+          title="Set syntax"
+          className="shrink-0 rounded px-1.5 py-0.5 text-[11.5px] text-[var(--color-fg-faint)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]"
+        >
+          {languageLabel(effectiveLanguageId(tab))}
+        </button>
+      </div>
+    );
+  }
   if (!tab || (tab.type !== "edit" && tab.type !== "diff") || !tab.path) return null;
   const path = tab.path;
   const parts = path.split("/").filter(Boolean);
@@ -184,6 +206,12 @@ export function TaskView({ task }: { task: Task }) {
 
   useEffect(() => { ensureDefaultTab(task.id, task.cli); }, [task.id, task.cli, ensureDefaultTab]);
 
+  // Bring back this task's scratchpads (GH #244). Deliberately NOT part of
+  // `persisted_tabs`, which is agent-tabs-only by construction: pads restore
+  // from their own index, unfocused and behind whatever agent tab the line
+  // above just seeded. Idempotent, so a remount cannot double a tab.
+  useEffect(() => { void restoreScratchTabs(task.id); }, [task.id]);
+
   // Seed the first bottom tab the moment the split opens.
   useEffect(() => {
     if (split && (!bottomTabs || bottomTabs.length === 0)) addBottomTab(task.id, { focus: false });
@@ -237,9 +265,10 @@ export function TaskView({ task }: { task: Task }) {
   // the breadcrumb h-7 (28px) when it's visible — same condition as
   // EditorBreadcrumb's own null-return. Pane headers are always h-9.
   const activeMainTab = tabs.find(t => t.id === activeId);
-  const bcVisible = !!activeMainTab
-    && (activeMainTab.type === "edit" || activeMainTab.type === "diff")
-    && !!activeMainTab.path;
+  const bcVisible = !!activeMainTab && (
+    activeMainTab.type === "scratch"
+    || ((activeMainTab.type === "edit" || activeMainTab.type === "diff") && !!activeMainTab.path)
+  );
   const mainTopPx = splitRoot ? 36 + (bcVisible ? 28 : 0) : 0;
 
   // One computeLeafBounds over the FULL tree positions everything: the main
@@ -451,6 +480,20 @@ export function TaskView({ task }: { task: Task }) {
                           : isMarkdownPath(t.path)
                             ? <MarkdownPane task={task} tab={t} visible={visible} ownsFind={ownsFind} />
                             : <EditorPane task={task} tab={t} active={tabActive} />}
+                    </Suspense>
+                  )}
+                  {t.type === "scratch"  && (
+                    <Suspense fallback={null}>
+                      {/* A pad whose syntax resolves to markdown gets the same
+                          source / preview / split shell a `.md` file does. It
+                          is keyed off the SYNTAX rather than a path because a
+                          pad has no extension: picking Markdown is how you say
+                          "this is a document", and the toggle is most of what
+                          that buys you. Swapping panes remounts CodeMirror
+                          once, which the pad's unmount flush already covers. */}
+                      {effectiveLanguageId(t) === "markdown"
+                        ? <MarkdownPane task={task} tab={t} visible={visible} ownsFind={ownsFind} />
+                        : <EditorPane task={task} tab={t} active={tabActive} />}
                     </Suspense>
                   )}
                   {t.type === "diff"     && <Suspense fallback={null}><DiffPane task={task} tab={t} /></Suspense>}
