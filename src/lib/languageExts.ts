@@ -158,7 +158,8 @@ export async function langForId(id: string | null | undefined): Promise<Extensio
   if (!desc) return null;
   try {
     return await desc.load();
-  } catch {
+  } catch (e) {
+    console.warn(`[termic] could not load the ${name} grammar`, e);
     return null;
   }
 }
@@ -172,7 +173,11 @@ export async function langForPath(
   if (!desc) return null;
   try {
     return { id: desc.name, ext: await desc.load() };
-  } catch {
+  } catch (e) {
+    // Loud, not silent. A grammar chunk that fails to load must not fail the
+    // file open, but swallowing it outright is how a bundling mistake that
+    // broke .ts and .js for every file looked exactly like "no grammar".
+    console.warn(`[termic] could not load the ${desc.name} grammar`, e);
     return null;
   }
 }

@@ -227,7 +227,9 @@ Precedence, in `lib/languages.ts`:
 
 `lib/languageExts.ts` is the gateway to every grammar, and it is imported ONLY by the lazily loaded editor and diff panes. `lib/languages.ts` stays free of CodeMirror. **`lib/mainChunkGuard.test.ts` pins this** by walking the static import graph from `main.tsx`: a stray `import` of `@codemirror/language-data` from anything reachable at app start would move ~800K of grammars onto the launch path. `SyntaxPalette` is mounted from `App.tsx`, so it `import()`s the list when it opens rather than at module load.
 
-Measured: the main chunk is unchanged (marginally smaller, the old catalog is gone), `languageExts` is a 21K chunk fetched on the first editor or diff open, and `dist/` grows ~876K spread over ~119 extra chunks that are only fetched for a language actually opened.
+The rule covers the GRAMMAR packages too, not just the registry index, and that is the half that bites. A single `import { javascript } from "@codemirror/lang-javascript"` in the settings theme preview pinned that package into the main chunk, and the namespace object the registry's own `import()` then received came back with **no `javascript` export at all** (`e.javascript is not a function`): every `.ts` and `.js` file in the app silently fell through to the content sniffer and highlighted as whatever that guessed. Nothing reachable at app start may name a grammar package, however small the use looks; fetch it with `await import("@/lib/languageExts")` instead. A failed grammar load now also `console.warn`s rather than resolving quietly to "no grammar".
+
+Measured: the main chunk went 2361K → 2214K (the old catalog is gone, and so is the pinned JS grammar), `languageExts` is a 21K chunk fetched on the first editor or diff open, and `dist/` grows ~876K spread over ~119 extra chunks that are only fetched for a language actually opened.
 
 ### Async loads, and the race
 

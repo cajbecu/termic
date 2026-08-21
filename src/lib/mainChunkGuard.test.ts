@@ -26,8 +26,22 @@ const here = dirname(fileURLToPath(import.meta.url));
 const src = resolve(here, "..");
 const ENTRY = resolve(src, "main.tsx");
 
-/** Packages that must never be reachable statically from app start. */
-const FORBIDDEN = ["@codemirror/language-data"];
+/** Packages that must never be reachable statically from app start, matched
+ *  as prefixes.
+ *
+ *  The registry index is the obvious one. The GRAMMARS are the one that
+ *  actually bit: a single `import { javascript } from "@codemirror/lang-
+ *  javascript"` in the settings pane pinned that package into the main chunk,
+ *  and the namespace object the registry's own `import()` then received came
+ *  back with no `javascript` export at all. Every .ts and .js file in the app
+ *  silently fell through to the content sniffer. Nothing in the main chunk may
+ *  name a grammar package, however small it looks. */
+const FORBIDDEN = [
+  "@codemirror/language-data",
+  "@codemirror/lang-",
+  "@codemirror/legacy-modes",
+  "codemirror-lang-",
+];
 /** Our own modules that exist to pull the forbidden packages in. */
 const FORBIDDEN_LOCAL = ["lib/languageExts"];
 
@@ -89,9 +103,9 @@ describe("main chunk", () => {
   });
 
   for (const pkg of FORBIDDEN) {
-    it(`never statically imports ${pkg}`, () => {
-      const trail = graph.get(pkg);
-      expect(trail && trail.map(rel).join("\n  → ")).toBeUndefined();
+    it(`never statically imports ${pkg}*`, () => {
+      const hit = [...graph.entries()].find(([k]) => k.startsWith(pkg));
+      expect(hit && `${hit[0]}\n  ← ${hit[1].map(rel).join("\n  ← ")}`).toBeUndefined();
     });
   }
 

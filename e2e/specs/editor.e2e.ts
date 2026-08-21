@@ -419,6 +419,33 @@ describe("code editor", () => {
     await snap("code-editor-php.png");
   });
 
+  // The two extensions this repo is mostly made of. They are the ones a
+  // regression would be noticed on first and the ones the suite never opened
+  // before the registry swap, which is how a broken .ts shipped once.
+  it("highlights TypeScript and JavaScript", async () => {
+    await openHighlighted(
+      "hello.ts",
+      "export const greet = (name: string): string => `hi ${name}`;\n",
+      "greet",
+    );
+    expect(await syntaxLabel()).toBe("TypeScript");
+
+    await openHighlighted(
+      "hello.js",
+      "export const greet = (name) => `hi ${name}`;\n",
+      "greet",
+    );
+    expect(await syntaxLabel()).toBe("JavaScript");
+
+    await openHighlighted(
+      "App.tsx",
+      "export const App = () => <div className=\"x\">hi</div>;\n",
+      "App",
+    );
+    // The registry splits JSX/TSX out of TypeScript. Same grammar, own name.
+    expect(await syntaxLabel()).toBe("TSX");
+  });
+
   it("names the syntax it picked from the extension", async () => {
     await openHighlighted("typed.py", "x = 1\n", "x = 1");
     expect(await syntaxLabel()).toBe("Python");

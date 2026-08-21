@@ -15,7 +15,6 @@ import { homeDir } from "@/lib/ipc";
 import { IS_MAC, ALT_LABEL, CMD_LABEL } from "@/lib/shortcuts";
 import { EditorView } from "@codemirror/view";
 import { EditorState, Compartment } from "@codemirror/state";
-import { javascript } from "@codemirror/lang-javascript";
 
 type AppearanceTab = "terminal" | "editor" | "interface";
 
@@ -626,6 +625,24 @@ function CodePreview() {
   const hostRef  = useRef<HTMLDivElement>(null);
   const viewRef  = useRef<EditorView | null>(null);
   const themeComp = useRef(new Compartment());
+  const langComp = useRef(new Compartment());
+
+  // The grammar is fetched, not imported. This pane is in the MAIN chunk, and
+  // a static `@codemirror/lang-*` import here does two bad things: it puts a
+  // grammar on the app-start path, and it pins that package into the main
+  // chunk, where the namespace object the registry's own `import()` receives
+  // comes back missing its exports — every .ts and .js file in the app lost
+  // its highlighting that way. `lib/mainChunkGuard.test.ts` pins it now.
+  useEffect(() => {
+    let alive = true;
+    import("@/lib/languageExts")
+      .then(m => m.langForId("TypeScript"))
+      .then(ext => {
+        if (!alive || !ext) return;
+        viewRef.current?.dispatch({ effects: langComp.current.reconfigure([ext]) });
+      });
+    return () => { alive = false; };
+  }, []);
 
   useEffect(() => {
     if (!hostRef.current) return;
@@ -633,7 +650,7 @@ function CodePreview() {
       state: EditorState.create({
         doc: CODE_SAMPLE,
         extensions: [
-          javascript({ typescript: true }),
+          langComp.current.of([]),
           EditorView.editable.of(false),
           EditorView.theme({ "&.cm-editor": { outline: "none" } }),
           themeComp.current.of([
