@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { FileEntry } from "@/lib/types";
-import { ROOT, sameChildren, mergeReload, dirsNeedingLoad, without } from "./dirCache";
+import { ROOT, sameChildren, mergeReload, dirsNeedingLoad, without, withoutKey } from "./dirCache";
 
 const dir = (name: string): FileEntry => ({ name, is_dir: true });
 const file = (name: string): FileEntry => ({ name, is_dir: false });
@@ -97,5 +97,28 @@ describe("without", () => {
     expect(out).not.toBe(s);
     expect([...out]).toEqual(["b"]);
     expect(s.has("a")).toBe(true);
+  });
+});
+
+describe("withoutKey", () => {
+  it("returns the same map when the key is absent", () => {
+    const m = new Map([["a", "boom"]]);
+    expect(withoutKey(m, "b")).toBe(m);
+  });
+
+  it("returns a new map without the key, leaving the original alone", () => {
+    const m = new Map([["a", "boom"], ["b", "bang"]]);
+    const out = withoutKey(m, "a");
+    expect(out).not.toBe(m);
+    expect([...out.keys()]).toEqual(["b"]);
+    expect(m.has("a")).toBe(true);
+  });
+});
+
+describe("dirsNeedingLoad with the failed map", () => {
+  it("skips a dir that failed, whether failures are a set or a map", () => {
+    const expanded = new Set(["src", "gone"]);
+    const failed = new Map([["gone", "Permission denied (os error 13)"]]);
+    expect(dirsNeedingLoad(expanded, {}, new Set(), failed)).toEqual(["src"]);
   });
 });

@@ -12,7 +12,8 @@ import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import { cn } from "@/lib/utils";
 import { fileIconUrl, folderIconUrl } from "@/lib/explorer/iconResolver";
-import { ROOT, sameChildren, mergeReload, dirsNeedingLoad, without } from "@/lib/explorer/dirCache";
+import { ROOT, sameChildren, mergeReload, dirsNeedingLoad, without, withoutKey } from "@/lib/explorer/dirCache";
+import { explainDirError } from "@/lib/explorer/dirError";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator } from "@/components/ui/ContextMenu";
 import { CopyPathItems } from "./CopyPathItems";
 import { startPathDrag } from "@/lib/terminalDrop";
@@ -72,10 +73,13 @@ export function FileTree({ taskId, reloadToken = 0, refreshToken = 0 }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(expandedByTask.get(taskId)));
   // Tracks in-flight dir loads so we don't double-fetch.
   const [loading, setLoading] = useState<Set<string>>(() => new Set());
-  // Dirs whose read failed twice. They render a retry row instead of a
-  // "Loading…" that would never resolve, and the reconcile effect leaves them
-  // alone so a genuinely unreadable dir isn't re-read on every render.
-  const [failed, setFailed] = useState<Set<string>>(() => new Set());
+  // Dirs whose read failed twice, mapped to the error that failed them. They
+  // render a retry row instead of a "Loading…" that would never resolve, and
+  // the reconcile effect leaves them alone so a genuinely unreadable dir isn't
+  // re-read on every render. The message is kept (not just the fact of the
+  // failure) because a row saying only "Couldn't read this folder" is not
+  // reportable: that is #250.
+  const [failed, setFailed] = useState<Map<string, string>>(() => new Map());
   const [err, setErr] = useState<string | null>(null);
 
   // Dirs with a read in flight, tracked imperatively. `loading` is state (the
@@ -110,19 +114,20 @@ export function FileTree({ taskId, reloadToken = 0, refreshToken = 0 }: Props) {
   // their contents; the stale cache for the old task is dropped.
   useEffect(() => {
     const saved = new Set(expandedByTask.get(taskId));
-    setRootEntries(null); setChildren({}); setExpanded(saved); setFailed(new Set()); setErr(null);
+    setRootEntries(null); setChildren({}); setExpanded(saved); setFailed(new Map()); setErr(null);
     let alive = true;
     // Launch is an intentional moment — heal missing member symlinks here.
     const toLoad = ["", ...saved];
     Promise.all(toLoad.map(rel =>
       taskDirList(taskId, rel, rel === "")
-        .then(list => [rel, list] as const)
-        .catch(() => [rel, null] as const),
+        .then(list => [rel, list, ""] as const)
+        .catch(e => [rel, null, String(e)] as const),
     )).then(results => {
       if (!alive) return;
       const patch: Record<string, FileEntry[]> = {};
       for (const [rel, list] of results) if (list) patch[rel] = list;
-      if (!patch[""]) { setErr("Failed to read task files"); return; }
+      // Show WHY the root read failed, not just that it did (GH #250).
+      if (!patch[""]) { setErr(results.find(r => r[0] === "")?.[2] || "unknown error"); return; }
       setRootEntries(patch[""]);
       // Merge (not replace) so a reveal-in-tree that expanded ancestor dirs
       // while this load was in flight doesn't get its children clobbered.
@@ -152,7 +157,7 @@ export function FileTree({ taskId, reloadToken = 0, refreshToken = 0 }: Props) {
       for (const [rel, list] of results) if (list) fresh[rel] = list;
       // A dir whose read just failed gets another chance: clear it from
       // `failed` so the reconcile effect picks it up again.
-      setFailed(f => (f.size ? new Set() : f));
+      setFailed(f => (f.size ? new Map() : f));
       // Skip the update (and the tree-wide re-render) if every re-fetched
       // dir is byte-identical to what we already have. The common case after
       // an agent turn is "nothing in the visible tree changed".
@@ -172,7 +177,7 @@ export function FileTree({ taskId, reloadToken = 0, refreshToken = 0 }: Props) {
     if (children[rel] || inFlight.current.has(rel)) return;
     inFlight.current.add(rel);
     setLoading(s => { const n = new Set(s); n.add(rel); return n; });
-    setFailed(f => without(f, rel));
+    setFailed(f => withoutKey(f, rel));
     try {
       let list: FileEntry[];
       try {
@@ -190,8 +195,9 @@ export function FileTree({ taskId, reloadToken = 0, refreshToken = 0 }: Props) {
       console.error("dir list failed", rel, e);
       if (taskIdRef.current !== taskId) return;
       // Mark it failed rather than leaving an expanded dir with no listing:
-      // that state renders "Loading…" with nothing coming (GH #159).
-      setFailed(f => { const n = new Set(f); n.add(rel); return n; });
+      // that state renders "Loading…" with nothing coming (GH #159). The
+      // message rides along so the row can show it (GH #250).
+      setFailed(f => { const n = new Map(f); n.set(rel, String(e)); return n; });
     }
     finally { inFlight.current.delete(rel); setLoading(s => without(s, rel)); }
   }, [taskId, children, loading]);
@@ -220,7 +226,7 @@ export function FileTree({ taskId, reloadToken = 0, refreshToken = 0 }: Props) {
 
   const toggle = useCallback((rel: string) => {
     // Collapsing clears the failed mark, so re-opening always retries.
-    if (expandedRef.current.has(rel)) setFailed(f => without(f, rel));
+    if (expandedRef.current.has(rel)) setFailed(f => withoutKey(f, rel));
     setExpanded(s => {
       const n = new Set(s);
       if (n.has(rel)) n.delete(rel);
@@ -273,7 +279,19 @@ export function FileTree({ taskId, reloadToken = 0, refreshToken = 0 }: Props) {
     return () => clearTimeout(t);
   }, [revealedRel]);
 
-  if (err) return <div className="px-3 py-2 text-[12.5px] text-[var(--color-err)]">{err}</div>;
+  if (err) {
+    // The raw message under the headline, not only in a tooltip: this panel is
+    // where a user copies the errno into a bug report (GH #250).
+    const { short, detail } = explainDirError(err);
+    return (
+      <div data-testid="tree-root-failed" className="px-3 py-2 text-[12.5px]">
+        <div className="text-[var(--color-err)]">Couldn't read the task folder. {short}.</div>
+        {detail !== short && (
+          <div className="mt-1 break-all text-[11.5px] text-[var(--color-fg-faint)]">{detail}</div>
+        )}
+      </div>
+    );
+  }
   if (!rootEntries) return <div className="px-3 py-2 text-[13.5px] text-[var(--color-fg-faint)]">Loading…</div>;
   if (rootEntries.length === 0) return <div className="px-3 py-2 text-[13.5px] text-[var(--color-fg-faint)]">(empty)</div>;
 
@@ -307,7 +325,7 @@ interface NodeProps {
   /** Dir reads in flight, and dirs whose read failed twice (GH #159). An open
    *  dir with no listing is only "Loading…" when it is in one of these. */
   loading: Set<string>;
-  failed: Set<string>;
+  failed: Map<string, string>;
   /** Retry a failed dir read (the retry row's click handler). */
   retry: (rel: string) => void;
   /** Project id, for the "Add to Run scripts" actions (GH #124). */
@@ -549,17 +567,7 @@ function TreeNode({ taskId, entry, depth, rel, root, expanded, children_, toggle
       ))}
       {entry.is_dir && isOpen && !kids && (
         failed.has(rel) ? (
-          <button
-            type="button"
-            data-testid="dir-read-failed"
-            data-dir={rel}
-            onClick={() => retry(rel)}
-            className="h-[22px] flex items-center text-left text-[12px] text-[var(--color-err)] hover:underline"
-            style={{ paddingLeft: 6 + (depth + 1) * 12 + 22 }}
-            title="Reading this folder failed. Click to try again."
-          >
-            {"Couldn't read this folder. Retry"}
-          </button>
+          <DirReadFailed rel={rel} depth={depth} raw={failed.get(rel) ?? ""} retry={retry} />
         ) : (
           <div
             className="h-[22px] flex items-center text-[12px] text-[var(--color-fg-faint)] italic"
@@ -570,5 +578,34 @@ function TreeNode({ taskId, entry, depth, rel, root, expanded, children_, toggle
         )
       )}
     </>
+  );
+}
+
+/** The row an expanded directory shows when its read failed twice: the actual
+ *  error, not a generic sentence (GH #250). Split out of TreeNode so the
+ *  message formatting stays out of the hot render path every row runs. */
+function DirReadFailed(
+  { rel, depth, raw, retry }: { rel: string; depth: number; raw: string; retry: (rel: string) => void },
+) {
+  const { short, detail } = explainDirError(raw);
+  return (
+    <div
+      data-testid="dir-read-failed"
+      data-dir={rel}
+      data-reason={short}
+      onClick={() => retry(rel)}
+      role="button"
+      tabIndex={0}
+      onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); retry(rel); } }}
+      className="cursor-pointer py-[2px] pr-2 text-left text-[12px] leading-[15px] text-[var(--color-err)]"
+      style={{ paddingLeft: 6 + (depth + 1) * 12 + 22 }}
+      title={`${detail}\n\nClick to try again.`}
+    >
+      <span className="break-words">{short}.</span>{" "}
+      <span className="underline">Retry</span>
+      {detail !== short && (
+        <div className="line-clamp-2 break-all text-[11px] leading-[14px] text-[var(--color-fg-faint)]">{detail}</div>
+      )}
+    </div>
   );
 }

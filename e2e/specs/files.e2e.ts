@@ -585,6 +585,18 @@ describe("file tree", () => {
         timeoutMsg: "an unreadable folder never showed its retry row",
       });
 
+      // And it says WHAT failed, not just that something did (GH #250): the
+      // headline names the errno and the raw message names the path.
+      const reason = await browser.execute(
+        () => {
+          const el = document.querySelector('[data-testid="dir-read-failed"][data-dir="e2e-denied"]') as HTMLElement;
+          return { short: el.dataset.reason, title: el.title };
+        },
+      );
+      expect(reason.short).toBe("Permission denied");
+      expect(reason.title).toContain("e2e-denied");
+      expect(reason.title).toContain("os error 13");
+
       // Make it readable and click Retry: the contents arrive, no collapse
       // and re-expand needed.
       execSync(`chmod 755 "${dir}"`);
@@ -598,6 +610,54 @@ describe("file tree", () => {
     } finally {
       execSync(`chmod 755 "${dir}"`);
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A folder that is a symlink OUT of the task reads as a directory but can
+  // never be listed: safe_task_path canonicalizes and rejects it. Retrying is
+  // hopeless, so the row has to say why (GH #250). This is also the shape a
+  // permanently-stuck folder takes in a real repo (a linked vendor dir, a
+  // shared cache), which is the leading suspect for that report.
+  it("says a folder links outside the task instead of offering a pointless retry", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = taskId ?? (await openTask("e2e-tree"));
+
+    const outside = path.join(fixture, "..", "e2e-outside-target");
+    const link = path.join(fixture, "e2e-escaped");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(path.join(outside, "secret.txt"), "s\n");
+    execSync(`ln -sfn "${outside}" "${link}"`);
+    try {
+      await browser.execute(
+        (id) => window.__termic!.useApp.getState().bumpFsRevision(id),
+        taskId,
+      );
+      await browser.waitUntil(() => rowExists("e2e-escaped"), {
+        timeout: 10_000,
+        timeoutMsg: "the symlinked folder never appeared in the tree",
+      });
+
+      await clickRow("e2e-escaped");
+      await browser.waitUntil(
+        () =>
+          browser.execute(
+            () => !!document.querySelector('[data-testid="dir-read-failed"][data-dir="e2e-escaped"]'),
+          ),
+        { timeout: 10_000, timeoutMsg: "the escaping folder never showed its error row" },
+      );
+      const reason = await browser.execute(
+        () => {
+          const el = document.querySelector('[data-testid="dir-read-failed"][data-dir="e2e-escaped"]') as HTMLElement;
+          return { short: el.dataset.reason, title: el.title };
+        },
+      );
+      expect(reason.short).toBe("This folder links outside the task");
+      expect(reason.title).toContain("path escapes task");
+      expect(reason.title).toContain("e2e-outside-target");
+    } finally {
+      rmSync(link, { force: true });
+      rmSync(outside, { recursive: true, force: true });
     }
   });
 

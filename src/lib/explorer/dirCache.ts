@@ -67,7 +67,9 @@ export function dirsNeedingLoad(
   expanded: Set<string>,
   children: Record<string, FileEntry[]>,
   loading: Set<string>,
-  failed: Set<string>,
+  // A Set of failed rel-paths or the Map of rel-path -> error the tree keeps
+  // since #250 (it needs the message to show it); only membership is read here.
+  failed: { has(rel: string): boolean },
 ): string[] {
   const out: string[] = [];
   for (const rel of expanded) {
@@ -83,6 +85,15 @@ export function dirsNeedingLoad(
 export function without(set: Set<string>, rel: string): Set<string> {
   if (!set.has(rel)) return set;
   const n = new Set(set);
+  n.delete(rel);
+  return n;
+}
+
+/** `without` for the failed-dirs map (rel-path -> error message), with the
+ *  same skip-the-setState-on-a-no-op contract. */
+export function withoutKey<V>(map: Map<string, V>, rel: string): Map<string, V> {
+  if (!map.has(rel)) return map;
+  const n = new Map(map);
   n.delete(rel);
   return n;
 }

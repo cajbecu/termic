@@ -8425,10 +8425,17 @@ fn reject_escaping_segments(rel: &str) -> Result<PathBuf, String> {
 fn safe_task_path(ws_path: &Path, rel: &str) -> Result<PathBuf, String> {
     let pb = reject_escaping_segments(rel)?;
     let target = ws_path.join(&pb);
-    let canon_base = fs::canonicalize(ws_path).map_err(|e| e.to_string())?;
-    let canon_target = fs::canonicalize(&target).map_err(|e| e.to_string())?;
+    let canon_base = fs::canonicalize(ws_path)
+        .map_err(|e| format!("{}: {e}", ws_path.display()))?;
+    // Name the path in every error. These strings surface in the file tree and
+    // in bug reports (GH #250), where "No such file or directory" on its own
+    // says nothing about WHICH path went missing.
+    let canon_target = fs::canonicalize(&target)
+        .map_err(|e| format!("{}: {e}", target.display()))?;
     if !canon_target.starts_with(&canon_base) {
-        return Err(format!("path escapes task: {rel}"));
+        // A symlink out of the task is the usual way to land here, and where it
+        // points is the whole answer, so include it.
+        return Err(format!("path escapes task: {rel} -> {}", canon_target.display()));
     }
     Ok(canon_target)
 }
@@ -9112,11 +9119,11 @@ fn task_dir_list_sync(id: String, rel: String, heal: bool) -> Result<Vec<FileEnt
         })
     };
     let canon_target = if rel.is_empty() {
-        fs::canonicalize(&base).map_err(|e| e.to_string())?
+        fs::canonicalize(&base).map_err(|e| format!("{}: {e}", base.display()))?
     } else if let Some((member, remainder)) = &member_hit {
         let mp = PathBuf::from(&member.path);
         if remainder.is_empty() {
-            fs::canonicalize(&mp).map_err(|e| e.to_string())?
+            fs::canonicalize(&mp).map_err(|e| format!("{}: {e}", mp.display()))?
         } else {
             safe_task_path(&mp, remainder)?
         }
@@ -9137,7 +9144,8 @@ fn task_dir_list_sync(id: String, rel: String, heal: bool) -> Result<Vec<FileEnt
     let exclude_patterns = compile_exclude_patterns(&owner_repo_path);
 
     let mut out = Vec::new();
-    let rd = fs::read_dir(&canon_target).map_err(|e| e.to_string())?;
+    let rd = fs::read_dir(&canon_target)
+        .map_err(|e| format!("{}: {e}", canon_target.display()))?;
     for e in rd.flatten() {
         let name = match e.file_name().into_string() { Ok(s) => s, Err(_) => continue };
         // Always hide .git — it's repo plumbing, never something the
@@ -14374,7 +14382,21 @@ mod tests {
         fs::write(outside.path().join("secret.png"), b"x").unwrap();
         let ws = tempdir().unwrap();
         std::os::unix::fs::symlink(outside.path().join("secret.png"), ws.path().join("link.png")).unwrap();
-        assert!(safe_task_path(ws.path(), "link.png").is_err());
+        let err = safe_task_path(ws.path(), "link.png").unwrap_err();
+        // The message has to name where the link went, or the file tree row it
+        // ends up in is as unactionable as the one #250 reported.
+        assert!(err.contains("path escapes task: link.png -> "), "{err}");
+        assert!(err.contains("secret.png"), "{err}");
+    }
+
+    #[test]
+    fn safe_task_path_names_the_missing_path() {
+        // "No such file or directory (os error 2)" alone tells a user nothing
+        // about WHICH path is missing (GH #250).
+        let ws = tempdir().unwrap();
+        let err = safe_task_path(ws.path(), "docs/gone").unwrap_err();
+        assert!(err.contains("docs/gone"), "{err}");
+        assert!(err.contains("os error 2"), "{err}");
     }
 
     #[test]

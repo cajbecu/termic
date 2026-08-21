@@ -14,6 +14,7 @@ import { taskDirList, taskFileRead } from "@/lib/ipc";
 import { findReadme } from "@/lib/readme";
 import { navigateDirTab } from "@/lib/dirTabs";
 import { fileIconUrl, folderIconUrl } from "@/lib/explorer/iconResolver";
+import { explainDirError } from "@/lib/explorer/dirError";
 import { useApp } from "@/store/app";
 import { usePrefs, resolveTheme } from "@/store/prefs";
 import { cn } from "@/lib/utils";
@@ -151,11 +152,19 @@ export function DirListingPane(
 
       <div className="min-h-0 flex-1 overflow-auto">
         <div className="mx-auto max-w-[900px] p-4">
-          {err?.path === dir && (
-            <div className="mb-3 rounded border border-[var(--color-border)] px-3 py-2 text-[12.5px] text-[var(--color-fg-dim)]">
-              Couldn't read this folder: {err.msg}
-            </div>
-          )}
+          {err?.path === dir && (() => {
+            // Headline plus the raw message, phrased the same way the sidebar
+            // tree phrases it, so a failure is reportable from either (GH #250).
+            const { short, detail } = explainDirError(err.msg);
+            return (
+              <div className="mb-3 rounded border border-[var(--color-border)] px-3 py-2 text-[12.5px] text-[var(--color-fg-dim)]">
+                <div className="text-[var(--color-err)]">Couldn't read this folder. {short}.</div>
+                {detail !== short && (
+                  <div className="mt-1 break-all text-[11.5px] text-[var(--color-fg-faint)]">{detail}</div>
+                )}
+              </div>
+            );
+          })()}
           {entries === null ? (
             <div className="text-[13px] text-[var(--color-fg-dim)]">Loading…</div>
           ) : (
