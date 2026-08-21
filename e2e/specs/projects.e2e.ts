@@ -521,6 +521,18 @@ describe("branch new tasks from", () => {
     }, trigger);
     await waitVisible('[role="menu"]');
     await clickByText("Main checkout");
+    // Settle before clicking an item. The mode is remembered app-wide and the
+    // case above leaves it on Worktree, so this click usually CHANGES it, and
+    // the menu re-renders to drop its "Branch from" row. Clicking "Terminal"
+    // into that re-render lands on a node Radix is replacing and is simply
+    // lost, which is the whole failure: no name prompt, no task, on CI only.
+    await browser.waitUntil(
+      async () => browser.execute(() => {
+        const m = document.querySelector('[role="menu"]') as HTMLElement | null;
+        return !!m && !m.innerText.includes("Branch from");
+      }),
+      { timeout: 8_000, timeoutMsg: "the menu never settled into main-checkout mode" },
+    );
     await clickMenuItem("Terminal");
 
     // Menu closes, an inline name input takes its place instead of a task
