@@ -1906,6 +1906,41 @@ struct PtySlot {
     /// in the map next to its replacement (the waiter reaps it); role
     /// resolution breaks the tie toward the NEWEST slot.
     seq: u64,
+    /// Set by `pty_attached` once the webview has registered its
+    /// `pty://<id>` listener. The flusher holds its FIRST emit until then
+    /// (see `wait_for_attach`).
+    attached: Arc<AtomicBool>,
+    /// The reader -> flusher buffer + condvar, kept here so `pty_attached`
+    /// can flip the flag and wake the flusher under the SAME mutex the
+    /// `done` handshake uses. A store outside that mutex can land between
+    /// the flusher's check and its wait, and the wakeup is lost.
+    out_buf: Arc<(Mutex<Vec<u8>>, Condvar)>,
+}
+
+/// How long the flusher holds a PTY's first output waiting for the webview
+/// to say it is listening. Sized for "the ack is late", not "the ack never
+/// comes": the normal ack lands within milliseconds of the spawn resolving,
+/// and after the grace expires output flows anyway, so a caller that never
+/// acks costs a one-time delay rather than a wedged terminal.
+const PTY_ATTACH_GRACE: Duration = Duration::from_secs(3);
+
+/// Block until the webview acks its listener, the process dies, or the grace
+/// expires. Split out of the flusher so the three exits are unit-testable
+/// without a real PTY (`wait_for_attach_*` tests).
+fn wait_for_attach(
+    buf: &(Mutex<Vec<u8>>, Condvar),
+    attached: &AtomicBool,
+    done: &AtomicBool,
+    grace: Duration,
+) {
+    let mut b = buf.0.lock();
+    let deadline = Instant::now() + grace;
+    loop {
+        if attached.load(Ordering::Acquire) || done.load(Ordering::Acquire) { return; }
+        let now = Instant::now();
+        if now >= deadline { return; }
+        buf.1.wait_for(&mut b, deadline - now);
+    }
 }
 
 fn next_pty_seq() -> u64 {
@@ -2509,6 +2544,26 @@ fn pty_alive(state: State<'_, PtyManager>, id: String) -> bool {
     state.inner.lock().contains_key(&id)
 }
 
+/// The webview says it has registered its `pty://<id>` listener, so output
+/// may go on the wire. MUST be called by every caller of `pty_spawn`, right
+/// after `listen()` resolves: until it lands the flusher holds the child's
+/// output (bounded by `PTY_ATTACH_GRACE`), and everything emitted before a
+/// listener exists is dropped by Tauri with no trace.
+///
+/// Idempotent, and a no-op for an id that already left the map (a process
+/// that exited before the ack).
+#[tauri::command]
+fn pty_attached(state: State<'_, PtyManager>, id: String) {
+    let map = state.inner.lock();
+    let Some(slot) = map.get(&id) else { return };
+    // Under the buffer mutex, exactly like the reader's `done` store: a store
+    // outside it can land between the flusher's check and its wait, and that
+    // wakeup is lost (the terminal then waits out the whole grace).
+    let _b = slot.out_buf.0.lock();
+    slot.attached.store(true, Ordering::Release);
+    slot.out_buf.1.notify_all();
+}
+
 #[tauri::command]
 fn pty_spawn(
     app: AppHandle,
@@ -2714,6 +2769,15 @@ fn pty_spawn(
     let pty_buf: Arc<(Mutex<Vec<u8>>, Condvar)> =
         Arc::new((Mutex::new(Vec::new()), Condvar::new()));
     let reader_done: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+    // Flipped by `pty_attached`. Tauri events are fire-and-forget, so every
+    // byte the flusher emits before the webview's `listen()` resolves reaches
+    // nobody and is gone: the child starts writing the moment it is forked,
+    // while the listener costs a spawn round trip plus the renderer's own
+    // async work to register. A CLI that paints a banner and one OSC title at
+    // startup and then waits on stdin (every agent we ship) can lose BOTH and
+    // sit there blank forever, which is what the Activity spec kept hitting on
+    // a loaded CI runner.
+    let attached: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
     // CLI feed (ring buffer + attach taps) only for PTYs the CLI can
     // address; everything else keeps the zero-overhead path.
@@ -2734,6 +2798,7 @@ fn pty_spawn(
     let id_r = id.clone();
     let feed_r = feed.clone();
     let out_bytes_r = out_bytes.clone();
+    let attached_r = attached.clone();
     thread::spawn(move || {
         let mut buf = [0u8; 65536];
         loop {
@@ -2758,6 +2823,12 @@ fn pty_spawn(
         // so the waiter can fire pty-exit after all output is on the wire.
         let remaining = std::mem::take(&mut *buf_r.0.lock());
         if !remaining.is_empty() {
+            // Same gate as the flusher, for the same reason: a process that
+            // prints and exits faster than the webview can register its
+            // listener (a one-shot command in a terminal tab) would otherwise
+            // have its ENTIRE output emitted to nobody. `done` is still false
+            // here, so this waits on the ack, not on itself.
+            wait_for_attach(&buf_r, &attached_r, &done_r, PTY_ATTACH_GRACE);
             let _ = app_final.emit(&format!("pty://{}", id_final), PtyChunk { data: remaining });
         }
         // Set `done` and notify UNDER the buffer mutex. The flusher and the
@@ -2783,8 +2854,13 @@ fn pty_spawn(
     let buf_f = pty_buf.clone();
     let done_f = reader_done.clone();
     let app_f = app.clone();
+    let attached_f = attached.clone();
     thread::spawn(move || {
         let interval = Duration::from_millis(8);
+        // Nothing goes on the wire until someone is listening. The reader
+        // keeps filling the buffer meanwhile, so this delays the first paint
+        // by however long the ack takes and loses nothing.
+        wait_for_attach(&buf_f, &attached_f, &done_f, PTY_ATTACH_GRACE);
         loop {
             {
                 let mut b = buf_f.0.lock();
@@ -2882,6 +2958,8 @@ fn pty_spawn(
             owner: args.owner.clone(),
             out_bytes,
             seq: next_pty_seq(),
+            attached,
+            out_buf: pty_buf,
         },
     );
 
@@ -13528,6 +13606,7 @@ pub fn run() {
             automation::automation_result,
             automation::automation_armed,
             pty_alive,
+            pty_attached,
             cli_server::cli_rpc_result,
             cli_server::cli_rpc_ready,
             cli_server::cli_rpc_progress,
@@ -14214,6 +14293,51 @@ mod tests {
         assert_eq!(tail.len(), PtyRing::CAP);
         assert!(tail.ends_with(b"end"));
         assert!(truncated);
+    }
+
+    #[test]
+    fn wait_for_attach_returns_as_soon_as_the_webview_acks() {
+        // The normal path: the flusher parks, the ack lands a moment later,
+        // output flows. Nothing may wait out the grace here.
+        let buf: Arc<(Mutex<Vec<u8>>, Condvar)> = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
+        let attached = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let b2 = buf.clone();
+        let a2 = attached.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            let _g = b2.0.lock();
+            a2.store(true, Ordering::Release);
+            b2.1.notify_all();
+        });
+        let t0 = Instant::now();
+        wait_for_attach(&buf, &attached, &done, Duration::from_secs(30));
+        assert!(t0.elapsed() < Duration::from_secs(5), "took {:?}", t0.elapsed());
+    }
+
+    #[test]
+    fn wait_for_attach_gives_up_after_the_grace() {
+        // A caller that never acks must not wedge its PTY forever: output is
+        // late, not lost.
+        let buf: Arc<(Mutex<Vec<u8>>, Condvar)> = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
+        let attached = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let t0 = Instant::now();
+        wait_for_attach(&buf, &attached, &done, Duration::from_millis(120));
+        assert!(t0.elapsed() >= Duration::from_millis(100), "returned early: {:?}", t0.elapsed());
+        assert!(t0.elapsed() < Duration::from_secs(5), "overshot: {:?}", t0.elapsed());
+    }
+
+    #[test]
+    fn wait_for_attach_returns_when_the_process_dies_first() {
+        // The reader's final drain waits on this too, so a child that exits
+        // before the ack must not hold pty-exit for the whole grace.
+        let buf: Arc<(Mutex<Vec<u8>>, Condvar)> = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
+        let attached = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(true));
+        let t0 = Instant::now();
+        wait_for_attach(&buf, &attached, &done, Duration::from_secs(30));
+        assert!(t0.elapsed() < Duration::from_secs(1), "took {:?}", t0.elapsed());
     }
 
     #[test]

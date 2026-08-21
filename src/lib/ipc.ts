@@ -671,6 +671,12 @@ export const defaultShell = () => invoke<string>("default_shell");
 export function onPtyData(ptyId: string, cb: (data: Uint8Array) => void): Promise<UnlistenFn> {
   return listen<{ data: number[] }>(`pty://${ptyId}`, ev => cb(new Uint8Array(ev.payload.data)));
 }
+/** Tell Rust this PTY has a listener, so its output may start flowing.
+ *  MUST be called right after `onPtyData` resolves: a Tauri event emitted
+ *  before `listen()` registers reaches nobody, so a CLI that prints a banner
+ *  and one OSC title at startup can lose both and leave a blank terminal.
+ *  Rust holds the output until this lands (bounded by a 3s grace). */
+export const ptyAttached = (ptyId: string) => invoke<void>("pty_attached", { id: ptyId });
 /** Whether a PTY slot is still live (pty_write silently no-ops on a
  *  dead id, so delivery confirmation re-checks with this). */
 export const ptyAlive = (ptyId: string) => invoke<boolean>("pty_alive", { id: ptyId });

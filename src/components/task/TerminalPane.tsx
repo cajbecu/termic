@@ -1792,6 +1792,12 @@ const captureArmedRef = useRef(false);
         // its own ref, not this one — assigning over it would silently drop
         // whatever was already there and leak a listener per respawn.
         unlistenDataRef.current = unlistenData;
+        // Rust holds this PTY's output until the ack lands, because a Tauri
+        // event emitted before `listen()` registers reaches nobody. Without
+        // it an agent that prints its banner and one OSC title at startup and
+        // then blocks on stdin can lose both to the spawn round trip and show
+        // an empty terminal with no live title, for good.
+        ipc.ptyAttached(ptyId).catch(() => {});
 
         const unlistenExit = await ipc.onPtyExit(ptyId, (code) => {
           ptyRef.current = null;

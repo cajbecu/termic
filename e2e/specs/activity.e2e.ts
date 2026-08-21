@@ -69,14 +69,26 @@ describe("Activity monitor", () => {
     // the BRIDGE carries a live title, so the main window has to actually have
     // one before the Activity window opens — otherwise the case is really
     // racing fake-agent.sh's first `set_title`, which is how it flaked in CI.
+    // Report what the tab ACTUALLY had. A bare timeout here cannot tell
+    // "the fixture never ran" from "it ran but the spawn dropped --name"
+    // from "the title was lost before the terminal was listening", and this
+    // only ever fails on CI, where guessing costs a round trip per attempt.
+    let seen: unknown = null;
     await browser.waitUntil(
-      async () => browser.execute((id, want) => {
-        const tab = (window.__termic!.useApp.getState().tabs[id] ?? [])[0] as
-          { liveTitle?: string } | undefined;
-        return !!tab?.liveTitle?.includes(want);
-      }, taskId, "activity-mon"),
-      { timeout: 20_000, timeoutMsg: "agent never drove its OSC title to the task name" },
-    );
+      async () => {
+        seen = await browser.execute((id) => {
+          const t = (window.__termic!.useApp.getState().tabs[id] ?? [])[0] as
+            { liveTitle?: string; cli?: string; ptyId?: string } | undefined;
+          return { liveTitle: t?.liveTitle ?? null, cli: t?.cli ?? null, pty: !!t?.ptyId };
+        }, taskId);
+        return !!(seen as { liveTitle: string | null }).liveTitle?.includes("activity-mon");
+      },
+      { timeout: 20_000 },
+    ).catch(() => {
+      throw new Error(
+        `agent never drove its OSC title to the task name — tab was ${JSON.stringify(seen)}`,
+      );
+    });
   });
 
   after(async () => {

@@ -71,6 +71,24 @@ jobs:
         run: npm run e2e:build
       - name: Run e2e suite
         run: npm run test:e2e
+      # The debug log lives in the per-user temp dir (`std::env::temp_dir()`),
+      # i.e. somewhere under /var/folders on macOS. Copying it here rather
+      # than globbing it in upload-artifact: `/var/folders/**` made the
+      # uploader walk the whole tree, where it hit an unreadable
+      # LaunchServices store and failed the step with EACCES, so a failing
+      # run uploaded NOTHING (not the log, not the screenshots).
+      - name: Collect the debug log
+        if: failure()
+        run: |
+          mkdir -p .e2e/artifacts
+          cp "${TMPDIR%/}/termic-debug.log" .e2e/artifacts/ 2>/dev/null || true
+          # The app may run under a different TMPDIR than this shell. Bounded
+          # depth so this stays a lookup, not a filesystem walk, and errors
+          # are swallowed so an unreadable sibling cannot fail the job.
+          find /var/folders -maxdepth 4 -name termic-debug.log 2>/dev/null \
+            | head -5 | while read -r f; do cp "$f" ".e2e/artifacts/$(basename "$(dirname "$f")")-termic-debug.log" 2>/dev/null || true; done
+          ls -la .e2e/artifacts || true
+
       - name: Upload artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -78,7 +96,6 @@ jobs:
           name: e2e-artifacts
           path: |
             .e2e/artifacts
-            /var/folders/**/termic-debug.log
           if-no-files-found: ignore
           # Same trap as perf.yml: `.e2e/` is hidden, so every screenshot and
           # debug log from a failing run was silently dropped. With

@@ -233,6 +233,9 @@ export function AuxTerminal({ taskId, tabId, taskPath, active, autoFocus, onExit
         if (cancelled) { ipc.ptyKill(ptyId).catch(() => {}); return; }
         ptyRef.current = ptyId;
         unlistenData = await ipc.onPtyData(ptyId, u8 => term.write(u8));
+        // Output is held Rust-side until this lands: anything emitted before
+        // the listener exists is dropped (see ipc.ptyAttached).
+        ipc.ptyAttached(ptyId).catch(() => {});
         unlistenExit = await ipc.onPtyExit(ptyId, () => {
           ptyRef.current = null;
           // Bottom-split shells: parent passes onExited to close the
