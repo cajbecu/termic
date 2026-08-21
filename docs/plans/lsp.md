@@ -576,19 +576,35 @@ server earns it), so the open question below blocks a feature, not the phase.
 
 ## Opt-in: "Code navigation"
 
-Two levels, no more, both machine-local:
+Three levels, each **inheriting** from the one above, all machine-local. This is
+the shape sandbox already uses (app default → project → per-task override), so
+it is a familiar control rather than a new concept.
 
 - **An app-wide pref, default OFF** (`prefs.ts`, alongside `loadRemoteImages`).
-  This is the master switch and the answer to "why would I spend RAM on a repo
-  I only ever point agents at".
-- **A per-project override** on the `Project` record (`projects.json`), tri-state
-  inherit / on / off, next to `default_sandbox` and `spotlight_enabled`. This is
-  what makes it useful: navigation on for the repo you read, off for the four
-  you only supervise.
+  The master switch, and the answer to "why would I spend RAM on a repo I only
+  ever point agents at".
+- **A per-project override** on the `Project` record (`projects.json`),
+  tri-state inherit / on / off, next to `default_sandbox` and
+  `spotlight_enabled`. Navigation on for the repo you read, off for the four you
+  only supervise.
+- **A per-task override**, same tri-state, defaulting to inherit.
 
-**No per-task toggle.** Tasks inherit their project. Tasks are created
-constantly, so a per-task switch would mean re-enabling this several times a
-day, and it would buy nothing the lazy-spawn rule does not already give.
+**Why per-task, given the cost model.** An earlier draft rejected it, on the
+grounds that tasks are created constantly so a per-task switch would mean
+re-enabling this several times a day. That objection only holds if the per-task
+level is a *required choice*; as an override that defaults to inherit, the
+common path costs the user nothing and the control exists when it matters.
+
+And it matters more than the draft assumed, because the unit of memory is the
+TASK, not the project. Measured: rust-analyzer holds ~3.1 GB per worktree and
+gopls up to 6.8 GB, neither ever released. Six tasks on one repo where the user
+reads code in exactly one of them is the normal case in termic, and a
+project-level switch cannot express it — it is all six or none. The per-task
+override is the only level that matches where the cost is actually incurred.
+
+It is also the natural home for **"stop this server now"**: the same control
+that says "not this task" reclaims gigabytes immediately, which pairs with
+listing servers in the Activity window.
 
 **Deliberately NOT in `.termic.yaml`.** The repo config is committed and
 team-shared, which is right for sandbox policy and wrong for this: whether to
