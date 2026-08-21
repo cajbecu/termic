@@ -320,17 +320,41 @@ per-asset `digest` field is the reliable source. Do not resolve `latest` at runt
 
 ## Lifecycle
 
-Servers are **per (task, language)**. They cannot be shared across tasks: each task
-is a git worktree, so the files are at different paths *with different content*.
-A shared server would send go-to-definition into the wrong worktree's copy. That is
-a correctness bug, not a tuning knob.
+Servers are keyed by **(resolved workspace root, language)** — NOT by task.
 
-LSP's `workspaceFolders` (one server, many roots) saves only the process baseline,
-not the index, and couples task lifetimes and crashes. Not worth it.
+The distinction is worth real memory, because "one task, one root" is not true
+in either direction:
+
+- **Several tasks can share one root.** A main-checkout task (`is_main_checkout`)
+  runs in the project's `root_path` itself, and nothing stops several existing at
+  once. Same directory, same bytes, same branch — so N of them need **one**
+  server between them, not N. At rust-analyzer's ~3.1 GB or gopls's 3-6 GB, that
+  is the difference between a second main-checkout task being free and it costing
+  another few gigabytes for an identical index.
+- **One task can need several roots.** A multi-repo task holds several members,
+  each with its own root (`kind: "host" | "worktree" | "repo_root"`), so it wants
+  one server per member per language.
+
+**Worktree tasks still get their own server, and that part is not negotiable.**
+Two worktrees are different paths with *different content*, and they share module
+paths — an import resolved in the wrong copy is a correctness bug, not a tuning
+knob. That is the case the per-task memory cost is genuinely buying something.
+
+Refcount, therefore: spawn on the first task that has code navigation enabled and
+opens an editor tab of that language at that root; reap when the last such task
+closes. Two consequences for the UI: turning navigation off in one task must not
+kill a server another task is still using, and **"stop this server now" stops it
+for every task sharing that root** — say so on the button rather than surprising
+someone.
+
+LSP's `workspaceFolders` (one server, many *unrelated* roots) is a different idea
+and still not worth it: it saves only the process baseline, not the index, and it
+couples task lifetimes and crashes.
 
 Memory is therefore controlled by lifecycle:
 
-- **Lazy spawn.** Only when an editor tab of that language is open in that task.
+- **Lazy spawn.** Only when an editor tab of that language is open in a task
+  using that root.
   This fits termic unusually well: most of the time a task is open, the user is
   watching an agent in a terminal, not editing. The agent does not need the server.
   Six open tasks with no editor tabs cost zero.
@@ -605,6 +629,37 @@ override is the only level that matches where the cost is actually incurred.
 It is also the natural home for **"stop this server now"**: the same control
 that says "not this task" reclaims gigabytes immediately, which pairs with
 listing servers in the Activity window.
+
+**Per-task is the RECOMMENDED level, and the UI should say so.** App-wide on is
+the setting most likely to surprise someone: it arms every task in every project,
+and the bill only arrives later, from a process the user never started. Steering
+people to enable navigation in the one task they are reading code in is both the
+cheapest default and the honest one.
+
+### The memory disclosure is part of the feature
+
+A user cannot consent to a cost nobody showed them, and this cost is large,
+per-worktree, and never reclaimed until the process dies. Three things have to be
+said at the moment of enabling — not buried in Settings:
+
+1. **A number, from the manifest, per language.** Not "may use significant
+   memory". Each manifest carries a measured typical and worst-case RSS, so the
+   toggle can read *"rust-analyzer typically holds 2-3 GB per task and does not
+   release it"* or *"gopls 1 GB, up to 7 GB on a large repo"*. The figures in the
+   cost model above are the seed values.
+2. **That the unit is the worktree, not the project.** Users reasonably assume
+   one server per repo, the way an IDE works. Termic is not that: every worktree
+   task is a separate checkout with different content, so it needs its own
+   server and its own copy of the index. Ten tasks on one repo with navigation on
+   everywhere is ten indexes. The exception is worth stating in the same breath —
+   several main-checkout tasks share one root and therefore one server.
+3. **Where it went and how to get it back.** The Activity window lists live
+   servers with their RSS and a stop button; stopping one frees its memory
+   immediately and costs a re-index when next needed.
+
+Language servers are the first thing termic runs that can cost more than every
+agent in the window combined. That deserves a sentence at the point of decision,
+not a support thread afterwards.
 
 **Deliberately NOT in `.termic.yaml`.** The repo config is committed and
 team-shared, which is right for sandbox policy and wrong for this: whether to
