@@ -1,12 +1,17 @@
-# Language servers (design + findings)
+# Language servers (spec + findings)
 
-Status: proposed, not started. Opt-in, off by default.
+**Approved** (GH #174, the code-navigation half; the commenting half shipped in
+0.27.0). Opt-in, off by default, not started.
 
-Code navigation via LSP: go-to-definition, find usages, hover types, completion,
-rename. Written up so the decisions (and the traps) survive the investigation
-that produced them. Every number below was measured on a real repo, not quoted.
+Code navigation via LSP: go-to-definition, find usages, hover types,
+completion. Every number below was measured on a real repo, not quoted.
 
-Goal: enough navigation to replace PyCharm.
+**Goal: navigate the code the agent is changing, in the task you are already
+in.** Deliberately not "replace PyCharm" — that goal argues for owning rename,
+refactors and the endless tail of "but PyCharm also does X", and it makes
+phase 3 definitional rather than optional. What termic owes the user is the
+ability to follow a symbol through the diff an agent just produced without
+leaving the window.
 
 Non-goal: becoming an IDE. Off by default, one process per language per task
 at most, nothing bundled in the `.app`, nothing running until the user opts in.
@@ -260,15 +265,34 @@ There is **no document registry today**. Every editor tab creates a fresh
 `EditorView` from a fresh disk read. Nothing tracks "what is open", no version
 counter, nothing for `didOpen`/`didChange`/`didClose` to sync against.
 
-The trap: **`openPreviewTab` recycles a preview tab in place** (`store/app.ts:1889`),
+**This phase is not "nothing visible".** It is the phase that has to be correct
+or everything above it is quietly wrong, and wrong here does not raise errors,
+it returns confident bad answers.
+
+The trap: **`openPreviewTab` recycles a preview tab in place** (`store/app.ts`),
 mutating the tab's `path` **without ever firing a close**. A naive tab-diff leaks
 `didOpen`s and desyncs the server model, which produces wrong results rather than
-errors.
+errors. There is now precedent for exactly where the `didClose`/`didOpen` pair
+belongs: that same recycle path already resets `syntax` / `syntaxAuto` because a
+recycled slot is a DIFFERENT file (shipped in 9f8b487). Whatever it resets
+there, the registry must close there.
 
 Needed before any LSP code:
 
 - A `(taskId, path) -> { version, languageId }` registry, driven by
   `openPreviewTab` / `closeTab` / the mount effect.
+- **`languageId` comes from `lib/languages.ts`** — `effectiveLanguageId` is
+  already the one place a language is decided, and it folds in the user's manual
+  Set-syntax pick. It is NOT the LSP spec's vocabulary, though, so the registry
+  owns a small explicit termic-id → LSP-`languageId` table (`shell` →
+  `shellscript`, `properties` → `ini`, our single `cpp` entry covering C and
+  C++). See [plans/editor-language-registry.md](editor-language-registry.md),
+  which makes those ids the CodeMirror registry's names.
+- **Decide what a URI-less buffer is.** Scratchpads (GH #244) are editor tabs
+  with no path at all, so they either model as an untitled document or are
+  excluded outright. Excluded is the right v1 answer — a language server has
+  nothing useful to say about a note — but it has to be a decision, because the
+  registry keys on path and a scratch tab would key on `undefined`.
 - Forward the `ExternalReload` path too (`EditorPane.tsx:299`): a disk-change
   reload is a full-document `didChange`.
 - Debounce `didChange`. It fires per keystroke.
@@ -296,8 +320,17 @@ tooltip, so phase 1's hover no longer has the surface to itself. Blame does NOT 
 `hoverTooltip`: it drives `showTooltip` from its own state field, opened by the
 annotation's own `mouseenter` after a 1s delay and anchored at the line's end. So the
 two can coexist without both registering a hover source and racing, but they can
-still overlap on screen, and nothing has been done about that yet. Whether two
-`hoverTooltip` sources stack cleanly is still untested; blame simply is not one.
+still overlap on screen. The decision, so it is not discovered mid-implementation:
+
+**Code hover and annotation hover stay separate, and only one card is ever on
+screen.** Separation needs no arbitration — blame's annotation is a
+`Decoration.widget({ side: 1 })` past `line.to`, where there is no symbol, so an
+LSP `hoverTooltip` source returns null over it, and blame is not a hover source
+at all. What DOES need a rule is both wanting the screen at once: a hover on a
+symbol near the end of a line whose blame card is anchored at that line's end.
+There, **hover wins** — hover is a question the user asked, blame is ambient.
+Blame's card suppresses itself while an LSP tooltip is open on the same line;
+its existing `cancelClose` / `closeCardSoon` lifecycle is where that hooks in.
 
 ## Security
 
@@ -355,14 +388,21 @@ subprocess), bash, and clangd (93 MB universal binary that also needs
 | Phase | Work | Ships |
 |---|---|---|
 | 0 | Document registry; extract `gotoLocation()` | nothing visible; unblocks all |
-| 1 | Rust LSP host + Channel transport + one server, default-OFF pref | hover, diagnostics, goto-def |
+| 1 | Rust LSP host + Channel transport + TypeScript 7 AND Python, default-OFF pref | hover, diagnostics, goto-def |
 | 2 | Find-references panel, completion, signature help, rename | the PyCharm core |
 | 3 | Read-only external-file tabs | ⌘-click into site-packages |
 | 4 | Declarative manifests + Settings section | rust-analyzer, gopls, TS7 for free |
 | 5 | `[server.install]` download with pinned checksums | works without a toolchain |
 
-Value is concentrated in 0-2. Phase 3 is the difference between "nicer editor" and
-"PyCharm replacement".
+Value is concentrated in 0-2, which is the whole of the stated goal. Phase 3
+buys ⌘-click into dependency source; it is worth doing and it is not what the
+feature is for, so it does not gate calling this done.
+
+**Phase 1 ships TypeScript 7 and Python together.** TS7 is the strongest
+measured case and needs no runtime, it is dogfooded in this repo every day, and
+it does not depend on settling ty vs zuban. Python ships alongside it with
+goto-def and hover only (see the Python section: no find-references until a
+server earns it), so the open question below blocks a feature, not the phase.
 
 ## Opt-in
 

@@ -55,7 +55,7 @@ docs/plans/        approved and refined. Ready to implement, no design work left
 docs/ideas/        everything not yet approved. Detailed or not, it is not decided.
 ```
 
-There is no third bucket for "detailed but undecided": that is an idea. `lsp.md`, `windows.md` and `docker-sandbox/` are all build-ready documents that are still ideas, because nobody has committed to them. The bar for `plans/` is high and the directory is usually near-empty; that is the honest state, not a gap to fill.
+There is no third bucket for "detailed but undecided": that is an idea. `windows.md` and `agent-orchestration.md` are build-ready documents that are still ideas, because nobody has committed to them, and being detailed is not the same as being decided. The bar for `plans/` is high and the directory is usually near-empty; that is the honest state, not a gap to fill.
 
 `scratchpad/` is gitignored throwaway work, outside all of this. See ## Scratchpad.
 

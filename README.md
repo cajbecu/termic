@@ -362,7 +362,7 @@ specs and get an issue at the same time. That is the whole promotion path:
   fast heuristic pass (ripgrep + tree-sitter) for languages that have no
   server present. The commenting half of #174 shipped in 0.27.0; this is
   the code-navigation half. Design and measurements in
-  [docs/ideas/lsp.md](docs/ideas/lsp.md).
+  [docs/plans/lsp.md](docs/plans/lsp.md).
 - **Mobile app.** ([#165](https://github.com/simion/termic/issues/165)) A
   companion app for checking on and steering tasks while away from the Mac.
 - **MCP server endpoint.** ([#176](https://github.com/simion/termic/issues/176))

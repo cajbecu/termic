@@ -116,6 +116,6 @@ descriptions and the registry lookup.
 
 ## Out of scope
 
-Highlighting inside terminal output; anything LSP (`docs/ideas/lsp.md` owns
+Highlighting inside terminal output; anything LSP (`docs/plans/lsp.md` owns
 that, and should read its `languageId` from the same place); shipping grammars
 the registry does not include.
