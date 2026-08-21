@@ -8524,6 +8524,67 @@ fn safe_task_path(ws_path: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(canon_target)
 }
 
+/// Read-only path resolution that also accepts the top-level config-dir
+/// symlinks termic itself creates into the repo root (GH #250).
+///
+/// `link_config_dir` symlinks `.claude/` and friends from the repo into every
+/// new worktree, precisely because they are commonly gitignored and so
+/// `git worktree add` leaves them out. `safe_task_path` then refused to read
+/// back through the very link we made: canonicalizing lands outside the
+/// worktree, so the folder LISTED (the parent's `read_dir` sees a dir entry)
+/// and could never be opened, with no retry or refresh able to help.
+///
+/// The bound is the PROJECT root rather than the worktree. A link resolving
+/// inside the repo the user deliberately added is theirs to read; a repo that
+/// ships `.claude -> ~/.ssh` still resolves outside it and is still refused,
+/// which is the case the containment check exists for.
+///
+/// READ paths only. `task_path_rename`, `task_path_delete` and every git path
+/// keep the strict check, so nothing can MUTATE the main checkout by writing
+/// through a link from a worktree task.
+fn safe_task_read_path(w: &Task, base: &Path, rel: &str) -> Result<PathBuf, String> {
+    let root = load_projects()
+        .into_iter()
+        .find(|p| p.id == w.project_id)
+        .map(|p| PathBuf::from(p.root_path));
+    safe_task_read_path_in(root.as_deref(), base, rel)
+}
+
+/// The decision itself, with the project root passed in rather than looked up,
+/// so it is testable without a profile on disk.
+fn safe_task_read_path_in(project_root: Option<&Path>, base: &Path, rel: &str) -> Result<PathBuf, String> {
+    let strict = match safe_task_path(base, rel) {
+        Ok(p) => return Ok(p),
+        Err(e) => e,
+    };
+    let pb = match reject_escaping_segments(rel) {
+        Ok(p) => p,
+        Err(_) => return Err(strict),
+    };
+    let Some(first) = pb.components().next() else { return Err(strict) };
+    // Only a symlink sitting directly in the task root qualifies: that is the
+    // shape link_config_dir creates, and it keeps a symlink buried deep in the
+    // repo from widening the check.
+    let is_link = base
+        .join(first.as_os_str())
+        .symlink_metadata()
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    if !is_link {
+        return Err(strict);
+    }
+    let Some(root) = project_root else { return Err(strict) };
+    let (Ok(canon_root), Ok(target)) = (fs::canonicalize(root), fs::canonicalize(base.join(&pb)))
+    else {
+        return Err(strict);
+    };
+    if target.starts_with(&canon_root) {
+        Ok(target)
+    } else {
+        Err(strict)
+    }
+}
+
 #[derive(Serialize)]
 struct PathStat {
     exists: bool,
@@ -8622,7 +8683,7 @@ fn task_file_read(id: String, path: String) -> Result<String, String> {
     // (which may live outside the wrapper for repo_root members), matching
     // the diff/finder/grep path scheme.
     let (cwd, rel) = resolve_task_git_path(&w, &path)?;
-    let abs = safe_task_path(&cwd, &rel)?;
+    let abs = safe_task_read_path(&w, &cwd, &rel)?;
     // Refuse binary or huge files for now — viewer is text-only.
     let bytes = read_capped_file(&abs, 2_000_000)?;
     String::from_utf8(bytes).map_err(|_| "file is not valid UTF-8".to_string())
@@ -8677,7 +8738,7 @@ struct Base64Read {
 fn task_file_read_base64_for_task(w: &Task, path: &str, known_fp: Option<&str>) -> Result<Base64Read, String> {
     use base64::Engine as _;
     let (cwd, rel) = resolve_task_git_path(w, path)?;
-    let abs = safe_task_path(&cwd, &rel)?;
+    let abs = safe_task_read_path(w, &cwd, &rel)?;
     let mime = preview_mime_for_ext(&abs).ok_or_else(|| format!("not previewable: {path}"))?;
     // Cheap pre-read stat: if it matches what the caller already has
     // cached, skip the read + base64 encode entirely. Only bother when
@@ -8734,7 +8795,7 @@ async fn task_file_read_base64(id: String, path: String, known_fp: Option<String
 /// is left to a path that resolves but won't stat.
 fn task_file_fp_for_task(w: &Task, path: &str) -> Result<String, String> {
     let (cwd, rel) = resolve_task_git_path(w, path)?;
-    let abs = safe_task_path(&cwd, &rel)?;
+    let abs = safe_task_read_path(w, &cwd, &rel)?;
     preview_mime_for_ext(&abs).ok_or_else(|| format!("not previewable: {path}"))?;
     Ok(file_fp(&abs))
 }
@@ -8756,7 +8817,7 @@ fn task_file_fp(id: String, path: String) -> Result<String, String> {
 /// in-memory `Task`.
 fn read_preview_file_for_task(w: &Task, path: &str) -> Result<(Vec<u8>, &'static str), String> {
     let (cwd, rel) = resolve_task_git_path(w, path)?;
-    let abs = safe_task_path(&cwd, &rel)?;
+    let abs = safe_task_read_path(w, &cwd, &rel)?;
     let mime = preview_mime_for_ext(&abs).ok_or_else(|| format!("not previewable: {path}"))?;
     let bytes = read_capped_file(&abs, PREVIEW_CAP)?;
     Ok((bytes, mime))
@@ -9523,7 +9584,9 @@ fn task_dir_list_sync(id: String, rel: String, heal: bool) -> Result<Vec<FileEnt
             safe_task_path(&mp, remainder)?
         }
     } else {
-        safe_task_path(&base, &rel)?
+        // GH #250: also resolves through the config-dir symlinks termic itself
+        // creates into the repo root, which the strict check refused.
+        safe_task_read_path(&w, &base, &rel)?
     };
     // The repo that owns this directory + the path relative to its root.
     let (owner_repo_path, local_rel): (String, &str) = match &member_hit {
@@ -14830,6 +14893,95 @@ mod tests {
         // ends up in is as unactionable as the one #250 reported.
         assert!(err.contains("path escapes task: link.png -> "), "{err}");
         assert!(err.contains("secret.png"), "{err}");
+    }
+
+    // ───────── linked config dirs in a worktree (GH #250) ─────────
+
+    /// A repo with a gitignored `.claude/`, plus a worktree carrying the
+    /// symlink `link_config_dir` creates into it. This is the exact shape a
+    /// real task has, and the shape the strict check refused to read.
+    fn repo_with_linked_config() -> (tempfile::TempDir, tempfile::TempDir) {
+        let repo = tempdir().unwrap();
+        fs::create_dir_all(repo.path().join(".claude/agents")).unwrap();
+        fs::write(repo.path().join(".claude/settings.json"), b"{}").unwrap();
+        let wt = tempdir().unwrap();
+        std::os::unix::fs::symlink(
+            fs::canonicalize(repo.path().join(".claude")).unwrap(),
+            wt.path().join(".claude"),
+        )
+        .unwrap();
+        (repo, wt)
+    }
+
+    #[test]
+    fn reads_through_the_config_symlink_termic_created() {
+        let (repo, wt) = repo_with_linked_config();
+        // The bug: we make this link because .claude is gitignored, then the
+        // strict check refuses to read back through it, so the folder lists
+        // and never opens.
+        assert!(safe_task_path(wt.path(), ".claude").is_err());
+
+        let dir = safe_task_read_path_in(Some(repo.path()), wt.path(), ".claude").unwrap();
+        assert_eq!(dir, fs::canonicalize(repo.path().join(".claude")).unwrap());
+        // …and files under it, which is what the editor opens.
+        let file = safe_task_read_path_in(Some(repo.path()), wt.path(), ".claude/settings.json").unwrap();
+        assert!(file.ends_with(".claude/settings.json"));
+        assert!(safe_task_read_path_in(Some(repo.path()), wt.path(), ".claude/agents").is_ok());
+    }
+
+    #[test]
+    fn still_refuses_a_link_that_leaves_the_project() {
+        // The case the containment check exists for: a repo shipping a link to
+        // something private. It resolves outside the PROJECT root, so widening
+        // the bound to the project must not admit it.
+        let (repo, wt) = repo_with_linked_config();
+        let outside = tempdir().unwrap();
+        fs::create_dir_all(outside.path().join("ssh")).unwrap();
+        fs::write(outside.path().join("ssh/id_rsa"), b"secret").unwrap();
+        std::os::unix::fs::symlink(
+            fs::canonicalize(outside.path().join("ssh")).unwrap(),
+            wt.path().join(".secrets"),
+        )
+        .unwrap();
+
+        let err = safe_task_read_path_in(Some(repo.path()), wt.path(), ".secrets/id_rsa").unwrap_err();
+        assert!(err.contains("path escapes task"), "{err}");
+        // And with no project known, nothing is relaxed at all.
+        assert!(safe_task_read_path_in(None, wt.path(), ".claude").is_err());
+    }
+
+    #[test]
+    fn only_a_link_at_the_task_root_is_relaxed() {
+        // A symlink buried deep in the repo must not widen the check, even
+        // when its target is inside the project: only the top-level dirs
+        // link_config_dir creates qualify.
+        let repo = tempdir().unwrap();
+        fs::create_dir_all(repo.path().join("vendor")).unwrap();
+        fs::write(repo.path().join("vendor/lib.rs"), b"x").unwrap();
+        let wt = tempdir().unwrap();
+        fs::create_dir_all(wt.path().join("src/nested")).unwrap();
+        std::os::unix::fs::symlink(
+            fs::canonicalize(repo.path().join("vendor")).unwrap(),
+            wt.path().join("src/nested/vendor"),
+        )
+        .unwrap();
+
+        assert!(safe_task_read_path_in(Some(repo.path()), wt.path(), "src/nested/vendor/lib.rs").is_err());
+    }
+
+    #[test]
+    fn ordinary_paths_are_untouched() {
+        // The relaxation is a FALLBACK: everything that resolved before still
+        // resolves the same way, and the classic escapes stay rejected.
+        let (repo, wt) = repo_with_linked_config();
+        fs::create_dir_all(wt.path().join("docs")).unwrap();
+        fs::write(wt.path().join("docs/a.md"), b"x").unwrap();
+        assert_eq!(
+            safe_task_read_path_in(Some(repo.path()), wt.path(), "docs/a.md").unwrap(),
+            safe_task_path(wt.path(), "docs/a.md").unwrap(),
+        );
+        assert!(safe_task_read_path_in(Some(repo.path()), wt.path(), "../outside.txt").is_err());
+        assert!(safe_task_read_path_in(Some(repo.path()), wt.path(), "/etc/passwd").is_err());
     }
 
     // ─────────────────── scratchpads (GH #244) ───────────────────
