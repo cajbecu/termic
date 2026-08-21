@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { PATH_TOKEN_RE, parsePathToken, scanPathTokens } from "./termLinkOpener";
+import { PATH_TOKEN_RE, parsePathToken, scanPathTokens, isAbsoluteToken } from "./termLinkOpener";
 
 const firstMatch = (s: string): string | null => PATH_TOKEN_RE.exec(s)?.[0] ?? null;
 const scan = (s: string): string[] => scanPathTokens(s).map(t => t.raw);
@@ -96,5 +96,53 @@ describe("parsePathToken", () => {
   });
   it("handles a bare filename", () => {
     expect(parsePathToken("file.ts")).toEqual({ path: "file.ts" });
+  });
+});
+
+describe("absolute path tokens (GH #240)", () => {
+  it("keeps the leading slash in the token", () => {
+    // Without this the slash fell outside the match and the path arrived as a
+    // relative "Users/me/proj/src/a.ts", which resolved against nothing.
+    expect(firstMatch("/Users/me/proj/src/a.ts")).toBe("/Users/me/proj/src/a.ts");
+  });
+  it("keeps a leading ~/", () => {
+    expect(firstMatch("~/notes/todo.md")).toBe("~/notes/todo.md");
+  });
+  it("captures :line:col on an absolute path", () => {
+    expect(firstMatch("/w/task/src/a.ts:45:2")).toBe("/w/task/src/a.ts:45:2");
+  });
+  it("scans an absolute path out of surrounding prose", () => {
+    expect(scan("wrote /tmp/out/report.json ok")).toEqual(["/tmp/out/report.json"]);
+  });
+  it("still requires an extension, so /etc/hosts does not match", () => {
+    expect(firstMatch("/etc/hosts")).toBeNull();
+  });
+  it("does not swallow the path half of a URL", () => {
+    expect(scan("https://example.com/a/b.ts and /w/t/file.ts")).toEqual(["/w/t/file.ts"]);
+  });
+  it("does not treat a bare relative path as absolute", () => {
+    expect(firstMatch("src/a.ts")).toBe("src/a.ts");
+  });
+  it("stays fast on a slash-heavy blob (the new prefix adds no backtracking)", () => {
+    const blob = "/".repeat(40000);
+    const start = performance.now();
+    scan(blob);
+    expect(performance.now() - start).toBeLessThan(150);
+  });
+});
+
+describe("isAbsoluteToken", () => {
+  it("recognises / and ~/ roots", () => {
+    expect(isAbsoluteToken("/w/t/a.ts")).toBe(true);
+    expect(isAbsoluteToken("~/a.ts")).toBe(true);
+  });
+  it("rejects relative tokens", () => {
+    expect(isAbsoluteToken("src/a.ts")).toBe(false);
+    expect(isAbsoluteToken("a.ts")).toBe(false);
+    expect(isAbsoluteToken("./a.ts")).toBe(false);
+    expect(isAbsoluteToken("../a.ts")).toBe(false);
+  });
+  it("rejects ~user, which we do not resolve", () => {
+    expect(isAbsoluteToken("~other/a.ts")).toBe(false);
   });
 });

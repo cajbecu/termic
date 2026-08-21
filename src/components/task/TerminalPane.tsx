@@ -14,9 +14,9 @@ import { cn } from "@/lib/utils";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { attachCmdClickLinkOpener, registerPathLinkProvider, type ClickTarget } from "@/lib/termLinkOpener";
-import { resolvePathClick, normalizePath } from "@/lib/pathMatch";
-import { TerminalPathMenu } from "@/components/task/TerminalPathMenu";
+import { attachCmdClickLinkOpener, registerPathLinkProvider, isAbsoluteToken, type ClickTarget } from "@/lib/termLinkOpener";
+import { resolvePathClick, normalizePath, expandTilde, resolveAbsoluteClick, type TaskRoot } from "@/lib/pathMatch";
+import { TerminalPathMenu, type ExternalTarget } from "@/components/task/TerminalPathMenu";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { Osc52Base64 } from "@/lib/osc52";
@@ -173,7 +173,9 @@ export function TerminalPane({ task, tab, active }: Props) {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [pathMenu, setPathMenu] = useState<{ x: number; y: number; candidates: string[]; line?: number; col?: number } | null>(null);
+  const [pathMenu, setPathMenu] = useState<
+    { x: number; y: number; candidates: string[]; line?: number; col?: number; external?: ExternalTarget } | null
+  >(null);
   const openPathFile = useCallback((path: string, line?: number, col?: number) => {
     useApp.getState().openPreviewTab(task.id, {
       type: "edit",
@@ -639,7 +641,43 @@ const captureArmedRef = useRef(false);
     // swallows the click so nothing double-fires. Must attach AFTER
     // term.open (it reads .xterm-screen geometry).
     // GH #117: the same opener also resolves file-path references.
+    // GH #240: an ABSOLUTE path says exactly where it lives, so it is resolved
+    // against the task's roots rather than suffix-matched against its file
+    // list. Landing outside every root is a real answer ("this file is not in
+    // this task"), not a reason to go hunting for a same-named file — which is
+    // how `~/notes/todo.md` used to open an unrelated `docs/notes/todo.md`.
+    async function handleAbsoluteTarget(
+      target: { path: string; line?: number; col?: number }, x: number, y: number,
+    ) {
+      const abs = expandTilde(target.path, await ipc.cachedHomeDir());
+      // `task.path` and `task.composition` are frozen for a task's lifetime,
+      // so capturing them in this long-lived effect cannot go stale.
+      const roots: TaskRoot[] = [
+        { path: task.path, prefix: "" },
+        ...(task.composition ?? []).map(m => ({ path: m.path, prefix: m.dir_name })),
+      ];
+      const resolved = resolveAbsoluteClick(abs, roots);
+      if (resolved.kind === "inside") {
+        const stat = await ipc.taskPathStat(task.id, resolved.rel).catch(() => null);
+        if (stat?.exists && !stat.is_dir) {
+          openPathFile(resolved.rel, target.line, target.col);
+          return;
+        }
+        // Inside the task but not a readable file (deleted since it was
+        // printed, or a directory). Fall through to the OS actions below,
+        // which can still reveal a directory.
+      }
+      if (!(await ipc.pathExists(abs).catch(() => false))) {
+        useUI.getState().pushToast("That path no longer exists", "error");
+        return;
+      }
+      setPathMenu({ x, y, candidates: [], external: { abs } });
+    }
     function handlePathTarget(target: { path: string; line?: number; col?: number }, x: number, y: number) {
+      if (isAbsoluteToken(target.path)) {
+        void handleAbsoluteTarget(target, x, y);
+        return;
+      }
       ipc.taskListFilesForFinder(task.id)
         .then(async files => {
           let matches = resolvePathClick(files, target.path);
@@ -2401,6 +2439,7 @@ const captureArmedRef = useRef(false);
           x={pathMenu.x}
           y={pathMenu.y}
           candidates={pathMenu.candidates}
+          external={pathMenu.external}
           onPick={(path) => { openPathFile(path, pathMenu.line, pathMenu.col); setPathMenu(null); }}
           onClose={() => setPathMenu(null)}
           onCloseAutoFocus={(e, picked) => {

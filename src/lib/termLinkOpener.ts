@@ -33,7 +33,16 @@ const URL_RE = /https?:\/\/[^\s"'`<>{}|\\^\[\]]+/g;
 // (segment runs {1,255}, dir depth {0,64}) so a long slash-/dot-heavy blob
 // (base64, a hash) can't drive the required-dot backtracking into O(n^2) and
 // stall the hover-underline pass.
-export const PATH_TOKEN_RE = /(?:[\w.@-]{1,255}\/){0,64}[\w.@-]{1,255}\.[A-Za-z]\w{0,9}(?::\d+(?::\d+)?)?/;
+//
+// GH #240: an optional `/` or `~/` root prefix is part of the token. Without
+// it the leading slash fell outside the match, so `/Users/me/proj/src/a.ts`
+// arrived as a RELATIVE `Users/me/proj/src/a.ts` and resolved against nothing
+// — and worse, a short one like `~/notes/todo.md` suffix-matched an unrelated
+// in-task `docs/notes/todo.md` and opened the wrong file. Capturing the root
+// marker is what lets the opener route absolute paths down their own branch
+// (see isAbsoluteToken) instead of guessing. `/etc/hosts` still does not
+// match: the extension requirement is unchanged and applies to every token.
+export const PATH_TOKEN_RE = /(?:~?\/)?(?:[\w.@-]{1,255}\/){0,64}[\w.@-]{1,255}\.[A-Za-z]\w{0,9}(?::\d+(?::\d+)?)?/;
 
 // Single scan that recognises three things so a fragment of one can't leak as
 // another (e.g. the `host/path.ts` inside a URL, or the two halves of an scp
@@ -72,6 +81,15 @@ const TRAILING_PUNCT_RE = /[.,;:!?)\]}>'"]+$/;
 export type ClickTarget =
   | { kind: "url"; uri: string }
   | { kind: "path"; path: string; line?: number; col?: number };
+
+/** Does this token name a filesystem root (`/foo/bar.ts`, `~/foo/bar.ts`)
+ *  rather than a path relative to the task? Absolute tokens must NOT go
+ *  through the suffix matcher: it exists to resolve a FRAGMENT an agent
+ *  printed, and applying it to a path that already says exactly where it
+ *  lives is how `~/notes/todo.md` opened `docs/notes/todo.md` (GH #240). */
+export function isAbsoluteToken(p: string): boolean {
+  return p.startsWith("/") || p.startsWith("~/");
+}
 
 /** Split "src/file.ts:123:5" into { path, line, col }. */
 export function parsePathToken(full: string): { path: string; line?: number; col?: number } {

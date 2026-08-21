@@ -1,11 +1,22 @@
 import { useRef } from "react";
+import { FolderOpen, ExternalLink, Copy } from "lucide-react";
 import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem } from "@/components/ui/Dropdown";
 import { fileIconUrl } from "@/lib/explorer/iconResolver";
+import { copyToClipboard } from "@/lib/clipboard";
+import { revealPath, openFileExternal } from "@/lib/ipc";
+import { useUI } from "@/store/ui";
 
-export function TerminalPathMenu({ x, y, candidates, onPick, onClose, onCloseAutoFocus }: {
+/** An absolute path the click resolved to something OUTSIDE the task (GH
+ *  #240). It has no task-relative form, so there is nothing to hand the
+ *  editor: the menu offers the OS-level actions instead. */
+export interface ExternalTarget { abs: string }
+
+export function TerminalPathMenu({ x, y, candidates, external, onPick, onClose, onCloseAutoFocus }: {
   x: number;
   y: number;
   candidates: string[];
+  /** Present ⇒ render the out-of-task actions instead of candidates. */
+  external?: ExternalTarget;
   onPick: (path: string) => void;
   onClose: () => void;
   // `picked` distinguishes a candidate selection from a dismiss (Escape /
@@ -21,7 +32,45 @@ export function TerminalPathMenu({ x, y, candidates, onPick, onClose, onCloseAut
       </DropdownTrigger>
       <DropdownMenu align="start" side="bottom" sideOffset={4}
         onCloseAutoFocus={onCloseAutoFocus && ((e) => onCloseAutoFocus(e, picked.current))}>
-        {candidates.length === 0 ? (
+        {external ? (
+          <>
+            {/* The resolved path, shown BEFORE any action can be taken. This is
+                the whole mitigation for handing an agent-printed string to the
+                OS launcher: a lookalike path is only catchable if the user can
+                read where it actually goes. Do not collapse this to a
+                basename. */}
+            <div className="max-w-[420px] break-all px-3 pb-2 pt-1 text-[12px] text-[var(--color-fg-faint)]">
+              {external.abs}
+            </div>
+            {/* Reveal first, and so under initial focus: it dispatches to no
+                handler (`open -R`), where "Open in default app" runs whatever
+                is registered for the extension. The inert option is the one a
+                stray Return key should hit. */}
+            <DropdownItem onSelect={() => {
+              picked.current = true;
+              revealPath(external.abs).catch(() => useUI.getState().pushToast("Couldn't reveal that path", "error"));
+            }}>
+              <FolderOpen className="h-4 w-4 shrink-0" />
+              <span>Reveal in Finder</span>
+            </DropdownItem>
+            <DropdownItem onSelect={() => {
+              picked.current = true;
+              openFileExternal(external.abs)
+                .then(r => { if (r === "revealed") useUI.getState().pushToast("No app for that file type, revealed it instead", "info"); })
+                .catch(() => useUI.getState().pushToast("Couldn't open that file", "error"));
+            }}>
+              <ExternalLink className="h-4 w-4 shrink-0" />
+              <span>Open in default app</span>
+            </DropdownItem>
+            <DropdownItem onSelect={() => {
+              picked.current = true;
+              void copyToClipboard(external.abs, "path");
+            }}>
+              <Copy className="h-4 w-4 shrink-0" />
+              <span>Copy path</span>
+            </DropdownItem>
+          </>
+        ) : candidates.length === 0 ? (
           <div className="px-3 py-3 text-[13px] text-[var(--color-fg-faint)]">
             No matches
           </div>

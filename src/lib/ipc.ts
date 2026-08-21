@@ -931,6 +931,12 @@ export const revealPath = (path: string) => invoke<void>("reveal_path", { path }
 export const openFileExternal = (path: string) =>
   invoke<"opened" | "revealed">("open_file_external", { path });
 export const homeDir   = () => invoke<string>("home_dir");
+/** `$HOME`, fetched at most once per process. The cmd-click path resolver
+ *  needs it on every `~/…` click (GH #240) and a home dir cannot change
+ *  mid-session, so the round trip is memoized. Resolves to "" if the command
+ *  fails, which callers must read as "unknown", never as a real path. */
+let homeDirOnce: Promise<string> | null = null;
+export const cachedHomeDir = () => (homeDirOnce ??= homeDir().catch(() => ""));
 export const pathExists= (path: string) => invoke<boolean>("path_exists", { path });
 export const pathIsGitRepo = (path: string) => invoke<boolean>("path_is_git_repo", { path });
 export const logLine   = (msg: string) => invoke<void>("log_line", { msg });
