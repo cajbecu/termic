@@ -84,6 +84,10 @@ Cross-doc references: link by **path**, and never cite a README roadmap item by 
 
 Add a `## [version] - ` section to the TOP of `CHANGELOG.md` (Keep a Changelog format: summary lead line + `### Features`/`### Bug fixes` bullets) before running `make release`. `CHANGELOG.md` is the source of truth; `changelog.json` is derived from it by `scripts/changelog.mjs` (do not hand-edit it). For a small change riding along with the last release, `make release-patch` folds it into a patch (bump the top heading in place + append a bullet, no new entry). Full flow: the **`release` skill** (`.claude/skills/release/SKILL.md`). Mock update UI: `VITE_MOCK_UPDATE=available|whatsnew npm run tauri:dev`.
 
+## Commits
+
+**Every commit that relates to a GitHub issue must name it in the message.** Put `(#N)` in the subject or a `Refs #N` / `Closes #N` line in the body, so `git log` and the issue thread stay linked without anyone having to reconstruct it later. If the work came from an issue, an investigation of one, or a follow-up to one, that counts. Only use `Closes`/`Fixes` when the change genuinely finishes the issue: a partial fix gets `Refs`, and the maintainer closes it.
+
 ## Copy rules
 
 No em dashes (—) anywhere in user-visible text: dialogs, tooltips, buttons, `CHANGELOG.md`, error messages. Use a comma, period, parentheses, or colon instead.
