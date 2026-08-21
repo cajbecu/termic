@@ -604,18 +604,48 @@ server earns it), so the open question below blocks a feature, not the phase.
 
 ## Opt-in: "Code navigation"
 
-**There is exactly one way to turn this on: from a task, for that task's
-checkout. Nothing else arms it — not a project setting, not an app-wide
-setting.** Given the measured cost (rust-analyzer ~3.1 GB per checkout, gopls up
-to 6.8 GB, none of it ever released), an inherited default is a bill the user did
-not agree to, arriving from a process they did not start.
+**Arming happens at one place: a task, for that task's checkout.** Given the
+measured cost (rust-analyzer ~3.1 GB per checkout, gopls up to 6.8 GB, none of it
+ever released), a blanket inherited "on" is a bill the user did not agree to,
+arriving from a process they did not start.
 
 The app-wide pref survives in one demoted role only: **whether the feature is
 offered at all** (default OFF, `prefs.ts`, alongside `loadRemoteImages`). With it
 off, nothing is imported, no affordance appears, and the editor is byte-for-byte
 what it is today. With it on, the *offer* exists — a task can now be armed. It
-never turns navigation on anywhere by itself. A per-project "on" was considered
-and dropped: it is exactly the inherited default this section exists to prevent.
+never turns navigation on anywhere by itself.
+
+### Per-project auto-enable: three choices, because the cost shape differs
+
+A project may standing-instruct termic to arm new checkouts for it. Deliberately
+NOT a boolean, because "arm the main checkout" and "arm every worktree" are
+different orders of magnitude and a single "on" would hide that:
+
+| Setting | What it arms | What it costs |
+|---|---|---|
+| **Off** (default) | Nothing. Each task asks. | Nothing until you say so. |
+| **Main checkout only** | The project's main repo, automatically. Worktree tasks still ask. | **Bounded: one server per language, ever.** Every task on the main checkout shares it, so the tenth costs what the first did. |
+| **Main checkout and worktrees** | Every checkout in the project, automatically. | **Unbounded: one server per language PER WORKTREE.** Ten worktree tasks is ten servers and ten indexes; at rust-analyzer's ~3.1 GB that is ~31 GB. |
+
+The middle option exists because it is the one most people actually want and it
+is genuinely cheap: reading the code you are supervising, in the checkout that
+never goes away, at a fixed cost that does not grow with how many agents you run.
+
+The third option is for someone who reviews every worktree's diff in an editor rather
+than in the terminal — a real workflow, and the only one that justifies paying
+per task. The UI must state the multiplication in the option itself, not in a
+tooltip: it is the difference between one server and one per agent you spawn.
+
+Lives on the `Project` record in `projects.json` (machine-local), next to
+`default_sandbox` and `spotlight_enabled` — **not** in `.termic.yaml`. That file
+is committed and team-shared, which is right for sandbox policy and wrong here:
+whether to spend 30 GB of *this* machine's memory is not a decision a colleague
+should be able to push.
+
+Auto-enable is a standing instruction to grant, not a permanent grant: the
+lifecycle below is unchanged, and turning it back to Off stops future arming
+without hunting down existing servers (they lapse on their own, at the usual
+point).
 
 ### The grant is per checkout, and it expires
 
@@ -623,13 +653,15 @@ Arming is a grant on a **checkout** (see Lifecycle: the main repo is one
 checkout, each worktree is another), made from a task, and it is deliberately
 **not sticky**:
 
-- Enabling it in a task arms that task's checkout. Sibling tasks on the same
-  checkout come along for free — they share the one server, so there is nothing
+- Enabling it in a task — by hand, or because the project's auto-enable said so —
+  arms that task's checkout. Sibling tasks on the same checkout come along for
+  free — they share the one server, so there is nothing
   extra to pay or to ask for.
 - **The grant is refcounted against the tasks on that checkout. When the last one
   is archived or closed, the grant is dropped and the server is reaped.** The
-  next task created on that checkout starts unarmed, and someone has to ask
-  again.
+  next task created on that checkout starts unarmed and someone has to ask again
+  — unless the project's auto-enable covers that checkout, in which case the
+  standing instruction re-grants it.
 
 That last rule is the point. Worktrees usually disappear with their task, so a
 stale grant there is self-limiting — but **the main checkout is permanent**. A
