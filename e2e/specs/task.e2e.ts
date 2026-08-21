@@ -433,10 +433,21 @@ describe("archive confirmation", () => {
     } catch { return false; }
   };
 
+  /** Drop this describe's two branches and any worktree still registered for
+   *  them. Runs BEFORE as well as after: an interrupted run leaves the branch
+   *  behind, and `task_create` then fails on a name it cannot reuse. */
+  const dropBranches = () => {
+    try { execSync(`git -C "${ARCHIVE_REPO}" worktree prune`); } catch { /* nothing to prune */ }
+    for (const b of [BRANCH_A, BRANCH_B]) {
+      try { execSync(`git -C "${ARCHIVE_REPO}" branch -D ${b}`, { stdio: "ignore" }); } catch { /* already gone */ }
+    }
+  };
+
   before(async () => {
     await waitForAppShell();
     await requireTermicApi();
     prefsOriginal = await archivePrefs();
+    dropBranches();
   });
 
   after(async () => {
@@ -449,10 +460,7 @@ describe("archive confirmation", () => {
         p.setArchiveDeleteBranch(o.deleteBranch);
       }, prefsOriginal);
     }
-    try { execSync(`git -C "${ARCHIVE_REPO}" worktree prune`); } catch { /* nothing to prune */ }
-    for (const b of [BRANCH_A, BRANCH_B]) {
-      try { execSync(`git -C "${ARCHIVE_REPO}" branch -D ${b}`, { stdio: "ignore" }); } catch { /* already gone */ }
-    }
+    dropBranches();
   });
 
   it("keeps asking when the user unticks the box but then cancels", async () => {

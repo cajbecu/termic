@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { clickByText, clickMenuItem, clickWhenVisible, dismissOverlays, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitGone, waitVisible } from "../helpers";
+import { clickByText, clickMenuItem, clickWhenVisible, dismissOverlays, pointerDrag, requireTermicApi, keysIn, snap, waitForAppShell, waitForText, waitGone, waitVisible } from "../helpers";
 
 // P1: adding/removing a project. Cases: a git repo can be added as a project
 // (shows in the store); removing it drops it. Uses a throwaway temp repo and
@@ -545,7 +545,7 @@ describe("branch new tasks from", () => {
     );
     expect(prefilled).toMatch(/^terminal-\d+$/);
 
-    await browser.keys("Enter");
+    await keysIn(nameInput, "Enter");
     await browser.waitUntil(
       async () =>
         browser.execute(
@@ -600,7 +600,7 @@ describe("branch new tasks from", () => {
       setter.call(input, "e2e-quick-wt");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     }, nameInput);
-    await browser.keys("Enter");
+    await keysIn(nameInput, "Enter");
 
     // The inline row (name + branch inputs) is gone right away — it does not
     // wait for `git worktree add` to finish, same fix as the dialog case in

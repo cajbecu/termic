@@ -80,6 +80,21 @@ add it to branch protection once it's proven stable over ~20-30 runs.
 your real `termic_dev` data. Agent flows use `fakeagent` (`scripts/fake-agent.sh`)
 so no real tokens are spent.
 
+Worktree tasks land in `.e2e/tasks/` and **nowhere else**. They used to be
+created under `~/termic_dev/tasks/fixture-repo`, mixed in with the developer's
+own dev tasks, where nothing could safely clean them up: a run killed mid-spec
+left a worktree behind, and every later run then failed on `a worktree already
+lives at …` (or, once the directory was gone but the registration was not,
+`branch … is already checked out elsewhere`). `seed()` now wipes that directory
+and prunes the fixture repo's worktrees on every run.
+
+For the same reason it wipes `.e2e/profile/tasks/`. No task is seeded from a
+template, so every record in there is a previous run's leftover — and a stale
+one is not inert: the CLI resolves `--task <name>` by NAME, so yesterday's
+archived `cli-tabs` makes today's ambiguous and the CLI specs address the wrong
+task. CI never sees any of this (fresh checkout, no state), which is exactly
+why local runs have to sweep it.
+
 The seeded `fixture-repo` carries an `origin` remote (a sibling bare repo,
 `.e2e/fixture-repo-origin.git`) so `origin/main` resolves like a real cloned
 checkout. This matters because the project default base is `origin/main`: any

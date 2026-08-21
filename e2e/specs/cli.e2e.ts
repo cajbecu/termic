@@ -19,7 +19,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import os from "node:os";
 import { dataDir } from "../../wdio.conf.js";
-import { archiveTask, cliRpc as rpc, openTask, requireTermicApi, waitForAppShell } from "../helpers.js";
+import { archiveTask, cliRpc as rpc, openTask, requireTermicApi, waitForAppShell, waitForClisDetected } from "../helpers.js";
 
 /**
  * Poll a tab's live PTY (spawn is async), through BOTH sides that have to
@@ -84,6 +84,13 @@ describe("termic tab: ids are addressable end to end (GH #138 part 2)", () => {
         ),
       { timeout: 20_000, timeoutMsg: "default agent PTY never spawned" },
     );
+    // The tab verbs below hydrate the agent registry INLINE when PATH
+    // detection has not landed yet, and that probe (one login shell per
+    // configured agent) takes seconds — long enough on a slow shell to blow
+    // the CLI's own 10s "did the UI answer?" deadline and fail four cases
+    // that have nothing to do with detection. Wait for the pass the app
+    // already started at launch instead of racing it.
+    await waitForClisDetected();
   });
 
   it("opens a second agent tab and returns its stable id", async () => {

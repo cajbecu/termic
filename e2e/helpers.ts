@@ -183,6 +183,44 @@ export async function clickMenuItem(text: string): Promise<void> {
   }, text);
 }
 
+/** Wait until the app's PATH detection for the agent registry has landed.
+ *
+ *  App.tsx kicks `refreshClis` off at startup, and it takes SECONDS (one
+ *  login-shell probe per configured agent). Any CLI verb that opens a tab
+ *  hydrates the registry inline if it is still empty, inside the CLI's own
+ *  10s "did the UI answer?" deadline — so a spec that drives `termic tab`
+ *  during the first few seconds of app life fails with "the Termic UI did not
+ *  answer within 10000ms" on a slow machine, while passing on a fast one.
+ *  Wait for the detection the app is already doing instead of racing it.
+ */
+export async function waitForClisDetected(timeout = 30_000): Promise<void> {
+  await browser.waitUntil(
+    () =>
+      browser.execute(
+        () => Object.keys(window.__termic!.useApp.getState().detectedClis).length > 0,
+      ),
+    { timeout, timeoutMsg: "the agent registry never finished PATH detection" },
+  );
+}
+
+/** Focus `selector`, then send a real key to it.
+ *
+ *  Inline inputs autofocus through a `requestAnimationFrame` chain, and rAF is
+ *  FROZEN while the window is occluded (another window on top, another Space).
+ *  A bare `browser.keys` then goes to whatever still holds focus, the row never
+ *  commits, and it stays open to block the next spec's menu — a failure that
+ *  only ever reproduces on a backgrounded window. Focusing explicitly keeps the
+ *  keystroke real without depending on the app's rAF landing first.
+ */
+export async function keysIn(selector: string, key: string): Promise<void> {
+  await browser.execute((sel) => {
+    const el = document.querySelector(sel) as HTMLElement | null;
+    if (!el) throw new Error(`no element to focus: ${sel}`);
+    el.focus();
+  }, selector);
+  await browser.keys(key);
+}
+
 /** Wait until the given substring is present in the visible body text. */
 export async function waitForText(needle: string, timeout = 15_000): Promise<void> {
   await browser.waitUntil(
