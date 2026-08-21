@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { clickByText, clickMenuItem, clickWhenVisible, dismissOverlays, pointerDrag, requireTermicApi, keysIn, snap, waitForAppShell, waitForText, waitGone, waitVisible } from "../helpers";
+import { clickByText, clickMenuItemUntil, clickWhenVisible, dismissOverlays, pointerDrag, requireTermicApi, keysIn, snap, waitForAppShell, waitForText, waitGone, waitVisible } from "../helpers";
 
 // P1: adding/removing a project. Cases: a git repo can be added as a project
 // (shows in the store); removing it drops it. Uses a throwaway temp repo and
@@ -543,7 +543,7 @@ describe("branch new tasks from", () => {
     await waitVisible('[role="menu"]');
     await clickByText("Main checkout");
     await settleMenuMode("main");
-    await clickMenuItem("Terminal");
+    await clickMenuItemUntil("Terminal", 'input[placeholder="Task name"]');
 
     // Menu closes, an inline name input takes its place instead of a task
     // appearing immediately.
@@ -598,7 +598,7 @@ describe("branch new tasks from", () => {
     await waitVisible('[role="menu"]');
     await clickByText("Worktree");
     await settleMenuMode("worktree");
-    await clickMenuItem("Terminal");
+    await clickMenuItemUntil("Terminal", 'input[placeholder="Task name"]');
 
     const nameInput = 'input[placeholder="Task name"]';
     await waitVisible(nameInput);

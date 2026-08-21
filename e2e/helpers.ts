@@ -183,6 +183,55 @@ export async function clickMenuItem(text: string): Promise<void> {
   }, text);
 }
 
+/**
+ * Click a menu entry and keep clicking it until the menu actually reacts.
+ *
+ * Radix remounts a menu's content whenever what it renders changes (the "+"
+ * menu's Worktree / Main checkout flip is the one that bites here), and a
+ * click dispatched into that remount lands on a node React is replacing: it
+ * does nothing, the menu stays open, and the spec then waits out its timeout
+ * on a prompt nobody opened. Settling the menu first narrows that window but
+ * cannot close it, because the read and the click are two separate round
+ * trips and the remount can start between them.
+ *
+ * Retrying is what closes it. `doneSelector` is what the click is supposed to
+ * produce (the inline name input, a dialog); once it is there, or once the
+ * item is gone because the menu closed, this stops clicking, so a landed
+ * click is never repeated into a second task.
+ */
+export async function clickMenuItemUntil(
+  text: string,
+  doneSelector: string,
+  timeout = 15_000,
+): Promise<void> {
+  await browser.waitUntil(
+    () =>
+      browser.execute(
+        (t, sel) => {
+          const done = document.querySelector(sel) as HTMLElement | null;
+          if (done) {
+            const r = done.getBoundingClientRect();
+            if (r.width > 0 && r.height > 0) return true;
+          }
+          const el = [...document.querySelectorAll("[role='menuitem']")].find(
+            (e) => e.textContent?.trim() === t,
+          );
+          // No item and no result yet: the menu is mid-remount, or the click
+          // landed and its result has not painted. Either way, wait.
+          if (el) (el as HTMLElement).click();
+          return false;
+        },
+        text,
+        doneSelector,
+      ),
+    {
+      timeout,
+      interval: 250,
+      timeoutMsg: `menu item "${text}" never produced ${doneSelector}`,
+    },
+  );
+}
+
 /** Wait until the app's PATH detection for the agent registry has landed.
  *
  *  App.tsx kicks `refreshClis` off at startup, and it takes SECONDS (one
