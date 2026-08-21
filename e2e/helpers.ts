@@ -204,32 +204,59 @@ export async function clickMenuItemUntil(
   doneSelector: string,
   timeout = 15_000,
 ): Promise<void> {
-  await browser.waitUntil(
-    () =>
-      browser.execute(
-        (t, sel) => {
-          const done = document.querySelector(sel) as HTMLElement | null;
-          if (done) {
-            const r = done.getBoundingClientRect();
-            if (r.width > 0 && r.height > 0) return true;
-          }
-          const el = [...document.querySelectorAll("[role='menuitem']")].find(
-            (e) => e.textContent?.trim() === t,
-          );
-          // No item and no result yet: the menu is mid-remount, or the click
-          // landed and its result has not painted. Either way, wait.
-          if (el) (el as HTMLElement).click();
-          return false;
-        },
-        text,
-        doneSelector,
-      ),
-    {
-      timeout,
-      interval: 250,
-      timeoutMsg: `menu item "${text}" never produced ${doneSelector}`,
-    },
-  );
+  try {
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          (t, sel) => {
+            const done = document.querySelector(sel) as HTMLElement | null;
+            if (done) {
+              const r = done.getBoundingClientRect();
+              if (r.width > 0 && r.height > 0) return true;
+            }
+            const el = [...document.querySelectorAll("[role='menuitem']")].find(
+              (e) =>
+                e.textContent?.trim() === t &&
+                e.getBoundingClientRect().width > 0,
+            );
+            // No item and no result yet: the menu is mid-remount, or the click
+            // landed and its result has not painted. Either way, wait.
+            if (el) (el as HTMLElement).click();
+            return false;
+          },
+          text,
+          doneSelector,
+        ),
+      { timeout, interval: 250, timeoutMsg: `menu item "${text}" never produced ${doneSelector}` },
+    );
+  } catch (e) {
+    // The click going nowhere and the click landing on a prompt that never
+    // painted look identical from the timeout alone, and this only reproduces
+    // on CI — so report the DOM that produced it rather than the deadline.
+    const state = await browser.execute(
+      (t, sel) => {
+        const box = (el: Element) => {
+          const r = el.getBoundingClientRect();
+          return `${Math.round(r.width)}x${Math.round(r.height)}`;
+        };
+        return {
+          menus: [...document.querySelectorAll('[role="menu"]')].map(
+            (m) => `${box(m)} state=${m.getAttribute("data-state")}`,
+          ),
+          items: [...document.querySelectorAll('[role="menuitem"]')]
+            .filter((e) => e.textContent?.trim() === t)
+            .map((e) => `${box(e)} state=${e.closest('[role="menu"]')?.getAttribute("data-state")}`),
+          done: [...document.querySelectorAll(sel)].map(box),
+          dialogs: [...document.querySelectorAll('[role="dialog"]')].map(
+            (d) => `${box(d)} state=${d.getAttribute("data-state")}`,
+          ),
+        };
+      },
+      text,
+      doneSelector,
+    );
+    throw new Error(`${(e as Error).message}\n  DOM at timeout: ${JSON.stringify(state)}`);
+  }
 }
 
 /** Wait until the app's PATH detection for the agent registry has landed.

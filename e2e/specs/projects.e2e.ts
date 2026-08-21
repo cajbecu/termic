@@ -325,10 +325,16 @@ describe("branch new tasks from", () => {
 
   const checkout = (branch: string) => execSync(`git -C "${dir}" checkout -q ${branch}`);
 
-  /** The open new-task menu's visible text. */
+  /** The open new-task menu's visible text. Takes the first menu with a real
+   *  box, not the first in the DOM: Radix leaves a closing menu mounted until
+   *  its animation ends, and animations are frozen while the window is
+   *  occluded (which the harness always is), so a zero-sized husk can sit in
+   *  front of the menu this actually means. */
   const menuText = async () =>
     (await browser.execute(() => {
-      const m = document.querySelector('[role="menu"]') as HTMLElement | null;
+      const m = [...document.querySelectorAll('[role="menu"]')].find(
+        (e) => e.getBoundingClientRect().width > 0,
+      ) as HTMLElement | null;
       return m?.innerText ?? "";
     })) as string;
 
@@ -344,6 +350,7 @@ describe("branch new tasks from", () => {
    *  had the same hole. */
   const settleMenuMode = async (mode: "worktree" | "main") => {
     const wantsBranchFrom = mode === "worktree";
+    const label = mode === "worktree" ? "Worktree" : "Main checkout";
     await browser.waitUntil(
       async () => {
         const text = await menuText();
@@ -352,9 +359,22 @@ describe("branch new tasks from", () => {
         // finds nothing — and "" trivially satisfies "no Branch from row",
         // which let the main-checkout case settle on a menu that was not
         // there yet and click into the remount.
-        return text.length > 0 && text.includes("Branch from") === wantsBranchFrom;
+        if (text.length === 0) return false;
+        if (text.includes("Branch from") === wantsBranchFrom) return true;
+        // Still on the other mode: the toggle click can be lost to the same
+        // remount as the items are, and then this would just wait out its
+        // timeout on a mode nothing is going to change. Click it again. The
+        // buttons are idempotent (they set a mode, they do not flip one), so a
+        // repeat is free.
+        await browser.execute((t) => {
+          const el = [...document.querySelectorAll('[role="menu"] button')].find(
+            (e) => e.textContent?.trim() === t && e.getBoundingClientRect().width > 0,
+          );
+          if (el) (el as HTMLElement).click();
+        }, label);
+        return false;
       },
-      { timeout: 8_000, timeoutMsg: `the menu never settled into ${mode} mode` },
+      { timeout: 8_000, interval: 250, timeoutMsg: `the menu never settled into ${mode} mode` },
     );
   };
 
