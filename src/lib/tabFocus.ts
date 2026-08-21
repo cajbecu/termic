@@ -4,16 +4,16 @@
 // lands in it so the user can type immediately), and when toggling the bottom
 // split (⌘J) — instead of focus falling to <body>, or jumping to the wrong pane.
 
-// Focus the first element matching `selector`, retrying across animation frames
-// until focus actually lands. Two reasons a single attempt isn't enough:
+// Focus the first element matching `selector`, retrying until focus actually
+// lands. Two reasons a single attempt isn't enough:
 //   1. The host may not be in the DOM yet — React has a re-render pending right
 //      after the store update that triggered this.
 //   2. The tab that takes over is mounted but still `visibility:hidden` for one
 //      frame (panes stay mounted, visibility-toggled). focus() on a hidden
 //      element is a no-op, so we verify it actually landed.
-// tries ≈ frames: a fresh tab's textarea isn't in the DOM until TerminalPane /
-// AuxTerminal mounts and runs `term.open()`, a few frames out — so retry
-// generously. Always match the target as a DESCENDANT of its tab host, never
+// tries ≈ frames' worth of delay: a fresh tab's textarea isn't in the DOM until
+// TerminalPane / AuxTerminal mounts and runs `term.open()`, a few frames out —
+// so retry generously. Always match the target as a DESCENDANT of its tab host, never
 // via a two-step host-then-child lookup: TabBar pills also carry `data-tab-id`
 // and sit earlier in the DOM, so resolving the host first can land on a pill
 // (no terminal inside) and focus would never take.
@@ -46,7 +46,16 @@ function focusBySelector(selector: string, tries: number, fallbackSelector?: str
       }
     }
   }
-  if (tries > 0) requestAnimationFrame(() => focusBySelector(selector, tries - 1, fallbackSelector));
+  // A TIMER, not requestAnimationFrame. rAF is frozen while the window is
+  // occluded (another Space, fully covered, minimized), and the very first
+  // attempt above is the one most likely to fail — the store update that
+  // called us has a React re-render still pending, so the target is often
+  // display:none for that instant. On rAF the retry chain then never ran at
+  // all and focus stayed wherever it was, which is why expanding the bottom
+  // split left the caret in the agent above it. A macrotask runs whether the
+  // window is on screen or not, and at ~one frame apart it is the same
+  // cadence when it is. Same reasoning as CommandPalette's `act()`.
+  if (tries > 0) setTimeout(() => focusBySelector(selector, tries - 1, fallbackSelector), 16);
 }
 
 // Focus a terminal tab's xterm — a main-pane TerminalPane or a bottom-split

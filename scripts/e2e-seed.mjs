@@ -176,13 +176,8 @@ export function seed(o = {}) {
   }
 
   // 3. Profile (settings + projects) from templates, paths filled in.
-  // Tasks are NOT seeded from a template, so every record in there is debris
-  // from a previous local run — and a stale one is not inert: the CLI resolves
-  // `--task <name>` by NAME, so an archived `cli-tabs` left over from
-  // yesterday makes today's `cli-tabs` ambiguous and the CLI specs address the
-  // wrong task. CI never sees this (fresh checkout, no tasks), which is
-  // exactly why it has to be swept here.
-  rmSync(path.join(dataDir, "tasks"), { recursive: true, force: true });
+  // Task records themselves are swept by wdio.conf's onPrepare, which runs on
+  // every `test:e2e` — including the ones that skip this script.
   mkdirSync(path.join(dataDir, "tasks"), { recursive: true });
   // Every worktree under `tasksPath` belongs to a previous run: task records
   // are recreated by the specs themselves, so anything still on disk here is

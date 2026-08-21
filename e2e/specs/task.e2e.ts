@@ -1236,8 +1236,19 @@ describe("task creation, in progress (GH #242)", () => {
 
     // Nothing is blocking: no dialog exists while this is in flight, which
     // is the whole point of GH #242.
-    const dialogPresent = await browser.execute(() => !!document.querySelector('[role="dialog"]'));
-    expect(dialogPresent).toBe(false);
+    // OPEN dialogs, not merely present ones. Radix defers a dialog's unmount
+    // until its closing animation ends, and CSS animations are frozen while
+    // the window is occluded — so every non-modal palette an earlier spec
+    // file opened and closed (command palette, file finder, prompt palette,
+    // find in files) is still in this shared window's DOM as a
+    // `data-state="closed"` husk. Asserting on presence made this case fail
+    // for other files' leftovers; `open` is what "nothing is blocking" means.
+    const openDialogs = await browser.execute(() =>
+      [...document.querySelectorAll('[role="dialog"]')]
+        .filter((d) => d.getAttribute("data-state") !== "closed")
+        .map((d) => (d as HTMLElement).textContent?.slice(0, 80) ?? ""),
+    );
+    expect(openDialogs).toEqual([]);
 
     await snap("creating-task-pending.png");
   });

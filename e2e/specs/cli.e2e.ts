@@ -176,16 +176,35 @@ describe("termic tab: ids are addressable end to end (GH #138 part 2)", () => {
       prompt: marker,
     });
     expect(r.ok).toBe(true);
-    const newId = r.data.tab_id;
+    const newId: string = r.data.tab_id;
     expect(r.data.prompt.mode).toBeTruthy();
-    // The rode-along prompt goes through the targeted send route, so the
-    // echo must appear in the NEW tab's ring (spawn + settle beat first).
+    // The rode-along prompt is injected in the BACKGROUND, after a settle beat
+    // that lets the agent finish booting. Wait for that through the STORE
+    // (`lastInputAt` is stamped the moment the write lands) rather than by
+    // polling `logs`: every `logs` call is a round trip through the CLI socket
+    // AND back into the webview, and doing that ~10x/s across the delivery
+    // window starved the write itself — `pty_write` is a synchronous command,
+    // so it queues behind that traffic on the main thread and the injection
+    // sat unresolved for the whole 40s.
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          (tid, tab) =>
+            (window.__termic!.useApp.getState().tabs[tid] ?? []).some(
+              (t: any) => t.id === tab && !!t.lastInputAt,
+            ),
+          taskId,
+          newId,
+        ),
+      { timeout: 40_000, interval: 500, timeoutMsg: "tab -p's prompt was never injected" },
+    );
+    // …and it landed in the NEW tab's ring, not somewhere else.
     await browser.waitUntil(
       async () => {
         const logs = await rpc({ cmd: "logs", task: "cli-tabs", tab: newId });
         return logs.ok && logs.data.data.includes(`FAKE-AGENT echo: ${marker}`);
       },
-      { timeout: 40_000, timeoutMsg: "tab -p's prompt never reached the new tab" },
+      { timeout: 20_000, interval: 500, timeoutMsg: "tab -p's prompt never reached the new tab" },
     );
   });
 

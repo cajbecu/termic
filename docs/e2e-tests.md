@@ -88,12 +88,8 @@ lives at …` (or, once the directory was gone but the registration was not,
 `branch … is already checked out elsewhere`). `seed()` now wipes that directory
 and prunes the fixture repo's worktrees on every run.
 
-For the same reason it wipes `.e2e/profile/tasks/`. No task is seeded from a
-template, so every record in there is a previous run's leftover — and a stale
-one is not inert: the CLI resolves `--task <name>` by NAME, so yesterday's
-archived `cli-tabs` makes today's ambiguous and the CLI specs address the wrong
-task. CI never sees any of this (fresh checkout, no state), which is exactly
-why local runs have to sweep it.
+The task RECORDS are swept separately, by `wdio.conf.ts`'s `onPrepare` — that
+runs on every `test:e2e`, including runs that skip the seed script.
 
 The seeded `fixture-repo` carries an `origin` remote (a sibling bare repo,
 `.e2e/fixture-repo-origin.git`) so `origin/main` resolves like a real cloned
