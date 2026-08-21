@@ -305,10 +305,19 @@ describe("Activity monitor", () => {
       // A supported one must work on the same pid, so the refusal above is
       // provably about the signal name and not about ownership.
       await t.invoke("procmon_signal", { pid: row.pid, signal: "TERM" });
-      const after = await t.invoke("procmon_sample", { session: first.session });
+      // kill(2) returning does not mean the process is gone: the signal is
+      // delivered asynchronously, and one sample straight after it caught a
+      // still-running `sleep` on a loaded CI runner. Poll for the death
+      // instead of assuming the next tick is late enough.
+      let aliveAfterTerm = true;
+      for (let i = 0; i < 25 && aliveAfterTerm; i++) {
+        const after = await t.invoke("procmon_sample", { session: first.session });
+        const stillThere = after.rows.find((r: any) => r.ptyId === spawned.id);
+        aliveAfterTerm = stillThere ? stillThere.alive : false;
+        if (aliveAfterTerm) await new Promise((r) => setTimeout(r, 200));
+      }
       await t.invoke("procmon_stop", { session: first.session });
-      const stillThere = after.rows.find((r: any) => r.ptyId === spawned.id);
-      return { err, pid: row.pid, aliveAfterTerm: stillThere ? stillThere.alive : false };
+      return { err, pid: row.pid, aliveAfterTerm };
     });
     expect(badSignal.err).toContain("unsupported signal");
     expect(badSignal.pid).toBeGreaterThan(1);
