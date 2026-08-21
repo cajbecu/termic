@@ -52,6 +52,7 @@ const LS_TERMINAL_COPY_ON_SELECT = "terminalCopyOnSelect";
 const LS_TASK_EXPAND_MODE = "taskExpandMode";
 const LS_HIDE_INACTIVE_PROJECTS = "hideInactiveProjects";
 const LS_MD_VIEW       = "markdownDefaultView";
+const LS_SVG_VIEW      = "svgDefaultView";
 const LS_LOAD_REMOTE_IMAGES = "loadRemoteImages";
 const LS_FIND_IN_FILES_REGEX = "findInFilesRegex";
 const LS_FIND_IN_FILES_MATCH_CASE = "findInFilesMatchCase";
@@ -625,6 +626,11 @@ interface PrefsState {
    *  New markdown tabs open in this mode, and toggling a tab's view
    *  updates it — so the app remembers however you last looked at a doc. */
   markdownDefaultView: MarkdownView;
+  /** Same three modes for SVG tabs (GH #247), tracked separately from
+   *  markdown: clicking an .svg in the file tree has always shown the
+   *  picture, so this defaults to "preview" even for someone whose markdown
+   *  default is "source". */
+  svgDefaultView: MarkdownView;
   /** Prefix prepended to auto-generated worktree branch names in the New
    *  task dialog (e.g. "feature" → "feature/my-task"). Empty means no
    *  prefix. The user can still freely edit the branch field per task. */
@@ -692,6 +698,7 @@ interface PrefsState {
   setTaskExpandMode: (m: "chevron" | "click" | "always") => void;
   setHideInactiveProjects: (v: boolean) => void;
   setMarkdownDefaultView: (v: MarkdownView) => void;
+  setSvgDefaultView: (v: MarkdownView) => void;
   setBranchPrefix: (v: string) => void;
   setQueueMinIntervalMs: (ms: number) => void;
   setSplitPaneDim: (v: boolean) => void;
@@ -831,6 +838,10 @@ const initialMarkdownView: MarkdownView = (() => {
   const raw = lsGet(LS_MD_VIEW, "source");
   return raw === "preview" || raw === "split" ? raw : "source";
 })();
+const initialSvgView: MarkdownView = (() => {
+  const raw = lsGet(LS_SVG_VIEW, "preview");
+  return raw === "source" || raw === "split" ? raw : "preview";
+})();
 const initialBranchPrefix = lsGet(LS_BRANCH_PREFIX, "feature");
 // Clamp 0–120s. Default 10s — fast loops (or false "done" oscillation)
 // shouldn't fire prompts at the agent faster than this.
@@ -873,6 +884,7 @@ export const usePrefs = create<PrefsState>(set => ({
   taskExpandMode: initialTaskExpandMode,
   hideInactiveProjects: initialHideInactiveProjects,
   markdownDefaultView: initialMarkdownView,
+  svgDefaultView: initialSvgView,
   branchPrefix: initialBranchPrefix,
   queueMinIntervalMs: initialQueueMinInterval,
   shortcuts: loadShortcuts(),
@@ -1095,6 +1107,10 @@ export const usePrefs = create<PrefsState>(set => ({
   setMarkdownDefaultView: (v) => {
     try { localStorage.setItem(LS_MD_VIEW, v); } catch {}
     set({ markdownDefaultView: v });
+  },
+  setSvgDefaultView: (v) => {
+    try { localStorage.setItem(LS_SVG_VIEW, v); } catch {}
+    set({ svgDefaultView: v });
   },
   setBranchPrefix: (v) => {
     // Store as-typed (normalization happens at the use site in

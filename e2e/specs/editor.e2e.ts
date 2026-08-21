@@ -2813,3 +2813,143 @@ describe("inline git blame", () => {
     });
   });
 });
+
+// GH #247: an SVG used to open as a read-only picture, so changing one meant
+// opening it somewhere else and losing the preview. It now gets the same
+// source / preview / split shell markdown has (SourcePreviewShell), with the
+// preview fed by the editor's LIVE buffer rather than the file on disk.
+describe("svg source/preview toggle", () => {
+  let taskId!: string;
+  let tabId!: string;
+  const SVG = "e2e-icon.svg";
+  // Deliberately carries a `#hex` fill and a non-Latin1 label: both are
+  // ordinary in an SVG and both break a naive data URL (see svgDataUrl).
+  const SVG_SRC =
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+    + '<rect width="32" height="32" fill="#2f81f7"/><text y="20">café</text></svg>';
+
+  /** The shell's current mode, read off the visible pane of THIS task. Every
+   *  visited task stays mounted, so an unscoped query can match a hidden copy. */
+  const mode = () => browser.execute((id) => {
+    const root = document.querySelector(`[data-task-id="${id}"]`);
+    const el = Array.from(root?.querySelectorAll("[data-testid='source-preview-shell']") ?? [])
+      .find((n) => n.getBoundingClientRect().width > 0);
+    return el?.getAttribute("data-view") ?? null;
+  }, taskId);
+
+  /** `src` of the rendered picture, or null when it isn't on screen. */
+  const previewSrc = () => browser.execute((id) => {
+    const root = document.querySelector(`[data-task-id="${id}"]`);
+    const img = Array.from(root?.querySelectorAll("[data-testid='svg-preview']") ?? [])
+      .find((n) => n.getBoundingClientRect().width > 0) as HTMLImageElement | undefined;
+    return img?.src ?? null;
+  }, taskId);
+
+  /** Is the CodeMirror source pane laid out? */
+  const editorShown = () => browser.execute((id) => {
+    const root = document.querySelector(`[data-task-id="${id}"]`);
+    return Array.from(root?.querySelectorAll(".cm-editor") ?? [])
+      .some((n) => n.getBoundingClientRect().width > 0);
+  }, taskId);
+
+  const clickMode = (m: string) => browser.execute((id, want) => {
+    const root = document.querySelector(`[data-task-id="${id}"]`);
+    const btn = Array.from(root?.querySelectorAll(`[data-view-btn="${want}"]`) ?? [])
+      .find((n) => n.getBoundingClientRect().width > 0) as HTMLElement | undefined;
+    btn?.click();
+  }, taskId, m);
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    writeFileSync(path.join(fixture, SVG), SVG_SRC);
+    taskId = await openTask("e2e-svg");
+    tabId = await browser.execute((id, p) => {
+      const app = window.__termic!.useApp.getState();
+      app.openPreviewTab(id, { type: "edit", path: p, title: p });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const tab = app.tabs[id].find((t: any) => t.type === "edit" && t.path === p);
+      app.persistTab(id, tab.id);
+      return tab.id;
+    }, taskId, SVG);
+  });
+
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+    try {
+      execSync(`git -C "${fixture}" clean -fd`);
+    } catch {
+      /* nothing */
+    }
+  });
+
+  it("opens showing the rendered picture, not the source", async () => {
+    // The default stays "preview" so clicking an .svg in the file tree still
+    // shows the image, which is what it has always done.
+    await browser.waitUntil(async () => (await previewSrc())?.startsWith("data:image/svg+xml") === true,
+      { timeout: 15_000, timeoutMsg: "the svg preview never rendered" });
+    expect(await mode()).toBe("preview");
+    expect(await editorShown()).toBe(false);
+  });
+
+  it("switches to the editable source", async () => {
+    await clickMode("source");
+    await browser.waitUntil(async () => await editorShown(),
+      { timeout: 10_000, timeoutMsg: "the source pane never appeared" });
+    expect(await mode()).toBe("source");
+    // It is the real file, not a placeholder.
+    const text = await browser.execute((id) => {
+      const root = document.querySelector(`[data-task-id="${id}"]`);
+      const cm = Array.from(root?.querySelectorAll(".cm-content") ?? [])
+        .find((n) => n.getBoundingClientRect().width > 0) as HTMLElement | undefined;
+      return cm?.textContent ?? "";
+    }, taskId);
+    expect(text).toContain("viewBox");
+  });
+
+  it("shows both panes in split", async () => {
+    await clickMode("split");
+    await browser.waitUntil(
+      async () => await editorShown() && (await previewSrc()) !== null,
+      { timeout: 10_000, timeoutMsg: "split never showed both panes" },
+    );
+    expect(await mode()).toBe("split");
+  });
+
+  it("re-renders the picture from unsaved edits", async () => {
+    // The payoff of feeding the preview from the buffer instead of disk: this
+    // never touches taskFileWrite, so a disk-backed preview could not move.
+    const before = await previewSrc();
+    await browser.execute((id, t) => {
+      window.__termic!.useApp.getState().setActiveTabId(id, t);
+    }, taskId, tabId);
+    // Through CodeMirror's own view API, the same hook the save spec uses. A
+    // synthetic beforeinput does NOT produce a transaction here (see the
+    // "keyboard into CodeMirror" caveat in docs/e2e-coverage.md), and without
+    // a transaction there is no onContent and nothing to assert.
+    await browser.execute((id) => {
+      const root = document.querySelector(`[data-task-id="${id}"]`)!;
+      const el = Array.from(root.querySelectorAll(".cm-editor"))
+        .find((n) => n.getBoundingClientRect().width > 0) as unknown as { __cmView?: any };
+      const view = el?.__cmView;
+      if (!view) throw new Error("CodeMirror e2e hook missing (build with make e2e)");
+      view.dispatch({ changes: { from: view.state.doc.length, insert: "<!-- edited -->" } });
+    }, taskId);
+    await browser.waitUntil(async () => {
+      const now = await previewSrc();
+      return !!now && now !== before && decodeURIComponent(now).includes("edited");
+    }, { timeout: 10_000, timeoutMsg: "the preview never picked up the unsaved edit" });
+    // Nothing was saved: the picture moved off the buffer alone.
+    expect(await browser.execute((id, p) => window.__termic!.ipc.taskFileRead(id, p), taskId, SVG))
+      .not.toContain("edited");
+  });
+
+  it("goes back to the picture, and remembers the last mode for the next svg", async () => {
+    await clickMode("preview");
+    await browser.waitUntil(async () => await mode() === "preview" && !(await editorShown()),
+      { timeout: 10_000, timeoutMsg: "never returned to the preview" });
+    // Toggling writes the global default too, so the next .svg opens the same
+    // way (same contract as markdownDefaultView).
+    expect(await browser.execute(() => localStorage.getItem("svgDefaultView"))).toBe("preview");
+  });
+});

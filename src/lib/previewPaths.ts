@@ -20,6 +20,33 @@ export function previewKindForPath(path: string): "image" | "pdf" | null {
   return null;
 }
 
+/** SVG is the one image that is also a text file, so it routes to SvgPane
+ *  (editor + rendered preview, GH #247) rather than the read-only
+ *  PreviewPane. Kept separate from `previewKindForPath`, which still reports
+ *  "image" for an .svg: that function describes what the FILE is and is
+ *  hand-synced with the backend's `preview_mime_for_ext` whitelist, while
+ *  this one is purely a frontend routing question. */
+export function isSvgPath(path: string): boolean {
+  return extOf(path) === "svg";
+}
+
+/** `<img src>` for SVG source text, so SvgPane can render the editor's live
+ *  buffer instead of re-reading the file (GH #247).
+ *
+ *  utf8 + encodeURIComponent rather than base64: `btoa` throws on any
+ *  non-Latin1 character, and an SVG carrying a `<text>` label in Greek,
+ *  Cyrillic or CJK is ordinary. Encoding the whole string (rather than the
+ *  usual "just # and %") is what keeps a `#hex` fill or a `?` in a font
+ *  family from truncating the URL.
+ *
+ *  Allowed by the CSP's `img-src data:`, which the read-only image preview
+ *  already relies on, so this needs no policy change (see src/lib/cspGuard.test.ts).
+ *  Lives here, next to the routing predicate and away from the DOM, so it is
+ *  testable without dragging in the editor's module graph. */
+export function svgDataUrl(text: string): string {
+  return `data:image/svg+xml;utf8,${encodeURIComponent(text)}`;
+}
+
 /** Tabs that must keep their `display` when hidden (TaskView drops every
  *  other hidden tab to display:none). Only the native PDF `<embed>`: its
  *  page lives inside WKWebView's PDF view, which is torn down and rebuilt at

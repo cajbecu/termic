@@ -37,10 +37,11 @@ import { ResizeHandle } from "@/components/ui/ResizeHandle";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent } from "@/components/ui/ContextMenu";
 import { CopyPathItems } from "./CopyPathItems";
 import { dirnamePosix, MARKDOWN_EXT_RE } from "@/lib/markdownPaths";
-import { keepsDisplayWhenHidden, previewKindForPath } from "@/lib/previewPaths";
+import { isSvgPath, keepsDisplayWhenHidden, previewKindForPath } from "@/lib/previewPaths";
 const EditorPane = lazy(() => import("./EditorPane").then(m => ({ default: m.EditorPane })));
 const DiffPane   = lazy(() => import("./DiffPane").then(m => ({ default: m.DiffPane })));
 const MarkdownPane = lazy(() => import("./MarkdownPane").then(m => ({ default: m.MarkdownPane })));
+const SvgPane = lazy(() => import("./SvgPane").then(m => ({ default: m.SvgPane })));
 const PreviewPane  = lazy(() => import("./PreviewPane").then(m => ({ default: m.PreviewPane })));
 const DirListingPane = lazy(() => import("./DirListingPane").then(m => ({ default: m.DirListingPane })));
 // Lightweight extension check so we don't import the (lazy) MarkdownPane
@@ -425,11 +426,13 @@ export function TaskView({ task }: { task: Task }) {
                     : <TerminalPane task={task} tab={t as TerminalTab} active={tabActive} />)}
                   {t.type === "edit"     && (
                     <Suspense fallback={null}>
-                      {previewKindForPath(t.path)
-                        ? <PreviewPane task={task} tab={t} />
-                        : isMarkdownPath(t.path)
-                          ? <MarkdownPane task={task} tab={t} visible={visible} ownsFind={ownsFind} />
-                          : <EditorPane task={task} tab={t} active={tabActive} />}
+                      {isSvgPath(t.path)
+                        ? <SvgPane task={task} tab={t} />
+                        : previewKindForPath(t.path)
+                          ? <PreviewPane task={task} tab={t} />
+                          : isMarkdownPath(t.path)
+                            ? <MarkdownPane task={task} tab={t} visible={visible} ownsFind={ownsFind} />
+                            : <EditorPane task={task} tab={t} active={tabActive} />}
                     </Suspense>
                   )}
                   {t.type === "diff"     && <Suspense fallback={null}><DiffPane task={task} tab={t} /></Suspense>}

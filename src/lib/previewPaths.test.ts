@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { keepsDisplayWhenHidden, previewKindForPath, taskPdfSrc } from "@/lib/previewPaths";
+import { isSvgPath, keepsDisplayWhenHidden, previewKindForPath, svgDataUrl, taskPdfSrc } from "@/lib/previewPaths";
 
 describe("previewKindForPath", () => {
   it("routes image extensions to \"image\"", () => {
@@ -17,6 +17,59 @@ describe("previewKindForPath", () => {
     expect(previewKindForPath("main.ts")).toBeNull();
     expect(previewKindForPath("README.md")).toBeNull();
     expect(previewKindForPath("Makefile")).toBeNull();
+  });
+});
+
+describe("isSvgPath", () => {
+  it("matches .svg regardless of case or depth", () => {
+    expect(isSvgPath("icon.svg")).toBe(true);
+    expect(isSvgPath("docs/termic-wordmark.SVG")).toBe(true);
+  });
+
+  it("does not match other images, or a name merely containing svg", () => {
+    expect(isSvgPath("shot.png")).toBe(false);
+    expect(isSvgPath("svg")).toBe(false);
+    expect(isSvgPath("my.svg.png")).toBe(false);
+    expect(isSvgPath("assets/svg/logo.png")).toBe(false);
+  });
+
+  it("still reports \"image\" from previewKindForPath", () => {
+    // The two answer different questions and must not be collapsed:
+    // previewKindForPath is hand-synced with the backend's base64 whitelist
+    // (which SVG stays on, for the markdown preview and the SvgPane
+    // fallback), isSvgPath is only about which pane TaskView mounts.
+    expect(previewKindForPath("icon.svg")).toBe("image");
+  });
+});
+
+const SVG = '<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>';
+
+describe("svgDataUrl", () => {
+  it("produces an image/svg+xml data URL the CSP already allows", () => {
+    // img-src includes `data:`, so this needs no policy change. See
+    // src/lib/cspGuard.test.ts, which pins the policy itself.
+    expect(svgDataUrl(SVG).startsWith("data:image/svg+xml;utf8,")).toBe(true);
+  });
+
+  it("round-trips the source exactly", () => {
+    const body = svgDataUrl(SVG).slice("data:image/svg+xml;utf8,".length);
+    expect(decodeURIComponent(body)).toBe(SVG);
+  });
+
+  it("survives a non-Latin1 label, which base64 via btoa would not", () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg"><text>Привет café 日本</text></svg>';
+    const body = svgDataUrl(svg).slice("data:image/svg+xml;utf8,".length);
+    expect(decodeURIComponent(body)).toBe(svg);
+  });
+
+  it("escapes the characters that would truncate the URL", () => {
+    // A `#hex` fill starts a fragment and `?`/`&` a query if left raw, both
+    // of which are ordinary inside an SVG.
+    const svg = '<svg fill="#ff0000" data-q="a?b&c"></svg>';
+    const url = svgDataUrl(svg);
+    expect(url).not.toContain("#");
+    expect(url).not.toContain("?b");
+    expect(decodeURIComponent(url.slice("data:image/svg+xml;utf8,".length))).toBe(svg);
   });
 });
 
