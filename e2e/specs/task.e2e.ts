@@ -1234,21 +1234,23 @@ describe("task creation, in progress (GH #242)", () => {
     );
     expect(logText).toContain("Adding worktree");
 
-    // Nothing is blocking: no dialog exists while this is in flight, which
-    // is the whole point of GH #242.
-    // OPEN dialogs, not merely present ones. Radix defers a dialog's unmount
-    // until its closing animation ends, and CSS animations are frozen while
-    // the window is occluded — so every non-modal palette an earlier spec
-    // file opened and closed (command palette, file finder, prompt palette,
-    // find in files) is still in this shared window's DOM as a
-    // `data-state="closed"` husk. Asserting on presence made this case fail
-    // for other files' leftovers; `open` is what "nothing is blocking" means.
-    const openDialogs = await browser.execute(() =>
-      [...document.querySelectorAll('[role="dialog"]')]
+    // Nothing is blocking: creating a task opens no dialog, which is the
+    // whole point of GH #242.
+    //
+    // What counts is a MODAL dialog, and only one that was not already there.
+    // This window is shared by every spec file: a non-modal palette another
+    // file left open blocks nothing, and Radix defers a dialog's unmount
+    // until its closing animation ends, which never arrives while the window
+    // is occluded. Filtering to `data-state="open"` was still counting both,
+    // so the case failed for leftovers it does not own. A modal is the thing
+    // that would actually lock the window, and `aria-modal` is how the DOM
+    // says so.
+    const blocking = await browser.execute(() =>
+      [...document.querySelectorAll('[role="dialog"][aria-modal="true"]')]
         .filter((d) => d.getAttribute("data-state") !== "closed")
         .map((d) => (d as HTMLElement).textContent?.slice(0, 80) ?? ""),
     );
-    expect(openDialogs).toEqual([]);
+    expect(blocking).toEqual([]);
 
     await snap("creating-task-pending.png");
   });

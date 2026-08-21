@@ -122,16 +122,32 @@ describe("scratchpads", () => {
     // The picker is the ONLY way to name a pad's language when the sniffer
     // has nothing to go on, so it has to accept a scratch tab: it used to
     // filter to `type === "edit"` and silently no-op here.
-    await browser.execute((id) => {
-      (document.querySelector(`[data-task-id="${id}"] [data-testid="syntax-button"]`) as HTMLElement).click();
-    }, taskId);
-    await waitVisible('[data-testid="syntax-palette"]');
-    await browser.execute(() => {
+    // Click until the picker is actually open, and read that from the STORE
+    // rather than the DOM. A click that lands while React is mid-commit on
+    // this pane is simply lost, and waiting on the dialog instead used to
+    // spend the whole timeout on a picker nothing had opened. The store flag
+    // is the thing the button sets, so it cannot be confused by a closing
+    // palette an earlier spec file left mounted (animations are frozen while
+    // the window is occluded, so those husks outlive their close).
+    await browser.waitUntil(
+      () => browser.execute((id) => {
+        if (window.__termic!.useUI.getState().syntaxPaletteFor) return true;
+        const btn = document.querySelector(
+          `[data-task-id="${id}"] [data-testid="syntax-button"]`,
+        ) as HTMLElement | null;
+        btn?.click();
+        return false;
+      }, taskId),
+      { timeout: 10_000, interval: 250, timeoutMsg: "the syntax button never opened the picker" },
+    );
+    // The list arrives with the languageExts chunk, so the rows are a beat
+    // behind the dialog. Wait for the row, not for the frame around it.
+    const markdownRow = '[data-testid="syntax-palette"] [data-lang="Markdown"]';
+    await waitVisible(markdownRow);
+    await browser.execute((sel) => {
       // Keyed by CodeMirror's registry NAME, which is also the label.
-      const row = document.querySelector('[data-testid="syntax-palette"] [data-lang="Markdown"]') as HTMLElement;
-      if (!row) throw new Error("no Markdown row in the syntax palette");
-      row.click();
-    });
+      (document.querySelector(sel) as HTMLElement).click();
+    }, markdownRow);
 
     await browser.waitUntil(
       () => browser.execute((id) => (
