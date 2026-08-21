@@ -343,8 +343,10 @@ they share module paths — an import resolved in the wrong copy is a correctnes
 bug, not a tuning knob. That is where the memory genuinely buys something.
 
 Refcount, therefore: spawn on the first task that has code navigation enabled and
-opens an editor tab of that language at that root; reap when the last such task
-closes. Two consequences for the UI: turning navigation off in one task must not
+opens an editor tab of that language at that checkout; reap when the last such
+task closes. The *grant* is refcounted the same way and on the same tasks (see
+Opt-in), so when a checkout's last task goes, both the server and the permission
+to run one go with it. Two consequences for the UI: turning navigation off in one task must not
 kill a server another task is still using, and **"stop this server now" stops it
 for every task sharing that root** — say so on the button rather than surprising
 someone.
@@ -602,86 +604,71 @@ server earns it), so the open question below blocks a feature, not the phase.
 
 ## Opt-in: "Code navigation"
 
-Three levels, each **inheriting** from the one above, all machine-local. This is
-the shape sandbox already uses (app default → project → per-task override), so
-it is a familiar control rather than a new concept.
+**There is exactly one way to turn this on: from a task, for that task's
+checkout. Nothing else arms it — not a project setting, not an app-wide
+setting.** Given the measured cost (rust-analyzer ~3.1 GB per checkout, gopls up
+to 6.8 GB, none of it ever released), an inherited default is a bill the user did
+not agree to, arriving from a process they did not start.
 
-- **An app-wide pref, default OFF** (`prefs.ts`, alongside `loadRemoteImages`).
-  The master switch, and the answer to "why would I spend RAM on a repo I only
-  ever point agents at".
-- **A per-project override** on the `Project` record (`projects.json`),
-  tri-state inherit / on / off, next to `default_sandbox` and
-  `spotlight_enabled`. Navigation on for the repo you read, off for the four you
-  only supervise.
-- **A per-task override**, same tri-state, defaulting to inherit.
+The app-wide pref survives in one demoted role only: **whether the feature is
+offered at all** (default OFF, `prefs.ts`, alongside `loadRemoteImages`). With it
+off, nothing is imported, no affordance appears, and the editor is byte-for-byte
+what it is today. With it on, the *offer* exists — a task can now be armed. It
+never turns navigation on anywhere by itself. A per-project "on" was considered
+and dropped: it is exactly the inherited default this section exists to prevent.
 
-**Why per-task, given the cost model.** An earlier draft rejected it, on the
-grounds that tasks are created constantly so a per-task switch would mean
-re-enabling this several times a day. That objection only holds if the per-task
-level is a *required choice*; as an override that defaults to inherit, the
-common path costs the user nothing and the control exists when it matters.
+### The grant is per checkout, and it expires
 
-And it matters more than the draft assumed, because the unit of memory is the
-TASK, not the project. Measured: rust-analyzer holds ~3.1 GB per worktree and
-gopls up to 6.8 GB, neither ever released. Six tasks on one repo where the user
-reads code in exactly one of them is the normal case in termic, and a
-project-level switch cannot express it — it is all six or none. The per-task
-override is the only level that matches where the cost is actually incurred.
+Arming is a grant on a **checkout** (see Lifecycle: the main repo is one
+checkout, each worktree is another), made from a task, and it is deliberately
+**not sticky**:
 
-It is also the natural home for **"stop this server now"**: the same control
-that says "not this task" reclaims gigabytes immediately, which pairs with
-listing servers in the Activity window.
+- Enabling it in a task arms that task's checkout. Sibling tasks on the same
+  checkout come along for free — they share the one server, so there is nothing
+  extra to pay or to ask for.
+- **The grant is refcounted against the tasks on that checkout. When the last one
+  is archived or closed, the grant is dropped and the server is reaped.** The
+  next task created on that checkout starts unarmed, and someone has to ask
+  again.
 
-**Per-task is the RECOMMENDED level, and the UI should say so.** App-wide on is
-the setting most likely to surprise someone: it arms every task in every project,
-and the bill only arrives later, from a process the user never started. Steering
-people to enable navigation in the one task they are reading code in is both the
-cheapest default and the honest one. Read precisely, "per task" means *per
-checkout*: enabling it in a task arms the checkout that task points at, and any
-sibling task on the same checkout comes along for free.
+That last rule is the point. Worktrees usually disappear with their task, so a
+stale grant there is self-limiting — but **the main checkout is permanent**. A
+grant made once for a five-minute code read would otherwise sit on it forever,
+and quietly resurrect a multi-gigabyte server months later, on a machine whose
+owner has long since forgotten they said yes. Tying the grant's lifetime to the
+work that motivated it means **an enablement can never outlive its reason**.
+
+The cost of this design is honest and small: someone who reads code in the main
+checkout every day re-enables it every day. That is a click against several
+gigabytes, and it is the right side of the trade.
 
 ### The memory disclosure is part of the feature
 
 A user cannot consent to a cost nobody showed them, and this cost is large,
-per-worktree, and never reclaimed until the process dies. Three things have to be
+per-checkout, and never reclaimed until the process dies. Three things have to be
 said at the moment of enabling — not buried in Settings:
 
 1. **A number, from the manifest, per language.** Not "may use significant
    memory". Each manifest carries a measured typical and worst-case RSS, so the
-   toggle can read *"rust-analyzer typically holds 2-3 GB per task and does not
-   release it"* or *"gopls 1 GB, up to 7 GB on a large repo"*. The figures in the
-   cost model above are the seed values.
-2. **That the unit is the CHECKOUT — not the project, and not the task.** This
-   is the difference users will not guess and must be told outright, because
-   every IDE they have used runs one server per project. Termic runs **one per
-   checkout: the main repo counts as one, and every worktree is another.** So
-   ten worktree tasks on one repo with navigation on everywhere is ten servers
-   and ten copies of the index. Say the reassuring half in the same breath:
-   tasks sharing a checkout share one server, so a second task on the main
-   checkout is free.
-3. **Where it went and how to get it back.** The Activity window lists live
-   servers with their RSS and a stop button; stopping one frees its memory
-   immediately and costs a re-index when next needed.
+   toggle can read *"rust-analyzer typically holds 2-3 GB per checkout and does
+   not release it"* or *"gopls 1 GB, up to 7 GB on a large repo"*. The figures in
+   the cost model above are the seed values.
+2. **That the unit is the CHECKOUT — not the project, and not the task.** This is
+   the difference users will not guess and must be told outright, because every
+   IDE they have used runs one server per project. Termic runs **one per
+   checkout: the main repo counts as one, and every worktree is another.** So ten
+   worktree tasks with navigation on everywhere is ten servers and ten copies of
+   the index. Say the reassuring half in the same breath: tasks sharing a
+   checkout share one server, so a second task on the main checkout is free.
+3. **Where it went, how to get it back, and that it will lapse.** The Activity
+   window lists live servers with their RSS and a stop button; stopping one frees
+   its memory immediately and costs a re-index when next needed. And the grant
+   itself ends when the checkout's last task does — which is a feature, and
+   should read as one rather than as the setting mysteriously forgetting itself.
 
 Language servers are the first thing termic runs that can cost more than every
 agent in the window combined. That deserves a sentence at the point of decision,
 not a support thread afterwards.
-
-**Deliberately NOT in `.termic.yaml`.** The repo config is committed and
-team-shared, which is right for sandbox policy and wrong for this: whether to
-spend 250 MB of *this* machine's memory is a personal choice, not something a
-colleague decides for you by pushing a config change.
-
-The label is **"Code navigation"**, not "smart code features" — it names what
-you get (go to definition, find usages, hover types) instead of inviting "smart
-how?". The roadmap's broader "code intelligence" stays as the name of the whole
-subsystem.
-
-**The toggle grants permission; it does not start anything.** Even fully on,
-nothing spawns until an editor tab of that language is open in that task —
-watching an agent in a terminal costs zero, which is what most tasks are doing
-most of the time. With the switch off, nothing spawns, nothing is imported, and
-the editor is byte-for-byte what it is today.
 
 Discovery should not depend on browsing Settings: prompt contextually in the
 editor the first time it would help.
