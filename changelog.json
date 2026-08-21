@@ -1,6 +1,11 @@
 {
   "versions": [
     {
+      "version": "0.29.0",
+      "date": "2026-08-21",
+      "summary": "Scratchpads that survive a relaunch, highlighting for every language CodeMirror knows, and editable SVGs."
+    },
+    {
       "version": "0.28.1",
       "date": "2026-08-20",
       "summary": "An Activity monitor for your agents, inline git blame, and a command palette that finally knows what the app can do."

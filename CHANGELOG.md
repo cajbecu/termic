@@ -4,6 +4,24 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
+## [0.29.0] - 2026-08-21
+
+Scratchpads that survive a relaunch, highlighting for every language CodeMirror knows, and editable SVGs.
+
+### Features
+- **Scratchpad tabs.** An unsaved buffer that happens to survive restarts, scoped to one task. Open one from the tab strip's + menu, the command palette or Option-Cmd-N, type a note, and it is still there after a relaunch, with no filename to choose and nothing stray in `git status`. Cmd-S does not write to the scratch store, it promotes the pad to a real file inside the task (pick a folder, pick a name), after which the tab is an ordinary edit tab. Quitting keeps your pads; closing one asks. Notes live in Termic's own data directory, never the worktree, so they never reach a diff the agent reviews, and archiving a task keeps its pads. The tab title folds in as many buffer lines as fit, and the syntax is detected from what you type (or picked by hand, and remembered). (#244)
+- **Highlighting for roughly 150 languages, with nothing to add here first.** The editor and the diff view take their grammars from CodeMirror's own language registry instead of a hand-maintained list, so `.php`, `.lua`, `.zig`, `.hs` and the next one all just work. Each grammar is a separate lazy chunk fetched only for a language you actually open, so app start is unaffected. Makefile, proto3 and Elixir stay hand-written, since the registry has no usable grammar for them.
+- **Set the syntax by hand.** A language button on the editor path bar, and a `Set syntax` row in the command palette, for the `.txt` that is really JSON. The pick reconfigures the editor in place, so the cursor, undo history and scroll survive it. Files that claim nothing get content detection (shebangs, markup declarations, real JSON) with high-confidence signals only: a wrong guess is worse than no guess.
+- **SVGs open as source, preview or split**, the same toggle markdown has, instead of a read-only image you had to leave the app to change. The preview renders the live buffer, so a split-view edit updates as you type. SVG keeps its own default-view preference, set to preview, so clicking an `.svg` in the file tree still shows the picture. (#247)
+
+### Bug fixes
+- A terminal no longer starts blank with an untitled tab. Anything an agent printed between the spawn and the moment the window started listening reached nobody, which for a CLI that paints a banner and then waits for input meant a blank pane and a generic tab title, permanently. The first output is held until the window is listening.
+- The "modified" chip in the Git panel was hard to read on the light theme: its ink was hard-coded black and ignored the theme. Light fills and inks it from the tokens that exist for that, measured at 5.98:1.
+- Expanding the bottom split left the caret in the agent terminal above it, so the next keystroke went to the agent instead of the shell. Focus retries on a timer now, which keeps running while the window is behind another one.
+- A folder that will not read says why: permission denied, the folder links outside the task, the folder no longer exists, with the raw error underneath. The retry row said "Couldn't read this folder" and nothing else, which for a symlink pointing out of the task was hopeless advice, since retrying can never work. (#250)
+- Committing no longer clears every mark-as-viewed in a review, on files the commit never touched. A file's mark expires on its own evidence now, and marks survive archiving, so unarchiving a task resumes the review where it left off.
+- The Activity window names an agent row after its tab within a second of the tab getting a title, instead of up to 50 seconds later when the window is behind another one.
+
 ## [0.28.1] - 2026-08-20
 
 An Activity monitor for your agents, inline git blame, and a command palette that finally knows what the app can do.
