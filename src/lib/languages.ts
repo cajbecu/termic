@@ -1,107 +1,103 @@
-// The catalog of syntaxes the editor knows about: one entry per language, the
-// extensions / filenames that pick it automatically, and the label the "Set
-// syntax" picker shows.
+// What language a buffer is highlighted as: the precedence rule, the labels,
+// and nothing else. There is no catalog here any more — the set of languages
+// termic knows is CodeMirror's published registry (`@codemirror/language-data`,
+// ~150 of them), composed with our own additions in `lib/languageExts.ts`.
 //
-// Deliberately free of CodeMirror imports. The picker, the breadcrumb and the
-// content sniffer need LABELS and IDS, not grammars, and importing
-// `@codemirror/lang-*` here would drag every grammar into the main bundle —
-// today they are only reachable through the lazily-loaded editor / diff panes.
-// The grammars live in `lib/languageExts.ts`, which only those panes import.
+// A language id IS the registry's `name`: "TypeScript", "Makefile",
+// "Properties files". Not lower-case slugs, not the LSP spec's ids.
+//
+// Deliberately free of CodeMirror imports, and `lib/mainChunkGuard.test.ts`
+// pins that. This module is reachable from the command palette and the
+// breadcrumb, i.e. the MAIN chunk; `@codemirror/language-data` pulls ~800K of
+// lazily-loaded grammars behind it and must stay reachable only from the
+// lazily-loaded editor / diff panes.
 
-export interface LanguageDef {
-  id: string;
-  /** Shown in the picker and on the breadcrumb button. */
-  label: string;
-  /** Lower-case extensions (no dot) that select this language. */
-  exts?: string[];
-  /** Whole-basename patterns, tried BEFORE extensions — `Dockerfile.dev` is a
-   *  Dockerfile, not a `.dev` file. */
-  filenames?: RegExp[];
-  /** Extra fuzzy-search terms for the picker. Never displayed. */
-  keywords?: string;
-}
-
-// A note for docs/ideas/lsp.md, which needs a `(taskId, path) -> { version,
+// A note for docs/plans/lsp.md, which needs a `(taskId, path) -> { version,
 // languageId }` registry: THIS is the place to read the language from, and
-// `effectiveLanguageId` already folds in the user's manual override. The ids
-// below are termic's own, chosen to match the LSP spec's `languageId` strings
-// where that was free, but they are NOT identical to it (`shell` vs
-// `shellscript`, `properties` vs `ini`, one `cpp` entry covering C and C++
-// because one Lezer grammar covers both). An LSP host wants a small explicit
-// termic-id → LSP-id table, not an assumption that these already are one.
+// `effectiveLanguageId` already folds in the user's manual override. The names
+// are CodeMirror's, and they are NOT the LSP spec's `languageId` strings
+// ("Shell" vs `shellscript`, "Properties files" vs `ini`). An LSP host wants a
+// small explicit name → LSP-id table, not an assumption that these are one.
 
 /** The "no grammar at all" entry. A real id (not `null`) so picking it is a
- *  deliberate choice the tab can remember, distinct from "nothing matched". */
-export const PLAIN_TEXT = "text";
+ *  deliberate choice the tab can remember, distinct from "nothing matched".
+ *  Not a registry name — nothing upstream owns "plain text". */
+export const PLAIN_TEXT = "Plain Text";
 
-/** Every language the editor can highlight. Order matters only for the
- *  filename pass (first match wins); the picker sorts by label itself. */
-export const LANGUAGES: LanguageDef[] = [
-  { id: PLAIN_TEXT, label: "Plain Text", keywords: "none off plain raw txt" },
-  { id: "javascript", label: "JavaScript", exts: ["js", "jsx", "mjs", "cjs"], keywords: "node es esm react" },
-  { id: "typescript", label: "TypeScript", exts: ["ts", "tsx", "mts", "cts"], keywords: "tsx react types" },
-  { id: "python", label: "Python", exts: ["py", "pyi"] },
-  { id: "rust", label: "Rust", exts: ["rs"], keywords: "cargo" },
-  { id: "go", label: "Go", exts: ["go"], keywords: "golang" },
-  { id: "java", label: "Java / Kotlin", exts: ["java", "kt", "kts"], keywords: "kotlin jvm gradle" },
-  { id: "swift", label: "Swift", exts: ["swift"], keywords: "ios macos xcode apple" },
-  // Gradle build scripts are Groovy (`build.gradle`); the Kotlin DSL variant
-  // ends in `.kts` and lands on the Java/Kotlin grammar above.
-  { id: "groovy", label: "Groovy / Gradle", exts: ["groovy", "gradle", "gvy"], keywords: "gradle build jvm" },
-  { id: "cpp", label: "C / C++", exts: ["c", "cc", "cpp", "cxx", "h", "hpp", "hh"], keywords: "c++ header" },
-  { id: "elixir", label: "Elixir", exts: ["ex", "exs"] },
-  { id: "ruby", label: "Ruby", exts: ["rb", "rake"], keywords: "rails gem" },
-  { id: "shell", label: "Shell", exts: ["sh", "bash", "zsh", "fish"], filenames: [/^justfile$/i], keywords: "bash sh zsh script" },
-  { id: "makefile", label: "Makefile", exts: ["mk", "mak"], filenames: [/^(gnu)?makefile(\..+)?$/i], keywords: "make target recipe build" },
-  { id: "dockerfile", label: "Dockerfile", filenames: [/^dockerfile/i], keywords: "container image docker" },
-  { id: "json", label: "JSON", exts: ["json"] },
-  { id: "yaml", label: "YAML", exts: ["yaml", "yml"], keywords: "config" },
-  { id: "toml", label: "TOML", exts: ["toml"], keywords: "cargo config" },
-  { id: "xml", label: "XML", exts: ["xml", "svg"] },
-  { id: "html", label: "HTML", exts: ["html", "htm", "vue", "svelte", "astro", "hbs", "handlebars", "ejs", "mustache", "twig", "liquid", "njk"], keywords: "template markup jsx vue svelte" },
-  { id: "css", label: "CSS", exts: ["css"], keywords: "style" },
-  { id: "markdown", label: "Markdown", exts: ["md", "markdown", "mdx"], keywords: "docs readme" },
-  { id: "sql", label: "SQL", exts: ["sql"], keywords: "query database" },
-  { id: "protobuf", label: "Protocol Buffers", exts: ["proto"], keywords: "proto3 grpc" },
-  { id: "properties", label: "INI / Properties", exts: ["properties", "conf", "ini", "env"], filenames: [/^\.env(\..+)?$/i], keywords: "config dotenv settings" },
-];
+/** The registry's spelling, used by the tab chrome to decide a markdown
+ *  buffer gets the preview shell. A bare string literal at the call site is
+ *  one typo away from silently never matching. */
+export const MARKDOWN = "Markdown";
 
-const BY_ID = new Map(LANGUAGES.map(l => [l.id, l]));
+/** Ids termic used before the registry swap, mapped to the registry name that
+ *  replaces them.
+ *
+ *  Only `ScratchTab.syntax` ever outlives a session (it is written to the
+ *  scratch index, GH #244), so this exists for exactly one case: a pad whose
+ *  syntax was picked on a build that shipped between 0029565 and this one.
+ *  Everything else is re-derived from the path on open.
+ *
+ *  A CLOSED list. Nothing gets added to it — a new language needs no entry
+ *  anywhere, which is the point of the swap. Removable once no pad in the
+ *  wild can still carry an old id; indexed in docs/tech-debt.md. */
+const LEGACY_IDS: Record<string, string> = {
+  text: PLAIN_TEXT,
+  javascript: "JavaScript",
+  typescript: "TypeScript",
+  python: "Python",
+  rust: "Rust",
+  go: "Go",
+  java: "Java",
+  swift: "Swift",
+  groovy: "Groovy",
+  cpp: "C++",
+  elixir: "Elixir",
+  ruby: "Ruby",
+  shell: "Shell",
+  makefile: "Makefile",
+  dockerfile: "Dockerfile",
+  json: "JSON",
+  yaml: "YAML",
+  toml: "TOML",
+  xml: "XML",
+  html: "HTML",
+  css: "CSS",
+  markdown: MARKDOWN,
+  sql: "SQL",
+  protobuf: "ProtoBuf",
+  properties: "Properties files",
+};
 
-/** Human label for an id, falling back to the id itself for anything the
- *  catalog has since dropped (a persisted override from an older build). */
+/** Translate a stored id, leaving anything already a registry name alone.
+ *  Registry names are capitalised and the legacy ids were not, so the two
+ *  spaces cannot collide. */
+export function normalizeLanguageId(id: string): string {
+  return LEGACY_IDS[id] ?? id;
+}
+
+/** Human label for an id. Registry names ARE the label, so this is mostly
+ *  identity — its job is the fallbacks: a legacy id from an older build, and
+ *  a name the registry has since dropped, which renders verbatim rather than
+ *  blank. */
 export function languageLabel(id: string | null | undefined): string {
-  if (!id) return "Plain Text";
-  return BY_ID.get(id)?.label ?? id;
+  if (!id) return PLAIN_TEXT;
+  return normalizeLanguageId(id);
 }
 
-export function isKnownLanguage(id: string): boolean {
-  return BY_ID.has(id);
-}
-
-/** The language a path selects on its own, or null when nothing matches.
- *  Filenames are tried before extensions (`Dockerfile.dev`, `Makefile.local`). */
-export function languageIdForPath(path: string | null | undefined): string | null {
-  if (!path) return null;
-  const base = path.split("/").pop() || path;
-  for (const lang of LANGUAGES) {
-    if (lang.filenames?.some(re => re.test(base))) return lang.id;
-  }
-  const ext = base.includes(".") ? base.split(".").pop()!.toLowerCase() : "";
-  if (!ext) return null;
-  for (const lang of LANGUAGES) {
-    if (lang.exts?.includes(ext)) return lang.id;
-  }
-  return null;
-}
-
-/** What a tab is ACTUALLY highlighted as, in precedence order:
- *  a manual pick beats the path, which beats the content sniff. The sniff only
- *  ever fills in for a path no rule claimed (see lib/detectSyntax). */
+/** What a tab is ACTUALLY highlighted as, in precedence order: a manual pick
+ *  beats whatever was worked out automatically.
+ *
+ *  Only TWO levels here, unlike the three the docs describe, because the third
+ *  cannot live in the main chunk: resolving a PATH to a language now needs the
+ *  registry. The pane does that work (path first, content sniff second, see
+ *  lib/languageExts + lib/detectSyntax) and writes its answer to `syntaxAuto`,
+ *  so the breadcrumb and the picker read one settled value instead of
+ *  re-deriving it. Until the pane has answered, a freshly opened tab reads as
+ *  Plain Text for a frame. */
 export function effectiveLanguageId(
   tab: { path?: string; syntax?: string; syntaxAuto?: string } | null | undefined,
 ): string {
   if (!tab) return PLAIN_TEXT;
-  if (tab.syntax) return tab.syntax;
-  return languageIdForPath(tab.path) ?? tab.syntaxAuto ?? PLAIN_TEXT;
+  const id = tab.syntax || tab.syntaxAuto;
+  return id ? normalizeLanguageId(id) : PLAIN_TEXT;
 }

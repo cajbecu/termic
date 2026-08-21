@@ -397,6 +397,28 @@ describe("code editor", () => {
     await snap("code-editor-makefile.png");
   });
 
+  // The whole point of sourcing languages from @codemirror/language-data:
+  // there is no PHP entry anywhere in termic, no import, no case in a switch.
+  // Highlighting it proves the registry lookup, the async grammar load and the
+  // compartment all reach CodeMirror on a language nobody here registered.
+  it("highlights a language termic never registered", async () => {
+    await openHighlighted(
+      "hello.php",
+      "<?php\nfunction greet(string $name): string {\n    return \"hi $name\";\n}\n",
+      "greet",
+    );
+
+    const styled = await browser.execute(() =>
+      [...document.querySelectorAll(".cm-content .cm-line span[class]")].map(
+        (s) => s.textContent ?? "",
+      ),
+    );
+    expect(styled).toContain("function");
+    expect(await syntaxLabel()).toBe("PHP");
+
+    await snap("code-editor-php.png");
+  });
+
   it("names the syntax it picked from the extension", async () => {
     await openHighlighted("typed.py", "x = 1\n", "x = 1");
     expect(await syntaxLabel()).toBe("Python");
@@ -432,7 +454,8 @@ describe("code editor", () => {
     // Existence, not `waitForDisplayed`: the panel fades in via a CSS
     // animation, and animations are frozen while the window is occluded — a
     // visibility wait then times out on a palette that is perfectly usable.
-    const rowSel = '[data-testid="syntax-palette"] [data-lang="yaml"]';
+    // The row's key is CodeMirror's registry NAME, which is also the label.
+    const rowSel = '[data-testid="syntax-palette"] [data-lang="YAML"]';
     await browser.waitUntil(
       () => browser.execute((sel) => !!document.querySelector(sel), rowSel),
       { timeout: 8_000, timeoutMsg: "the syntax palette never listed YAML" },

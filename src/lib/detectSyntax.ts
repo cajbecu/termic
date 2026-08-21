@@ -18,15 +18,16 @@ const HEAD_BYTES = 8_000;
 const JSON_PARSE_CAP = 512_000;
 
 const SHEBANGS: Array<[RegExp, string]> = [
-  [/\b(bash|sh|zsh|fish|dash|ksh)\b/, "shell"],
-  [/\bpython[\d.]*\b/, "python"],
-  [/\b(ruby|jruby)\b/, "ruby"],
-  [/\bnode\b/, "javascript"],
-  [/\bdeno\b/, "typescript"],
-  [/\bmake\b/, "makefile"],
+  [/\b(bash|sh|zsh|fish|dash|ksh)\b/, "Shell"],
+  [/\bpython[\d.]*\b/, "Python"],
+  [/\b(ruby|jruby)\b/, "Ruby"],
+  [/\bnode\b/, "JavaScript"],
+  [/\bdeno\b/, "TypeScript"],
+  [/\bmake\b/, "Makefile"],
 ];
 
-/** A language id from `lib/languages`, or null when nothing is confident. */
+/** A language NAME (CodeMirror's registry spelling, see lib/languages), or
+ *  null when nothing is confident. */
 export function detectSyntaxFromContent(text: string): string | null {
   if (!text) return null;
   const head = text.slice(0, HEAD_BYTES);
@@ -37,18 +38,18 @@ export function detectSyntaxFromContent(text: string): string | null {
   if (trimmed.startsWith("#!")) {
     const line = trimmed.slice(0, trimmed.indexOf("\n") + 1 || undefined);
     for (const [re, id] of SHEBANGS) if (re.test(line)) return id;
-    return "shell";
+    return "Shell";
   }
 
   // 2. Markup with a declaration.
-  if (/^<\?xml\b/i.test(trimmed)) return "xml";
-  if (/^<!doctype\s+html\b/i.test(trimmed) || /^<html[\s>]/i.test(trimmed)) return "html";
-  if (/^<svg[\s>]/i.test(trimmed)) return "xml";
+  if (/^<\?xml\b/i.test(trimmed)) return "XML";
+  if (/^<!doctype\s+html\b/i.test(trimmed) || /^<html[\s>]/i.test(trimmed)) return "HTML";
+  if (/^<svg[\s>]/i.test(trimmed)) return "XML";
 
   // 3. JSON — brace/bracket first (cheap), then an actual parse of the WHOLE
   //    text, since a truncated head never parses.
   if (/^[{[]/.test(trimmed) && text.length <= JSON_PARSE_CAP) {
-    try { JSON.parse(text); return "json"; } catch { /* not JSON, keep going */ }
+    try { JSON.parse(text); return "JSON"; } catch { /* not JSON, keep going */ }
   }
 
   // 4. Makefile before YAML: `target:` and `key:` look alike, and only make
@@ -56,44 +57,44 @@ export function detectSyntaxFromContent(text: string): string | null {
   if (/^\.PHONY\s*:/m.test(head)
       || /^[A-Za-z0-9_.$(){}\/%-]+\s*:[^=\n]*\n\t/m.test(head)
       || (/^[A-Z_][A-Z0-9_]*\s*(:=|\?=|\+=)/m.test(head) && /^\t/m.test(head)))
-    return "makefile";
+    return "Makefile";
 
   // 5. Dockerfile: FROM plus at least one other instruction, so a stray
   //    "FROM" in prose doesn't qualify.
   if (/^\s*FROM\s+\S+/im.test(head)
       && /^\s*(RUN|CMD|COPY|ADD|ENTRYPOINT|WORKDIR|ENV|EXPOSE)\s+/im.test(head))
-    return "dockerfile";
+    return "Dockerfile";
 
   // 6. TOML before INI: both use [sections], only TOML uses `key = value`
   //    with quoted strings and dotted tables.
   if (/^\[[\w.$-]+\]\s*$/m.test(head)) {
-    return /^\s*[\w.-]+\s*=\s*(["'[{]|\d)/m.test(head) ? "toml" : "properties";
+    return /^\s*[\w.-]+\s*=\s*(["'[{]|\d)/m.test(head) ? "TOML" : "Properties files";
   }
 
   // 7. YAML: a document marker, or several `key: value` lines with no braces
   //    (which would make it JSON-ish) and no tabs (illegal in YAML).
-  if (/^---\s*$/m.test(trimmed.slice(0, 8))) return "yaml";
+  if (/^---\s*$/m.test(trimmed.slice(0, 8))) return "YAML";
   if (!/^\t/m.test(head) && (head.match(/^[ ]*[\w.-]+:(\s|$)/gm)?.length ?? 0) >= 2
       && !/[{};]\s*$/m.test(head))
-    return "yaml";
+    return "YAML";
 
   // 8. Code, by declaration keywords that are rare as prose.
-  if (/^package\s+\w+/m.test(head) && /\bfunc\s+\w*\s*\(/.test(head)) return "go";
-  if (/^\s*(use\s+std::|fn\s+main\s*\(|impl\s+\w+|let\s+mut\s)/m.test(head)) return "rust";
+  if (/^package\s+\w+/m.test(head) && /\bfunc\s+\w*\s*\(/.test(head)) return "Go";
+  if (/^\s*(use\s+std::|fn\s+main\s*\(|impl\s+\w+|let\s+mut\s)/m.test(head)) return "Rust";
   if (/^\s*(def|class)\s+\w+.*:\s*$/m.test(head) || /^\s*from\s+[\w.]+\s+import\s/m.test(head))
-    return "python";
+    return "Python";
   if (/^\s*(interface|type)\s+\w+\s*[={]/m.test(head) || /:\s*(string|number|boolean)\b/.test(head))
-    return "typescript";
+    return "TypeScript";
   if (/^\s*(import\s.+from\s|export\s+(default|const|function|class)\s|const\s+\w+\s*=\s*(\(|function))/m.test(head))
-    return "javascript";
+    return "JavaScript";
   if (/^\s*(SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|CREATE\s+(TABLE|INDEX|VIEW))\b/im.test(head))
-    return "sql";
+    return "SQL";
 
   // 9. Markdown last: its markers (headings, fences, lists) also appear in
   //    plain prose notes, so only take it when there are two of them.
   const md = [/^#{1,6}\s+\S/m, /^```/m, /^\s*[-*+]\s+\S/m, /^\s*\d+\.\s+\S/m, /\[[^\]]+\]\([^)]+\)/]
     .filter(re => re.test(head)).length;
-  if (md >= 2) return "markdown";
+  if (md >= 2) return "Markdown";
 
   return null;
 }

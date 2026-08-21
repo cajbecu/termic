@@ -211,7 +211,15 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
     setErr(null);
     setCommentable(false);
     setBinary(null);
-    taskFileDiffSides(task.id, tab.path, tab.scope).then(sides => {
+    // Grammars come from CodeMirror's registry now, so resolving one is a
+    // chunk fetch. It rides ALONGSIDE the diff read rather than after it, and
+    // needs no guard of its own: `alive` already covers the whole load, the
+    // path cannot change without this effect re-running, and a diff has no
+    // per-file syntax override to race with.
+    Promise.all([
+      taskFileDiffSides(task.id, tab.path, tab.scope),
+      langForPath(tab.path),
+    ]).then(([sides, byPath]) => {
       if (!alive || !hostRef.current) return;
       setFp(sides.fp);
       if (sides.kind !== "text") {
@@ -238,7 +246,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
       editorRef.current = null;
       hostRef.current.innerHTML = "";
 
-      const lang = langForPath(tab.path);
+      const lang = byPath?.ext ?? null;
       const baseExt: Extension[] = [
         EditorView.editable.of(false),
         EditorState.readOnly.of(true),

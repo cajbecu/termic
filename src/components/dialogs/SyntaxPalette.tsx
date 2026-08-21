@@ -22,16 +22,13 @@ import { Search, Check } from "lucide-react";
 import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
 import { scratchSetMeta } from "@/lib/ipc";
-import { LANGUAGES, PLAIN_TEXT, effectiveLanguageId, type LanguageDef } from "@/lib/languages";
+import { effectiveLanguageId } from "@/lib/languages";
 import { fuzzyMatch, Highlighted } from "@/lib/fuzzy";
 import type { EditTab, ScratchTab } from "@/lib/types";
 
-/** Alphabetical, with Plain Text pinned to the top — it is the "turn this
- *  off" row, not a language you go hunting for in the Ps. */
-const SORTED: LanguageDef[] = [
-  ...LANGUAGES.filter(l => l.id === PLAIN_TEXT),
-  ...LANGUAGES.filter(l => l.id !== PLAIN_TEXT).sort((a, b) => a.label.localeCompare(b.label)),
-];
+/** One row per language: the registry name IS the label, and the registry's
+ *  aliases are extra fuzzy-search terms that are never displayed. */
+type Row = { name: string; keywords: string };
 
 export function SyntaxPalette() {
   const target = useUI(s => s.syntaxPaletteFor);
@@ -51,31 +48,46 @@ export function SyntaxPalette() {
   const listRef = useRef<HTMLDivElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
 
+  // The language list is fetched when the picker OPENS, never at import time.
+  // It is CodeMirror's registry (~150 languages), and `lib/languageExts` is
+  // the gateway to every grammar chunk behind it — this dialog is mounted from
+  // App.tsx, i.e. the MAIN chunk, so a static import here would put all of it
+  // on the app-start path (see lib/mainChunkGuard.test.ts). By the time the
+  // picker is reachable the editor pane has already loaded the module, so this
+  // resolves in a microtask and the list is there on the first paint.
+  const [langs, setLangs] = useState<Row[]>([]);
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    import("@/lib/languageExts").then(m => { if (alive) setLangs(m.pickerLanguages()); });
+    return () => { alive = false; };
+  }, [open]);
+
   // Open on the language the buffer already uses, so Enter is a no-op rather
   // than a surprise and the list is scrolled to where you are.
   useEffect(() => {
-    if (!open) return;
+    if (!open || !langs.length) return;
     setQuery("");
-    setActiveIdx(Math.max(0, SORTED.findIndex(l => l.id === currentId)));
+    setActiveIdx(Math.max(0, langs.findIndex(l => l.name === currentId)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, langs]);
   useEffect(() => { if (query) setActiveIdx(0); }, [query]);
 
   const rows = useMemo(() => {
-    type Scored = { lang: LanguageDef; matches: number[] };
-    if (!query) return SORTED.map<Scored>(lang => ({ lang, matches: [] }));
+    type Scored = { lang: Row; matches: number[] };
+    if (!query) return langs.map<Scored>(lang => ({ lang, matches: [] }));
     const out: Array<Scored & { score: number }> = [];
-    for (const lang of SORTED) {
-      const m = fuzzyMatch(lang.label, query);
+    for (const lang of langs) {
+      const m = fuzzyMatch(lang.name, query);
       if (m) { out.push({ lang, matches: m.matches, score: m.score }); continue; }
-      // Keywords are searched but never highlighted — "dotenv" finds
-      // "INI / Properties" without the match indices meaning anything there.
+      // Aliases are searched but never highlighted — "ini" finds "Properties
+      // files" without the match indices meaning anything there.
       if (lang.keywords && fuzzyMatch(lang.keywords, query))
         out.push({ lang, matches: [], score: -1 });
     }
     out.sort((a, b) => b.score - a.score);
     return out;
-  }, [query]);
+  }, [query, langs]);
 
   useEffect(() => {
     if (activeIdx > rows.length - 1) setActiveIdx(Math.max(0, rows.length - 1));
@@ -84,13 +96,13 @@ export function SyntaxPalette() {
     listRef.current?.querySelector<HTMLElement>(`[data-row="${activeIdx}"]`)?.scrollIntoView({ block: "nearest" });
   }, [activeIdx, open]);
 
-  function pick(lang: LanguageDef) {
+  function pick(lang: Row) {
     if (target && tab) {
-      useApp.getState().patchTab(target.taskId, target.tabId, { syntax: lang.id });
+      useApp.getState().patchTab(target.taskId, target.tabId, { syntax: lang.name });
       // A pad's pick outlives the session: there is no extension to re-derive
       // it from, so the scratch index is the only record of it.
       if (tab.type === "scratch") {
-        scratchSetMeta(target.taskId, tab.scratchId, { syntax: lang.id }).catch(() => {});
+        scratchSetMeta(target.taskId, tab.scratchId, { syntax: lang.name }).catch(() => {});
       }
     }
     close();
@@ -159,18 +171,18 @@ export function SyntaxPalette() {
             )}
             {rows.map(({ lang, matches }, i) => (
               <button
-                key={lang.id}
+                key={lang.name}
                 data-row={i}
-                data-lang={lang.id}
+                data-lang={lang.name}
                 onClick={() => pick(lang)}
                 onMouseMove={() => setActiveIdx(i)}
                 style={i === activeIdx ? { background: "color-mix(in srgb, var(--color-fg) 13%, transparent)" } : undefined}
                 className="flex w-full items-center gap-2.5 px-3 py-2 text-left"
               >
                 <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--color-fg)]">
-                  {query && matches.length ? <Highlighted text={lang.label} matches={matches} /> : lang.label}
+                  {query && matches.length ? <Highlighted text={lang.name} matches={matches} /> : lang.name}
                 </span>
-                {lang.id === currentId && <Check className="h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />}
+                {lang.name === currentId && <Check className="h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />}
               </button>
             ))}
           </div>

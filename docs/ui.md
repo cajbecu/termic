@@ -210,19 +210,39 @@ Editor tabs also get a **language button** there, showing what the buffer is hig
 
 A **scratchpad** (GH #244) renders its own variant of this bar: no trail, no copy / Finder / locate buttons (it has no path to point at), a line saying it is not in the project yet, and the language button — which matters more here than anywhere else, since with no extension the content sniffer is the only thing that CAN name the buffer. Its manual pick is PERSISTED, in the scratch index, unlike an edit tab's session-only one (point 1 below): there is no filename to re-derive it from after a relaunch. `SyntaxPalette` writes it at the moment of the pick, not the pane from an effect: picking Markdown swaps panes and remounts the editor in the same commit, so a pane-side effect would only ever see the new value as its initial seed.
 
-Picking **Markdown** on a pad also earns it the source / preview / split shell a `.md` file gets (`MarkdownPane`, routed on `effectiveLanguageId(tab) === "markdown"` rather than on a path, since a pad has no extension). That works because the shell's preview is fed by the EDITOR BUFFER, not by disk, so an unsaved pad has something to render. Relative links and images resolve from the task root (a pad has no directory of its own), and there is no `file.md#heading` reveal to consume. Switching between the two panes remounts CodeMirror once; the pad's unmount flush writes the buffer on the way out, so nothing is lost.
+Picking **Markdown** on a pad also earns it the source / preview / split shell a `.md` file gets (`MarkdownPane`, routed on `effectiveLanguageId(tab) === MARKDOWN` rather than on a path, since a pad has no extension). That works because the shell's preview is fed by the EDITOR BUFFER, not by disk, so an unsaved pad has something to render. Relative links and images resolve from the task root (a pad has no directory of its own), and there is no `file.md#heading` reveal to consume. Switching between the two panes remounts CodeMirror once; the pad's unmount flush writes the buffer on the way out, so nothing is lost.
 
-The language itself resolves in `lib/languages.ts`, in strict precedence:
+### Which language, and where that is decided
 
-1. **A manual pick** (`EditTab.syntax`) — session-only, exactly like Sublime's. It survives tab switches, not a relaunch, and is cleared when a preview tab slot recycles onto a different file (otherwise the next file to land in that slot inherits the override).
-2. **The path** — extension, or a whole-filename rule for the files that have no extension (`Makefile`, `Dockerfile.dev`, `justfile`, `.env.production`).
-3. **The content** (`lib/detectSyntax.ts`) — only consulted when the path matched nothing at all, and only for markers close to unambiguous (a shebang, an `<?xml`, text that actually `JSON.parse`s). A wrong guess is worse than no guess, so anything vaguer stays Plain Text.
+The set of languages is **CodeMirror's published registry** (`@codemirror/language-data`, ~150 of them), so opening a `.php`, `.lua` or `.zig` file highlights with no edit here. **Adding a language is not a thing you do.** A language id IS the registry's `name` ("TypeScript", "Properties files", "TSX"), which is also its label.
 
-Grammars live in `lib/languageExts.ts`, which is imported ONLY by the lazily loaded editor and diff panes; `lib/languages.ts` carries the labels and ids and stays free of CodeMirror, so the picker and this bar don't drag every grammar into the main bundle. Switching syntax reconfigures the language **compartment** in place — no `EditorView` rebuild, so the cursor, undo history and scroll position survive.
+Precedence, in `lib/languages.ts`:
 
-Adding a language is two lines: an entry in `lib/languages.ts` (id, label, extensions) and a `case` in `lib/languageExts.ts` returning its grammar. Anything CodeMirror ships a Lezer grammar or a legacy stream mode for is that cheap — Swift and Groovy/Gradle went in that way. `.gradle.kts` is deliberately NOT Groovy: it is the Kotlin DSL, so it rides the Java/Kotlin grammar like any other `.kts`.
+1. **A manual pick** (`EditTab.syntax`) — session-only, exactly like Sublime's. It survives tab switches, not a relaunch, and is cleared when a preview tab slot recycles onto a different file (otherwise the next file to land in that slot inherits the override). A **scratchpad's** pick is the exception and persists (above).
+2. **The automatic answer** (`syntaxAuto`), written by the editor pane: the language the PATH resolves to, or, when the path matches nothing, a guess from the **content** (`lib/detectSyntax.ts` — only markers close to unambiguous: a shebang, an `<?xml`, text that actually `JSON.parse`s; a wrong guess is worse than no guess, so anything vaguer stays Plain Text).
 
-Makefiles are highlighted by a hand-written stream parser (`lib/makeMode.ts`): `@codemirror/legacy-modes` ships ~150 CodeMirror 5 grammars and Makefile is not among them. Same approach as `lib/protoMode.ts`. The rule that makes it a Makefile rather than a config file is that a leading TAB opens a recipe, where the line is shell instead of make, and a trailing backslash keeps that state across lines.
+`effectiveLanguageId` therefore has only two levels, not three, and **does not look at the path**. It cannot: resolving a path needs the registry, and the registry may not be reachable from the main chunk (below). The pane owns resolution and writes its answer back to the tab, so the breadcrumb and the picker read one settled value instead of re-deriving it. A tab the pane has not answered for yet reads as Plain Text for a frame.
+
+### The bundle rule
+
+`lib/languageExts.ts` is the gateway to every grammar, and it is imported ONLY by the lazily loaded editor and diff panes. `lib/languages.ts` stays free of CodeMirror. **`lib/mainChunkGuard.test.ts` pins this** by walking the static import graph from `main.tsx`: a stray `import` of `@codemirror/language-data` from anything reachable at app start would move ~800K of grammars onto the launch path. `SyntaxPalette` is mounted from `App.tsx`, so it `import()`s the list when it opens rather than at module load.
+
+Measured: the main chunk is unchanged (marginally smaller, the old catalog is gone), `languageExts` is a 21K chunk fetched on the first editor or diff open, and `dist/` grows ~876K spread over ~119 extra chunks that are only fetched for a language actually opened.
+
+### Async loads, and the race
+
+A grammar is now a **chunk fetch**, so nothing about setting a language is synchronous. Both panes resolve it alongside the file read (`Promise.all`) rather than after it, so highlighting is there on first paint. Switching syntax still reconfigures the language **compartment** in place — no `EditorView` rebuild, so the cursor, undo history and scroll position survive.
+
+Four things race to set one editor's language: the initial load, a path change on a recycled preview tab, the sniffer answering as a pad fills, and a manual pick. Whichever STARTED last must win no matter which chunk arrives first, so every apply goes through `lib/langSwitch.ts` (`claim()` returns a predicate that is false once anything else has claimed). An `alive` flag is not enough — it only knows about unmount.
+
+### What termic still owns
+
+Three grammars, because the registry cannot serve them, and a short **overlay** of filename rules, because it does not match the way we need:
+
+- **Custom grammars**: `Makefile` (hand-written, `lib/makeMode.ts` — `legacy-modes` has ~150 CodeMirror 5 modes and Makefile is not among them; the rule that makes it a Makefile rather than a config file is that a leading TAB opens a recipe, where the line is shell instead of make, and a trailing backslash keeps that state across lines), `ProtoBuf` (`lib/protoMode.ts`; the registry's mode predates proto3, and ours takes the same NAME so it replaces rather than shadows it), and `Elixir` (absent upstream).
+- **Overlay rules** (`OVERLAY_RULES`), each reusing the registry entry's own loader: `Dockerfile.dev` (upstream's pattern is anchored `/^Dockerfile$/`), `justfile`, `.env.production`, `.zsh`/`.fish`, `.conf`, `.rake`, `.pyi`, `.mdx`, and the component templates with no grammar of their own (`.svelte`, `.astro`, `.ejs`, …) which get tag highlighting from HTML.
+
+Two upstream behaviours to know about. `LanguageDescription.matchFilename` compares the **raw** extension, so `README.MD` matches nothing — `matchLanguage` in `lib/languageExts.ts` does its own two-pass match with the extension lower-cased, and must not be swapped back. And the registry splits JSX/TSX out of JavaScript/TypeScript, so a `.tsx` file's button reads "TSX". `.gradle.kts` is Kotlin, not Groovy, which upstream already gets right.
 
 ## Inline review comments (two surfaces)
 

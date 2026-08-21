@@ -16,6 +16,7 @@ still-relevant future layer it reserved is
 |---|---|---|---|---|
 | 1 | `workspace` → `task` migration (schema v1) | v0.19.0 | a few minor releases after v0.19 | active |
 | 2 | `migrate_legacy_members()` (multi-repo) | pre-v0.19 | independent (likely already) | active |
+| 3 | `LEGACY_IDS` (pre-registry language ids) | v0.28.x | a few minor releases | active |
 
 ---
 
@@ -156,3 +157,40 @@ Two checks reproduce the confidence from the original migration audit:
    profile with old-format JSON and assert the migrated `tasks/` output. Don't
    commit it: it mutates a process-global env var and flakes the parallel
    suite. (This is exactly how the v1 migration was verified.)
+
+---
+
+## 3. `LEGACY_IDS` (pre-registry language ids)
+
+`src/lib/languages.ts` holds a frozen ~25-entry map from termic's old
+lower-case language ids (`json`, `cpp`, `properties`) to CodeMirror registry
+names (`JSON`, `C++`, `Properties files`), applied by `normalizeLanguageId`.
+
+### Why it exists
+
+Language ids became registry names when the hand-maintained catalog was
+replaced by `@codemirror/language-data`. Almost nothing carried the old ids
+across a relaunch, because a file's language is re-derived from its path every
+time it opens. The exception is a **scratchpad** (GH #244): a pad has no
+filename, so its manual "Set syntax" pick is written to the scratch index and
+is the one place an old id can still reach a running build. Without the map, a
+pad someone set to JSON on a build between 0029565 and the swap comes back
+plain.
+
+### Safe to remove when
+
+Every realistically-active install has opened its pads at least once on a build
+that rewrites the pick (any build after the swap writes the new name back on
+the next manual pick, but NOT automatically), or simply once the cost of a pad
+losing its highlight is acceptable. A few minor releases.
+
+### What to delete
+
+1. `LEGACY_IDS` and `normalizeLanguageId` in `src/lib/languages.ts`, and its
+   call sites (`languageLabel`, `effectiveLanguageId`, and in
+   `src/lib/languageExts.ts` `isKnownLanguage` / `langForId`).
+2. The legacy-id cases in `src/lib/languages.test.ts` and
+   `src/lib/languageExts.test.ts`.
+3. The note on `ScratchTab.syntax` in `src/lib/types.ts`.
+
+Nothing on the Rust side changes: `ScratchRecord.syntax` is an opaque `String`.

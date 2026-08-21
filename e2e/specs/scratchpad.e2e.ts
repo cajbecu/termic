@@ -127,7 +127,8 @@ describe("scratchpads", () => {
     }, taskId);
     await waitVisible('[data-testid="syntax-palette"]');
     await browser.execute(() => {
-      const row = document.querySelector('[data-testid="syntax-palette"] [data-lang="markdown"]') as HTMLElement;
+      // Keyed by CodeMirror's registry NAME, which is also the label.
+      const row = document.querySelector('[data-testid="syntax-palette"] [data-lang="Markdown"]') as HTMLElement;
       if (!row) throw new Error("no Markdown row in the syntax palette");
       row.click();
     });
@@ -168,14 +169,17 @@ describe("scratchpads", () => {
     }, taskId);
 
     // Persisted in the scratch index, unlike an edit tab's session-only pick:
-    // a pad has no extension to re-derive it from after a relaunch.
+    // a pad has no extension to re-derive it from after a relaunch. Stored as
+    // the registry NAME, which is what the index holds from now on (a pad
+    // written by an older build still says "markdown"; normalizeLanguageId
+    // translates it on read, see docs/tech-debt.md).
     const pad = (await pads(taskId))[0];
     await browser.waitUntil(
       async () => {
         const listed = await browser.execute(
           (id) => window.__termic!.ipc.scratchList(id), taskId,
         ) as { id: string; syntax?: string }[];
-        return listed.find(r => r.id === pad.scratchId)?.syntax === "markdown";
+        return listed.find(r => r.id === pad.scratchId)?.syntax === "Markdown";
       },
       { timeout: 10_000, timeoutMsg: "the manual pick never reached the scratch index" },
     );

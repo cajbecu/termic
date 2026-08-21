@@ -37,7 +37,7 @@ import { ResizeHandle } from "@/components/ui/ResizeHandle";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent } from "@/components/ui/ContextMenu";
 import { CopyPathItems } from "./CopyPathItems";
 import { useUI } from "@/store/ui";
-import { effectiveLanguageId, languageLabel } from "@/lib/languages";
+import { MARKDOWN, effectiveLanguageId, languageLabel } from "@/lib/languages";
 import { dirnamePosix, MARKDOWN_EXT_RE } from "@/lib/markdownPaths";
 import { isSvgPath, keepsDisplayWhenHidden, previewKindForPath } from "@/lib/previewPaths";
 import { restoreScratchTabs } from "@/lib/scratchTabs";
@@ -491,7 +491,7 @@ export function TaskView({ task }: { task: Task }) {
                           "this is a document", and the toggle is most of what
                           that buys you. Swapping panes remounts CodeMirror
                           once, which the pad's unmount flush already covers. */}
-                      {effectiveLanguageId(t) === "markdown"
+                      {effectiveLanguageId(t) === MARKDOWN
                         ? <MarkdownPane task={task} tab={t} visible={visible} ownsFind={ownsFind} />
                         : <EditorPane task={task} tab={t} active={tabActive} />}
                     </Suspense>

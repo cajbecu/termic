@@ -1,5 +1,11 @@
 // CodeMirror 6 editor with syntax highlight. Loads file contents, resolves the
-// language (manual pick > path > content sniff, see lib/languages), mounts once.
+// language (manual pick > path > content sniff) and mounts once.
+//
+// This pane OWNS language resolution: the grammars live in CodeMirror's
+// registry, which is reachable only from lazily-loaded panes like this one, so
+// `lib/languages` cannot map a path to a language and the answer is written
+// back to `tab.syntaxAuto` for the breadcrumb and the picker to read. Loading
+// a grammar is a chunk fetch, hence lib/langSwitch guarding every apply.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { EditTab, ScratchTab, Task } from "@/lib/types";
@@ -11,8 +17,8 @@ import { search } from "@codemirror/search";
 import { lintGutter } from "@codemirror/lint";
 import { indentUnit } from "@codemirror/language";
 import { taskFileRead, taskFileWrite, scratchRead, scratchWrite, scratchSetMeta } from "@/lib/ipc";
-import { langForId } from "@/lib/languageExts";
-import { effectiveLanguageId, languageIdForPath } from "@/lib/languages";
+import { langForId, langForPath } from "@/lib/languageExts";
+import { PLAIN_TEXT, effectiveLanguageId, normalizeLanguageId } from "@/lib/languages";
 import { detectSyntaxFromContent } from "@/lib/detectSyntax";
 import { attachHiddenScrollRestore } from "@/lib/hiddenScrollRestore";
 import { reviewCommentsExtension, dispatchSelectionComment } from "./reviewCommentsExt";
@@ -23,6 +29,7 @@ import { useUI } from "@/store/ui";
 import { usePrefs, resolveTheme } from "@/store/prefs";
 import { resolveEditorTheme, editorSurfaceTheme } from "@/lib/editorTheme";
 import { deriveScratchTitle } from "@/lib/scratchTitle";
+import { createLangSwitch } from "@/lib/langSwitch";
 
 /** How long after the last keystroke a scratchpad's buffer is flushed to the
  *  scratch store and its title re-derived. Both ride the TYPING path, so both
@@ -31,25 +38,33 @@ import { deriveScratchTitle } from "@/lib/scratchTitle";
  *  re-runs every mounted task's selectors (docs/performance.md bear trap 8). */
 const SCRATCH_FLUSH_MS = 500;
 
-/** The syntax to highlight this tab with, sniffing the content when the path
- *  claims nothing (an extension-less file, a `.txt` that is really JSON). The
- *  sniff result is remembered on the tab so the breadcrumb button and the
- *  picker agree with what the buffer actually shows; a manual pick and a
- *  recognised extension both take precedence and skip it entirely. */
-function resolveSyntax(taskId: string, tab: EditTab | ScratchTab, content: string): string {
-  // A scratchpad has no path at all, so `languageIdForPath` answers null and
-  // the content sniffer decides — which is the only thing that CAN decide.
-  if (!tab.syntax && !languageIdForPath(tab.type === "edit" ? tab.path : undefined)) {
-    const sniffed = detectSyntaxFromContent(content);
-    // Bail when unchanged: this runs on every load (and every external
-    // reload), and an unconditional write is the store churn docs/performance
-    // bear trap 8 is about.
-    if (sniffed && sniffed !== tab.syntaxAuto) {
-      useApp.getState().patchTab(taskId, tab.id, { syntaxAuto: sniffed });
-      return sniffed;
-    }
+/** The syntax to highlight this tab with AND its grammar, resolved together:
+ *  a manual pick, else the path, else a sniff of the content (an extension-less
+ *  file, a `.txt` that is really JSON, and every scratchpad — a pad has no path
+ *  at all, so the sniffer is the only thing that CAN decide).
+ *
+ *  `byPath` is passed in already resolved because the caller runs it
+ *  concurrently with reading the file: both are dynamic imports away from the
+ *  network of grammar chunks, and doing them in series would show on a cold
+ *  editor open.
+ *
+ *  Writes NOTHING to the store. The automatic answer comes back as `auto` for
+ *  the caller to persist once it has committed to this load — patching from in
+ *  here would re-render mid-await and race the caller's own claim on the
+ *  language switch. */
+async function resolveSyntax(
+  tab: EditTab | ScratchTab,
+  content: string,
+  byPath: { id: string; ext: Extension } | null,
+): Promise<{ id: string; ext: Extension | null; auto: string | null }> {
+  if (tab.syntax) {
+    const id = normalizeLanguageId(tab.syntax);
+    return { id, ext: await langForId(id), auto: null };
   }
-  return effectiveLanguageId(tab);
+  if (byPath) return { id: byPath.id, ext: byPath.ext, auto: byPath.id };
+  const sniffed = detectSyntaxFromContent(content);
+  const id = sniffed ?? (tab.syntaxAuto ? normalizeLanguageId(tab.syntaxAuto) : PLAIN_TEXT);
+  return { id, ext: await langForId(id), auto: sniffed };
 }
 
 // CodeMirror's search/replace panel inputs (plus any future panel that
@@ -140,6 +155,11 @@ export function EditorPane({ task, tab, active, onContent }: {
   onContentRef.current = onContent;
   const viewRef = useRef<EditorView | null>(null);
   const langCompRef = useRef(new Compartment());
+  // Claimed by every mount, path change and syntax change. Grammar loads are
+  // async now (the registry code-splits ~150 of them), so a slow one from a
+  // load that has since been superseded has to be dropped rather than
+  // dispatched into a view that has moved on. See lib/langSwitch.
+  const langSwitchRef = useRef(createLangSwitch());
   // Which language id the compartment currently holds, so switching syntax
   // (or loading a file) doesn't reconfigure it to what it already is.
   const langIdRef = useRef<string | null>(null);
@@ -243,15 +263,34 @@ export function EditorPane({ task, tab, active, onContent }: {
     // next file's content.
     setErr(null);
     setLoading(true);
+    const langIsCurrent = langSwitchRef.current.claim();
     (async () => {
       try {
-        const content = tab.type === "scratch"
-          ? await scratchRead(task.id, tab.scratchId)
-          : await taskFileRead(task.id, tab.path);
+        // The grammar load rides alongside the file read rather than after it:
+        // both are async, and a language the user has not opened this session
+        // is a chunk fetch, which would otherwise land on the critical path of
+        // every cold editor open.
+        const [content, byPath] = await Promise.all([
+          tab.type === "scratch"
+            ? scratchRead(task.id, tab.scratchId)
+            : taskFileRead(task.id, tab.path),
+          tab.type === "edit" && !tab.syntax ? langForPath(tab.path) : Promise.resolve(null),
+        ]);
         if (!alive || !hostRef.current) return;
+        const resolved = await resolveSyntax(tab, content, byPath);
+        // A "Set syntax" pick made while the grammar was loading owns the
+        // compartment now; this one is stale and must not land on top of it.
+        if (!alive || !hostRef.current || !langIsCurrent()) return;
         blameOnRef.current = usePrefs.getState().inlineBlame;
-        langIdRef.current = resolveSyntax(task.id, tab, content);
-        const lang = langForId(langIdRef.current);
+        langIdRef.current = resolved.id;
+        const lang = resolved.ext;
+        // Persisted AFTER the guard and with nothing awaited behind it, so the
+        // re-render it triggers cannot interleave with this load. Bail when
+        // unchanged: this runs on every load and every external reload, and an
+        // unconditional write is the store churn bear trap 8 is about.
+        if (resolved.auto && resolved.auto !== tab.syntaxAuto) {
+          useApp.getState().patchTab(task.id, tab.id, { syntaxAuto: resolved.auto });
+        }
 
         // Flip the tab's dirty dot on the first edit after a load/save. A
         // pad is seeded dirty and STAYS dirty for its whole life (nothing has
@@ -636,8 +675,15 @@ export function EditorPane({ task, tab, active, onContent }: {
     const v = viewRef.current;
     if (!v || langIdRef.current === syntaxId) return;
     langIdRef.current = syntaxId;
-    const lang = langForId(syntaxId);
-    v.dispatch({ effects: langCompRef.current.reconfigure(lang ? [lang] : []) });
+    const isCurrent = langSwitchRef.current.claim();
+    langForId(syntaxId).then(lang => {
+      // Two picks in quick succession resolve in whatever order their chunks
+      // fetch in, so the LAST pick wins by claim order, not by arrival.
+      if (!isCurrent()) return;
+      const view = viewRef.current;
+      if (!view) return;
+      view.dispatch({ effects: langCompRef.current.reconfigure(lang ? [lang] : []) });
+    });
   }, [syntaxId]);
 
   // A commit landing anywhere (Git panel, or the agent committing in its own

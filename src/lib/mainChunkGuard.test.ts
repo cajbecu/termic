@@ -1,0 +1,104 @@
+import { describe, it, expect } from "vitest";
+import { readFileSync, existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve, join } from "node:path";
+
+// CodeMirror's language registry is ~150 grammars, ~800K of them in the
+// bundle. termic pays nothing for that at app start ONLY because the registry
+// is reachable from the lazily-loaded editor / diff panes and from nowhere
+// else, so rolldown puts every grammar behind a dynamic import.
+//
+// That is a one-line mistake away at all times: `lib/languages` is imported by
+// the command palette and the breadcrumb, and the "Set syntax" picker is
+// mounted from App.tsx. A static import of `@codemirror/language-data` (or of
+// `lib/languageExts`, which is its gateway) from any of them silently moves
+// the whole registry onto the app-start path.
+//
+// So walk the STATIC import graph from the entry point and prove it is not
+// there. Dynamic `import()` is what the lazy panes and the picker use and is
+// deliberately not followed.
+//
+// If you are here because this test failed: do not add the module to the
+// allowlist. Load it with `await import(...)` at the point of use instead, the
+// way SyntaxPalette does.
+
+const here = dirname(fileURLToPath(import.meta.url));
+const src = resolve(here, "..");
+const ENTRY = resolve(src, "main.tsx");
+
+/** Packages that must never be reachable statically from app start. */
+const FORBIDDEN = ["@codemirror/language-data"];
+/** Our own modules that exist to pull the forbidden packages in. */
+const FORBIDDEN_LOCAL = ["lib/languageExts"];
+
+const EXTS = [".ts", ".tsx", ".js", ".jsx"];
+
+function resolveLocal(spec: string, fromFile: string): string | null {
+  const base = spec.startsWith("@/")
+    ? join(src, spec.slice(2))
+    : spec.startsWith(".")
+      ? resolve(dirname(fromFile), spec)
+      : null;
+  if (!base) return null;
+  for (const e of EXTS) if (existsSync(base + e)) return base + e;
+  for (const e of EXTS) if (existsSync(join(base, "index" + e))) return join(base, "index" + e);
+  return existsSync(base) ? base : null;
+}
+
+/** Static specifiers only: `import x from "y"` and `export … from "y"`.
+ *  `import type` emits nothing at runtime and `import("y")` is the lazy form
+ *  this whole guard exists to encourage, so neither counts. */
+function staticImports(code: string): string[] {
+  const out: string[] = [];
+  const re = /^\s*(?:import|export)\s+(?!type\s)(?:[^;'"]*?\sfrom\s*)?["']([^"']+)["']/gm;
+  for (let m = re.exec(code); m; m = re.exec(code)) out.push(m[1]);
+  return out;
+}
+
+/** Every module statically reachable from `main.tsx`, plus the first path by
+ *  which each was reached (so a failure names the chain, not just the file). */
+function walk(): Map<string, string[]> {
+  const seen = new Map<string, string[]>([[ENTRY, [ENTRY]]]);
+  const queue = [ENTRY];
+  while (queue.length) {
+    const file = queue.shift()!;
+    const trail = seen.get(file)!;
+    for (const spec of staticImports(readFileSync(file, "utf8"))) {
+      const next = resolveLocal(spec, file);
+      const key = next ?? spec;
+      if (seen.has(key)) continue;
+      seen.set(key, [...trail, key]);
+      if (next) queue.push(next);
+    }
+  }
+  return seen;
+}
+
+function rel(p: string) {
+  return p.startsWith(src) ? p.slice(src.length + 1) : p;
+}
+
+describe("main chunk", () => {
+  const graph = walk();
+
+  it("walks a graph big enough to mean something", () => {
+    // A regex that stopped matching would make every assertion below pass on
+    // an empty graph.
+    expect(graph.size).toBeGreaterThan(50);
+    expect([...graph.keys()].some(k => k.endsWith("lib/languages.ts"))).toBe(true);
+  });
+
+  for (const pkg of FORBIDDEN) {
+    it(`never statically imports ${pkg}`, () => {
+      const trail = graph.get(pkg);
+      expect(trail && trail.map(rel).join("\n  → ")).toBeUndefined();
+    });
+  }
+
+  for (const mod of FORBIDDEN_LOCAL) {
+    it(`never statically imports ${mod}`, () => {
+      const hit = [...graph.entries()].find(([k]) => k.endsWith(`${mod}.ts`));
+      expect(hit && hit[1].map(rel).join("\n  → ")).toBeUndefined();
+    });
+  }
+});

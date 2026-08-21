@@ -283,11 +283,12 @@ Needed before any LSP code:
   `openPreviewTab` / `closeTab` / the mount effect.
 - **`languageId` comes from `lib/languages.ts`** — `effectiveLanguageId` is
   already the one place a language is decided, and it folds in the user's manual
-  Set-syntax pick. It is NOT the LSP spec's vocabulary, though, so the registry
-  owns a small explicit termic-id → LSP-`languageId` table (`shell` →
-  `shellscript`, `properties` → `ini`, our single `cpp` entry covering C and
-  C++). See [plans/editor-language-registry.md](editor-language-registry.md),
-  which makes those ids the CodeMirror registry's names.
+  Set-syntax pick. Those ids are CodeMirror's registry NAMES ("Shell",
+  "Properties files", "C++"), NOT the LSP spec's vocabulary, so the registry
+  owns a small explicit name → LSP-`languageId` table (`Shell` →
+  `shellscript`, `Properties files` → `ini`). See
+  [docs/ui.md](../ui.md#which-language-and-where-that-is-decided). Note it is
+  the PANE that resolves a path, not `lib/languages.ts`, which never sees one.
 - **Decide what a URI-less buffer is.** Scratchpads (GH #244) are editor tabs
   with no path at all, so they either model as an untitled document or are
   excluded outright. Excluded is the right v1 answer — a language server has

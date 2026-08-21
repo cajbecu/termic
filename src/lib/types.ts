@@ -1006,14 +1006,17 @@ export interface EditTab extends BaseTab {
    *  raw CodeMirror editor, "preview" the rendered HTML, "split" both
    *  side-by-side. Undefined → "source". Ignored for non-markdown files. */
   mdView?: "source" | "preview" | "split";
-  /** Manual "Set syntax" pick (a `lib/languages` id) — beats the extension,
-   *  so a `.txt` full of JSON can be highlighted as JSON. Session-only, like
-   *  `mdView`: it does not survive a relaunch, and it is cleared when a
-   *  preview tab slot recycles to a different file. */
+  /** Manual "Set syntax" pick (a CodeMirror registry NAME, e.g. "JSON" — see
+   *  lib/languages) — beats the extension, so a `.txt` full of JSON can be
+   *  highlighted as JSON. Session-only, like `mdView`: it does not survive a
+   *  relaunch, and it is cleared when a preview tab slot recycles to a
+   *  different file. */
   syntax?: string;
-  /** Syntax guessed from the CONTENT, filled in by the editor only when the
-   *  path matched no rule at all (an extension-less file, a `.txt` that is
-   *  really YAML). Lowest precedence: see `effectiveLanguageId`. */
+  /** The syntax worked out AUTOMATICALLY, written by the editor pane: the
+   *  language the path resolves to, or, when the path matches nothing (an
+   *  extension-less file, a `.txt` that is really YAML), a guess from the
+   *  content. Lower precedence than `syntax`; see `effectiveLanguageId` for
+   *  why the pane owns this rather than the main chunk re-deriving it. */
   syntaxAuto?: string;
   /** Per-tab override: true unblocks remote (http/https) images in this
    *  document's markdown preview for the current session, without
@@ -1066,7 +1069,9 @@ export interface ScratchTab extends BaseTab {
   /** Record id under `<data_dir>/scratch/<taskId>/`. */
   scratchId: string;
   /** Manual "Set syntax" pick. PERSISTED (in the scratch index), unlike
-   *  EditTab's session-only one: a pad has no extension to re-derive from. */
+   *  EditTab's session-only one: a pad has no extension to re-derive from.
+   *  Being persisted, it is the ONE field that can still hold a pre-registry
+   *  id from an older build — `normalizeLanguageId` translates those. */
   syntax?: string;
   /** Syntax guessed from the CONTENT, exactly as on EditTab. Session-only:
    *  it is re-sniffed from the buffer on every load. */
