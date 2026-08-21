@@ -345,7 +345,15 @@ describe("branch new tasks from", () => {
   const settleMenuMode = async (mode: "worktree" | "main") => {
     const wantsBranchFrom = mode === "worktree";
     await browser.waitUntil(
-      async () => (await menuText()).includes("Branch from") === wantsBranchFrom,
+      async () => {
+        const text = await menuText();
+        // The menu must EXIST, not merely lack the row. Radix remounts the
+        // content while the mode flips, so there is a beat where the query
+        // finds nothing — and "" trivially satisfies "no Branch from row",
+        // which let the main-checkout case settle on a menu that was not
+        // there yet and click into the remount.
+        return text.length > 0 && text.includes("Branch from") === wantsBranchFrom;
+      },
       { timeout: 8_000, timeoutMsg: `the menu never settled into ${mode} mode` },
     );
   };
