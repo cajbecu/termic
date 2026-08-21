@@ -1376,8 +1376,14 @@ fn link_config_dir(repo: &Path, wt: &Path, name: &str) {
     let target = fs::canonicalize(&src).unwrap_or(src);
     #[cfg(unix)]
     let linked = std::os::unix::fs::symlink(&target, &dst).is_ok();
+    // Windows needs to know which kind it is up front, and the list is no
+    // longer dirs-only: `.mcp.json` is a file (GH #251).
     #[cfg(not(unix))]
-    let linked = std::os::windows::fs::symlink_dir(&target, &dst).is_ok();
+    let linked = if target.is_dir() {
+        std::os::windows::fs::symlink_dir(&target, &dst).is_ok()
+    } else {
+        std::os::windows::fs::symlink_file(&target, &dst).is_ok()
+    };
     if linked {
         // The link is a symlink, which git's `<name>/` (directory) ignore
         // patterns do NOT match - so without this it shows as an untracked
@@ -11678,11 +11684,21 @@ fn open_command(os: &str, target: &str) -> (&'static str, Vec<String>) {
 // wizard fires exactly once per install). Keep this struct additive — fields
 // are serde(default) so old files keep parsing as we grow it.
 
-/// Repo-root config dirs symlinked into each new worktree by default: the
-/// common per-project agent-config dirs (Claude Code, Gemini, Codex). Each is
-/// only linked when it actually exists in the repo, so listing one a given repo
-/// lacks is harmless. Just the pre-filled starting point - users edit the list.
+/// Repo-root config paths symlinked into each new worktree by default: the
+/// common per-project agent-config dirs (Claude Code, Gemini, Codex) plus
+/// `.mcp.json`, which is a FILE and plays the same role — project-scoped MCP
+/// servers that a plain worktree checkout omits (GH #251). Each is only linked
+/// when it actually exists in the repo, so listing one a given repo lacks is
+/// harmless. Just the pre-filled starting point - users edit the list.
 fn default_worktree_symlink_paths() -> Vec<String> {
+    vec![".claude".into(), ".gemini".into(), ".codex".into(), ".mcp.json".into()]
+}
+
+/// The default as it shipped before `.mcp.json` joined it. A stored list equal
+/// to this one was never edited by the user, so the upgrade in
+/// `load_settings_inner` may replace it; anything else is theirs and is left
+/// alone. Delete once no profile can still carry the old list.
+fn legacy_worktree_symlink_paths_v0_29() -> Vec<String> {
     vec![".claude".into(), ".gemini".into(), ".codex".into()]
 }
 
@@ -11779,8 +11795,10 @@ pub struct Settings {
     /// gets the dock icon as their way back instead of losing both.
     #[serde(default)]
     pub tray_enabled: Option<bool>,
-    /// Repo-root config dirs symlinked into each NEW worktree task (when the
-    /// checkout didn't already provide them). `.claude/` and friends hold a
+    /// Repo-root config paths symlinked into each NEW worktree task (when the
+    /// checkout didn't already provide them). Files as well as dirs:
+    /// `.mcp.json` is a file and carries project-scoped MCP servers (GH #251).
+    /// `.claude/` and friends hold a
     /// project's subagents / skills / commands, which are commonly gitignored
     /// (or built from symlinks to a shared dir) so `git worktree add` leaves
     /// them out - an agent spawned there would otherwise lose all project-local
@@ -12322,6 +12340,15 @@ pub(crate) fn load_settings_inner() -> Settings {
     // entries usually breaks the agent, and (b) it's a single line
     // to re-remove in Settings → Agents. Custom agents are left alone.
     let mut migrated = false;
+    // Migration (GH #251): `.mcp.json` joined the shipped list. Only a list
+    // that still EXACTLY equals the previous default is replaced — that is a
+    // user who never edited it, so this is honoring the "pre-filled starting
+    // point" rather than overriding a choice. A user who removed an entry, or
+    // added their own, keeps theirs untouched; so does one who cleared it.
+    if s.worktree_symlink_paths == legacy_worktree_symlink_paths_v0_29() {
+        s.worktree_symlink_paths = default_worktree_symlink_paths();
+        migrated = true;
+    }
     for def in default_agents() {
         if let Some(a) = s.agents.iter_mut().find(|a| a.id == def.id && a.builtin) {
             let existing: std::collections::HashSet<&String> =
@@ -14795,7 +14822,59 @@ mod tests {
     }
 
     #[test]
-    fn worktree_symlink_paths_absent_vs_cleared() {
+    fn default_worktree_symlink_paths_carries_mcp_json() {
+        // GH #251: `.mcp.json` holds project-scoped MCP servers and is
+        // commonly gitignored, exactly like `.claude/`, so a plain worktree
+        // checkout silently loses them.
+        let d = default_worktree_symlink_paths();
+        assert!(d.contains(&".mcp.json".to_string()), "{d:?}");
+        assert!(d.contains(&".claude".to_string()), "{d:?}");
+    }
+
+    #[test]
+    fn link_config_dir_links_a_file_not_just_a_dir() {
+        // The list is no longer dirs-only. A file entry must link like any
+        // other, or `.mcp.json` is in the default and does nothing.
+        let repo = tempdir().unwrap();
+        fs::create_dir_all(repo.path().join(".git/info")).unwrap();
+        fs::write(repo.path().join(".mcp.json"), b"{\"mcpServers\":{}}").unwrap();
+        fs::create_dir_all(repo.path().join(".claude")).unwrap();
+        let wt = tempdir().unwrap();
+
+        link_config_dir(repo.path(), wt.path(), ".mcp.json");
+        link_config_dir(repo.path(), wt.path(), ".claude");
+
+        let linked = wt.path().join(".mcp.json");
+        assert!(linked.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&linked).unwrap(), "{\"mcpServers\":{}}");
+        assert!(wt.path().join(".claude").symlink_metadata().unwrap().file_type().is_symlink());
+        // A name the repo lacks is a no-op, not an error or a broken link.
+        link_config_dir(repo.path(), wt.path(), ".gemini");
+        assert!(wt.path().join(".gemini").symlink_metadata().is_err());
+    }
+
+    #[test]
+    fn mcp_json_upgrade_only_touches_an_unedited_list() {
+        // An untouched list is the "pre-filled starting point" and may gain
+        // the new entry; anything the user shaped is theirs.
+        let untouched: Settings =
+            serde_json::from_str(r#"{"worktree_symlink_paths":[".claude",".gemini",".codex"]}"#).unwrap();
+        assert_eq!(untouched.worktree_symlink_paths, legacy_worktree_symlink_paths_v0_29());
+
+        // Edited (an entry removed), cleared, and extended lists must all
+        // survive the upgrade untouched — the migration compares for EQUALITY
+        // with the old default precisely so it cannot overwrite a choice.
+        for stored in [
+            vec![".claude".to_string()],
+            vec![],
+            vec![".claude".into(), ".gemini".into(), ".codex".into(), ".envrc".into()],
+        ] {
+            assert_ne!(stored, legacy_worktree_symlink_paths_v0_29(), "{stored:?}");
+        }
+    }
+
+    #[test]
+        fn worktree_symlink_paths_absent_vs_cleared() {
         // Absent in an old settings.json -> pre-filled defaults, so upgraders
         // keep the original .claude-linking behavior instead of silently losing it.
         let absent: Settings = serde_json::from_str("{}").unwrap();

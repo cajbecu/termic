@@ -201,17 +201,18 @@ export function TasksSection() {
       </Block>
 
       {/* Worktree config symlinks (personal). A project's agent config
-          (.claude/ etc.) is often gitignored, so a plain worktree checkout
-          omits it and agents there lose their project subagents/skills. These
-          repo-root dirs get symlinked into each new worktree task. Only ones
-          that exist in the repo are linked; clear the list to disable. */}
+          (.claude/, .mcp.json etc.) is often gitignored, so a plain worktree
+          checkout omits it and agents there lose their project subagents,
+          skills and MCP servers. These repo-root paths get symlinked into each
+          new worktree task. Only ones that exist in the repo are linked; clear
+          the list to disable. Files as well as dirs (GH #251). */}
       <Block>
         <div className="text-[14px] font-medium">Worktree config symlinks</div>
         <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
-          Repo-root dirs symlinked into each new worktree task, one per line, so agents keep project config (subagents, skills, commands) that is gitignored out of a plain checkout. Only dirs that exist in the repo are linked. Clear the list to turn this off.
+          Repo-root files and folders symlinked into each new worktree task, one per line, so agents keep project config (subagents, skills, commands, MCP servers) that is gitignored out of a plain checkout. Only entries that exist in the repo are linked. Clear the list to turn this off.
         </div>
         <div className="mt-3">
-          <ListField label="Paths to symlink" placeholder={".claude\n.gemini\n.codex"} value={symlinkPaths} onChange={setSymlinkPaths} />
+          <ListField label="Paths to symlink" placeholder={".claude\n.gemini\n.codex\n.mcp.json"} value={symlinkPaths} onChange={setSymlinkPaths} />
         </div>
         <div className="mt-3">
           <Button variant="primary" disabled={!symlinkDirty || busy} onClick={saveSymlinkPaths}>
