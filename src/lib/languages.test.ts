@@ -40,6 +40,18 @@ describe("languageIdForPath", () => {
     expect(languageIdForPath("a/b/c.yml")).toBe("yaml");
   });
 
+  it("covers the JVM/Apple build files people actually open", () => {
+    expect(languageIdForPath("StockApp.swift")).toBe("swift");
+    expect(languageIdForPath("Package.swift")).toBe("swift");
+    expect(languageIdForPath("app/build.gradle")).toBe("groovy");
+    expect(languageIdForPath("settings.gradle")).toBe("groovy");
+    // The Kotlin DSL flavour is Kotlin, so it rides the Java grammar.
+    expect(languageIdForPath("app/build.gradle.kts")).toBe("java");
+    expect(languageIdForPath("Main.kt")).toBe("java");
+    // …while gradle.properties is a properties file, not a build script.
+    expect(languageIdForPath("gradle.properties")).toBe("properties");
+  });
+
   it("is case-insensitive about the extension", () => {
     expect(languageIdForPath("README.MD")).toBe("markdown");
   });

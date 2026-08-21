@@ -48,13 +48,38 @@ describe("git dirty tree", () => {
       );
     }
     // The section-collapse flags are global and outlive the task; leave none
-    // behind for the suites after this one.
+    // behind for the suites after this one. Same for the theme: the contrast
+    // case below flips it, and a failure mid-flip would hand every later spec
+    // file a light window.
     await browser.execute(() => {
       localStorage.removeItem("gitUnstagedCollapsed");
       localStorage.removeItem("gitStagedCollapsed");
+      window.__termic!.usePrefs.getState().setThemeMode("dark");
     });
     if (taskId) await archiveTask(taskId);
   });
+
+  /** WCAG contrast between the chip's ink and its fill, read from COMPUTED
+   *  style — the point is what actually renders under the live theme, which
+   *  no token-level assertion can answer. */
+  const chipContrast = () =>
+    browser.execute(() => {
+      const chip = document.querySelector(
+        '[data-testid="git-file-row"][data-pane="unstaged"] span',
+      ) as HTMLElement | null;
+      if (!chip) return null;
+      const cs = getComputedStyle(chip);
+      const lum = (rgb: string) => {
+        const [r, g, b] = (rgb.match(/[\d.]+/g) ?? ["0", "0", "0"]).slice(0, 3).map(Number);
+        const ch = (v: number) => {
+          const s = v / 255;
+          return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+        };
+        return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b);
+      };
+      const a = lum(cs.color), b = lum(cs.backgroundColor);
+      return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+    }) as Promise<number | null>;
 
   const paneCollapsed = (pane: "unstaged" | "staged") =>
     browser.execute((p) => {
@@ -114,6 +139,32 @@ describe("git dirty tree", () => {
     );
 
     await snap("git-dirty.png");
+  });
+
+  // Reported from the light theme: the "modified" chip is a solid fill with a
+  // 10.5px letter on it, and light darkens --color-accent for text on cream,
+  // which left black ink on it at 4.96:1 and muddy. Asserting the RATIO rather
+  // than a colour keeps this true for every theme, including ones not written
+  // yet. The bar is 5.5 and not WCAG's 4.5: the reported bug CLEARED 4.5, so a
+  // floor there would have watched it ship. Measured today: 6.73 dark (black
+  // ink on the terracotta accent), 5.98 light (white on --color-accent-deep).
+  it("keeps the status chip readable in both themes", async () => {
+    expect(await chipContrast()).toBeGreaterThanOrEqual(5.5);
+
+    await browser.execute(() =>
+      window.__termic!.usePrefs.getState().setThemeMode("light"));
+    await browser.waitUntil(
+      () => browser.execute(() => document.documentElement.classList.contains("light")),
+      { timeout: 5_000, timeoutMsg: "the app never switched to the light theme" },
+    );
+    expect(await chipContrast()).toBeGreaterThanOrEqual(5.5);
+
+    await browser.execute(() =>
+      window.__termic!.usePrefs.getState().setThemeMode("dark"));
+    await browser.waitUntil(
+      () => browser.execute(() => !document.documentElement.classList.contains("light")),
+      { timeout: 5_000, timeoutMsg: "the app never switched back to dark" },
+    );
   });
 
   it("opens a diff tab for the changed file", async () => {

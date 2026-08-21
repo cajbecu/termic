@@ -49,7 +49,8 @@ import {
 } from "@/components/ui/ContextMenu";
 import { CopyPathItems } from "./CopyPathItems";
 import { fileIconUrl, folderIconUrl } from "@/lib/explorer/iconResolver";
-import { flattenRows, SC, COL, LBL, type FlatRow, type ViewMode } from "./GitPanel";
+import { flattenRows, type FlatRow, type ViewMode } from "./GitPanel";
+import { SC, COL, INK, LBL } from "@/lib/gitStatus";
 
 /** Whether the compare runs from the merge base. Global rather than per task:
  *  it expresses how someone reads a diff, not anything about one branch. */
@@ -499,8 +500,8 @@ function FileRow({ file, label, depth, taskId, root, repoDir, selected, onOpen }
           )}
         >
           <span
-            className="inline-flex h-4 min-w-[16px] shrink-0 items-center justify-center rounded px-0.5 text-[10.5px] font-semibold text-black"
-            style={{ background: COL[key] || "var(--color-fg-dim)" }}
+            className="inline-flex h-4 min-w-[16px] shrink-0 items-center justify-center rounded px-0.5 text-[10.5px] font-semibold"
+            style={{ background: COL[key] || "var(--color-fg-dim)", color: INK[key] || "var(--color-status-ink)" }}
           >{SC[key] || key}</span>
           <img src={fileIconUrl(label)} alt="" className={cn("h-4 w-4 shrink-0 file-icon", viewed && !selected && "opacity-50")} />
           <span className={cn(

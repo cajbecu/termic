@@ -46,13 +46,11 @@ import { HistoryPanel, ScopePicker } from "./HistoryPanel";
 import { ComparePanel } from "./ComparePanel";
 import { fileIconUrl, folderIconUrl } from "@/lib/explorer/iconResolver";
 
-// Per-side status → glyph / color / label. `?` is untracked (rendered as
-// a green +, same as a fresh add). Exported so Compare (GH #208)
-// renders a status the same way this one does rather than keeping a second
-// copy that can drift.
-export const SC: Record<string, string>  = { M: "M", A: "+", "?": "+", D: "D", R: "R", C: "C", U: "U" };
-export const COL: Record<string, string> = { M: "var(--color-accent)", A: "var(--color-ok)", "?": "var(--color-ok)", D: "var(--color-err)", R: "var(--color-accent)", C: "var(--color-accent)", U: "var(--color-err)" };
-export const LBL: Record<string, string> = { M: "modified", A: "added", "?": "untracked", D: "deleted", R: "renamed", C: "copied", U: "conflict" };
+// Per-side status → glyph / fill / ink / label, shared with Compare (GH #208)
+// so the two panels cannot drift. Re-exported here because this is where they
+// used to live and DiffPane / ComparePanel import from this module.
+import { SC, COL, INK, LBL } from "@/lib/gitStatus";
+export { SC, COL, INK, LBL };
 
 export type ViewMode = "tree" | "list" | "combined";
 
@@ -1548,8 +1546,8 @@ function FileRow({ file, label, depth = 0, pane, selectedKey, stageGlyph, taskId
       onDoubleClick={() => onToggle([file.path])}
     >
       <span
-        className="inline-flex h-4 min-w-[16px] shrink-0 items-center justify-center rounded px-0.5 text-[10.5px] font-semibold text-black"
-        style={{ background: COL[key] || "var(--color-fg-dim)" }}
+        className="inline-flex h-4 min-w-[16px] shrink-0 items-center justify-center rounded px-0.5 text-[10.5px] font-semibold"
+        style={{ background: COL[key] || "var(--color-fg-dim)", color: INK[key] || "var(--color-status-ink)" }}
       >{SC[key] || key}</span>
       <img src={fileIconUrl(label)} alt="" className={cn("h-4 w-4 shrink-0 file-icon", viewed && !selected && "opacity-50")} />
       {/* Same face and size as the All files tree (13px, medium, not mono).

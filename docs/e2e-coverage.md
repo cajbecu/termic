@@ -109,6 +109,7 @@ until `make e2e` is green and this file reflects it.
 | ✅ Setup script | Configure + launch a Setup tab that spawns | `run.e2e.ts` |
 | ✅ Sidebar layout | Sidebar width setter persists | `tabs-layout.e2e.ts` |
 | ✅ Code editor | Open a .py file → CodeMirror renders with highlight tokens | `editor.e2e.ts` |
+| ✅ Git status chip contrast | The one-letter status chip on a changed file keeps ≥5.5:1 between its ink and its fill in BOTH themes, measured from computed style (the light theme's "modified" chip shipped at 4.96:1, so a WCAG-4.5 floor would not have caught it) | `git.e2e.ts` |
 | ✅ Set syntax (GH #244) | A Makefile highlights at all (hand-written grammar, no upstream one exists), the breadcrumb's language button names what the extension picked, an extension-less file gets its language from its CONTENT, and a manual pick from the syntax palette overrides both: label switches, a buffer that had zero token spans gains them, the text survives the switch (a view rebuild would also produce tokens, while losing undo/cursor), and the palette closes | `editor.e2e.ts` |
 | ✅ Editor h-scroll gutter | A long line scrolled fully right keeps the sticky gutter painting the host's surface, so code never shows through it (GH #161) | `editor.e2e.ts` |
 | ✅ Commit & push | Commit with push to a bare remote; remote receives it | `git.e2e.ts` |

@@ -29,6 +29,8 @@ import { dockerFile } from "@codemirror/legacy-modes/mode/dockerfile";
 import { shell } from "@codemirror/legacy-modes/mode/shell";
 import { toml } from "@codemirror/legacy-modes/mode/toml";
 import { ruby } from "@codemirror/legacy-modes/mode/ruby";
+import { swift } from "@codemirror/legacy-modes/mode/swift";
+import { groovy } from "@codemirror/legacy-modes/mode/groovy";
 import { properties } from "@codemirror/legacy-modes/mode/properties";
 import { proto3 } from "@/lib/protoMode";
 import { makefile } from "@/lib/makeMode";
@@ -59,6 +61,8 @@ export function langForId(id: string | null | undefined): Extension | null {
     case "shell":       return StreamLanguage.define(shell);
     case "toml":        return StreamLanguage.define(toml);
     case "ruby":        return StreamLanguage.define(ruby);
+    case "swift":       return StreamLanguage.define(swift);
+    case "groovy":      return StreamLanguage.define(groovy);
     case "properties":  return StreamLanguage.define(properties);
     case "dockerfile":  return StreamLanguage.define(dockerFile);
     case "makefile":    return StreamLanguage.define(makefile);

@@ -325,6 +325,31 @@ describe("branch new tasks from", () => {
 
   const checkout = (branch: string) => execSync(`git -C "${dir}" checkout -q ${branch}`);
 
+  /** The open new-task menu's visible text. */
+  const menuText = async () =>
+    (await browser.execute(() => {
+      const m = document.querySelector('[role="menu"]') as HTMLElement | null;
+      return m?.innerText ?? "";
+    })) as string;
+
+  /** Wait for the menu to finish re-rendering into `mode` before clicking
+   *  anything in it.
+   *
+   *  The mode is remembered app-wide, so clicking "Worktree" / "Main checkout"
+   *  usually CHANGES it, and the menu then re-renders to add or drop its
+   *  "Branch from" row. An item clicked into that re-render lands on a node
+   *  Radix is replacing and is simply lost: no name prompt, no task, and only
+   *  on a machine slow enough to put the click inside the window — i.e. CI.
+   *  5eff3f3 fixed exactly this for the main-checkout case; the worktree ones
+   *  had the same hole. */
+  const settleMenuMode = async (mode: "worktree" | "main") => {
+    const wantsBranchFrom = mode === "worktree";
+    await browser.waitUntil(
+      async () => (await menuText()).includes("Branch from") === wantsBranchFrom,
+      { timeout: 8_000, timeoutMsg: `the menu never settled into ${mode} mode` },
+    );
+  };
+
   /** Alphabetical on purpose: "bitbucket" must sort before "origin". */
   const remotes = ["bitbucket", "origin"];
   const remotePath = (r: string) =>
@@ -479,25 +504,13 @@ describe("branch new tasks from", () => {
     }, trigger);
     await waitVisible('[role="menu"]');
 
-    const menuText = async () =>
-      (await browser.execute(() => {
-        const m = document.querySelector('[role="menu"]') as HTMLElement | null;
-        return m?.innerText ?? "";
-      })) as string;
-
     // Mode is remembered app-wide, so don't assume where we start: drive it.
     // Main checkout runs on the live branch, so there's no base to pick.
     await clickByText("Main checkout");
-    await browser.waitUntil(async () => !(await menuText()).includes("Branch from"), {
-      timeout: 8_000,
-      timeoutMsg: '"Branch from" row still shown in main-checkout mode',
-    });
+    await settleMenuMode("main");
 
     await clickByText("Worktree");
-    await browser.waitUntil(async () => (await menuText()).includes("Branch from"), {
-      timeout: 8_000,
-      timeoutMsg: '"Branch from" row never appeared in worktree mode',
-    });
+    await settleMenuMode("worktree");
     // The row names the PINNED base ("main" from the previous case), which is
     // the disclosure the quick path never had. HEAD is on `dev`, so a row
     // reading "dev" would mean the base is following the checkout again.
@@ -521,18 +534,7 @@ describe("branch new tasks from", () => {
     }, trigger);
     await waitVisible('[role="menu"]');
     await clickByText("Main checkout");
-    // Settle before clicking an item. The mode is remembered app-wide and the
-    // case above leaves it on Worktree, so this click usually CHANGES it, and
-    // the menu re-renders to drop its "Branch from" row. Clicking "Terminal"
-    // into that re-render lands on a node Radix is replacing and is simply
-    // lost, which is the whole failure: no name prompt, no task, on CI only.
-    await browser.waitUntil(
-      async () => browser.execute(() => {
-        const m = document.querySelector('[role="menu"]') as HTMLElement | null;
-        return !!m && !m.innerText.includes("Branch from");
-      }),
-      { timeout: 8_000, timeoutMsg: "the menu never settled into main-checkout mode" },
-    );
+    await settleMenuMode("main");
     await clickMenuItem("Terminal");
 
     // Menu closes, an inline name input takes its place instead of a task
@@ -587,6 +589,7 @@ describe("branch new tasks from", () => {
     }, trigger);
     await waitVisible('[role="menu"]');
     await clickByText("Worktree");
+    await settleMenuMode("worktree");
     await clickMenuItem("Terminal");
 
     const nameInput = 'input[placeholder="Task name"]';
@@ -647,6 +650,7 @@ describe("branch new tasks from", () => {
     }, trigger);
     await waitVisible('[role="menu"]');
     await clickByText("Worktree");
+    await settleMenuMode("worktree");
 
     // Radix submenus open on hover; the trigger carries aria-haspopup.
     await browser.execute(() => {

@@ -65,6 +65,16 @@
   --color-ok-fg:     #ffffff;
   --color-warn:      #f0b13a;
   --color-err:       #ef5350;
+  /* The one-letter git status chips (M / + / D) in the Git panel and
+     Compare are a SOLID fill with ink on top, at 10.5px — so unlike a
+     coloured letter on the app surface, each fill needs an ink that
+     actually reads on it. Black clears 4.5:1 on every dark theme's fills.
+     The light theme is the exception and gets its own pair below: it
+     darkens --color-accent for text on cream, which left the "modified"
+     chip at ~5:1 and muddy. See lib/gitStatus.ts. */
+  --color-status-ink:     #000000;
+  --color-status-mod:     var(--color-accent);
+  --color-status-mod-ink: var(--color-status-ink);
   /* "Work done" blue — sidebar activity dots + tab badges. Was previously
      only a hard-coded fallback (var(--color-info, #4aa3ff)) sprinkled at
      the point of use; defined here so themes can override it. */
@@ -162,6 +172,12 @@
     --color-accent:      #c25e3d;       /* shifted slightly for contrast on light bg */
     --color-accent-soft: rgba(194, 94, 61, 0.20);
     --color-accent-deep: #a04a2c;       /* button bg on cream surfaces */
+    /* Fill the "modified" chip with the SOLID-fill token rather than the
+       text-tuned accent, and ink it white: #a04a2c + white is ~5.7:1,
+       where #c25e3d + black was ~5:1 and unreadable at chip size. The
+       green/red chips keep black ink (~7.5:1 and ~6:1). */
+    --color-status-mod:     var(--color-accent-deep);
+    --color-status-mod-ink: #ffffff;
     /* Grok's mark is neutral, not a vivid brand hue — bump to a darker
        slate in light mode so it doesn't disappear against the cream bg. */
     --color-cli-grok:    #64748b;

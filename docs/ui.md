@@ -204,6 +204,8 @@ The language itself resolves in `lib/languages.ts`, in strict precedence:
 
 Grammars live in `lib/languageExts.ts`, which is imported ONLY by the lazily loaded editor and diff panes; `lib/languages.ts` carries the labels and ids and stays free of CodeMirror, so the picker and this bar don't drag every grammar into the main bundle. Switching syntax reconfigures the language **compartment** in place — no `EditorView` rebuild, so the cursor, undo history and scroll position survive.
 
+Adding a language is two lines: an entry in `lib/languages.ts` (id, label, extensions) and a `case` in `lib/languageExts.ts` returning its grammar. Anything CodeMirror ships a Lezer grammar or a legacy stream mode for is that cheap — Swift and Groovy/Gradle went in that way. `.gradle.kts` is deliberately NOT Groovy: it is the Kotlin DSL, so it rides the Java/Kotlin grammar like any other `.kts`.
+
 Makefiles are highlighted by a hand-written stream parser (`lib/makeMode.ts`): `@codemirror/legacy-modes` ships ~150 CodeMirror 5 grammars and Makefile is not among them. Same approach as `lib/protoMode.ts`. The rule that makes it a Makefile rather than a config file is that a leading TAB opens a recipe, where the line is shell instead of make, and a trailing backslash keeps that state across lines.
 
 ## Inline review comments (two surfaces)

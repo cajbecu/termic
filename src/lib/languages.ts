@@ -43,7 +43,11 @@ export const LANGUAGES: LanguageDef[] = [
   { id: "python", label: "Python", exts: ["py", "pyi"] },
   { id: "rust", label: "Rust", exts: ["rs"], keywords: "cargo" },
   { id: "go", label: "Go", exts: ["go"], keywords: "golang" },
-  { id: "java", label: "Java", exts: ["java", "kt"], keywords: "kotlin jvm" },
+  { id: "java", label: "Java / Kotlin", exts: ["java", "kt", "kts"], keywords: "kotlin jvm gradle" },
+  { id: "swift", label: "Swift", exts: ["swift"], keywords: "ios macos xcode apple" },
+  // Gradle build scripts are Groovy (`build.gradle`); the Kotlin DSL variant
+  // ends in `.kts` and lands on the Java/Kotlin grammar above.
+  { id: "groovy", label: "Groovy / Gradle", exts: ["groovy", "gradle", "gvy"], keywords: "gradle build jvm" },
   { id: "cpp", label: "C / C++", exts: ["c", "cc", "cpp", "cxx", "h", "hpp", "hh"], keywords: "c++ header" },
   { id: "elixir", label: "Elixir", exts: ["ex", "exs"] },
   { id: "ruby", label: "Ruby", exts: ["rb", "rake"], keywords: "rails gem" },
