@@ -24,7 +24,7 @@ import { useApp } from "@/store/app";
 import { scratchSetMeta } from "@/lib/ipc";
 import { effectiveLanguageId } from "@/lib/languages";
 import { fuzzyMatch, Highlighted } from "@/lib/fuzzy";
-import type { EditTab, ScratchTab } from "@/lib/types";
+import type { EditTab, ExternalTab, ScratchTab } from "@/lib/types";
 
 /** One row per language: the registry name IS the label, and the registry's
  *  aliases are extra fuzzy-search terms that are never displayed. */
@@ -38,8 +38,9 @@ export function SyntaxPalette() {
   // while the picker is up, in which case there is nothing left to apply to.
   const tab = useApp(s => target
     ? (s.tabs[target.taskId] ?? []).find(
-        t => t.id === target.tabId && (t.type === "edit" || t.type === "scratch"),
-      ) as EditTab | ScratchTab | undefined
+        t => t.id === target.tabId
+          && (t.type === "edit" || t.type === "scratch" || t.type === "external"),
+      ) as EditTab | ScratchTab | ExternalTab | undefined
     : undefined);
   const currentId = effectiveLanguageId(tab);
 

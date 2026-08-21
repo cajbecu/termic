@@ -303,7 +303,7 @@ export interface AppState {
   resumeClosedTab: (taskId: string, entryId: string) => void;
   setActiveTabId: (taskId: string, tabId: string) => void;
   persistTab: (taskId: string, tabId: string) => void;
-  openPreviewTab: (taskId: string, data: { type: "edit" | "diff" | "dir"; path: string; title: string; scope?: DiffTab["scope"]; revealAt?: { line: number; col?: number }; revealHeading?: string }) => void;
+  openPreviewTab: (taskId: string, data: { type: "edit" | "diff" | "dir" | "external"; path: string; title: string; scope?: DiffTab["scope"]; revealAt?: { line: number; col?: number }; revealHeading?: string }) => void;
   /** Clear an edit tab's `revealAt` after EditorPane has consumed it,
    *  so a re-render doesn't re-jump the cursor. */
   consumeReveal: (taskId: string, tabId: string) => void;
@@ -2120,7 +2120,11 @@ export const useApp = create<AppState>((set, get) => ({
     // remote images in a file the user never actually approved, just
     // because a PREVIOUS file shown in this same tab slot was unblocked.
     const revealPatch = {
-      revealAt: data.type === "edit" ? data.revealAt : undefined,
+      // `external` (GH #240) carries a reveal target too — a clicked
+      // `path:line:col` outside the task jumps the same way an in-task one
+      // does. It has no heading fragment: markdown links are resolved
+      // against the task, never against an arbitrary absolute path.
+      revealAt: data.type === "edit" || data.type === "external" ? data.revealAt : undefined,
       revealHeading: data.type === "edit" ? data.revealHeading : undefined,
       remoteImagesUnblocked: undefined as boolean | undefined,
       // Diff-side scope (GH #122) is part of the tab's identity: recycling
@@ -2144,7 +2148,7 @@ export const useApp = create<AppState>((set, get) => ({
     // openPreviewTab call for the same file lands first).
     const withNewRevealOnly = (existing: Tab) => {
       const patch: { revealAt?: unknown; revealHeading?: unknown } = {};
-      if (data.type === "edit" && data.revealAt !== undefined) patch.revealAt = data.revealAt;
+      if ((data.type === "edit" || data.type === "external") && data.revealAt !== undefined) patch.revealAt = data.revealAt;
       if (data.type === "edit" && data.revealHeading !== undefined) patch.revealHeading = data.revealHeading;
       if (Object.keys(patch).length === 0) return list; // nothing new — leave any pending reveal alone
       return list.map(t => t.id === existing.id ? { ...t, ...patch } as Tab : t);

@@ -671,6 +671,25 @@ const captureArmedRef = useRef(false);
         useUI.getState().pushToast("That path no longer exists", "error");
         return;
       }
+      // Is it text? Not answerable from the extension: `.ts` is TypeScript AND
+      // MPEG transport stream, `.txt`/`LICENSE`/dotfiles carry no grammar at
+      // all, and a 2 GB `.json` is still `.json`. The read itself already caps
+      // size, requires UTF-8 and rejects anything that is not a regular file,
+      // so its verdict IS the answer. Costs one extra read of a ≤2 MB file on
+      // the click (EditorPane reads again on mount); worth it to decide
+      // between an editor tab and the OS menu BEFORE showing either.
+      const readable = await ipc.fileReadExternal(abs).then(() => true).catch(() => false);
+      if (readable) {
+        useApp.getState().openPreviewTab(task.id, {
+          type: "external",
+          path: abs,
+          title: abs.split("/").pop() || abs,
+          revealAt: target.line ? { line: target.line, col: target.col } : undefined,
+        });
+        return;
+      }
+      // Binary, oversized, or a directory: nothing the editor can show, so
+      // hand it to the OS actions instead of an error state.
       setPathMenu({ x, y, candidates: [], external: { abs } });
     }
     function handlePathTarget(target: { path: string; line?: number; col?: number }, x: number, y: number) {

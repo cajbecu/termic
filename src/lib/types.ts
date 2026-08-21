@@ -792,7 +792,7 @@ export type { SplitDir, SplitNode, PaneLeaf, SplitTree } from "@/lib/splitTree";
 
 // ───────────────────────────── tab model (frontend only) ─────────────────────────────
 
-export type TabType = "terminal" | "diff" | "edit" | "dir" | "scratch";
+export type TabType = "terminal" | "diff" | "edit" | "dir" | "scratch" | "external";
 
 export interface BaseTab {
   id: string;
@@ -1086,7 +1086,36 @@ export interface ScratchTab extends BaseTab {
   remoteImagesUnblocked?: boolean;
 }
 
-export type Tab = TerminalTab | DiffTab | EditTab | DirTab | ScratchTab;
+/** A file OUTSIDE the task, opened READ-ONLY from a cmd+clicked absolute
+ *  path in terminal output (GH #240).
+ *
+ *  A distinct type for the same reason `ScratchTab` is one: `EditTab.path` is
+ *  task-relative and load-bearing in places this must opt out of. Every one
+ *  of them is task-scoped and would be meaningless or wrong here: saving
+ *  (`task_file_write` refuses absolute paths by design), inline blame, review
+ *  comments, the changed-on-disk watcher, "locate in file tree", and the
+ *  breadcrumb's clickable trail. A separate type makes each one a compiler
+ *  error to answer rather than a runtime surprise, which is exactly the trap
+ *  a boolean flag on `EditTab` would have set.
+ *
+ *  READ-ONLY is not a UI nicety, it is the containment story. The backing
+ *  read (`file_read_external`) is the only uncontained one in the app; there
+ *  is no uncontained write to pair with it, so this tab has no save path at
+ *  all. */
+export interface ExternalTab extends BaseTab {
+  type: "external";
+  /** ABSOLUTE path on disk, outside every root of the owning task. */
+  path: string;
+  /** 1-based line + column to scroll to on mount, from a clicked
+   *  `path:line:col`. Consumed via `consumeReveal` exactly like EditTab's. */
+  revealAt?: { line: number; col?: number };
+  /** Manual "Set syntax" pick, session-only, as on EditTab. */
+  syntax?: string;
+  /** Syntax resolved from the path (content sniff second), as on EditTab. */
+  syntaxAuto?: string;
+}
+
+export type Tab = TerminalTab | DiffTab | EditTab | DirTab | ScratchTab | ExternalTab;
 
 /** Mirror of `repo_config::RepoConfig` (src-tauri/src/repo_config.rs).
  *  Parsed from the repo-root `.termic.yaml` — committed, team-shared

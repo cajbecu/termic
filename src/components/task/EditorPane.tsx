@@ -8,7 +8,7 @@
 // a grammar is a chunk fetch, hence lib/langSwitch guarding every apply.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { EditTab, ScratchTab, Task } from "@/lib/types";
+import type { EditTab, ScratchTab, ExternalTab, Task } from "@/lib/types";
 import { EditorState, Compartment, Annotation, type Extension } from "@codemirror/state";
 import { EditorView, ViewPlugin, keymap, tooltips } from "@codemirror/view";
 import { indentWithTab } from "@codemirror/commands";
@@ -16,7 +16,7 @@ import { basicSetup } from "codemirror";
 import { search } from "@codemirror/search";
 import { lintGutter } from "@codemirror/lint";
 import { indentUnit } from "@codemirror/language";
-import { taskFileRead, taskFileWrite, scratchRead, scratchWrite, scratchSetMeta } from "@/lib/ipc";
+import { taskFileRead, fileReadExternal, taskFileWrite, scratchRead, scratchWrite, scratchSetMeta } from "@/lib/ipc";
 import { langForId, langForPath } from "@/lib/languageExts";
 import { PLAIN_TEXT, effectiveLanguageId, normalizeLanguageId } from "@/lib/languages";
 import { detectSyntaxFromContent } from "@/lib/detectSyntax";
@@ -53,7 +53,7 @@ const SCRATCH_FLUSH_MS = 500;
  *  here would re-render mid-await and race the caller's own claim on the
  *  language switch. */
 async function resolveSyntax(
-  tab: EditTab | ScratchTab,
+  tab: EditTab | ScratchTab | ExternalTab,
   content: string,
   byPath: { id: string; ext: Extension } | null,
 ): Promise<{ id: string; ext: Extension | null; auto: string | null }> {
@@ -128,7 +128,7 @@ export function EditorPane({ task, tab, active, onContent }: {
    *  the theme and language compartments, find, the ⌘S binding — is shared,
    *  because a second editor component would drift from this one inside two
    *  releases. */
-  tab: EditTab | ScratchTab;
+  tab: EditTab | ScratchTab | ExternalTab;
   /** True when this tab is the active main tab — mirrors TerminalPane's
    *  `active` prop so the editor self-focuses on tab switch, closing, etc. */
   active?: boolean;
@@ -140,6 +140,12 @@ export function EditorPane({ task, tab, active, onContent }: {
   onContent?: (view: EditorView) => void;
 }) {
   const isScratch = tab.type === "scratch";
+  // GH #240: an out-of-task file is read-only and has no task-relative path,
+  // so every TASK-SCOPED feature below keys off this rather than `!isScratch`.
+  // Blame, review comments and the changed-on-disk watcher all address a file
+  // by (task, relative path); an absolute path outside the task has no such
+  // address, and asking git about it would be a question about the wrong repo.
+  const isTaskFile = tab.type === "edit";
   // The one string that identifies what this editor is showing. Both the
   // mount effect and every path-keyed extension key off it, so a preview tab
   // recycling to another file and a pad are the same kind of change.
@@ -200,7 +206,7 @@ export function EditorPane({ task, tab, active, onContent }: {
 
   // ONE definition of the blame extension, shared by the mount and the toggle
   // effect: two copies of the same `onOpenCommit` would drift.
-  const buildBlame = useCallback((enabled: boolean) => enabled && !isScratch
+  const buildBlame = useCallback((enabled: boolean) => enabled && isTaskFile
     ? inlineBlameExtension(task.id, filePath, {
         // A `commit:<sha>` diff, the same scope the History panel opens, so it
         // lands somewhere that already knows how to render a historical
@@ -228,7 +234,7 @@ export function EditorPane({ task, tab, active, onContent }: {
           });
         },
       })
-    : [], [task.id, filePath, isScratch]);
+    : [], [task.id, filePath, isTaskFile]);
 
   const editorFontSize = usePrefs(s => s.editorFontSize);
   const codeLigatures  = usePrefs(s => s.codeLigatures);
@@ -273,8 +279,13 @@ export function EditorPane({ task, tab, active, onContent }: {
         const [content, byPath] = await Promise.all([
           tab.type === "scratch"
             ? scratchRead(task.id, tab.scratchId)
-            : taskFileRead(task.id, tab.path),
-          tab.type === "edit" && !tab.syntax ? langForPath(tab.path) : Promise.resolve(null),
+            // An out-of-task file has no task-relative form, so it cannot go
+            // through the contained read (GH #240).
+            : tab.type === "external"
+              ? fileReadExternal(tab.path)
+              : taskFileRead(task.id, tab.path),
+          (tab.type === "edit" || tab.type === "external") && !tab.syntax
+            ? langForPath(tab.path) : Promise.resolve(null),
         ]);
         if (!alive || !hostRef.current) return;
         const resolved = await resolveSyntax(tab, content, byPath);
@@ -374,6 +385,15 @@ export function EditorPane({ task, tab, active, onContent }: {
             void useUI.getState().askScratchSave(task.id, tab.id);
             return true;
           }
+          // No uncontained WRITE pairs with the uncontained read that opened
+          // this buffer, deliberately: `task_file_write` refuses absolute
+          // paths. Swallow the key rather than let it reach a write that
+          // would throw from Rust. The buffer is `readOnly` too, so there is
+          // nothing unsaved to lose.
+          if (tab.type === "external") {
+            useUI.getState().pushToast("Outside the task, opened read-only", "info");
+            return true;
+          }
           const name = tab.path.split("/").pop() || tab.path;
           taskFileWrite(task.id, tab.path, v.state.doc.toString())
             .then(() => {
@@ -448,7 +468,7 @@ export function EditorPane({ task, tab, active, onContent }: {
               // heavy typing above it can end up quoting the wrong lines. It
               // is bounded (comments are transient, sent then cleared) and
               // clampLine keeps a stale range in bounds.
-              isScratch ? [] : reviewCommentsExtension(task.id, filePath,
+              !isTaskFile ? [] : reviewCommentsExtension(task.id, filePath,
                 // Quiet surface: no icon chasing the mouse down the gutter, no
                 // labelled pill over the selection. One gutter icon, only
                 // while something is selected. The diff pane keeps both.
@@ -456,6 +476,12 @@ export function EditorPane({ task, tab, active, onContent }: {
                 // framing from the message: this is code the user is reading,
                 // not a review of the agent's work.
                 { selection: "gutter", hoverGutter: false, source: "editor" }),
+              // Out-of-task files are read-only (GH #240). There is no write
+              // path for an absolute path, so an editable buffer could only
+              // ever invite work that cannot be saved.
+              ...(tab.type === "external"
+                ? [EditorView.editable.of(false), EditorState.readOnly.of(true)]
+                : []),
               indentUnit.of("  "),
               EditorState.tabSize.of(2),
               EditorView.updateListener.of(u => {
@@ -569,7 +595,7 @@ export function EditorPane({ task, tab, active, onContent }: {
   // confirming the true-editor prompt.
   const applyDiskContent = useCallback((content: string) => {
     const v = viewRef.current;
-    if (!v || isScratch) return;
+    if (!v || !isTaskFile) return;
     if (content !== v.state.doc.toString())
       v.dispatch({
         changes: { from: 0, to: v.state.doc.length, insert: content },
@@ -584,7 +610,7 @@ export function EditorPane({ task, tab, active, onContent }: {
     }
     setDiskChanged(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [task.id, filePath, isScratch]);
+  }, [task.id, filePath, isTaskFile]);
 
   // React to an external change (GH #57). An UNTOUCHED buffer (no unsaved
   // edits) just mirrors disk silently — preview tab or not, source or
@@ -597,7 +623,7 @@ export function EditorPane({ task, tab, active, onContent }: {
     // A pad has no file on disk to diverge from. Nothing outside this editor
     // can touch its buffer, so there is nothing to watch and nothing to ask
     // about (GH #244).
-    if (!v || isScratch) return;
+    if (!v || !isTaskFile) return;
     taskFileRead(task.id, filePath).then(content => {
       const v2 = viewRef.current;
       if (!v2) return;
@@ -605,7 +631,7 @@ export function EditorPane({ task, tab, active, onContent }: {
       if (dirtyRef.current) { setDiskChanged(true); return; }
       applyDiskContent(content);
     }).catch(() => {});
-  }, [task.id, filePath, isScratch, applyDiskContent]);
+  }, [task.id, filePath, isTaskFile, applyDiskContent]);
 
   // User accepted the prompt: re-read (content may have moved on since the
   // change was detected) and swap it in, discarding the buffer's edits — so
@@ -693,11 +719,11 @@ export function EditorPane({ task, tab, active, onContent }: {
   // click in the Git panel, per open editor, to redraw one line that usually
   // did not change. The refetch rides the reader's next cursor move.
   useEffect(() => {
-    if (gitRevision === 0 || !inlineBlame || isScratch) return;
+    if (gitRevision === 0 || !inlineBlame || !isTaskFile) return;
     invalidateBlame(task.id);
     viewRef.current?.dispatch({ effects: markBlameStale.of() });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gitRevision, task.id, inlineBlame, isScratch]);
+  }, [gitRevision, task.id, inlineBlame, isTaskFile]);
 
   // Re-apply theme compartment when the user changes font size,
   // ligatures, or the syntax theme — all reconfigure live.

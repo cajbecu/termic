@@ -396,6 +396,12 @@ export const taskFileDiffSides = (
   scope?: "unstaged" | "staged" | `commit:${string}` | `base:${string}`,
 ) => invoke<DiffSides>("task_file_diff_sides", { id, path, scope: scope ?? null });
 export const taskFileRead = (id: string, path: string) => invoke<string>("task_file_read", { id, path });
+/** Read a text file by ABSOLUTE path, outside any task (GH #240). Backs the
+ *  read-only tab for a cmd+clicked path that resolves outside the task.
+ *  Rejects non-UTF-8, anything over 2 MB, and anything that is not a regular
+ *  file, so a binary or a directory surfaces as an error the caller can fall
+ *  back on rather than a hung read. There is deliberately NO write twin. */
+export const fileReadExternal = (path: string) => invoke<string>("file_read_external", { path });
 /** Read a task image or PDF as base64, for the markdown preview's inline
  *  images or the file-tree preview pane (image/PDF extensions, 20 MB cap).
  *  Member-aware + worktree-contained, same checks as taskFileRead. Pass the

@@ -31,7 +31,8 @@ import { Plus, ChevronDown, ChevronUp, ChevronRight, LocateFixed, Copy, Check, F
 import { cn } from "@/lib/utils";
 import { getAllLeaves, computeLeafBounds, focusedTabId } from "@/lib/splitTree";
 import type { PaneLeaf, Rect } from "@/lib/splitTree";
-import { openPath } from "@/lib/ipc";
+import { openPath, revealPath } from "@/lib/ipc";
+import { copyToClipboard } from "@/lib/clipboard";
 import { fileIconUrl } from "@/lib/explorer/iconResolver";
 import { ResizeHandle } from "@/components/ui/ResizeHandle";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent } from "@/components/ui/ContextMenu";
@@ -84,6 +85,48 @@ function EditorBreadcrumb({ task }: { task: Task }) {
           className="shrink-0 rounded px-1.5 py-0.5 text-[11.5px] text-[var(--color-fg-faint)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]"
         >
           {languageLabel(effectiveLanguageId(tab))}
+        </button>
+      </div>
+    );
+  }
+  // An out-of-task file (GH #240). Its path is ABSOLUTE and points outside the
+  // task, so none of the trail below applies: the segments are not task
+  // -relative, there is nothing to locate in the file tree, and the file is
+  // read-only. It still gets the syntax button, and the full path is rendered
+  // rather than a basename because "which file is this, exactly" is the whole
+  // question for a path that came out of agent output.
+  if (tab?.type === "external") {
+    const extName = tab.path.split("/").pop() || tab.path;
+    return (
+      <div className="flex h-7 shrink-0 items-center gap-1 border-b border-[var(--color-border-soft)] bg-[var(--color-bg-1)] px-2 text-[12px]">
+        <img src={fileIconUrl(extName)} alt="" className="mr-1 h-3.5 w-3.5 shrink-0 file-icon" />
+        <span className="min-w-0 flex-1 truncate text-[var(--color-fg-faint)]" title={tab.path}>
+          {tab.path}
+        </span>
+        <span className="shrink-0 rounded bg-[var(--color-bg-2)] px-1.5 py-0.5 text-[11px] text-[var(--color-fg-faint)]">
+          Read-only
+        </span>
+        <button
+          data-testid="syntax-button"
+          onClick={() => openSyntaxPalette(task.id, tab.id)}
+          title="Set syntax"
+          className="shrink-0 rounded px-1.5 py-0.5 text-[11.5px] text-[var(--color-fg-faint)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]"
+        >
+          {languageLabel(effectiveLanguageId(tab))}
+        </button>
+        <button
+          onClick={() => void copyToClipboard(tab.path, "path")}
+          title="Copy path"
+          className="shrink-0 rounded p-1 text-[var(--color-fg-faint)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]"
+        >
+          <Copy className="h-3.5 w-3.5" />
+        </button>
+        <button
+          onClick={() => revealPath(tab.path).catch(() => {})}
+          title="Reveal in Finder"
+          className="shrink-0 rounded p-1 text-[var(--color-fg-faint)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]"
+        >
+          <FolderOpen className="h-3.5 w-3.5" />
         </button>
       </div>
     );
@@ -267,6 +310,7 @@ export function TaskView({ task }: { task: Task }) {
   const activeMainTab = tabs.find(t => t.id === activeId);
   const bcVisible = !!activeMainTab && (
     activeMainTab.type === "scratch"
+    || activeMainTab.type === "external"
     || ((activeMainTab.type === "edit" || activeMainTab.type === "diff") && !!activeMainTab.path)
   );
   const mainTopPx = splitRoot ? 36 + (bcVisible ? 28 : 0) : 0;
@@ -494,6 +538,17 @@ export function TaskView({ task }: { task: Task }) {
                       {effectiveLanguageId(t) === MARKDOWN
                         ? <MarkdownPane task={task} tab={t} visible={visible} ownsFind={ownsFind} />
                         : <EditorPane task={task} tab={t} active={tabActive} />}
+                    </Suspense>
+                  )}
+                  {t.type === "external" && (
+                    <Suspense fallback={null}>
+                      {/* Source view only, never the markdown / SVG / binary
+                          preview shells (GH #240). Every one of them resolves
+                          sibling assets and links against the TASK root, which
+                          an out-of-task file has no relationship to, so they
+                          would render broken images and links that go nowhere.
+                          Read-only source is the honest thing to show. */}
+                      <EditorPane task={task} tab={t} active={tabActive} />
                     </Suspense>
                   )}
                   {t.type === "diff"     && <Suspense fallback={null}><DiffPane task={task} tab={t} /></Suspense>}

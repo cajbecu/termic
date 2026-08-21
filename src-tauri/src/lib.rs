@@ -8682,6 +8682,44 @@ fn read_capped_file(abs: &Path, cap: u64) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
+/// Read a text file by ABSOLUTE path, with NO task containment (GH #240).
+///
+/// This is the ONLY read in the app that is not bounded by a task root, and
+/// it exists for exactly one thing: a cmd+clicked path in terminal output
+/// that resolves OUTSIDE the task, which has no task-relative form and so
+/// cannot go through `task_file_read`. The tab it feeds is READ-ONLY; there
+/// is deliberately no absolute-path WRITE counterpart, and `task_file_write`
+/// keeps its containment check unchanged.
+///
+/// The exposure this adds is an arbitrary file READ reachable from the
+/// webview. Accepted, and bounded three ways: the same 2 MB cap as the task
+/// read, a UTF-8 requirement (so it is a text channel, not a way to pull
+/// bytes out of arbitrary binaries), and the pinned CSP, which gives an
+/// attacker who could call it nowhere to send the result. Recorded under
+/// "Known gap" in docs/sandbox.md.
+#[tauri::command]
+async fn file_read_external(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || read_external_file(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The decision itself, split out from the command so it is unit-testable.
+fn read_external_file(path: &str) -> Result<String, String> {
+    let abs = Path::new(path);
+    // A relative path here would resolve against the APP's cwd, which is
+    // nobody's task and not what any caller means. Only the frontend's
+    // out-of-task branch calls this, and it always holds an absolute path.
+    if !abs.is_absolute() {
+        return Err(format!("not an absolute path: {path}"));
+    }
+    // `read_capped_file` rejects a directory (and anything else that is not a
+    // regular file) via the fstat on the already-OPEN handle, so a clicked
+    // directory lands here as a plain error rather than a huge read.
+    let bytes = read_capped_file(abs, 2_000_000)?;
+    String::from_utf8(bytes).map_err(|_| "file is not valid UTF-8".to_string())
+}
+
 #[tauri::command]
 fn task_file_read(id: String, path: String) -> Result<String, String> {
     let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
@@ -14003,7 +14041,7 @@ pub fn run() {
             task_diff, task_files, task_list_files_for_finder, task_match_ignored_files, task_send_diff_to_main,
             task_changes, task_git_status, task_git_branches, project_git_branches, project_branch_context, task_git_checkout, task_git_update, task_git_update_info, task_stage, task_unstage, task_commit, task_discard,
             task_git_log, task_git_refs, task_git_push, task_git_commit_files, task_git_compare, task_git_blame, task_git_commit_meta, task_git_commit_offset,
-            task_file_diff, task_file_diff_sides, task_file_read, task_file_read_base64, task_file_fp, task_file_write, task_dir_list, task_path_stat,
+            task_file_diff, task_file_diff_sides, task_file_read, file_read_external, task_file_read_base64, task_file_fp, task_file_write, task_dir_list, task_path_stat,
             task_path_rename, task_path_delete, task_reveal_path,
             scratch_list, scratch_read, scratch_write, scratch_set_meta, scratch_delete,
             scratch_promote, scratch_promote_target_exists,
@@ -14339,6 +14377,56 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    // ── file_read_external (GH #240) ─────────────────────────────────────
+    // The ONLY uncontained read in the app. These pin the three bounds that
+    // make that acceptable: absolute-only, size-capped, UTF-8-only. A binary
+    // or oversized file must ERROR rather than return junk, because the
+    // frontend reads that error as "not text, offer the OS actions instead".
+
+    #[test]
+    fn external_read_returns_text_outside_any_task() {
+        let d = tempdir().unwrap();
+        let f = d.path().join("notes.txt");
+        fs::write(&f, "hello outside").unwrap();
+        assert_eq!(read_external_file(f.to_str().unwrap()).unwrap(), "hello outside");
+    }
+
+    #[test]
+    fn external_read_rejects_a_relative_path() {
+        // Would otherwise resolve against the APP's cwd, which is nobody's task.
+        let e = read_external_file("src/a.ts").unwrap_err();
+        assert!(e.contains("not an absolute path"), "{e}");
+    }
+
+    #[test]
+    fn external_read_rejects_a_directory() {
+        let d = tempdir().unwrap();
+        assert!(read_external_file(d.path().to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn external_read_rejects_binary() {
+        let d = tempdir().unwrap();
+        let f = d.path().join("blob.bin");
+        fs::write(&f, [0xff, 0xfe, 0x00, 0x01]).unwrap();
+        let e = read_external_file(f.to_str().unwrap()).unwrap_err();
+        assert!(e.contains("UTF-8"), "{e}");
+    }
+
+    #[test]
+    fn external_read_caps_size() {
+        let d = tempdir().unwrap();
+        let f = d.path().join("huge.txt");
+        fs::write(&f, "x".repeat(2_000_001)).unwrap();
+        assert!(read_external_file(f.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn external_read_errors_on_a_missing_path() {
+        let d = tempdir().unwrap();
+        assert!(read_external_file(d.path().join("nope.txt").to_str().unwrap()).is_err());
+    }
 
     // ── post-launch session capture (GH #243) ──
     //

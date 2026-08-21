@@ -65,6 +65,35 @@ gate, not a CSP tweak, per the note below.
 **Before widening the CSP again, remember it is app-wide.** `connect-src` or
 `script-src` would be materially worse than `img-src` is.
 
+## Known gap: one uncontained file read (`file_read_external`)
+
+Every other renderer → filesystem read is bounded by a task root
+(`safe_task_path` / `safe_task_read_path`, which reject absolute paths and
+`..` outright). `file_read_external` is the single exception, added for
+GH #240: a cmd+clicked absolute path in terminal output that resolves
+OUTSIDE the task has no task-relative form, so it cannot go through the
+contained read, and the tab it opens is read-only.
+
+What this adds is an arbitrary file **read** reachable from the webview. It
+is accepted, bounded three ways:
+
+- **Read only.** There is deliberately no absolute-path write counterpart.
+  `task_file_write` keeps its containment check, and the tab the read feeds
+  is `EditorState.readOnly` with its ⌘S path stubbed out. Nothing can be
+  mutated outside a task through this.
+- **Text only, capped.** The same 2 MB ceiling as the task read, plus a
+  UTF-8 requirement, so it is a text channel rather than a way to pull bytes
+  out of arbitrary binaries.
+- **Nowhere to send it.** The pinned CSP (`connect-src`, see
+  `src/lib/cspGuard.test.ts`) means an attacker who could invoke it has no
+  egress for the result.
+
+The residual risk is an XSS in our own UI turning into local file
+disclosure. That is strictly worse than before this command existed, and is
+the reason `connect-src` must not be widened (see the CSP rule in
+CLAUDE.md). The bounds above are pinned by `external_read_*` tests in
+`src-tauri/src/lib.rs`.
+
 ## Known gap: Monitor mode reaches the CLI control plane
 
 The CLI control socket (docs/plans/cli.md) is denied to `Enforce` /

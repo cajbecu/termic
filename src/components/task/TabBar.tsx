@@ -370,7 +370,7 @@ export function TabPill({ task, tab, active, paneFocused, compact, onSelect, onC
   }, [active, dragging]);
 
   let fileIcon: string | null = null;
-  if ((tab.type === "edit" || tab.type === "diff") && (tab as any).path) {
+  if ((tab.type === "edit" || tab.type === "diff" || tab.type === "external") && (tab as any).path) {
     const path = (tab as any).path;
     const name = path.split("/").pop() || tab.title;
     fileIcon = fileIconUrl(name);
@@ -451,7 +451,7 @@ export function TabPill({ task, tab, active, paneFocused, compact, onSelect, onC
       {(tab.type === "terminal" || fileIcon || tab.type === "diff") && (
         <span className={cn("shrink-0 flex items-center justify-center", color)}>
           {tab.type === "terminal" && <CliIcon cli={iconId} className="h-4 w-4" />}
-          {(tab.type === "edit" || tab.type === "dir") && fileIcon && <img src={fileIcon} alt="" className="h-4 w-4 shrink-0 file-icon" />}
+          {(tab.type === "edit" || tab.type === "dir" || tab.type === "external") && fileIcon && <img src={fileIcon} alt="" className="h-4 w-4 shrink-0 file-icon" />}
           {tab.type === "diff" && (fileIcon ? <img src={fileIcon} alt="" className="h-4 w-4 shrink-0 file-icon" /> : <GitCompare className="h-4 w-4" />)}
         </span>
       )}
