@@ -345,7 +345,15 @@ its existing `cancelClose` / `closeCardSoon` lifecycle is where that hooks in.
 - **Content-Length is bytes, not characters.** The classic hand-rolled-framer bug;
   it bites on the first non-ASCII docstring.
 
-## Recommended default set
+## Shipped manifests: two tiers
+
+The expensive part of supporting a language is **not the manifest, it is the
+installer**. A manifest is a dozen lines of TOML. An `[server.install]` block is
+a pinned version plus a per-platform SHA-256 that has to be re-pinned every time
+upstream releases, and a claim that we tested this server against a real repo.
+So the two are split, and only the second tier is small.
+
+### Tier 1 — we install it, we pinned it, we measured it
 
 | Language | Server | Download | Runtime |
 |---|---|---|---|
@@ -354,12 +362,49 @@ its existing `cancelClose` / `closeCardSoon` lifecycle is where that hooks in.
 | Rust | rust-analyzer | 13.9 MB | none |
 | Go | gopls | `go install` | Go (already present) |
 
-~73 MB of optional on-demand downloads, every one a single static binary, covering
-the languages termic users actually write. Nothing ships in the `.app`.
+~73 MB of optional on-demand downloads, every one a single static binary.
+Nothing ships in the `.app`. This tier stays small on purpose: every row is a
+version+SHA to maintain and a server whose quirks we have actually hit.
 
-**Skip:** JSON, Markdown, HTML/CSS (CodeMirror already wins in-process, no
-subprocess), bash, and clangd (93 MB universal binary that also needs
-`compile_commands.json`).
+### Tier 2 — PATH-only manifests, shipped from day one
+
+Same manifest format with **no `[server.install]` block**: if the server is on
+your PATH (or in the worktree's own toolchain), termic drives it; if not, the
+language simply has no navigation and nothing is offered. This is Helix's
+default behaviour, it costs no pinning, no SHA maintenance, no download path
+and no bytes, and it is what makes the answer to "why only four languages?" be
+"it isn't four".
+
+Ship these on day one, all PATH-resolved:
+
+| Language | Server | Note |
+|---|---|---|
+| Swift | `sourcekit-lsp` | resolved via `xcrun`; ships WITH Xcode / the Swift toolchain, so there is nothing to download and most Swift users already have it |
+| C / C++ | `clangd` | 93 MB universal binary and it needs `compile_commands.json`, so we will not install it — but if the user has it, use it |
+| Java | `jdtls` | Eclipse JDT: a JVM program, not a static binary, with a multi-step handshake and a workspace data dir. Never a tier-1 candidate; fine as tier 2 |
+| Ruby | `ruby-lsp` / `solargraph` | usually already in the project's bundle |
+| PHP | `intelephense` / `phpactor` | |
+| Zig | `zls` | |
+| Elixir | `elixir-ls` / `lexical` | |
+| Lua | `lua-language-server` | |
+| Kotlin | `kotlin-language-server` | |
+| C# | `omnisharp` / Roslyn | |
+
+**Why this is safe to do broadly, and was not before.** The doc's three hard
+requirements are CLIENT-side and generic: answer server→client requests, declare
+pull diagnostics as well as push, always send an explicit workspace root. Get
+those right once and an untested server's failure mode collapses from "confidently
+wrong" (pyrefly's 9-references-instead-of-309, caused by the client, not the
+server) to "does not work", which the user can see. That is the difference
+between shipping ten manifests being reckless and being cheap.
+
+Settings must say which tier a language is in — "download available" vs "found
+on PATH" vs "not installed" — so a missing tier-2 server reads as a fact about
+the machine rather than a termic bug.
+
+**Skip entirely:** JSON, Markdown, HTML/CSS. CodeMirror already wins in-process;
+spawning a subprocess to report a misspelled JSON key is a bad trade. Also bash,
+where the servers are weak and the payoff is thin.
 
 ### Python server choice, honestly
 
@@ -391,7 +436,7 @@ subprocess), bash, and clangd (93 MB universal binary that also needs
 | 1 | Rust LSP host + Channel transport + TypeScript 7 AND Python, default-OFF pref | hover, diagnostics, goto-def |
 | 2 | Find-references panel, completion, signature help, rename | the PyCharm core |
 | 3 | Read-only external-file tabs | ⌘-click into site-packages |
-| 4 | Declarative manifests + Settings section | rust-analyzer, gopls, TS7 for free |
+| 4 | Declarative manifests + Settings section | tier 1 completed (rust-analyzer, gopls) AND the whole tier-2 PATH-only set (Swift, Java, C/C++, Ruby, PHP, Zig, …) |
 | 5 | `[server.install]` download with pinned checksums | works without a toolchain |
 
 Value is concentrated in 0-2, which is the whole of the stated goal. Phase 3
