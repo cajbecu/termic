@@ -405,11 +405,9 @@ specs and get an issue at the same time. That is the whole promotion path:
   compiling on Windows at all. The audit in
   [docs/ideas/windows.md](docs/ideas/windows.md) is a prediction: nothing in
   it has been built on Windows yet.
-- **Profiles (multi-window, Chrome-style).** Separate windows with their own
-  projects and settings. [docs/ideas/profiles.md](docs/ideas/profiles.md).
-- **The Space layer.** A grouping above projects. The Task rename in v0.19.0
-  deliberately reserved the word.
-  [docs/ideas/space-layer.md](docs/ideas/space-layer.md).
+- **Spaces.** A named, colored group of projects with its own window, so work
+  and personal projects stay in separate windows.
+  [docs/ideas/spaces.md](docs/ideas/spaces.md).
 - **Ambient agent status.** A Dock tile, or a strip beside the Dock, showing
   what every agent is doing without bringing the window forward.
   [docs/ideas/dock-widget.md](docs/ideas/dock-widget.md).

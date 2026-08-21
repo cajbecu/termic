@@ -10,7 +10,7 @@ Related: [docs/data-model.md](data-model.md) (data dirs). The original
 workspace→task rename design lived in `docs/plans/workspace-to-task-rename.md`
 (deleted once shipped; see git history if you need the decision log). The
 still-relevant future layer it reserved is
-[docs/plans/space-layer.md](plans/space-layer.md).
+[docs/ideas/spaces.md](ideas/spaces.md).
 
 | # | Item | Introduced | Safe to remove | Status |
 |---|---|---|---|---|
