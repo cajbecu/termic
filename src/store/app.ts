@@ -13,6 +13,7 @@ import { pinBoundary } from "@/lib/tabActions";
 import * as ipc from "@/lib/ipc";
 import { groupOf } from "@/lib/projectGroups";
 import { useRace } from "@/store/race";
+import { useFileViewed } from "@/store/fileViewed";
 import { takeUnattendedSpawn } from "@/lib/unattendedSpawns";
 import { failCliQueuedPromptsInTabs } from "@/lib/cliPromptReports";
 import { focusTerminalTab, focusMainTab, focusPaneTab } from "@/lib/tabFocus";
@@ -596,7 +597,14 @@ export const useApp = create<AppState>((set, get) => ({
     // Same housekeeping for Agent Race cohorts: once every task in a race is
     // archived or deleted, drop the race so the board and its localStorage
     // don't accumulate dead entries.
-    useRace.getState().prune(new Set(tasks.filter(t => !t.archived).map(t => t.id)));
+    const liveTaskIds = new Set(tasks.filter(t => !t.archived).map(t => t.id));
+    useRace.getState().prune(liveTaskIds);
+    // "Mark as viewed" marks are bounded the same way, by TASK liveness only
+    // (GH #248): the map is one namespace shared by the Git panel, the Compare
+    // panel and DiffPane's compare walk, so nothing that sees a partial slice
+    // of it may prune paths. Archived tasks keep their marks until the task is
+    // gone for good, matching the race prune above.
+    useFileViewed.getState().prune(new Set(tasks.map(t => t.id)));
   },
 
   refreshClis: async () => {

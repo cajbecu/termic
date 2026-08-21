@@ -14,6 +14,9 @@
 // the agent touches the file again, the fingerprint moves and the mark
 // clears itself. No watcher needed: every git-status refetch carries a fresh
 // fp, so isViewed() re-evaluates on its own.
+//
+// That per-file expiry is the ONLY thing allowed to clear a mark implicitly.
+// Entries are removed wholesale only when their task dies (see prune).
 
 import { create } from "zustand";
 
@@ -40,9 +43,20 @@ interface FileViewedState {
   byTask: ByTask;
   /** Tick / untick a file. Ticking stashes its current fingerprint. */
   toggle: (taskId: string, path: string, fp: string) => void;
-  /** Drop entries for paths that no longer have changes (committed /
-   *  discarded), keeping localStorage from growing without bound. */
-  prune: (taskId: string, validPaths: Set<string>) => void;
+  /** Drop whole task maps for tasks that no longer exist (archived /
+   *  deleted), keeping localStorage from growing without bound. Called from
+   *  app.loadAll with the live task ids, mirroring useRace.prune.
+   *
+   *  Deliberately task-scoped and NOT path-scoped (GH #248). This map is one
+   *  namespace shared by three call sites that each see a DIFFERENT slice of
+   *  it: the Git panel lists uncommitted files, the Compare panel lists a
+   *  whole branch diff, and DiffPane's compare walk reads marks for files
+   *  that `git status` never returns. Pruning against any one of those slices
+   *  deletes the others' live marks. That is exactly what used to happen: the
+   *  Git panel pruned against its uncommitted list, so the moment an agent
+   *  COMMITTED its work that list emptied and every Compare mark for the task
+   *  went with it, including files the agent never touched. */
+  prune: (liveTaskIds: Set<string>) => void;
 }
 
 export const useFileViewed = create<FileViewedState>((set) => ({
@@ -58,18 +72,12 @@ export const useFileViewed = create<FileViewedState>((set) => ({
       return { byTask };
     }),
 
-  prune: (taskId, validPaths) =>
+  prune: (liveTaskIds) =>
     set((s) => {
-      const cur = s.byTask[taskId];
-      if (!cur) return s;
-      const next: Record<string, string> = {};
-      let changed = false;
-      for (const [p, fp] of Object.entries(cur)) {
-        if (validPaths.has(p)) next[p] = fp;
-        else changed = true;
-      }
-      if (!changed) return s;
-      const byTask = { ...s.byTask, [taskId]: next };
+      const dead = Object.keys(s.byTask).filter((id) => !liveTaskIds.has(id));
+      if (dead.length === 0) return s;
+      const byTask = { ...s.byTask };
+      for (const id of dead) delete byTask[id];
       save(byTask);
       return { byTask };
     }),

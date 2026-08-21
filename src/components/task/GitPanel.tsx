@@ -248,20 +248,11 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
   // "Viewed" marks (GH #42). Subscribe to this task's map so the per-pane
   // "N/M viewed" header counts re-render when a row is ticked.
   const viewedMap = useFileViewed(s => s.byTask[task.id]);
-  const pruneViewed = useFileViewed(s => s.prune);
-  // Drop viewed marks for files that no longer have changes (committed /
-  // discarded) so localStorage doesn't accumulate dead paths. Keyed by the
-  // task-relative path (member files prefixed with their dir_name).
-  useEffect(() => {
-    if (!status) return;
-    const valid = new Set<string>();
-    for (const r of status.repos) {
-      const pfx = r.dir_name ? `${r.dir_name}/` : "";
-      for (const f of r.staged) valid.add(pfx + f.path);
-      for (const f of r.unstaged) valid.add(pfx + f.path);
-    }
-    pruneViewed(task.id, valid);
-  }, [status, task.id, pruneViewed]);
+  // No prune here (GH #248). This pane sees only UNCOMMITTED files, but the
+  // viewed map is shared with the Compare panel's branch diff, so pruning
+  // against this list wiped every Compare mark the moment an agent committed.
+  // Marks expire per file via their fingerprint; dead tasks are cleaned up in
+  // app.loadAll. See store/fileViewed.ts.
 
   // ── git mutations ──
   const dir = repo?.dir_name ?? "";
