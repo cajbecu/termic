@@ -320,25 +320,27 @@ per-asset `digest` field is the reliable source. Do not resolve `latest` at runt
 
 ## Lifecycle
 
-Servers are keyed by **(resolved workspace root, language)** — NOT by task.
+**One LSP instance per checkout, per language** — where a checkout is the main
+repo or a worktree, and the two are treated identically. The key is the resolved
+workspace root; it is NOT the task.
 
-The distinction is worth real memory, because "one task, one root" is not true
-in either direction:
+"Checkout" is the honest unit. Tasks are a layer above it, and "one task, one
+checkout" is false in both directions:
 
-- **Several tasks can share one root.** A main-checkout task (`is_main_checkout`)
-  runs in the project's `root_path` itself, and nothing stops several existing at
-  once. Same directory, same bytes, same branch — so N of them need **one**
-  server between them, not N. At rust-analyzer's ~3.1 GB or gopls's 3-6 GB, that
+- **Several tasks can share one checkout.** A main-checkout task
+  (`is_main_checkout`) runs in the project's `root_path` itself, and nothing
+  stops several existing at once. Same directory, same bytes, same branch — so N
+  of them need **one** server between them, not N. At rust-analyzer's ~3.1 GB or gopls's 3-6 GB, that
   is the difference between a second main-checkout task being free and it costing
   another few gigabytes for an identical index.
-- **One task can need several roots.** A multi-repo task holds several members,
-  each with its own root (`kind: "host" | "worktree" | "repo_root"`), so it wants
-  one server per member per language.
+- **One task can span several checkouts.** A multi-repo task holds several
+  members, each with its own root (`kind: "host" | "worktree" | "repo_root"`), so
+  it wants one server per member checkout per language.
 
-**Worktree tasks still get their own server, and that part is not negotiable.**
-Two worktrees are different paths with *different content*, and they share module
-paths — an import resolved in the wrong copy is a correctness bug, not a tuning
-knob. That is the case the per-task memory cost is genuinely buying something.
+**Separate checkouts still get separate servers, and that part is not
+negotiable.** Two worktrees are different paths holding *different content*, and
+they share module paths — an import resolved in the wrong copy is a correctness
+bug, not a tuning knob. That is where the memory genuinely buys something.
 
 Refcount, therefore: spawn on the first task that has code navigation enabled and
 opens an editor tab of that language at that root; reap when the last such task
@@ -634,7 +636,9 @@ listing servers in the Activity window.
 the setting most likely to surprise someone: it arms every task in every project,
 and the bill only arrives later, from a process the user never started. Steering
 people to enable navigation in the one task they are reading code in is both the
-cheapest default and the honest one.
+cheapest default and the honest one. Read precisely, "per task" means *per
+checkout*: enabling it in a task arms the checkout that task points at, and any
+sibling task on the same checkout comes along for free.
 
 ### The memory disclosure is part of the feature
 
@@ -647,12 +651,14 @@ said at the moment of enabling — not buried in Settings:
    toggle can read *"rust-analyzer typically holds 2-3 GB per task and does not
    release it"* or *"gopls 1 GB, up to 7 GB on a large repo"*. The figures in the
    cost model above are the seed values.
-2. **That the unit is the worktree, not the project.** Users reasonably assume
-   one server per repo, the way an IDE works. Termic is not that: every worktree
-   task is a separate checkout with different content, so it needs its own
-   server and its own copy of the index. Ten tasks on one repo with navigation on
-   everywhere is ten indexes. The exception is worth stating in the same breath —
-   several main-checkout tasks share one root and therefore one server.
+2. **That the unit is the CHECKOUT — not the project, and not the task.** This
+   is the difference users will not guess and must be told outright, because
+   every IDE they have used runs one server per project. Termic runs **one per
+   checkout: the main repo counts as one, and every worktree is another.** So
+   ten worktree tasks on one repo with navigation on everywhere is ten servers
+   and ten copies of the index. Say the reassuring half in the same breath:
+   tasks sharing a checkout share one server, so a second task on the main
+   checkout is free.
 3. **Where it went and how to get it back.** The Activity window lists live
    servers with their RSS and a stop button; stopping one frees its memory
    immediately and costs a re-index when next needed.
