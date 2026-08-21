@@ -404,15 +404,40 @@ it does not depend on settling ty vs zuban. Python ships alongside it with
 goto-def and hover only (see the Python section: no find-references until a
 server earns it), so the open question below blocks a feature, not the phase.
 
-## Opt-in
+## Opt-in: "Code navigation"
 
-A per-**project** toggle (not per-task; re-enabling per task is a paper cut). With
-it off, nothing spawns, nothing is imported, and the editor is byte-for-byte what
-it is today. Default OFF, following the existing `loadRemoteImages` pattern
-(`prefs.ts`).
+Two levels, no more, both machine-local:
 
-Discovery should not depend on browsing Settings: prompt contextually in the editor
-the first time it would help.
+- **An app-wide pref, default OFF** (`prefs.ts`, alongside `loadRemoteImages`).
+  This is the master switch and the answer to "why would I spend RAM on a repo
+  I only ever point agents at".
+- **A per-project override** on the `Project` record (`projects.json`), tri-state
+  inherit / on / off, next to `default_sandbox` and `spotlight_enabled`. This is
+  what makes it useful: navigation on for the repo you read, off for the four
+  you only supervise.
+
+**No per-task toggle.** Tasks inherit their project. Tasks are created
+constantly, so a per-task switch would mean re-enabling this several times a
+day, and it would buy nothing the lazy-spawn rule does not already give.
+
+**Deliberately NOT in `.termic.yaml`.** The repo config is committed and
+team-shared, which is right for sandbox policy and wrong for this: whether to
+spend 250 MB of *this* machine's memory is a personal choice, not something a
+colleague decides for you by pushing a config change.
+
+The label is **"Code navigation"**, not "smart code features" — it names what
+you get (go to definition, find usages, hover types) instead of inviting "smart
+how?". The roadmap's broader "code intelligence" stays as the name of the whole
+subsystem.
+
+**The toggle grants permission; it does not start anything.** Even fully on,
+nothing spawns until an editor tab of that language is open in that task —
+watching an agent in a terminal costs zero, which is what most tasks are doing
+most of the time. With the switch off, nothing spawns, nothing is imported, and
+the editor is byte-for-byte what it is today.
+
+Discovery should not depend on browsing Settings: prompt contextually in the
+editor the first time it would help.
 
 ## Open questions
 
