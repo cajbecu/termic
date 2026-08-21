@@ -26,6 +26,7 @@ import { ProjectPickerDialog } from "./ProjectPickerDialog";
 import { CommandPalette } from "./CommandPalette";
 import { PromptDestinationDialog } from "./PromptDestinationDialog";
 import { PromptPalette } from "./PromptPalette";
+import { SyntaxPalette } from "./SyntaxPalette";
 import { Loader2 } from "lucide-react";
 
 export function Dialogs() {
@@ -61,6 +62,7 @@ export function Dialogs() {
       <CommandPalette />
       <PromptDestinationDialog />
       <PromptPalette />
+      <SyntaxPalette />
       {/* Blocking work overlay: shown while a slow IPC call is in flight
           (archive task, etc.). Click-blocks the whole window so users
           don't fire the action twice mid-wait. */}

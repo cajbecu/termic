@@ -329,6 +329,150 @@ describe("code editor", () => {
     await snap("code-editor-elixir.png");
   });
 
+  const tokenSpans = () =>
+    browser.execute(
+      () => document.querySelectorAll(".cm-content .cm-line span[class]").length,
+    );
+
+  // Open a file WITHOUT waiting for highlight tokens — for the plain-text
+  // cases, where "no tokens" is the thing being asserted.
+  const openPlain = async (name: string, source: string, marker: string) => {
+    writeFileSync(path.join(fixture, name), source);
+    await browser.execute(
+      (id) => window.__termic!.useApp.getState().bumpFsRevision(id),
+      taskId,
+    );
+    const sel = `[data-path="${name}"]`;
+    await browser.waitUntil(
+      () => browser.execute((s) => !!document.querySelector(s), sel),
+      { timeout: 10_000, timeoutMsg: `${name} never appeared in the tree` },
+    );
+    await browser.execute((s) => {
+      (document.querySelector(s) as HTMLElement).click();
+    }, sel);
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          (m) => (document.querySelector(".cm-content")?.textContent ?? "").includes(m),
+          marker,
+        ),
+      { timeout: 10_000, timeoutMsg: `CodeMirror never loaded ${name}` },
+    );
+  };
+
+  // The breadcrumb's language button, which is also what the palette's
+  // "Set syntax…" row opens.
+  const syntaxLabel = () =>
+    browser.execute(
+      (id) =>
+        (
+          document.querySelector(
+            `[data-task-id="${id}"] [data-testid="syntax-button"]`,
+          ) as HTMLElement | null
+        )?.textContent ?? null,
+      taskId,
+    );
+
+  // Issue #244. `@codemirror/legacy-modes` has no Makefile grammar, so this
+  // one is hand-written (src/lib/makeMode.ts) and the tab-means-recipe rule
+  // is the part worth guarding in the real editor.
+  it("highlights a Makefile, which has no upstream grammar at all", async () => {
+    await openHighlighted(
+      "Makefile",
+      "CARGO := cargo\n\n.PHONY: build\nbuild: ## comment\n\t@$(CARGO) build --release\n",
+      "CARGO",
+    );
+
+    const styled = await browser.execute(() =>
+      [...document.querySelectorAll(".cm-content .cm-line span[class]")].map(
+        (s) => s.textContent ?? "",
+      ),
+    );
+    // Two tokens the mode has to get right, and that every editor theme
+    // colours: the special target, and the comment after the recipe's `:`.
+    expect(styled).toContain(".PHONY");
+    expect(styled.some((t) => t.includes("## comment"))).toBe(true);
+    expect(await syntaxLabel()).toBe("Makefile");
+
+    await snap("code-editor-makefile.png");
+  });
+
+  it("names the syntax it picked from the extension", async () => {
+    await openHighlighted("typed.py", "x = 1\n", "x = 1");
+    expect(await syntaxLabel()).toBe("Python");
+  });
+
+  it("guesses the syntax from the content when the name says nothing", async () => {
+    // No extension at all: only the content can say this is JSON, and the
+    // button must agree with what the buffer is actually highlighted as.
+    await openHighlighted(
+      "config-blob",
+      '{\n  "name": "termic",\n  "port": 1420\n}\n',
+      "termic",
+    );
+    expect(await syntaxLabel()).toBe("JSON");
+  });
+
+  it("overrides the guess when the user sets the syntax by hand", async () => {
+    // One `key: value` line is not enough for the sniffer to call it YAML
+    // (it wants at least two), and `.txt` claims nothing — so this starts
+    // life as plain text, with no grammar and therefore no token spans.
+    await openPlain("notes.txt", "server: 8080\n", "8080");
+    expect(await syntaxLabel()).toBe("Plain Text");
+    expect(await tokenSpans()).toBe(0);
+
+    await browser.execute((id) => {
+      (
+        document.querySelector(
+          `[data-task-id="${id}"] [data-testid="syntax-button"]`,
+        ) as HTMLElement
+      ).click();
+    }, taskId);
+
+    // Existence, not `waitForDisplayed`: the panel fades in via a CSS
+    // animation, and animations are frozen while the window is occluded — a
+    // visibility wait then times out on a palette that is perfectly usable.
+    const rowSel = '[data-testid="syntax-palette"] [data-lang="yaml"]';
+    await browser.waitUntil(
+      () => browser.execute((sel) => !!document.querySelector(sel), rowSel),
+      { timeout: 8_000, timeoutMsg: "the syntax palette never listed YAML" },
+    );
+    await browser.execute((sel) => {
+      (document.querySelector(sel) as HTMLElement).click();
+    }, rowSel);
+
+    await browser.waitUntil(async () => (await syntaxLabel()) === "YAML", {
+      timeout: 5000,
+      timeoutMsg: "the syntax button never switched to YAML",
+    });
+    // The pick must actually reach CodeMirror, not just the label: the
+    // language compartment is reconfigured in place, so the buffer that had
+    // no token spans at all now has them.
+    await browser.waitUntil(async () => (await tokenSpans()) > 0, {
+      timeout: 5000,
+      timeoutMsg: "no syntax tokens after setting the syntax to YAML",
+    });
+    // …and the content survived the switch (a view REBUILD would also
+    // produce tokens, while quietly discarding undo history and the cursor).
+    const text = await browser.execute(
+      () => document.querySelector(".cm-content")?.textContent ?? "",
+    );
+    expect(text).toContain("server: 8080");
+
+    // Picking closes the palette. Radix defers the unmount until the closing
+    // animation ends, and animations are frozen on an occluded window, so the
+    // node itself can linger — `data-state` is the signal, not presence.
+    await browser.waitUntil(
+      () =>
+        browser.execute(() => {
+          const el = document.querySelector('[data-testid="syntax-palette"]');
+          return !el || el.getAttribute("data-state") === "closed";
+        }),
+      { timeout: 8_000, timeoutMsg: "the syntax palette stayed open after a pick" },
+    );
+    await snap("code-editor-set-syntax.png");
+  });
+
   // Issue #161. The gutter is `position: sticky` (z-index 200) inside the
   // scroller, so a long line slides UNDER the line numbers as you scroll right,
   // and a see-through gutter shows it. Nothing in the DOM says "overlap", so the

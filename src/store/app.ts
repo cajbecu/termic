@@ -2146,6 +2146,11 @@ export const useApp = create<AppState>((set, get) => ({
         const next = list.map(t => t.id === previewTab.id ? {
           ...t, type: data.type, path: data.path, title: data.title,
           liveTitle: undefined, customTitle: false, dirty: false, preview: true,
+        // The recycled slot is now a DIFFERENT file: a syntax the user set
+        // on the previous occupant (or one sniffed from its content) must
+        // not carry over, or a preview tab silently mislabels every file
+        // that lands in it afterwards.
+        syntax: undefined, syntaxAuto: undefined,
           ...revealPatch,
         } as Tab : t);
         const newTree = setLeafActiveTabId(tree, activePaneLeaf.id, previewTab.id);
@@ -2183,6 +2188,11 @@ export const useApp = create<AppState>((set, get) => ({
       const next = list.map(t => t.id === previewTab.id ? {
         ...t, type: data.type, path: data.path, title: data.title,
         liveTitle: undefined, customTitle: false, dirty: false, preview: true,
+        // The recycled slot is now a DIFFERENT file: a syntax the user set
+        // on the previous occupant (or one sniffed from its content) must
+        // not carry over, or a preview tab silently mislabels every file
+        // that lands in it afterwards.
+        syntax: undefined, syntaxAuto: undefined,
         ...revealPatch,
       } as Tab : t);
       return { tabs: { ...s.tabs, [taskId]: next }, ...setActive(previewTab.id) };

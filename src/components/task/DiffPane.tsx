@@ -19,7 +19,7 @@ import { EditorView, lineNumbers, highlightActiveLine } from "@codemirror/view";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags as t } from "@lezer/highlight";
 import { cn } from "@/lib/utils";
-import { langForPath } from "./EditorPane";
+import { langForPath } from "@/lib/languageExts";
 import { resolveEditorTheme, editorSurfaceTheme } from "@/lib/editorTheme";
 import { reviewCommentsExtension, dispatchFileComment } from "./reviewCommentsExt";
 import { MessageSquarePlus } from "lucide-react";

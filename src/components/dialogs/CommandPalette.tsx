@@ -12,7 +12,7 @@ import {
   PanelLeft, PanelRight, PanelBottom, Palette, Keyboard, Settings as SettingsIcon,
   FolderCog, RefreshCw, ScrollText, Bug, SlidersHorizontal, Bot, BookText,
   Check, ChevronLeft, ListTodo, Bell, SquareTerminal, FolderPlus, History, Square,
-  Play, Swords, Megaphone, Columns2, Rows2, Clock, UserPen, Activity, type LucideIcon,
+  Play, Swords, Megaphone, Columns2, Rows2, Clock, UserPen, Activity, Code2, type LucideIcon,
 } from "lucide-react";
 import { useUI } from "@/store/ui";
 import { copyToClipboard } from "@/lib/clipboard";
@@ -26,6 +26,7 @@ import { bindingGlyphs, type ShortcutId } from "@/lib/shortcuts";
 import { confirmAndArchive } from "@/lib/archiveTask";
 import { taskSetYolo, openPath, procmonOpenWindow } from "@/lib/ipc";
 import { isCustomId } from "@/lib/customTheme";
+import { effectiveLanguageId, languageLabel } from "@/lib/languages";
 import { effectiveSandboxMode, isSandboxEnforced } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -114,6 +115,14 @@ export function CommandPalette() {
   const themeOriginalRef = useRef<ThemeMode | null>(null);
 
   const task = useMemo(() => tasks.find(w => w.id === activeTaskId) ?? null, [tasks, activeTaskId]);
+  // The active main-pane tab when it is an editor. "Set syntax" re-highlights
+  // ONE buffer, so the row only exists while there is a buffer to act on.
+  const activeEditTab = useApp(s => {
+    const id = s.activeTaskId;
+    if (!id) return null;
+    const t = (s.tabs[id] ?? []).find(tt => tt.id === s.activeTab[id]);
+    return t?.type === "edit" ? t : null;
+  });
   const proj = useMemo(() => (task ? projects.find(p => p.id === task.project_id) ?? null : null), [projects, task]);
 
   // Roll the live theme preview back and leave the submenu.
@@ -334,6 +343,14 @@ export function CommandPalette() {
         run: act(() => { useApp.getState().splitPane(task.id, "h"); }),
       });
     }
+    if (task && activeEditTab) {
+      cmds.push({
+        id: "set-syntax", section: "View", label: "Set syntax…",
+        suffix: languageLabel(effectiveLanguageId(activeEditTab)), icon: Code2,
+        keywords: "language highlighting grammar mode colour color file type",
+        run: act(() => useUI.getState().openSyntaxPalette(task.id, activeEditTab.id)),
+      });
+    }
     cmds.push({
       id: "toggle-inline-blame", section: "View", label: "Toggle inline git blame",
       suffix: inlineBlame ? "On" : "Off", icon: UserPen,
@@ -420,7 +437,7 @@ export function CommandPalette() {
     }
 
     return cmds;
-  }, [view, task, proj, themeMode, themeEntries, inlineBlame]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [view, task, proj, themeMode, themeEntries, inlineBlame, activeEditTab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Recents, re-read on every open so an hour spent with the palette closed
   // expires them (the list is only ever consulted at build time). Empty query

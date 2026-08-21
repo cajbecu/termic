@@ -190,6 +190,22 @@ Three tabs. Setup + Run stream via `useScriptRuns`. Terminal is opt-in: click `+
 
 `task_archive` sweeps `RUNNING_SCRIPTS` and SIGTERMs each before teardown.
 
+## Editor path bar (breadcrumb + syntax)
+
+The bar under the tab strip, for `edit` and `diff` tabs with a path (`EditorBreadcrumb` in `components/task/TaskView.tsx`). Each path segment is a click target: a folder reveals/expands that folder in the tree, the filename reveals the file, and every segment right-clicks to a copy menu. On the right: copy path, open the containing folder in Finder, locate in the tree.
+
+Editor tabs also get a **language button** there, showing what the buffer is highlighted as and opening the "Set syntax" picker (`SyntaxPalette`, also reachable as the command palette's `set-syntax` row). Sublime and VS Code put this bottom-right; termic has no status bar, and inventing one to hold a single control would cost the terminal pane an edge, so it goes on the bar that already exists. Diff tabs deliberately do NOT get it: there is no editable buffer there, so a diff's syntax always follows its path.
+
+The language itself resolves in `lib/languages.ts`, in strict precedence:
+
+1. **A manual pick** (`EditTab.syntax`) — session-only, exactly like Sublime's. It survives tab switches, not a relaunch, and is cleared when a preview tab slot recycles onto a different file (otherwise the next file to land in that slot inherits the override).
+2. **The path** — extension, or a whole-filename rule for the files that have no extension (`Makefile`, `Dockerfile.dev`, `justfile`, `.env.production`).
+3. **The content** (`lib/detectSyntax.ts`) — only consulted when the path matched nothing at all, and only for markers close to unambiguous (a shebang, an `<?xml`, text that actually `JSON.parse`s). A wrong guess is worse than no guess, so anything vaguer stays Plain Text.
+
+Grammars live in `lib/languageExts.ts`, which is imported ONLY by the lazily loaded editor and diff panes; `lib/languages.ts` carries the labels and ids and stays free of CodeMirror, so the picker and this bar don't drag every grammar into the main bundle. Switching syntax reconfigures the language **compartment** in place — no `EditorView` rebuild, so the cursor, undo history and scroll position survive.
+
+Makefiles are highlighted by a hand-written stream parser (`lib/makeMode.ts`): `@codemirror/legacy-modes` ships ~150 CodeMirror 5 grammars and Makefile is not among them. Same approach as `lib/protoMode.ts`. The rule that makes it a Makefile rather than a config file is that a leading TAB opens a recipe, where the line is shell instead of make, and a trailing backslash keeps that state across lines.
+
 ## Inline review comments (two surfaces)
 
 `reviewCommentsExtension(taskId, file, surface)` is one component with two loudness settings, because the same gesture means different things in the two places it runs.

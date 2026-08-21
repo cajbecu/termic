@@ -36,6 +36,8 @@ import { fileIconUrl } from "@/lib/explorer/iconResolver";
 import { ResizeHandle } from "@/components/ui/ResizeHandle";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent } from "@/components/ui/ContextMenu";
 import { CopyPathItems } from "./CopyPathItems";
+import { useUI } from "@/store/ui";
+import { effectiveLanguageId, languageLabel } from "@/lib/languages";
 import { dirnamePosix, MARKDOWN_EXT_RE } from "@/lib/markdownPaths";
 import { isSvgPath, keepsDisplayWhenHidden, previewKindForPath } from "@/lib/previewPaths";
 const EditorPane = lazy(() => import("./EditorPane").then(m => ({ default: m.EditorPane })));
@@ -62,6 +64,7 @@ function EditorBreadcrumb({ task }: { task: Task }) {
   const activeId = useActiveTabId(task.id);
   const tab = useApp(s => (s.tabs[task.id] ?? []).find(t => t.id === activeId));
   const revealInTree = useApp(s => s.revealInTree);
+  const openSyntaxPalette = useUI(s => s.openSyntaxPalette);
   const [copied, setCopied] = useState(false);
   if (!tab || (tab.type !== "edit" && tab.type !== "diff") || !tab.path) return null;
   const path = tab.path;
@@ -111,6 +114,21 @@ function EditorBreadcrumb({ task }: { task: Task }) {
         })}
       </div>
       <div className="ml-1 flex shrink-0 items-center gap-0.5">
+        {/* Sublime puts the syntax picker bottom-right; termic has no status
+            bar, and inventing one to hold a single control would cost the
+            terminal an edge. It goes on the bar this file already has, next
+            to the other per-file actions. Editor tabs only: a diff has no
+            editable buffer, so its syntax always follows its path. */}
+        {tab.type === "edit" && (
+          <button
+            data-testid="syntax-button"
+            onClick={() => openSyntaxPalette(task.id, tab.id)}
+            title="Set syntax"
+            className="shrink-0 rounded px-1.5 py-0.5 text-[11.5px] text-[var(--color-fg-faint)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]"
+          >
+            {languageLabel(effectiveLanguageId(tab))}
+          </button>
+        )}
         <button onClick={copyPath} title="Copy path" className={iconBtn}>
           {copied ? <Check className="h-3.5 w-3.5 text-[var(--color-accent)]" /> : <Copy className="h-3.5 w-3.5" />}
         </button>

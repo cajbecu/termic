@@ -169,6 +169,10 @@ interface UIState {
   commandPaletteOpen: boolean;
   /** ⌥⌘P prompt palette — searchable list of library prompts (title only). */
   promptPaletteOpen: boolean;
+  /** "Set syntax" picker — which editor tab it will re-highlight; null =
+   *  closed. Keyed by tab (not just task) because the pick applies to one
+   *  buffer, and the palette can outlive a tab switch underneath it. */
+  syntaxPaletteFor: { taskId: string; tabId: string } | null;
   /** The prompt-destination picker: "Run "<title>"" modal shared by the
    *  Prompts dropdown and the prompt palette's fallback. `body` is a
    *  one-shot editable copy of the
@@ -265,6 +269,8 @@ interface UIState {
   closeCommandPalette: () => void;
   openPromptPalette: () => void;
   closePromptPalette: () => void;
+  openSyntaxPalette: (taskId: string, tabId: string) => void;
+  closeSyntaxPalette: () => void;
   /** Open the destination picker for `prompt`, seeding the editable body. */
   openPromptFire: (prompt: Prompt) => void;
   closePromptFire: () => void;
@@ -366,6 +372,7 @@ export const useUI = create<UIState>(set => ({
   projectPickerOpen: false,
   commandPaletteOpen: false,
   promptPaletteOpen: false,
+  syntaxPaletteFor: null,
   promptFire: null,
   renameRequest: null,
   busyMessage: null,
@@ -429,6 +436,8 @@ export const useUI = create<UIState>(set => ({
   closeCommandPalette:() => set({ commandPaletteOpen: false }),
   openPromptPalette: () => set({ promptPaletteOpen: true }),
   closePromptPalette:() => set({ promptPaletteOpen: false }),
+  openSyntaxPalette: (taskId: string, tabId: string) => set({ syntaxPaletteFor: { taskId, tabId } }),
+  closeSyntaxPalette:() => set({ syntaxPaletteFor: null }),
   openPromptFire:    (prompt) => set({ promptFire: { prompt, body: prompt.body } }),
   closePromptFire:   () => set({ promptFire: null }),
   setPromptFireBody: (body) => set(s => (s.promptFire ? { promptFire: { ...s.promptFire, body } } : s)),

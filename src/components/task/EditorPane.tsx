@@ -1,5 +1,5 @@
-// CodeMirror 6 editor with syntax highlight. Loads file contents, picks the
-// right language extension by extension, mounts once.
+// CodeMirror 6 editor with syntax highlight. Loads file contents, resolves the
+// language (manual pick > path > content sniff, see lib/languages), mounts once.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { EditTab, Task } from "@/lib/types";
@@ -9,28 +9,11 @@ import { indentWithTab } from "@codemirror/commands";
 import { basicSetup } from "codemirror";
 import { search } from "@codemirror/search";
 import { lintGutter } from "@codemirror/lint";
-import { javascript } from "@codemirror/lang-javascript";
-import { python } from "@codemirror/lang-python";
-import { rust } from "@codemirror/lang-rust";
-import { json } from "@codemirror/lang-json";
-import { markdown } from "@codemirror/lang-markdown";
-import { html } from "@codemirror/lang-html";
-import { css } from "@codemirror/lang-css";
-import { yaml } from "@codemirror/lang-yaml";
-import { sql } from "@codemirror/lang-sql";
-import { xml } from "@codemirror/lang-xml";
-import { cpp } from "@codemirror/lang-cpp";
-import { go } from "@codemirror/lang-go";
-import { java } from "@codemirror/lang-java";
-import { elixir } from "codemirror-lang-elixir";
-import { StreamLanguage, indentUnit } from "@codemirror/language";
-import { dockerFile } from "@codemirror/legacy-modes/mode/dockerfile";
-import { shell } from "@codemirror/legacy-modes/mode/shell";
-import { toml } from "@codemirror/legacy-modes/mode/toml";
-import { ruby } from "@codemirror/legacy-modes/mode/ruby";
-import { properties } from "@codemirror/legacy-modes/mode/properties";
-import { proto3 } from "@/lib/protoMode";
+import { indentUnit } from "@codemirror/language";
 import { taskFileRead, taskFileWrite } from "@/lib/ipc";
+import { langForId } from "@/lib/languageExts";
+import { effectiveLanguageId, languageIdForPath } from "@/lib/languages";
+import { detectSyntaxFromContent } from "@/lib/detectSyntax";
 import { attachHiddenScrollRestore } from "@/lib/hiddenScrollRestore";
 import { reviewCommentsExtension, dispatchSelectionComment } from "./reviewCommentsExt";
 import { inlineBlameExtension, invalidateBlame, refreshBlame, markBlameStale } from "./inlineBlameExt";
@@ -40,46 +23,23 @@ import { useUI } from "@/store/ui";
 import { usePrefs, resolveTheme } from "@/store/prefs";
 import { resolveEditorTheme, editorSurfaceTheme } from "@/lib/editorTheme";
 
-// Map a file path to a CodeMirror language extension. We match by extension
-// first, then fall back to basename heuristics for files like `Dockerfile`,
-// `Makefile`, etc. that have no extension.
-export function langForPath(p: string) {
-  const base = p.split("/").pop() || p;
-  const lower = base.toLowerCase();
-  const ext = base.includes(".") ? base.split(".").pop()!.toLowerCase() : "";
-
-  // Filename-based (no extension or special name).
-  if (/^dockerfile/i.test(base))                           return StreamLanguage.define(dockerFile);
-  if (lower === "makefile" || lower.endsWith(".mk"))       return null;  // no good CM grammar
-  if (lower === "justfile")                                return StreamLanguage.define(shell);
-  if (/^(\.env|\.env\..+)$/i.test(base))                   return StreamLanguage.define(properties);
-
-  // Extension-based.
-  if (["js", "jsx", "ts", "tsx", "mjs", "cjs"].includes(ext))
-    return javascript({ jsx: true, typescript: ext.startsWith("ts") });
-  if (["py", "pyi"].includes(ext))                         return python();
-  if (ext === "rs")                                        return rust();
-  if (ext === "json")                                      return json();
-  if (["md", "markdown", "mdx"].includes(ext))             return markdown();
-  // HTML-ish template formats reuse the HTML grammar — component markup
-  // gets tag highlighting; <script>/<style> blocks won't get deep JS/CSS
-  // parsing but the same trade VS Code makes without dedicated extensions.
-  if (["html", "htm", "vue", "svelte", "astro", "hbs", "handlebars",
-       "ejs", "mustache", "twig", "liquid", "njk"].includes(ext)) return html();
-  if (ext === "css")                                       return css();
-  if (["yaml", "yml"].includes(ext))                       return yaml();
-  if (ext === "sql")                                       return sql();
-  if (["xml", "svg"].includes(ext))                        return xml();
-  if (["c", "cc", "cpp", "cxx", "h", "hpp", "hh"].includes(ext)) return cpp();
-  if (ext === "go")                                        return go();
-  if (["java", "kt"].includes(ext))                        return java();
-  if (["ex", "exs"].includes(ext))                         return elixir();
-  if (ext === "proto")                                     return StreamLanguage.define(proto3);
-  if (["sh", "bash", "zsh", "fish"].includes(ext))         return StreamLanguage.define(shell);
-  if (ext === "toml")                                      return StreamLanguage.define(toml);
-  if (["rb", "rake"].includes(ext))                        return StreamLanguage.define(ruby);
-  if (["properties", "conf", "ini", "env"].includes(ext))  return StreamLanguage.define(properties);
-  return null;
+/** The syntax to highlight this tab with, sniffing the content when the path
+ *  claims nothing (an extension-less file, a `.txt` that is really JSON). The
+ *  sniff result is remembered on the tab so the breadcrumb button and the
+ *  picker agree with what the buffer actually shows; a manual pick and a
+ *  recognised extension both take precedence and skip it entirely. */
+function resolveSyntax(taskId: string, tab: EditTab, content: string): string {
+  if (!tab.syntax && !languageIdForPath(tab.path)) {
+    const sniffed = detectSyntaxFromContent(content);
+    // Bail when unchanged: this runs on every load (and every external
+    // reload), and an unconditional write is the store churn docs/performance
+    // bear trap 8 is about.
+    if (sniffed && sniffed !== tab.syntaxAuto) {
+      useApp.getState().patchTab(taskId, tab.id, { syntaxAuto: sniffed });
+      return sniffed;
+    }
+  }
+  return effectiveLanguageId(tab);
 }
 
 // CodeMirror's search/replace panel inputs (plus any future panel that
@@ -154,6 +114,9 @@ export function EditorPane({ task, tab, active, onContent }: {
   onContentRef.current = onContent;
   const viewRef = useRef<EditorView | null>(null);
   const langCompRef = useRef(new Compartment());
+  // Which language id the compartment currently holds, so switching syntax
+  // (or loading a file) doesn't reconfigure it to what it already is.
+  const langIdRef = useRef<string | null>(null);
   // Theme lives in its own compartment so font-size / ligatures changes can be
   // reconfigured live without recreating the entire EditorView.
   const themeCompRef = useRef(new Compartment());
@@ -252,7 +215,8 @@ export function EditorPane({ task, tab, active, onContent }: {
         const content = await taskFileRead(task.id, tab.path);
         if (!alive || !hostRef.current) return;
         blameOnRef.current = usePrefs.getState().inlineBlame;
-        const lang = langForPath(tab.path);
+        langIdRef.current = resolveSyntax(task.id, tab, content);
+        const lang = langForId(langIdRef.current);
 
         // Flip the tab's dirty dot on the first edit after a load/save.
         const markDirty = () => {
@@ -530,6 +494,19 @@ export function EditorPane({ task, tab, active, onContent }: {
     blameOnRef.current = inlineBlame;
     v.dispatch({ effects: blameCompRef.current.reconfigure(buildBlame(inlineBlame)) });
   }, [inlineBlame, buildBlame]);
+
+  // "Set syntax" (breadcrumb button / command palette) writes `tab.syntax`;
+  // the content sniff writes `tab.syntaxAuto`. Either way the language
+  // compartment is reconfigured in place — no view rebuild, so the cursor,
+  // undo history and scroll position survive changing a file's syntax.
+  const syntaxId = effectiveLanguageId(tab);
+  useEffect(() => {
+    const v = viewRef.current;
+    if (!v || langIdRef.current === syntaxId) return;
+    langIdRef.current = syntaxId;
+    const lang = langForId(syntaxId);
+    v.dispatch({ effects: langCompRef.current.reconfigure(lang ? [lang] : []) });
+  }, [syntaxId]);
 
   // A commit landing anywhere (Git panel, or the agent committing in its own
   // terminal) can re-attribute lines this file's snapshot already described.
