@@ -1533,7 +1533,7 @@ const pressCmdF = () =>
 /** Type one character at a time, the way a person does: React sees N input
  *  events, and each re-runs the search. A single value assignment would skip
  *  every intermediate state. */
-const typeFind = async (q: string) => {
+const typeFind = async (q: string, taskId?: string) => {
   for (let i = 1; i <= q.length; i++) {
     await browser.execute((v, inputSel) => {
       const shown = (el: Element) => el.getBoundingClientRect().width > 0;
@@ -1544,6 +1544,21 @@ const typeFind = async (q: string) => {
       el.dispatchEvent(new Event("input", { bubbles: true }));
     }, q.slice(0, i), FIND_INPUT);
   }
+  // Every prefix runs its own search and paints its own marks, so a wait that
+  // only COUNTS marks can be satisfied mid-word: "need" matches the same three
+  // places "needle" does, and the reading then belongs to the prefix (this is
+  // how the split-view ⌘F case failed on CI, asserting ["needle" x3] against
+  // three "need"s). Hand control back only once no mark is still showing a
+  // prefix. Zero marks passes on purpose: a query that stops matching is a
+  // real case, and the callers that expect marks wait for their count next.
+  // Whitespace-insensitive on purpose: markdown-it keeps the source newline of
+  // a hard-wrapped paragraph inside the text node, so a mark for a phrase the
+  // reader sees on one line reads "wrapped phrase\nspans".
+  const norm = (t: string) => t.replace(/\s+/g, " ").toLowerCase();
+  await browser.waitUntil(
+    async () => (await readFind(taskId)).texts.every(t => norm(t) === norm(q)),
+    { timeout: 8_000, timeoutMsg: `find marks never settled on the whole query "${q}"` },
+  );
 };
 
 const pressInFind = (key: string, shift = false) =>
@@ -2078,7 +2093,7 @@ describe("⌘F ownership across previews", () => {
       await pressCmdF();
       await browser.waitUntil(async () => (await bars()).visible === 1,
         { timeout: 8_000, timeoutMsg: "the preview never claimed ⌘F after the click" });
-      await typeFind("needle");
+      await typeFind("needle", taskA);
       const p = await waitFind((x) => x.texts.length === 3, "split preview never marked", taskA);
       expect(p.texts).toEqual(["needle", "needle", "needle"]);
       expect(p.parents).toEqual(["P", "P", "P"]);
