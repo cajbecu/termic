@@ -11612,7 +11612,19 @@ async fn play_completion_sound(name: String) {
 
 #[tauri::command]
 fn open_path(path: String) -> Result<(), String> {
-    let (program, args) = open_command(std::env::consts::OS, &path);
+    spawn_os_open(&path)
+}
+
+/// Hand `target` (a URL or a filesystem path) to the OS default handler.
+///
+/// THE single implementation, shared by `open_path` and `open_url_default`.
+/// It is factored out rather than duplicated because the preview buttons moved
+/// from the former to the latter (GH #245) on the strength of the two being
+/// identical: with no browser configured they must stay that way, and two
+/// copies of three lines is exactly the kind of thing a later refactor edits
+/// one of. Now they cannot disagree.
+fn spawn_os_open(target: &str) -> Result<(), String> {
+    let (program, args) = open_command(std::env::consts::OS, target);
     Command::new(program).args(&args).status().map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -11846,6 +11858,19 @@ fn browser_argv(template: &str, url: &str) -> Result<Vec<String>, String> {
 /// (because `open` exists) and still fails at launch, which is exactly why
 /// `open_external_url` also falls back at runtime.
 fn browser_program_exists(program: &str) -> bool {
+    // `is_file()` alone is not enough: a non-executable file that happens to
+    // share the name (a README in a PATH dir, a stray data file) would pass
+    // validation at save time and only fail on click. The runtime fallback
+    // would catch it, but the point of this check is to fail in the settings
+    // field, where the user can see and fix it.
+    #[cfg(unix)]
+    let is_exec = |p: &std::path::Path| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    };
+    #[cfg(not(unix))]
     let is_exec = |p: &std::path::Path| p.is_file();
     if program.contains('/') {
         return is_exec(std::path::Path::new(program));
@@ -12003,9 +12028,8 @@ fn open_url_default(url: &str) -> Result<(), String> {
     }
     #[cfg(not(feature = "e2e"))]
     {
-        let (program, args) = open_command(std::env::consts::OS, url);
-        Command::new(program).args(&args).status().map_err(|e| e.to_string())?;
-        Ok(())
+        // Same call `open_path` makes - see `spawn_os_open`.
+        spawn_os_open(url)
     }
 }
 
@@ -15959,6 +15983,23 @@ mod tests {
         assert!(browser_program_exists("sh"));
         assert!(!browser_program_exists("termic-no-such-browser-xyz"));
         assert!(!browser_program_exists("/nope/termic-no-such-browser-xyz"));
+    }
+
+    #[test]
+    fn browser_program_exists_requires_the_execute_bit() {
+        // A file on PATH with the right NAME but no +x is not a launcher.
+        // Accepting it would pass the settings field and fail on click, which
+        // is the failure mode this whole feature exists to avoid.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let f = dir.path().join("termic-fake-browser");
+        fs::write(&f, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&f, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!browser_program_exists(f.to_str().unwrap()), "a non-executable file passed");
+        fs::set_permissions(&f, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(browser_program_exists(f.to_str().unwrap()), "an executable file was rejected");
+        // A directory is not a launcher either.
+        assert!(!browser_program_exists(dir.path().to_str().unwrap()));
     }
 
     #[test]
