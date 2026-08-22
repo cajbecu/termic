@@ -130,6 +130,11 @@ export interface AppState {
    *  `spawnArgsForCli` can consult `agent.command + args + capabilities`
    *  instead of hard-coding by CLI string. Empty until first loadAll. */
   agents: import("@/lib/types").Agent[];
+  /** App-wide browser command (`Settings.preview_browser`, GH #245). Mirrored
+   *  into the store because terminal link clicks need it synchronously — an
+   *  async settings read per Cmd+click would be a round trip on a hot path.
+   *  Written on load and again by Settings on save. "" = OS default. */
+  previewBrowser: string;
   /** PATH-detection results keyed by agent id. Empty until `refreshClis`
    *  first resolves — an empty map means "show every agent" so the
    *  pickers are never stranded before/without detection. Drives the
@@ -560,6 +565,7 @@ export const useApp = create<AppState>((set, get) => ({
   collapsedGroups: initialCollapsedGrp as Record<string, boolean>,
   groupColors: initialGroupColors as Record<string, string>,
   agents: [],
+  previewBrowser: "",
   detectedClis: {},
   spotlightTaskId: {},
 
@@ -599,7 +605,7 @@ export const useApp = create<AppState>((set, get) => ({
       );
       try { localStorage.setItem(LS_GROUP_COLORS, JSON.stringify(groupColors)); } catch {}
     }
-    set({ projects, tasks, collapsedGroups, groupColors, agents: (settings.agents as import("@/lib/types").Agent[]) ?? [] });
+    set({ projects, tasks, collapsedGroups, groupColors, agents: (settings.agents as import("@/lib/types").Agent[]) ?? [], previewBrowser: settings.preview_browser ?? "" });
     // Same housekeeping for Agent Race cohorts: once every task in a race is
     // archived or deleted, drop the race so the board and its localStorage
     // don't accumulate dead entries.

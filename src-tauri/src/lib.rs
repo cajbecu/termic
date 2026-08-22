@@ -85,6 +85,23 @@ pub struct Project {
     pub base_branch: String,
     pub remote: String,
     pub preview_url: String,
+    /// Per-project OVERRIDE of the global `Settings.preview_browser` (GH #245):
+    /// the command that opens this project's preview URL and terminal links.
+    ///
+    /// Three states, which is why this is an `Option` and `tasks_path` (the
+    /// other project-level override) is not:
+    ///   `None`      - follow the global setting. The normal case.
+    ///   `Some("")`  - force the OS default browser for THIS project, even
+    ///                 when the global setting names one. A plain `String`
+    ///                 could not express this: empty already means "inherit".
+    ///   `Some(cmd)` - launch `cmd` instead. See `browser_argv`.
+    ///
+    /// Personal (projects.json) on purpose, never `.termic.yaml`: a launch
+    /// command is machine-specific, so a committed `open -a "Google Chrome"`
+    /// would be silently dead for a teammate on Linux. `preview_url` is
+    /// committable precisely because a URL is not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_browser: Option<String>,
     pub files_to_copy: Vec<String>,
     pub setup_script: String,
     pub run_script: String,
@@ -3074,6 +3091,8 @@ fn project_add(root_path: String, non_git: Option<bool>) -> Result<Project, Stri
         base_branch: if non_git { String::new() } else { format!("{remote}/{base}") },
         remote,
         preview_url: String::new(),
+        // None = follow the global "Preview browser" setting (GH #245).
+        preview_browser: None,
         // Seeded with the patterns 99% of repos benefit from. The user can
         // tune these in Settings → Repositories → Files to copy.
         //   .env*         — local secrets git ignores. Without these the
@@ -3273,6 +3292,7 @@ fn project_add_multi(root_path: String, name: String, members: Vec<ProjectMember
         base_branch: if non_git { String::new() } else { format!("{remote}/{base}") },
         remote,
         preview_url: String::new(),
+        preview_browser: None,
         // No file-copy defaults for multi-repo: each member already has
         // its own copy list; the host repo is for docs/skills, not code.
         files_to_copy: Vec::new(),
@@ -11714,6 +11734,281 @@ fn open_command(os: &str, target: &str) -> (&'static str, Vec<String>) {
     }
 }
 
+// ─────────────────── preview browser (GH #245) ───────────────────
+//
+// The user names a COMMAND TEMPLATE, not an app: `open -a "Google Chrome"`,
+// `firefox -P work`, `flatpak run com.google.Chrome`. A template is what lets
+// them pick a Chrome/Edge profile, which naming an app cannot.
+//
+// The template is tokenised HERE and spawned as argv. It is never handed to a
+// shell, and that is not a stylistic preference: Debian's `sensible-browser`
+// passes $BROWSER to `eval`, and the same mistake here would let a preview URL
+// like `http://localhost:3000/?a=1&b=2` split on the unquoted `&` — the exact
+// bug `open_command` documents for `cmd /C start`. Verified by experiment on
+// macOS: `open -na App --args --profile-directory="Profile 1" <url>` delivers
+// two argv entries with the `&` and any `%20` intact.
+
+/// The `{url}` placeholder in a browser command template.
+const BROWSER_URL_PLACEHOLDER: &str = "{url}";
+
+/// Split a browser command template into argv, honouring quotes the way a
+/// user reasonably expects when copying a command out of a terminal.
+///
+/// Deliberately NOT a shell: no variable expansion, no globbing, no command
+/// substitution, no operators. Double and single quotes group a run and are
+/// removed; inside double quotes a backslash escapes `"` or `\`; outside
+/// quotes a backslash escapes the next character. An unterminated quote is an
+/// error rather than a silently truncated argument, because the difference
+/// shows up as a link that mysteriously fails to open.
+fn split_browser_command(input: &str) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut has_cur = false;
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() => {
+                if has_cur {
+                    out.push(std::mem::take(&mut cur));
+                    has_cur = false;
+                }
+            }
+            '\'' => {
+                has_cur = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        Some(ch) => cur.push(ch),
+                        None => return Err("unterminated single quote".into()),
+                    }
+                }
+            }
+            '"' => {
+                has_cur = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('\\') => match chars.next() {
+                            // Only these two are escapes inside double quotes;
+                            // anything else keeps the backslash, so a Windows-
+                            // ish path in a quoted arg survives intact.
+                            Some(ch @ ('"' | '\\')) => cur.push(ch),
+                            Some(ch) => { cur.push('\\'); cur.push(ch); }
+                            None => return Err("unterminated double quote".into()),
+                        },
+                        Some(ch) => cur.push(ch),
+                        None => return Err("unterminated double quote".into()),
+                    }
+                }
+            }
+            '\\' => {
+                has_cur = true;
+                match chars.next() {
+                    Some(ch) => cur.push(ch),
+                    None => return Err("trailing backslash".into()),
+                }
+            }
+            ch => { has_cur = true; cur.push(ch); }
+        }
+    }
+    if has_cur { out.push(cur); }
+    Ok(out)
+}
+
+/// Build the argv that opens `url` with `template`.
+///
+/// `{url}` is substituted wherever it appears; with no placeholder the URL is
+/// appended as the final argument, which is what every preset relies on
+/// (`open -a Safari` + url, `firefox -P work` + url). The placeholder exists
+/// for the rare command that needs the URL in the middle.
+///
+/// The URL always lands as its OWN argv entry (or inside one), never re-split.
+fn browser_argv(template: &str, url: &str) -> Result<Vec<String>, String> {
+    let toks = split_browser_command(template)?;
+    if toks.is_empty() {
+        return Err("the browser command is empty".into());
+    }
+    if toks.iter().any(|t| t.contains(BROWSER_URL_PLACEHOLDER)) {
+        return Ok(toks.into_iter()
+            .map(|t| t.replace(BROWSER_URL_PLACEHOLDER, url))
+            .collect());
+    }
+    let mut argv = toks;
+    argv.push(url.to_string());
+    Ok(argv)
+}
+
+/// Does `argv[0]` name something we can actually execute? Used by Settings to
+/// reject a typo at save time rather than at click time. An absolute/relative
+/// path is checked directly; a bare name is looked up on PATH.
+///
+/// This can only vouch for the LAUNCHER. `open -a "Gogle Chrome"` passes here
+/// (because `open` exists) and still fails at launch, which is exactly why
+/// `open_external_url` also falls back at runtime.
+fn browser_program_exists(program: &str) -> bool {
+    let is_exec = |p: &std::path::Path| p.is_file();
+    if program.contains('/') {
+        return is_exec(std::path::Path::new(program));
+    }
+    let Some(paths) = std::env::var_os("PATH") else { return false };
+    std::env::split_paths(&paths).any(|dir| is_exec(&dir.join(program)))
+}
+
+/// Validate a browser command template for the Settings UI. `Ok(())` for an
+/// empty template (that means "OS default", always valid).
+#[tauri::command]
+fn browser_command_check(command: String) -> Result<(), String> {
+    if command.trim().is_empty() {
+        return Ok(());
+    }
+    let argv = browser_argv(&command, "https://example.invalid/")?;
+    if !browser_program_exists(&argv[0]) {
+        return Err(format!("`{}` was not found on your PATH", argv[0]));
+    }
+    Ok(())
+}
+
+/// E2E-ONLY: record the argv a preview/link open WOULD have run, instead of
+/// launching a browser on the machine running the suite. One JSON line per
+/// open in the isolated profile dir, so a spec can assert which browser the
+/// precedence rules picked with plain `fs` and no extra release-build IPC.
+#[cfg(feature = "e2e")]
+fn e2e_record_browser(argv: &[String]) {
+    if let Ok(dir) = data_dir() {
+        let line = serde_json::to_string(argv).unwrap_or_default();
+        let _ = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("e2e-browser.log"))
+            .and_then(|mut f| writeln!(f, "{line}"));
+    }
+}
+
+/// How long to watch a freshly spawned browser command for an early failure.
+///
+/// A launcher that is going to fail does so immediately (`open -a "Nonexistent"`
+/// exits 1 in a few ms), while a browser that took the URL either exits 0 at
+/// once or stays alive for its whole session. So a short bounded watch cleanly
+/// separates the two without ever waiting on a real browser.
+///
+/// NOTE for the next reader: this is NOT the banned `thread::sleep` poll loop
+/// (docs/performance.md bear trap 9). That one is about steady-state polling on
+/// a hot path; this is one bounded wait per user click, on the blocking pool.
+const BROWSER_WATCH_MS: u64 = 500;
+const BROWSER_WATCH_STEP_MS: u64 = 20;
+
+/// Outcome of trying to launch a URL with a user-configured browser command.
+#[derive(Debug, PartialEq, Eq)]
+enum BrowserLaunch {
+    /// The configured command took the URL.
+    Launched,
+    /// The command failed; the caller should fall back to the OS default.
+    Failed(String),
+}
+
+/// Run `argv`, watching briefly for an immediate failure. Blocking: callers
+/// must be on the blocking pool.
+#[cfg_attr(feature = "e2e", allow(dead_code))]
+fn run_browser_argv(argv: &[String]) -> BrowserLaunch {
+    let mut child = match Command::new(&argv[0]).args(&argv[1..]).spawn() {
+        Ok(c) => c,
+        Err(e) => return BrowserLaunch::Failed(format!("could not run `{}`: {e}", argv[0])),
+    };
+    let mut waited = 0;
+    while waited < BROWSER_WATCH_MS {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Exited already. Zero means it handed the URL off and quit
+                // (every `open`-style launcher); non-zero is a real failure,
+                // and the one the user actually hits: a misspelled app name.
+                return if status.success() {
+                    BrowserLaunch::Launched
+                } else {
+                    BrowserLaunch::Failed(format!(
+                        "`{}` exited with {}", argv[0],
+                        status.code().map(|c| c.to_string()).unwrap_or_else(|| "a signal".into()),
+                    ))
+                };
+            }
+            // Still running past the watch window: a real browser holding the
+            // foreground (`firefox <url>` on Linux does exactly this).
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(BROWSER_WATCH_STEP_MS));
+                waited += BROWSER_WATCH_STEP_MS;
+            }
+            Err(e) => return BrowserLaunch::Failed(format!("could not wait on `{}`: {e}", argv[0])),
+        }
+    }
+    BrowserLaunch::Launched
+}
+
+/// Open `url` in the user's configured browser, falling back to the OS default
+/// (GH #245).
+///
+/// `browser` is the template the FRONTEND already resolved (project override
+/// beats the app-wide setting - see `resolveBrowserCommand` in
+/// lib/previewBrowser.ts, which owns and tests that precedence); empty
+/// or absent means "OS default", which takes the byte-identical path this app
+/// used before the setting existed. Returns which one happened plus the reason
+/// on a fallback, so the frontend can say so instead of leaving a dead link.
+#[tauri::command]
+async fn open_external_url(url: String, browser: Option<String>) -> Result<BrowserOpen, String> {
+    let template = browser.unwrap_or_default();
+    if template.trim().is_empty() {
+        return open_url_default(&url).map(|_| BrowserOpen { used: "default".into(), reason: None });
+    }
+    let argv = match browser_argv(&template, &url) {
+        Ok(a) => a,
+        Err(e) => {
+            open_url_default(&url)?;
+            return Ok(BrowserOpen { used: "fallback".into(), reason: Some(e) });
+        }
+    };
+    #[cfg(feature = "e2e")]
+    {
+        e2e_record_browser(&argv);
+        return Ok(BrowserOpen { used: "browser".into(), reason: None });
+    }
+    #[cfg(not(feature = "e2e"))]
+    {
+        match tauri::async_runtime::spawn_blocking(move || run_browser_argv(&argv)).await {
+            Ok(BrowserLaunch::Launched) => Ok(BrowserOpen { used: "browser".into(), reason: None }),
+            Ok(BrowserLaunch::Failed(why)) => {
+                open_url_default(&url)?;
+                Ok(BrowserOpen { used: "fallback".into(), reason: Some(why) })
+            }
+            Err(e) => {
+                open_url_default(&url)?;
+                Ok(BrowserOpen { used: "fallback".into(), reason: Some(e.to_string()) })
+            }
+        }
+    }
+}
+
+/// What `open_external_url` did. `used` is "default" (no browser configured),
+/// "browser" (the configured one took it) or "fallback" (it failed and the OS
+/// default took it); `reason` is set only for "fallback".
+#[derive(Debug, Clone, Serialize)]
+pub struct BrowserOpen {
+    pub used: String,
+    pub reason: Option<String>,
+}
+
+/// Hand `url` to the OS default handler: the pre-#245 path, unchanged.
+fn open_url_default(url: &str) -> Result<(), String> {
+    #[cfg(feature = "e2e")]
+    {
+        e2e_record_browser(&["<default>".to_string(), url.to_string()]);
+        return Ok(());
+    }
+    #[cfg(not(feature = "e2e"))]
+    {
+        let (program, args) = open_command(std::env::consts::OS, url);
+        Command::new(program).args(&args).status().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
 // ───────────────────────────── settings / discovery ─────────────────────────────
 //
 // App-wide preferences live in `settings.json` next to `projects.json`. Today
@@ -11861,6 +12156,18 @@ pub struct Settings {
     /// the same built-in. Resolution lives in `project_tasks_root`.
     #[serde(default = "builtin_tasks_path")]
     pub default_tasks_path: String,
+    /// App-wide command that opens preview URLs and terminal links (GH #245).
+    /// Empty (the default) means the OS default browser, i.e. exactly the
+    /// behaviour that shipped before this setting existed.
+    ///
+    /// A COMMAND TEMPLATE, not an app name: `open -a "Google Chrome"`,
+    /// `firefox -P work`, `flatpak run com.google.Chrome`. That is what lets a
+    /// user pick a Chrome/Edge profile, which naming an app cannot. Tokenised
+    /// by `split_browser_command` and spawned as argv - NEVER through a shell,
+    /// or the URL's `&` would be re-parsed (see `open_command`). Projects
+    /// override it via `Project.preview_browser`.
+    #[serde(default)]
+    pub preview_browser: String,
 }
 
 /// Whether the pre-create base fetch (GH #79) is enabled. Default-on: only an
@@ -14048,7 +14355,7 @@ pub fn run() {
             task_rename, project_rename,
             pty_spawn, pty_write, pty_resize, pty_kill,
             procmon_start, procmon_sample, procmon_stop, procmon_signal, procmon_open_window,
-            notify, open_path, reveal_path, open_file_external, home_dir, project_tasks_path_default, tasks_path_conflicts, default_shell, path_exists, path_is_git_repo, log_line, pty_debug_append, terminal_stage_file, install_notification_sound, play_completion_sound,
+            notify, open_path, reveal_path, open_file_external, open_external_url, browser_command_check, home_dir, project_tasks_path_default, tasks_path_conflicts, default_shell, path_exists, path_is_git_repo, log_line, pty_debug_append, terminal_stage_file, install_notification_sound, play_completion_sound,
             settings_load, settings_save, discovery_dismiss, agents_save, agents_defaults, run_capture_command, discover_repos, detect_clis,
             automation::automation_result,
             automation::automation_armed,
@@ -15543,6 +15850,126 @@ mod tests {
     fn open_command_unknown_os_falls_back_to_xdg_open() {
         let (prog, _) = open_command("freebsd", "https://x.com");
         assert_eq!(prog, "xdg-open");
+    }
+
+    // ── preview browser (GH #245) ──
+
+    #[test]
+    fn browser_argv_appends_the_url_when_there_is_no_placeholder() {
+        // Every shipped preset relies on this: `open -a Safari` + the URL.
+        assert_eq!(
+            browser_argv("open -a Safari", "http://localhost:3000/").unwrap(),
+            vec!["open", "-a", "Safari", "http://localhost:3000/"],
+        );
+    }
+
+    #[test]
+    fn browser_argv_keeps_a_query_string_in_one_argument() {
+        // THE regression guard. A shell would split this on the unquoted `&`
+        // and open a truncated page (the bug open_command documents for
+        // `cmd /C start`, and what Debian's eval-based $BROWSER would do).
+        // Confirmed against the real `open` on macOS with an argv probe.
+        let argv = browser_argv(
+            r#"open -na "Google Chrome" --args --profile-directory=Default"#,
+            "http://localhost:3000/?a=1&b=2&r=x%20y",
+        ).unwrap();
+        assert_eq!(argv, vec![
+            "open", "-na", "Google Chrome", "--args",
+            "--profile-directory=Default",
+            "http://localhost:3000/?a=1&b=2&r=x%20y",
+        ]);
+    }
+
+    #[test]
+    fn browser_argv_substitutes_the_placeholder_instead_of_appending() {
+        let argv = browser_argv("launcher {url} --after", "https://x.test/").unwrap();
+        assert_eq!(argv, vec!["launcher", "https://x.test/", "--after"]);
+        // Substituting means NOT also appending, or the URL opens twice.
+        assert_eq!(argv.iter().filter(|a| a.contains("x.test")).count(), 1);
+    }
+
+    #[test]
+    fn browser_argv_rejects_an_empty_template() {
+        // Callers treat empty as "OS default" before getting here; reaching
+        // this with nothing but whitespace is a bad template, not a default.
+        assert!(browser_argv("   ", "https://x.test/").is_err());
+    }
+
+    #[test]
+    fn split_browser_command_keeps_quoted_spaces_together() {
+        assert_eq!(
+            split_browser_command(r#"open -a "Brave Browser""#).unwrap(),
+            vec!["open", "-a", "Brave Browser"],
+        );
+        assert_eq!(
+            split_browser_command("open -a 'Brave Browser'").unwrap(),
+            vec!["open", "-a", "Brave Browser"],
+        );
+    }
+
+    #[test]
+    fn split_browser_command_handles_a_quoted_profile_flag() {
+        // The form users copy off a blog post: the value quoted, not the flag.
+        assert_eq!(
+            split_browser_command(r#"chrome --profile-directory="Profile 1""#).unwrap(),
+            vec!["chrome", "--profile-directory=Profile 1"],
+        );
+    }
+
+    #[test]
+    fn split_browser_command_rejects_an_unterminated_quote() {
+        // Silently dropping the tail would produce a command that looks fine
+        // in the settings box and fails only on click.
+        assert!(split_browser_command(r#"open -a "Google Chrome"#).is_err());
+        assert!(split_browser_command("open -a 'Chrome").is_err());
+        assert!(split_browser_command(r"open -a Chrome\").is_err());
+    }
+
+    #[test]
+    fn split_browser_command_does_not_expand_anything() {
+        // Not a shell: no globbing, no substitution, no operators. These are
+        // literal argv entries, which is what keeps a URL inert.
+        assert_eq!(
+            split_browser_command("browser $HOME/* `id` && rm").unwrap(),
+            vec!["browser", "$HOME/*", "`id`", "&&", "rm"],
+        );
+    }
+
+    #[test]
+    fn split_browser_command_escapes_inside_double_quotes() {
+        assert_eq!(
+            split_browser_command(r#"b "a\"b" c"#).unwrap(),
+            vec!["b", r#"a"b"#, "c"],
+        );
+        // A backslash that is not an escape keeps itself, so a path survives.
+        assert_eq!(split_browser_command(r#"b "a\nb""#).unwrap(), vec!["b", r"a\nb"]);
+    }
+
+    #[test]
+    fn split_browser_command_tolerates_padding() {
+        assert_eq!(split_browser_command("  open   -a  Safari  ").unwrap(), vec!["open", "-a", "Safari"]);
+        assert!(split_browser_command("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn browser_program_exists_finds_a_path_and_a_path_lookup() {
+        // An absolute path to something that is really there, and a bare name
+        // resolved through PATH. `sh` is on every platform we ship.
+        assert!(browser_program_exists("/bin/sh"));
+        assert!(browser_program_exists("sh"));
+        assert!(!browser_program_exists("termic-no-such-browser-xyz"));
+        assert!(!browser_program_exists("/nope/termic-no-such-browser-xyz"));
+    }
+
+    #[test]
+    fn browser_command_check_accepts_empty_and_rejects_a_typo() {
+        // Empty is "OS default", always valid.
+        assert!(browser_command_check(String::new()).is_ok());
+        assert!(browser_command_check("   ".into()).is_ok());
+        // A launcher that does not exist is caught at save time.
+        assert!(browser_command_check("termic-no-such-browser-xyz --flag".into()).is_err());
+        // An unterminated quote is a template error, reported as one.
+        assert!(browser_command_check(r#"open -a "Chrome"#.into()).is_err());
     }
 
     #[test]

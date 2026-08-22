@@ -16,6 +16,8 @@ import { usePrefs } from "@/store/prefs";
 import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
 import { ExcludeEditor } from "./ExcludeEditor";
+import { BrowserCommandField } from "./BrowserCommandField";
+import { LINK_CLICK_MODIFIER as CLICK_MOD } from "@/lib/previewBrowser";
 import { Block, SectionTitle, Toggle, useBackendSettings } from "./Controls";
 import { cn, cleanLines } from "@/lib/utils";
 import { IS_MAC } from "@/lib/shortcuts";
@@ -36,6 +38,8 @@ export function GeneralSection() {
   // Personal (global) file-tree exclude globs. Kept as an array so the
   // ExcludeEditor's preset chips can add/remove cleanly; joined for the
   // dirty check.
+  const [previewBrowser, setPreviewBrowser] = useState("");
+  const [previewBrowserSaved, setPreviewBrowserSaved] = useState("");
   const [fileExclude, setFileExclude] = useState<string[]>([]);
   const [fileExcludeOriginal, setFileExcludeOriginal] = useState("");
 
@@ -75,6 +79,8 @@ export function GeneralSection() {
     hydrated.current = true;
     setReposDir(settings.repos_dir);
     setOriginalDir(settings.repos_dir);
+    setPreviewBrowser(settings.preview_browser ?? "");
+    setPreviewBrowserSaved(settings.preview_browser ?? "");
     const ex = settings.file_tree_exclude ?? [];
     setFileExclude(ex);
     setFileExcludeOriginal(ex.join("\n"));
@@ -116,6 +122,21 @@ export function GeneralSection() {
       setOriginalDir(reposDir.trim());
     } finally { setBusy(false); }
   }
+  async function savePreviewBrowser() {
+    if (!settings) return;
+    setBusy(true);
+    try {
+      const next: Settings = { ...settings, preview_browser: previewBrowser };
+      await settingsSave(next);
+      store(next);
+      setPreviewBrowserSaved(previewBrowser);
+      // Terminal link clicks read this from the app store (they cannot afford
+      // an async settings read per click), so write it through or an open tab
+      // keeps opening the previous browser until the next app start.
+      useApp.setState({ previewBrowser });
+    } finally { setBusy(false); }
+  }
+
   async function saveExclude() {
     if (!settings) return;
     setBusy(true);
@@ -167,6 +188,42 @@ export function GeneralSection() {
         <div className="mt-3">
           <Button variant="primary" disabled={!excludeDirty || busy} onClick={saveExclude}>
             {busy ? "Saving…" : "Save hidden files"}
+          </Button>
+        </div>
+      </Block>
+
+      {/* GH #245. A command, not an app name, because that is the only way to
+          express a specific browser PROFILE, which is what the issue asks
+          for. Empty keeps the OS default and the exact pre-#245 code path. */}
+      <Block id="setting-preview-browser">
+        <div className="text-[14px] font-medium">Open links in</div>
+        <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+          Termic opens a link in three places: the globe button that appears
+          while a run is going, the Open button on the run toolbar, and any URL
+          you {CLICK_MOD}-click in a terminal. This setting picks the browser
+          for all three. Everything else (the Termic website, an issue link)
+          keeps using your system default.
+        </div>
+        <div className="mt-1.5 text-[12.5px] text-[var(--color-fg-dim)]">
+          It is a command, not just an app, so you can pick a specific browser
+          profile. Leave it empty to use your default browser, exactly as
+          before. One project can override this in Settings → Projects.
+        </div>
+        <div className="mt-3 max-w-xl">
+          <BrowserCommandField
+            value={previewBrowser}
+            onChange={(v) => setPreviewBrowser(v ?? "")}
+            testId="general-browser"
+          />
+        </div>
+        <div className="mt-3">
+          <Button
+            variant="primary"
+            disabled={previewBrowser === previewBrowserSaved || busy}
+            onClick={savePreviewBrowser}
+            data-testid="general-browser-save"
+          >
+            {busy ? "Saving…" : "Save browser"}
           </Button>
         </div>
       </Block>

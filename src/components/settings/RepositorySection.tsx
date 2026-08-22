@@ -17,6 +17,8 @@ import { Trash2, Check, Layers, X, AudioWaveform, SlidersHorizontal } from "luci
 import { useTasksPathConflicts } from "./Controls";
 import { ExcludeEditor } from "./ExcludeEditor";
 import { ScriptField } from "./ScriptField";
+import { BrowserCommandField } from "./BrowserCommandField";
+import { LINK_CLICK_MODIFIER as CLICK_MOD } from "@/lib/previewBrowser";
 import { cn, cleanLines } from "@/lib/utils";
 import { isValidPortName } from "@/lib/namedPorts";
 import { isTerminalEntry } from "@/lib/agents";
@@ -24,6 +26,12 @@ import { isTerminalEntry } from "@/lib/agents";
 export function RepositorySection({ projectId }: { projectId: string }) {
   const project = useApp(s => s.projects.find(p => p.id === projectId));
   const loadAll = useApp(s => s.loadAll);
+  // App-wide browser, only to describe what "follow the app-wide setting"
+  // currently resolves to in the dropdown label. MUST stay up here with the
+  // other hooks: this component early-returns when no project is selected,
+  // and a hook below that return is a conditional hook, which crashes the
+  // whole Settings overlay on the render where it changes.
+  const globalBrowser = useApp(s => s.previewBrowser);
   const setView = useApp(s => s.setView);
   const agents = useApp(s => s.agents);
 
@@ -496,6 +504,28 @@ export function RepositorySection({ projectId }: { projectId: string }) {
               className={cn("mt-2 font-mono", !isMulti && scriptTarget === "personal" && flashRing("preview_url"))}
               placeholder="http://localhost:$TERMIC_PORT"
             />
+          </div>
+
+          {/* Per-project browser override (GH #245). Personal, never
+              .termic.yaml: a launch command is machine-specific, so a
+              committed one would be a dead link for a teammate on Linux. */}
+          <div>
+            <div className="text-[14px] font-medium">Open links in</div>
+            <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+              Which browser this project uses for the Preview URL above, the
+              Open button on the run toolbar, and links you {CLICK_MOD}-click in
+              a terminal. Useful when one project needs a different browser
+              (or browser profile) from the rest.
+            </div>
+            <div className="mt-2">
+              <BrowserCommandField
+                value={draft.preview_browser}
+                onChange={(v) => patch("preview_browser", v)}
+                allowInherit
+                globalCommand={globalBrowser}
+                testId="project-browser"
+              />
+            </div>
           </div>
 
           {isMulti ? (
