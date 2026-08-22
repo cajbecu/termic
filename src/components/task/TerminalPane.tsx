@@ -18,6 +18,7 @@ import { attachCmdClickLinkOpener, registerPathLinkProvider, isAbsoluteToken, ty
 import { resolvePathClick, normalizePath, expandTilde, resolveAbsoluteClick, type TaskRoot } from "@/lib/pathMatch";
 import { TerminalPathMenu, type ExternalTarget } from "@/components/task/TerminalPathMenu";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { openWebUrl, browserCommandForTask } from "@/lib/previewBrowser";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { Osc52Base64 } from "@/lib/osc52";
 import { makeCtrlSniffer } from "@/lib/ctrlSniffer";
@@ -565,6 +566,13 @@ const captureArmedRef = useRef(false);
     // opens, not the WKWebView (window.open silently no-ops).
     const openLink = (via: string) => (uri: string) => {
       ipc.logLine(`[link] agent activate via=${via} uri=${uri}`).catch(() => {});
+      // GH #245: a configured browser takes the argv path in Rust. With
+      // NOTHING configured (the default) this falls through to the exact
+      // plugin-opener call that shipped before the setting existed, so the
+      // default carries none of the new path's risk. Link activation itself
+      // (#14, #58, #117) is untouched — this is only the handoff to the OS.
+      const browser = browserCommandForTask(task.id);
+      if (browser) { void openWebUrl(uri, browser); return; }
       openUrl(uri)
         .then(() => ipc.logLine("[link] agent open ok").catch(() => {}))
         .catch((e) => ipc.logLine(`[link] agent open FAILED: ${e}`).catch(() => {}));

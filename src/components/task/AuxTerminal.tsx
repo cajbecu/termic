@@ -18,6 +18,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { attachCmdClickLinkOpener } from "@/lib/termLinkOpener";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { openWebUrl, browserCommandForTask } from "@/lib/previewBrowser";
 import { loadTerminalRenderer, awaitTerminalFonts } from "@/lib/terminalRenderer";
 import { resyncViewportAfterReveal } from "@/lib/xtermViewportSync";
 import { registerTerminalDropTarget } from "@/lib/terminalDrop";
@@ -89,6 +90,10 @@ export function AuxTerminal({ taskId, tabId, taskPath, active, autoFocus, onExit
     // selects. Routes through `open_path` for the system browser (#14).
     const openLink = (via: string) => (uri: string) => {
       ipc.logLine(`[link] scratch activate via=${via} uri=${uri}`).catch(() => {});
+      // GH #245, same rule as TerminalPane: configured browser or the
+      // untouched pre-#245 default path.
+      const browser = browserCommandForTask(taskId);
+      if (browser) { void openWebUrl(uri, browser); return; }
       openUrl(uri)
         .then(() => ipc.logLine("[link] scratch open ok").catch(() => {}))
         .catch((e) => ipc.logLine(`[link] scratch open FAILED: ${e}`).catch(() => {}));

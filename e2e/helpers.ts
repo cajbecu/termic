@@ -70,6 +70,15 @@ export interface TermicApi {
     handleDeepLink: (url: string) => void;
     MAX_PROMPT_CHARS: number;
   };
+  /** GH #245: configurable browser for preview URLs + terminal links. */
+  previewBrowser: {
+    openWebUrl: (url: string, browser: string) => Promise<void>;
+    openWebUrlForProject: (
+      url: string, globalCmd: string | undefined,
+      project: { preview_browser?: string } | null | undefined,
+    ) => Promise<void>;
+    resolveBrowserCommand: (g: string | undefined, p: string | undefined) => string;
+  };
   agentRace: {
     startRace: (opts: {
       projectId: string;

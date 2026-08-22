@@ -927,6 +927,20 @@ async function resolveCompletionSoundValue(
 }
 
 export const openPath  = (path: string) => invoke<void>("open_path", { path });
+/** What `openExternalUrl` did: "default" (nothing configured, OS default took
+ *  it), "browser" (the configured command took it) or "fallback" (it failed
+ *  and the OS default took it). `reason` is set only for "fallback". */
+export interface BrowserOpen { used: "default" | "browser" | "fallback"; reason: string | null }
+/** Open a web URL, honouring the user's configured browser command (GH #245).
+ *  Pass "" for the OS default, which is the pre-#245 code path exactly.
+ *  Prefer `openWebUrl` in `lib/previewBrowser.ts`: it adds the fallback toast
+ *  so a misconfigured command can never leave a link silently dead. */
+export const openExternalUrl = (url: string, browser: string) =>
+  invoke<BrowserOpen>("open_external_url", { url, browser });
+/** Validate a browser command template for the Settings UI. Rejects an
+ *  unparseable template and a launcher that is not on PATH. */
+export const browserCommandCheck = (command: string) =>
+  invoke<void>("browser_command_check", { command });
 /** Reveal an absolute path in the OS file manager (select it on macOS/Windows,
  *  open its parent on Linux). For task-relative paths use taskRevealPath. */
 export const revealPath = (path: string) => invoke<void>("reveal_path", { path });

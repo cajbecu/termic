@@ -38,7 +38,7 @@ logLine("[termic] boot build=resume-fix-v3-sidebar-bypass").catch(() => {});
 // release bundles: both flags are statically false there.
 if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
   void (async () => {
-    const [app, ui, prefs, race, ipc, core, runTabs, scriptRuns, prompts, agentRace, signalLog, reviewComments, deepLink, pendingTasks, archivingTasks] =
+    const [app, ui, prefs, race, ipc, core, runTabs, scriptRuns, prompts, agentRace, signalLog, reviewComments, deepLink, previewBrowser, pendingTasks, archivingTasks] =
       await Promise.all([
         import("@/store/app"),
         import("@/store/ui"),
@@ -53,6 +53,7 @@ if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
         import("@/lib/agentSignalLog"),
         import("@/store/reviewComments"),
         import("@/lib/deepLink"),
+        import("@/lib/previewBrowser"),
         import("@/store/pendingTasks"),
         import("@/store/archivingTasks"),
       ]);
@@ -69,6 +70,9 @@ if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
       // can snapshot the order in before() and put it back in after() — the
       // profile must be left byte-identical (see the signal-inspector note).
       usePromptLibrary: prompts.usePromptLibrary,
+      // GH #245: the exact helper both preview buttons and the terminal link
+      // openers delegate to, so a spec exercises the real resolution path.
+      previewBrowser,
       agentRace,
       // Queued inline review comments: the e2e suite asserts what a selection
       // actually queued (line range + quote), which no DOM surface spells out

@@ -20,7 +20,8 @@ import {
   DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem,
   DropdownLabel, DropdownSeparator,
 } from "@/components/ui/Dropdown";
-import { ptyKill, openPath } from "@/lib/ipc";
+import { ptyKill } from "@/lib/ipc";
+import { openWebUrlForProject } from "@/lib/previewBrowser";
 import { launchRunTabs, launchSetupTab, launchCustomRun, customRunMember, isCustomRunMember, resolveRunTargets, runsAtRepoRoot, type RunTarget } from "@/lib/runTabs";
 import { resolveCustomCommands, runCommandLabel, type ResolvedCommand } from "@/lib/runCommands";
 import { Play, Square, ChevronDown, Wrench, Globe, Settings, SlidersHorizontal } from "lucide-react";
@@ -32,6 +33,9 @@ export function RunControls({ task }: { task: Task }) {
     (t): t is TerminalTab => t.type === "terminal" && !!(t as TerminalTab).runTab,
   )));
   const project = useApp(s => s.projects.find(p => p.id === task.project_id));
+  // Preview opens in the user's configured browser (GH #245): the project
+  // overrides the app-wide setting, empty means the OS default.
+  const previewBrowser = useApp(s => s.previewBrowser);
   const hasSetup = !!project?.setup_script?.trim();
   const isSpotlighted = useApp(s => s.spotlightTaskId[task.project_id] === task.id);
   const atRoot = runsAtRepoRoot(project);
@@ -96,7 +100,7 @@ export function RunControls({ task }: { task: Task }) {
           <Button
             size="sm" variant="ghost" className="px-1.5" data-no-drag
             aria-label="Open preview in browser"
-            onClick={() => { openPath(previewUrl).catch(() => {}); }}
+            onClick={() => { void openWebUrlForProject(previewUrl, previewBrowser, project); }}
           >
             <Globe className="h-3.5 w-3.5" />
           </Button>
@@ -205,7 +209,7 @@ export function RunControls({ task }: { task: Task }) {
             </DropdownItem>
           )}
           {previewUrl && (
-            <DropdownItem onSelect={() => openPath(previewUrl).catch(() => {})}>
+            <DropdownItem onSelect={() => { void openWebUrlForProject(previewUrl, previewBrowser, project); }}>
               <Globe className="h-4 w-4" />
               <span>Open {previewUrl}</span>
             </DropdownItem>

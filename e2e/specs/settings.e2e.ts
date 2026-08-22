@@ -1,8 +1,8 @@
 import { execSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { archiveTask, dismissOverlays, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitVisible } from "../helpers";
+import { archiveTask, clickWhenVisible, dismissOverlays, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitVisible } from "../helpers";
 
 /** Click the [role="switch"] in the settings row whose label matches exactly.
  *  Toggle rows are label + switch inside one .justify-between wrapper
@@ -1650,5 +1650,213 @@ describe("extra named ports settings", () => {
       { timeout: 8_000, timeoutMsg: "valid name missing from the saved list" },
     );
     await snap("extra-named-ports-warning.png");
+  });
+});
+
+// Which browser opens preview URLs and terminal links (GH #245).
+//
+// The e2e binary RECORDS the argv instead of launching anything (see
+// `open_external_url` / `open_url_default` in lib.rs): a suite that actually
+// opened Chrome would put a browser window over the window under test on every
+// run, and on CI there is no browser to open. The log is therefore the only
+// surface that can show which browser was chosen — the visible outcome of this
+// feature happens outside the app.
+//
+// `<default>` in the log means the OS-default path, i.e. the byte-identical
+// code path that shipped before this setting existed.
+describe("preview browser (GH #245)", () => {
+  const browserLog = path.join(process.cwd(), ".e2e", "profile", "e2e-browser.log");
+  const URL_WITH_QUERY = "http://localhost:4173/?a=1&b=2";
+  let projectId!: string;
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    projectId = await browser.execute(
+      () => window.__termic!.useApp.getState().projects.find((p: any) => p.name === "fixture-repo").id,
+    );
+    // Close Settings before touching the project. RepositorySection holds a
+    // DRAFT of the whole project and debounce-saves it; left mounted from an
+    // earlier describe, that pending write lands on top of the project this
+    // spec just wrote and silently reverts preview_browser. It presented as
+    // "the project override is ignored" on roughly one run in three.
+    await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
+  });
+
+  after(async () => {
+    rmSync(browserLog, { force: true });
+    // Leave the profile as we found it: the global setting is shared with
+    // every later spec file, and a stray browser command would redirect
+    // their link opens too.
+    await browser.execute(async () => {
+      const t = window.__termic!;
+      const s = await t.ipc.settingsLoad();
+      await t.ipc.settingsSave({ ...s, preview_browser: "" });
+      t.useApp.setState({ previewBrowser: "" });
+    });
+    await setProjectBrowser(undefined);
+    // Close the Settings overlay this describe opened. The window is REUSED
+    // across spec files, and an overlay left up covers the drop point of
+    // every pointer drag in the next file: tabs-layout lost 8 tests to it,
+    // none of which mention settings or browsers. See the e2e skill, "Drags".
+    await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
+    await dismissOverlays();
+  });
+
+  /** Recorded opens, newest last. Missing file = nothing opened yet. */
+  const opens = async (): Promise<string[][]> => {
+    try {
+      return readFileSync(browserLog, "utf8").split("\n").filter(Boolean).map(l => JSON.parse(l));
+    } catch {
+      return [];
+    }
+  };
+  const clearLog = () => rmSync(browserLog, { force: true });
+
+  /** The argv of the most recent open, waited for rather than slept on. The
+   *  LAST line, not the first: an open from the previous case can still be
+   *  landing when this one clears the log, and reading [0] would then assert
+   *  against the wrong case's argv. */
+  const nextOpen = async (): Promise<string[]> => {
+    await browser.waitUntil(async () => (await opens()).length > 0, {
+      timeout: 8_000, timeoutMsg: "nothing was recorded as opened",
+    });
+    const all = await opens();
+    return all[all.length - 1];
+  };
+
+  const setGlobalBrowser = (cmd: string) =>
+    browser.execute(async (c) => {
+      const t = window.__termic!;
+      const s = await t.ipc.settingsLoad();
+      await t.ipc.settingsSave({ ...s, preview_browser: c });
+      t.useApp.setState({ previewBrowser: c });
+    }, cmd);
+
+  const setProjectBrowser = (cmd: string | undefined) =>
+    browser.execute(async (id, c, unset) => {
+      const t = window.__termic!;
+      const proj = t.useApp.getState().projects.find((p: any) => p.id === id);
+      const next = { ...proj };
+      if (unset) delete next.preview_browser; else next.preview_browser = c;
+      await t.ipc.projectUpdate(next);
+      await t.useApp.getState().loadAll();
+    }, projectId, cmd ?? "", cmd === undefined).then(async () => {
+      // Confirm the value survived. See the closeSettings note above: a
+      // clobbered write is invisible until an assertion fails much later.
+      await browser.waitUntil(async () => {
+        const got = await browser.execute(
+          (id) => window.__termic!.useApp.getState().projects.find((p: any) => p.id === id)?.preview_browser,
+          projectId,
+        );
+        return cmd === undefined ? got === undefined || got === null : got === cmd;
+      }, { timeout: 5_000, timeoutMsg: `project preview_browser never became ${JSON.stringify(cmd)}` });
+    });
+
+  /** Open a URL through the very helper both preview buttons and the two
+   *  terminal link openers delegate to, so this exercises the real resolution
+   *  path rather than a spec-local reimplementation of it. */
+  const openThroughApp = (url: string) =>
+    browser.execute(async (id, u) => {
+      const t = window.__termic!;
+      const st = t.useApp.getState();
+      const proj = st.projects.find((p: any) => p.id === id);
+      await t.previewBrowser.openWebUrlForProject(u, st.previewBrowser, proj);
+    }, projectId, url);
+
+  it("uses the OS default when no browser is configured", async () => {
+    await setGlobalBrowser("");
+    await setProjectBrowser(undefined);
+    clearLog();
+    await openThroughApp(URL_WITH_QUERY);
+    expect(await nextOpen()).toEqual(["<default>", URL_WITH_QUERY]);
+  });
+
+  it("uses the app-wide browser command, with the URL appended", async () => {
+    await setGlobalBrowser('open -a "Google Chrome"');
+    await setProjectBrowser(undefined);
+    clearLog();
+    await openThroughApp(URL_WITH_QUERY);
+    // Three argv entries: the quoted app name stays ONE argument, and the
+    // query string is not split on its `&`.
+    expect(await nextOpen()).toEqual(["open", "-a", "Google Chrome", URL_WITH_QUERY]);
+  });
+
+  it("lets a project override the app-wide browser", async () => {
+    await setGlobalBrowser('open -a "Google Chrome"');
+    await setProjectBrowser("firefox -P work");
+    clearLog();
+    await openThroughApp(URL_WITH_QUERY);
+    expect(await nextOpen()).toEqual(["firefox", "-P", "work", URL_WITH_QUERY]);
+  });
+
+  it("lets a project force the OS default despite an app-wide browser", async () => {
+    // The state a plain string could not express: empty on the project means
+    // "system default here", NOT "inherit the global".
+    await setGlobalBrowser('open -a "Google Chrome"');
+    await setProjectBrowser("");
+    clearLog();
+    await openThroughApp(URL_WITH_QUERY);
+    expect(await nextOpen()).toEqual(["<default>", URL_WITH_QUERY]);
+  });
+
+  it("falls back to the OS default rather than leaving the link dead", async () => {
+    // An unparseable template (unterminated quote). A link that silently does
+    // nothing is the exact complaint this feature exists to fix, so a broken
+    // command must still open the page somewhere.
+    await setGlobalBrowser('open -a "Google Chrome');
+    await setProjectBrowser(undefined);
+    clearLog();
+    await openThroughApp(URL_WITH_QUERY);
+    expect(await nextOpen()).toEqual(["<default>", URL_WITH_QUERY]);
+  });
+
+  it("substitutes {url} instead of appending it", async () => {
+    await setGlobalBrowser("mybrowser {url} --tail");
+    await setProjectBrowser(undefined);
+    clearLog();
+    await openThroughApp(URL_WITH_QUERY);
+    expect(await nextOpen()).toEqual(["mybrowser", URL_WITH_QUERY, "--tail"]);
+  });
+
+  it("saves a browser command from the General settings page", async () => {
+    await setGlobalBrowser("");
+    await browser.execute(() => window.__termic!.useApp.getState().openSettings("general"));
+    await waitVisible('[data-testid="general-browser-input"]');
+    await browser.execute(() => {
+      const el = document.querySelector('[data-testid="general-browser-input"]') as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(el, "open -a Safari");
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await clickWhenVisible('[data-testid="general-browser-save"]');
+    // Persisted to settings.json...
+    await browser.waitUntil(
+      async () => (await browser.execute(async () =>
+        (await window.__termic!.ipc.settingsLoad()).preview_browser)) === "open -a Safari",
+      { timeout: 8_000, timeoutMsg: "the browser command never reached settings.json" },
+    );
+    // ...and written through to the store, which is what terminal link
+    // clicks read. Without this an open tab keeps using the old browser
+    // until the app restarts.
+    expect(await browser.execute(() => window.__termic!.useApp.getState().previewBrowser))
+      .toBe("open -a Safari");
+    await snap("preview-browser-general.png");
+  });
+
+  it("rejects a launcher that is not installed", async () => {
+    await browser.execute(() => {
+      const el = document.querySelector('[data-testid="general-browser-input"]') as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+      setter.call(el, "termic-no-such-browser-xyz");
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    // Debounced validation (400ms), waited for as a condition.
+    await waitVisible('[data-testid="general-browser-error"]');
+    const msg = await browser.execute(
+      () => document.querySelector('[data-testid="general-browser-error"]')!.textContent,
+    );
+    expect(msg).toContain("termic-no-such-browser-xyz");
+    await snap("preview-browser-invalid.png");
   });
 });

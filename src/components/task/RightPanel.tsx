@@ -15,9 +15,10 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useApp, useActiveTask } from "@/store/app";
 import { useUI } from "@/store/ui";
 import {
-  taskGitStatus, taskRunScriptStream, openPath, repoConfigLoad, repoConfigLoadAt,
+  taskGitStatus, taskRunScriptStream, repoConfigLoad, repoConfigLoadAt,
   taskSpotlightResync,
 } from "@/lib/ipc";
+import { openWebUrlForProject } from "@/lib/previewBrowser";
 import { startSpotlight, stopSpotlight } from "@/lib/spotlight";
 import { launchRunTabs, expandPreviewUrl } from "@/lib/runTabs";
 import type { GitStatus, Task, TaskMember, Project, TerminalTab } from "@/lib/types";
@@ -762,6 +763,8 @@ function RunToolbar({ task, project, yamlPreviewUrl = "", compact }: {
   compact?: boolean;
 }) {
   const url = expandPreviewUrl(project, task, yamlPreviewUrl);
+  // GH #245: honour the configured browser (project override, else app-wide).
+  const previewBrowser = useApp(s => s.previewBrowser);
   const btnCls = compact ? "h-6 w-6 p-0" : "h-6 gap-1 px-1.5 text-[12px]";
   // In compact (icon-only) mode the inline label is gone, so the action name
   // moves to an INSTANT app tooltip (Tip, delay 0) instead of a slow native
@@ -773,7 +776,7 @@ function RunToolbar({ task, project, yamlPreviewUrl = "", compact }: {
       {url && tipWrap(`Open ${url}`,
         <Button
           size="sm" variant="secondary"
-          onClick={() => openPath(url).catch(err => console.error("open failed:", err))}
+          onClick={() => { void openWebUrlForProject(url, previewBrowser, project); }}
           title={!compact ? url : undefined}
           className={btnCls}
         >

@@ -45,6 +45,12 @@ export interface Project {
   base_branch: string;
   remote: string;
   preview_url: string;
+  /** Per-project override of the global `Settings.preview_browser` (GH #245).
+   *  Three states: absent = follow the global setting; `""` = force the OS
+   *  default for this project even when the global names a browser; a command
+   *  = use that. Personal (projects.json), never `.termic.yaml`, because a
+   *  launch command is machine-specific. See `lib/previewBrowser.ts`. */
+  preview_browser?: string;
   files_to_copy: string[];
   setup_script: string;
   run_script: string;
@@ -523,6 +529,13 @@ export interface Settings {
    *  field shows a real value. Optional here only because older profiles
    *  predate it; the backend fills it in on load. */
   default_tasks_path?: string;
+  /** App-wide command that opens preview URLs and terminal links (GH #245).
+   *  Empty/absent = the OS default browser, which takes the byte-identical
+   *  code path this app used before the setting existed. A command TEMPLATE,
+   *  not an app name (`open -a "Google Chrome"`, `firefox -P work`), which is
+   *  what lets a user select a browser profile. Projects override it via
+   *  `Project.preview_browser`. */
+  preview_browser?: string;
 }
 
 /** Install state of the bundled CLI on PATH (cli_install_status). */
