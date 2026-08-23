@@ -443,6 +443,11 @@ class BlameWidget extends WidgetType {
 
 // ───────────────────────── decorations ─────────────────────────
 
+/** How long after the last keystroke the annotation comes back. Long enough
+ *  that typing a line never has it shuffling along beside the caret, short
+ *  enough that pausing to read gives you the author. */
+export const TYPING_IDLE_MS = 600;
+
 /** One annotation per distinct cursor line, same as VS Code (which iterates
  *  `new Set(selections.map(s => s.active.line))`). */
 function computeDeco(
@@ -456,10 +461,25 @@ function computeDeco(
     const line = state.doc.lineAt(r.head);
     if (seen.has(line.number)) continue;
     seen.add(line.number);
+    // Nothing to attribute on a blank line, and rendering there is actively
+    // wrong: the widget is anchored at `line.to`, which on an empty line is
+    // column 0, so it shares its position with the caret and reads as broken
+    // indentation ("Not committed yet" sitting where the code should start).
+    // VS Code annotates blank lines; it looks like a bug there too.
+    if (!line.text.trim()) continue;
     const commit = commitForLine(state, line.number);
     if (!commit) continue;
+    // A line you have not committed is a line you just wrote: "Not committed
+    // yet" beside your own caret is noise, and it is the annotation that shows
+    // up while you are typing, which is when the feature is least welcome.
+    // The gutter and the Git panel already say the file is modified.
+    if (commit.uncommitted) continue;
     const text = formatBlame(commit);
-    keyParts.push(`${line.number}:${commit.sha}:${text}`);
+    // `line.to` is part of the identity, not decoration: the widget is
+    // anchored THERE, so an edit that moves the end of the line has to produce
+    // a different key or `sync` would keep the stale set and the annotation
+    // would render mid-line, wedged between the characters being typed.
+    keyParts.push(`${line.number}:${line.to}:${commit.sha}:${text}`);
     ranges.push(
       Decoration.widget({
         widget: new BlameWidget(text, line.number, commit.uncommitted ? "" : commit.sha),
@@ -581,12 +601,50 @@ export function inlineBlameExtension(taskId: string, path: string, opts: InlineB
     // height-map compare. Per-instance, not per-extension, so two views can
     // never read each other's last render.
     private lastKey: string | null = null;
+    /** Pending "typing has stopped" timer, so the annotation comes back once
+     *  and a view that goes away does not fire into a destroyed plugin. */
+    private idle: number | null = null;
 
     constructor(view: EditorView) { this.sync(view); }
 
+    destroy() {
+      if (this.idle !== null) window.clearTimeout(this.idle);
+    }
+
     update(u: ViewUpdate) {
+      // Map FIRST. A plugin owns its decoration set, so nothing moves these
+      // through an edit for us: without this the widget keeps the offset it
+      // had before the keystroke, which on the line being typed means it
+      // renders inside the word ("StorePag" + the annotation + "e").
+      if (u.docChanged) this.decorations = this.decorations.map(u.changes);
       const dataChanged = u.startState.field(blameField) !== u.state.field(blameField);
-      if (u.selectionSet || u.docChanged || dataChanged) this.sync(u.view);
+      if (u.docChanged) {
+        // Get out of the way while the reader is typing, and come back when
+        // they stop. An annotation that shuffles along beside the caret on
+        // every keystroke is the thing people mean by "intrusive".
+        this.hideWhileTyping(u.view);
+        return;
+      }
+      if (u.selectionSet || dataChanged) this.sync(u.view);
+    }
+
+    /** Drop the annotation now, restore it once typing settles. A timer, not
+     *  requestAnimationFrame: rAF is frozen while the window is occluded, and
+     *  an agent editing the file you have open is exactly that case
+     *  (docs/gotchas.md). */
+    private hideWhileTyping(view: EditorView) {
+      if (this.decorations !== Decoration.none) {
+        this.decorations = Decoration.none;
+        this.lastKey = "";
+      }
+      if (this.idle !== null) window.clearTimeout(this.idle);
+      this.idle = window.setTimeout(() => {
+        this.idle = null;
+        this.sync(view);
+        // sync() only assigns; the view has to be told the plugin's
+        // decorations changed outside an update.
+        view.dispatch({});
+      }, TYPING_IDLE_MS);
     }
 
     private sync(view: EditorView) {

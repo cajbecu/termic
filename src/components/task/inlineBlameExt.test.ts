@@ -23,7 +23,7 @@ const blameMock = vi.hoisted(() => vi.fn());
 const metaMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/ipc", () => ({ taskGitBlame: blameMock, taskGitCommitMeta: metaMock }));
 
-import { inlineBlameExtension, invalidateBlame, refreshBlame, markBlameStale, formatBlame, blameAgo, __resetBlameCache, __resetBlameMetaCache } from "./inlineBlameExt";
+import { inlineBlameExtension, invalidateBlame, refreshBlame, markBlameStale, formatBlame, blameAgo, TYPING_IDLE_MS, __resetBlameCache, __resetBlameMetaCache } from "./inlineBlameExt";
 
 const TASK = "task-blame";
 const FILE = "src/thing.ts";
@@ -236,13 +236,12 @@ describe("inline blame annotation", () => {
     // Join line 3 onto line 2 by deleting the newline before it. Line 3's
     // mark is dropped (TrackBefore) AND line 2's is dropped as touched, so
     // the merged line is attributed to nobody rather than to either half's
-    // author.
+    // author — and "nobody" is rendered as SILENCE, because "Not committed
+    // yet" beside your own caret on a line you just wrote is noise.
     const line3 = view.state.doc.line(3);
     view.dispatch({ changes: { from: line3.from - 1, to: line3.from } });
-    const after = annotations(view);
-    expect(after).toHaveLength(1);
-    expect(after[0]).toBe("Not committed yet");
-    expect(after[0]).not.toContain("Grace");
+    await wait(TYPING_IDLE_MS + 120);
+    expect(annotations(view)).toHaveLength(0);
   });
 
   it("keeps attribution for untouched lines when an unrelated line is edited", async () => {
@@ -442,10 +441,12 @@ describe("inline blame annotation", () => {
     cursorToLine(view, 3);
     await settle();
     view.dispatch({ changes: { from: view.state.doc.line(3).from, insert: "edited " } });
-    expect(annotations(view)[0]).toBe("Not committed yet");
-    const el = view.dom.querySelector(".cm-inline-blame") as HTMLElement;
-    el.dispatchEvent(new MouseEvent("mouseenter"));
-    await wait(CARD_DELAY + 120);
+    // An uncommitted line has no annotation at all now, so there is nothing
+    // to hover and nothing that could ask git for a commit that does not
+    // exist. The assertion is the absence, all the way down.
+    await wait(TYPING_IDLE_MS + 120);
+    expect(annotations(view)).toHaveLength(0);
+    expect(view.dom.querySelector(".cm-inline-blame")).toBeNull();
     expect(card(view)).toBeNull();
     expect(metaMock).not.toHaveBeenCalled();
   });

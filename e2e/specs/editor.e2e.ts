@@ -2828,7 +2828,81 @@ describe("inline git blame", () => {
     expect((await annotations()).length).toBe(1);
   });
 
-  it("stops attributing a line once it is edited", async () => {
+  it("leaves a blank line alone", async () => {
+    // The widget is anchored at `line.to`, which on an empty line is column 0:
+    // it lands where the code would start and reads as broken indentation,
+    // sharing its spot with the caret. There is also nothing to attribute.
+    await cursorTo(3);
+    await waitForOneAnnotation("no annotation to start from");
+    const blankAt = await browser.execute((id) => {
+      const dom = document.querySelector(`[data-task-id="${id}"] .cm-editor`) as
+        (HTMLElement & { __cmView?: any }) | null;
+      const view = dom!.__cmView;
+      const end = view.state.doc.length;
+      view.dispatch({ changes: { from: end, insert: "\n\n" }, selection: { anchor: end + 1 } });
+      return view.state.selection.main.head as number;
+    }, taskId) as number;
+    expect(blankAt).toBeGreaterThan(0);
+    await browser.waitUntil(async () => (await annotations()).length === 0, {
+      timeout: 8_000,
+      timeoutMsg: "a blank line was annotated",
+    });
+  });
+
+  it("gets out of the way while typing, and returns at the end of the line", async () => {
+    // Two things this pins. It HIDES on a change, because an annotation that
+    // shuffles along beside the caret on every keystroke is what people mean
+    // by intrusive. And when it returns it is anchored past the text: a plugin
+    // owns its decorations, so nothing maps them through an edit for us, and
+    // unmapped the widget kept its pre-edit offset and rendered inside the
+    // word being typed ("StorePag" + the annotation + "e").
+    await cursorTo(3);
+    await waitForOneAnnotation("no annotation to start from");
+
+    // Type somewhere ELSE, so the annotated line stays committed and keeps its
+    // author. Editing the annotated line is the case below.
+    await browser.execute((id) => {
+      const dom = document.querySelector(`[data-task-id="${id}"] .cm-editor`) as
+        (HTMLElement & { __cmView?: any }) | null;
+      const view = dom!.__cmView;
+      view.dispatch({ changes: { from: view.state.doc.length, insert: "trailing" } });
+    }, taskId);
+    await browser.waitUntil(async () => (await annotations()).length === 0, {
+      timeout: 4_000,
+      timeoutMsg: "the annotation stayed up while the document was changing",
+    });
+    await browser.waitUntil(async () => (await annotations()).length === 1, {
+      timeout: 8_000,
+      timeoutMsg: "the annotation never came back after typing stopped",
+    });
+
+    // Measured in the DOM: "renders in the wrong place" is exactly the class
+    // of bug a state assertion cannot see.
+    const placed = await browser.execute((id) => {
+      const editor = document.querySelector(`[data-task-id="${id}"] .cm-editor`) as HTMLElement;
+      const widget = editor.querySelector(".cm-inline-blame") as HTMLElement | null;
+      if (!widget) return { ok: false, why: "no annotation" };
+      const line = widget.closest(".cm-line") as HTMLElement | null;
+      if (!line) return { ok: false, why: "annotation outside a line" };
+      const wLeft = widget.getBoundingClientRect().left;
+      const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+      let worst = 0;
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        if (widget.contains(n)) continue;
+        const range = document.createRange();
+        range.selectNodeContents(n);
+        worst = Math.max(worst, range.getBoundingClientRect().right);
+      }
+      return { ok: worst <= wLeft + 1, why: `text ends at ${worst}, widget starts at ${wLeft}` };
+    }, taskId) as { ok: boolean; why: string };
+    if (!placed.ok) throw new Error(`the annotation is not at the end of the line: ${placed.why}`);
+  });
+
+  it("stops attributing a line once it is edited, and says nothing instead", async () => {
+    // Two rules at once. An edited line must never keep its old author, which
+    // would be a confident lie. And what replaces it is NOTHING: "Not
+    // committed yet" beside your own caret, on a line you just wrote, is the
+    // noise that made this feature feel intrusive.
     await cursorTo(3);
     await waitForOneAnnotation("no annotation before the edit");
 
@@ -2839,10 +2913,10 @@ describe("inline git blame", () => {
       dom!.__cmView.dispatch({ changes: { from: 2, insert: "edited " } });
     }, taskId);
 
-    await browser.waitUntil(
-      async () => (await annotations())[0] === "Not committed yet",
-      { timeout: 8_000, timeoutMsg: "an edited line kept its old author" },
-    );
+    await browser.waitUntil(async () => (await annotations()).length === 0, {
+      timeout: 8_000,
+      timeoutMsg: "an edited line kept an annotation",
+    });
   });
 
   it("disappears when the pref is off and comes back when it is on", async () => {
