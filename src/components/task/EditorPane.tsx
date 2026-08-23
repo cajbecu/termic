@@ -31,6 +31,7 @@ import { usePrefs, resolveTheme } from "@/store/prefs";
 import { resolveEditorTheme, editorSurfaceTheme } from "@/lib/editorTheme";
 import { deriveScratchTitle } from "@/lib/scratchTitle";
 import { createLangSwitch } from "@/lib/langSwitch";
+import { gotoLocation as revealLine } from "@/lib/gotoLocation";
 
 /** How long after the last keystroke a scratchpad's buffer is flushed to the
  *  scratch store and its title re-derived. Both ride the TYPING path, so both
@@ -105,26 +106,6 @@ function indentExtension(style: IndentStyle): Extension {
 // Marks a doc-replacing transaction as an external reload (file changed on
 // disk), not a user edit — so the updateListener skips flipping the dirty dot.
 const ExternalReload = Annotation.define<boolean>();
-
-/** Scroll the editor to a 1-based line/col and place the cursor there.
- *  Centers the line vertically. Clamps line to the doc bounds so a stale
- *  grep hit on a file that's since shrunk doesn't blow up. */
-function revealLine(view: EditorView, line: number, col?: number) {
-  const doc = view.state.doc;
-  const safe = Math.max(1, Math.min(line, doc.lines));
-  const lineObj = doc.line(safe);
-  const pos = col && col > 0
-    ? Math.min(lineObj.from + col - 1, lineObj.to)
-    : lineObj.from;
-  view.dispatch({
-    selection: { anchor: pos, head: pos },
-    effects: EditorView.scrollIntoView(pos, { y: "center" }),
-  });
-  // Defer focus to next frame — if the editor isn't visible yet (lazy
-  // mount), focus() would no-op silently. requestAnimationFrame gives
-  // the layout a tick to settle.
-  requestAnimationFrame(() => view.focus());
-}
 
 export function EditorPane({ task, tab, active, onContent }: {
   task: Task;
@@ -675,7 +656,14 @@ export function EditorPane({ task, tab, active, onContent }: {
     if (!active) return;
     const view = viewRef.current;
     if (!view) return;
-    requestAnimationFrame(() => view.focus());
+    // A timer, not requestAnimationFrame: WebKit freezes rAF while the window
+    // is occluded, so a tab that becomes active in the background — a
+    // `termic://` deep link, a CLI-opened file, an agent's jump — would never
+    // get focus, and the editor would still be inert when you came back to the
+    // window. Same reasoning as lib/tabFocus.ts (0e66f79). Cleared on the way
+    // out so it cannot fire into a destroyed view.
+    const timer = window.setTimeout(() => view.focus(), 0);
+    return () => window.clearTimeout(timer);
   }, [active]);
 
   // Reload when an agent terminal in this task settles. Skip the first
