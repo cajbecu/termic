@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { archiveTask, clickByText, clickWhenVisible, dismissOverlays, ensureActiveTask, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitForWorkBadge, waitGone, waitVisible } from "../helpers";
@@ -1341,7 +1341,19 @@ describe("resume closed tab", () => {
           before,
         ),
       { timeout: 10_000, timeoutMsg: "closed tab was not resumed" },
-    );
+    ).catch(async (e) => {
+      // Which half failed matters and a deadline does not say: the tab never
+      // appeared, or it appeared and a loadAll landing mid-resume replaced the
+      // tab list with the persisted one before the entry was consumed.
+      const state = await browser.execute((id) => {
+        const s = window.__termic!.useApp.getState();
+        return {
+          tabs: (s.tabs[id] ?? []).map((t: any) => ({ type: t.type, title: t.title, cli: t.cli })),
+          closed: (s.closedTabs[id] ?? []).map((c: any) => c.id),
+        };
+      }, taskId);
+      throw new Error(`${(e as Error).message}\n  before=${before} now: ${JSON.stringify(state)}`);
+    });
     await snap("resume-tab.png");
   });
 });
@@ -1394,6 +1406,25 @@ describe("agent race", () => {
           await window.__termic!.useApp.getState().loadAll();
         }, id)
         .catch(() => {});
+    }
+    // A race that throws PART WAY through leaves racer 1 created and racer 2
+    // never attempted, and raceAndVerify only records the ids startRace
+    // RETURNS — so the loop above has nothing to delete and the worktree stays
+    // on disk. Sweep by name, which is what the ids would have pointed at.
+    // (Seen once in a full-suite run: racer 1's create reported "a worktree
+    // already lives at …" for its own path, and the directory outlived the
+    // suite.)
+    for (const stale of [remoteName, localName]) {
+      for (const dir of [
+        path.join(process.cwd(), ".e2e", "tasks", "fixture-repo"),
+        path.join(os.homedir(), "termic_dev", "tasks", "fixture-repo"),
+      ]) {
+        try {
+          for (const entry of readdirSync(dir)) {
+            if (entry.startsWith(stale)) rmSync(path.join(dir, entry), { recursive: true, force: true });
+          }
+        } catch { /* the directory may not exist on this machine */ }
+      }
     }
     // taskDelete keeps the branch (deleteBranch=false), so prune the worktrees
     // AND every race branch this describe created, or the fixture accrues them.
@@ -1465,16 +1496,39 @@ describe("agent race", () => {
             ptyId: def?.ptyId ?? null,
             lastInputAt: def?.lastInputAt ?? null,
             liveTitle: def?.liveTitle ?? null,
+            // Enough to tell "the pane never mounted" from "it mounted and the
+            // spawn stalled" when this times out, which is the whole question
+            // and is not answerable after the fact from a deadline alone.
+            tabs: (app.tabs[id] ?? []).length,
+            mounted: !!document.querySelector(`[data-task-id="${id}"]`),
+            hasPane: !!document.querySelector(`[data-task-id="${id}"] .xterm`),
+            // Does the task still EXIST, and how long has this document been
+            // alive? A webview that reloaded mid-test comes back with an empty
+            // store and a performance.now() near zero, which reads exactly
+            // like "the racer never started" unless you ask.
+            taskExists: app.tasks.some((t: any) => t.id === id),
+            docAgeMs: Math.round(performance.now()),
           };
         });
       }, ids);
+
+    /** waitUntil's message with the racer state that produced it appended. */
+    const withRacerState = async (msg: string) =>
+      `${msg}\n  racers: ${JSON.stringify(await racerTabs())}`;
 
     // 2) Both racers' agents actually spawn: their default tab acquires a live
     //    PTY. This is the "did the hidden/inactive racer boot at all" guard.
     await browser.waitUntil(
       async () => (await racerTabs()).every((t) => !!t.ptyId),
-      { timeout: 20_000, timeoutMsg: "a racer never spawned its agent PTY" },
-    );
+      // 45s, not 20: two worktrees, two PTYs and two agent boots, and this
+      // spec runs about twice as slowly inside a full suite as it does alone
+      // (43s vs 21s locally). Both halves of this wait timed out across two
+      // consecutive full runs, on a different half each time, which is what a
+      // deadline sized for an idle machine looks like rather than a bug. A
+      // generous ceiling costs nothing when it works: waitUntil returns the
+      // moment the condition holds.
+      { timeout: 45_000, timeoutMsg: "a racer never spawned its agent PTY" },
+    ).catch(async (e) => { throw new Error(await withRacerState((e as Error).message)); });
 
     // 3) Both racers receive the prompt after the settle: agentRace stamps
     //    lastInputAt when it injects. This is the core "sits there" guard — an
@@ -1482,10 +1536,10 @@ describe("agent race", () => {
     await browser.waitUntil(
       async () => (await racerTabs()).every((t) => !!t.lastInputAt),
       {
-        timeout: 20_000,
+        timeout: 45_000,
         timeoutMsg: "a racer spawned but never received the race prompt",
       },
-    );
+    ).catch(async (e) => { throw new Error(await withRacerState((e as Error).message)); });
 
     // 4) The seeded terminals are real fakeagent PTYs driving claude-style OSC
     //    titles (✳ idle / Braille spinner working), not empty shells. Poll: the
@@ -1496,7 +1550,7 @@ describe("agent race", () => {
           (t.liveTitle ?? "").includes("fakeagent"),
         ),
       {
-        timeout: 15_000,
+        timeout: 30_000,
         timeoutMsg: "a racer never published its fakeagent OSC title",
       },
     );
