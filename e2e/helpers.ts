@@ -45,7 +45,14 @@ export async function snap(name: string): Promise<void> {
  * the shapes from src/store/* as you need them in a given spec.
  */
 export interface TermicApi {
-  useApp: { getState: () => any; setState: (p: any) => void };
+  useApp: {
+    getState: () => any;
+    setState: (p: any) => void;
+    /** Zustand's own subscribe, for watching a value CHANGE rather than
+     *  sampling it: a poll cannot see a state that is restored before the
+     *  next tick, and "when did it change" is often the whole question. */
+    subscribe: (fn: (s: any, prev: any) => void) => () => void;
+  };
   useUI: { getState: () => any; setState: (p: any) => void };
   usePrefs: { getState: () => any };
   useRace: { getState: () => any };

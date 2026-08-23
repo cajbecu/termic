@@ -1512,9 +1512,51 @@ describe("agent race", () => {
         });
       }, ids);
 
-    /** waitUntil's message with the racer state that produced it appended. */
-    const withRacerState = async (msg: string) =>
-      `${msg}\n  racers: ${JSON.stringify(await racerTabs())}`;
+    // Two recorders, because the first one's SILENCE turned out to be the
+    // finding. __raceLog rides in the JS context and notes every change to a
+    // racer's tab list; the token rides in sessionStorage, which survives a
+    // reload that the JS context does not. A timeout that reports an empty
+    // timeline AND a surviving token whose window-side twin is gone did not
+    // watch the tabs close: it watched the page get replaced underneath it.
+    const startedAt = Date.now();
+    await browser.execute((tabIds: string[]) => {
+      const w = window as any;
+      w.__raceLog = [];
+      w.__raceToken = String(Math.round(performance.now()));
+      sessionStorage.setItem("e2e-race-token", w.__raceToken);
+      const app = window.__termic!.useApp;
+      const seen: Record<string, number> = {};
+      w.__raceUnsub = app.subscribe((s: any) => {
+        for (const id of tabIds) {
+          const n = (s.tabs[id] ?? []).length;
+          if (seen[id] !== n) {
+            seen[id] = n;
+            w.__raceLog.push(`${Math.round(performance.now())}ms ${id.slice(0, 8)} tabs=${n} mounted=${s.mountedTasks.has(id)}`);
+          }
+        }
+      });
+    }, ids);
+
+    /** waitUntil's message, with the state that produced it — and the right
+     *  headline when the racers are innocent. */
+    const withRacerState = async (msg: string) => {
+      const page = await browser.execute(() => ({
+        // A token in sessionStorage outlives a reload; its twin on `window`
+        // does not. Disagreement means this is not the document the test
+        // started in.
+        reloaded: (window as any).__raceToken !== sessionStorage.getItem("e2e-race-token"),
+        docAgeMs: Math.round(performance.now()),
+        timeline: (window as any).__raceLog ?? [],
+      })) as { reloaded: boolean; docAgeMs: number; timeline: string[] };
+      const waited = Date.now() - startedAt;
+      const head = page.reloaded
+        ? `the webview reloaded during this test, so the store the assertions read is a fresh one`
+        : msg;
+      return `${head}\n  racers: ${JSON.stringify(await racerTabs())}`
+        + `\n  tab-list timeline: ${JSON.stringify(page.timeline)}`
+        + `\n  waited ${waited}ms, document is ${page.docAgeMs}ms old, reloaded=${page.reloaded}`
+        + (page.reloaded ? `\n  (original failure: ${msg})` : "");
+    };
 
     // 2) Both racers' agents actually spawn: their default tab acquires a live
     //    PTY. This is the "did the hidden/inactive racer boot at all" guard.
