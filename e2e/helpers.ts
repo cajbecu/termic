@@ -99,6 +99,9 @@ export interface TermicApi {
    *  usePendingTasks: the fixture repo's archive is far too fast to catch the
    *  "Archiving…" row by racing a real one. */
   useArchivingTasks: { getState: () => any };
+  /** CodeMirror's indentation facet, for asserting what a file was detected
+   *  as (lib/detectIndent). */
+  cm: { indentUnit: unknown };
 }
 
 declare global {

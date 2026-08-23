@@ -20,6 +20,7 @@ import { taskFileRead, fileReadExternal, taskFileWrite, scratchRead, scratchWrit
 import { langForId, langForPath } from "@/lib/languageExts";
 import { PLAIN_TEXT, effectiveLanguageId, normalizeLanguageId } from "@/lib/languages";
 import { detectSyntaxFromContent } from "@/lib/detectSyntax";
+import { detectIndent, type IndentStyle } from "@/lib/detectIndent";
 import { attachHiddenScrollRestore } from "@/lib/hiddenScrollRestore";
 import { reviewCommentsExtension, dispatchSelectionComment } from "./reviewCommentsExt";
 import { inlineBlameExtension, invalidateBlame, refreshBlame, markBlameStale } from "./inlineBlameExt";
@@ -94,6 +95,12 @@ const noAutocorrectOnPanelInputs = ViewPlugin.define(view => {
   mo.observe(view.dom, { childList: true, subtree: true });
   return { destroy() { mo.disconnect(); } };
 });
+
+/** CodeMirror's two halves of "how wide is a level": what pressing Tab
+ *  inserts, and how wide an existing tab character renders. */
+function indentExtension(style: IndentStyle): Extension {
+  return [indentUnit.of(style.unit), EditorState.tabSize.of(style.size)];
+}
 
 // Marks a doc-replacing transaction as an external reload (file changed on
 // disk), not a user edit — so the updateListener skips flipping the dirty dot.
@@ -172,6 +179,10 @@ export function EditorPane({ task, tab, active, onContent }: {
   // Theme lives in its own compartment so font-size / ligatures changes can be
   // reconfigured live without recreating the entire EditorView.
   const themeCompRef = useRef(new Compartment());
+  // Indentation is per FILE, not per app: it comes from the buffer's own
+  // content, and a reload (or a preview tab recycling onto another file)
+  // re-reads it.
+  const indentCompRef = useRef(new Compartment());
   // Blame lives in its own compartment so the pref (and the palette's toggle)
   // can switch it on and off without rebuilding the view. With it off the
   // extension is not constructed at all, so nothing is fetched, no state
@@ -482,8 +493,12 @@ export function EditorPane({ task, tab, active, onContent }: {
               ...(tab.type === "external"
                 ? [EditorView.editable.of(false), EditorState.readOnly.of(true)]
                 : []),
-              indentUnit.of("  "),
-              EditorState.tabSize.of(2),
+              // Read off the file rather than assumed: two spaces is wrong for
+              // most of what an agent writes (Python is 4, Go and Makefiles are
+              // tabs, and a Makefile's tabs are the format). Its own
+              // compartment so a reload can re-detect without rebuilding the
+              // view. See lib/detectIndent.
+              indentCompRef.current.of(indentExtension(detectIndent(content))),
               EditorView.updateListener.of(u => {
                 if (u.docChanged) {
                   // A programmatic reload (file changed on disk) carries the
@@ -598,6 +613,7 @@ export function EditorPane({ task, tab, active, onContent }: {
     if (!v || !isTaskFile) return;
     if (content !== v.state.doc.toString())
       v.dispatch({
+        effects: indentCompRef.current.reconfigure(indentExtension(detectIndent(content))),
         changes: { from: 0, to: v.state.doc.length, insert: content },
         annotations: ExternalReload.of(true),
       });

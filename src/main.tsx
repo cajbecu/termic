@@ -38,7 +38,7 @@ logLine("[termic] boot build=resume-fix-v3-sidebar-bypass").catch(() => {});
 // release bundles: both flags are statically false there.
 if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
   void (async () => {
-    const [app, ui, prefs, race, ipc, core, runTabs, scriptRuns, prompts, agentRace, signalLog, reviewComments, deepLink, previewBrowser, pendingTasks, archivingTasks] =
+    const [app, ui, prefs, race, ipc, core, runTabs, scriptRuns, prompts, agentRace, signalLog, reviewComments, deepLink, previewBrowser, pendingTasks, archivingTasks, cmLanguage] =
       await Promise.all([
         import("@/store/app"),
         import("@/store/ui"),
@@ -56,6 +56,7 @@ if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
         import("@/lib/previewBrowser"),
         import("@/store/pendingTasks"),
         import("@/store/archivingTasks"),
+        import("@codemirror/language"),
       ]);
     (window as unknown as Record<string, unknown>).__termic = {
       useApp: app.useApp,
@@ -97,6 +98,10 @@ if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
       // same reason as usePendingTasks: the fixture repo's archive finishes
       // far too fast to catch the "Archiving…" row by racing a real one.
       useArchivingTasks: archivingTasks.useArchivingTasks,
+      // CodeMirror's own indentation facet. Indentation is detected per file
+      // (lib/detectIndent), and the only honest way to assert what the editor
+      // decided is to read it from the state the editor actually uses.
+      cm: { indentUnit: cmLanguage.indentUnit },
     };
   })();
 }

@@ -1,7 +1,7 @@
 import { execSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { archiveTask, cliRpc, ensureActiveTask, openTask, requireTermicApi, snap, waitForAgentReady, waitForAppShell } from "../helpers";
+import { archiveTask, cliRpc, ensureActiveTask, openTask, requireTermicApi, snap, waitForAgentReady, waitForAppShell, waitVisible } from "../helpers";
 
 declare global {
   interface Window {
@@ -2658,6 +2658,69 @@ describe("comment on an editor selection for the agent", () => {
 // is enough to break `git.e2e.ts`'s first-parent case (verified, not guessed).
 // The README is a single line, so the cursor is armed by COLUMN rather than by
 // moving to another line, which is the same code path.
+// Indentation is read off the file, not assumed: the editor hard-coded two
+// spaces for everything, which is wrong for most of what an agent writes.
+describe("indentation, detected per file", () => {
+  let taskId!: string;
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask("e2e-indent");
+  });
+
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+  });
+
+  /** Open a file we wrote into the task, and read back what CodeMirror
+   *  decided one level of indentation is. */
+  const indentOf = async (name: string, body: string) => {
+    const root = await browser.execute(
+      (id) => window.__termic!.useApp.getState().tasks.find((t: any) => t.id === id)?.path as string,
+      taskId,
+    ) as string;
+    writeFileSync(path.join(root, name), body);
+    await browser.execute((id, p) => {
+      window.__termic!.useApp.getState().openPreviewTab(id, { type: "edit", path: p, title: p });
+    }, taskId, name);
+    await waitVisible(`[data-task-id="${taskId}"] .cm-editor`);
+    return await browser.waitUntil(async () => {
+      const got = await browser.execute((id) => {
+        const dom = document.querySelector(`[data-task-id="${id}"] .cm-editor`) as
+          (HTMLElement & { __cmView?: any }) | null;
+        const view = dom?.__cmView;
+        if (!view) return null;
+        // The two halves CodeMirror keeps separately: what Tab inserts, and
+        // how wide an existing tab renders.
+        return { unit: view.state.facet(window.__termic!.cm.indentUnit), tab: view.state.tabSize };
+      }, taskId) as { unit: string; tab: number } | null;
+      return got && got.unit !== undefined ? got : false;
+    }, { timeout: 10_000, timeoutMsg: `${name} never reported its indentation` }) as
+      { unit: string; tab: number };
+  };
+
+  it("reads four spaces off a Python file", async () => {
+    const py = "def sync(x: int) -> None:\n    if x:\n        print(x)\n    return None\n";
+    const got = await indentOf("indent_demo.py", py);
+    expect(got.unit).toBe("    ");
+    expect(got.tab).toBe(4);
+  });
+
+  it("reads tabs off a Go file, where they are the format", async () => {
+    const go = "package main\n\nfunc main() {\n\tif true {\n\t\tprintln(1)\n\t}\n}\n";
+    const got = await indentOf("indent_demo.go", go);
+    expect(got.unit).toBe("\t");
+  });
+
+  it("keeps two spaces for a file that uses them", async () => {
+    const ts = "export function f(x: number) {\n  if (x) {\n    return x;\n  }\n  return 0;\n}\n";
+    const got = await indentOf("indent_demo.ts", ts);
+    expect(got.unit).toBe("  ");
+    expect(got.tab).toBe(2);
+  });
+});
+
 describe("inline git blame", () => {
   let taskId!: string;
 

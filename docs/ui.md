@@ -246,6 +246,14 @@ Three grammars, because the registry cannot serve them, and a short **overlay** 
 
 Two upstream behaviours to know about. `LanguageDescription.matchFilename` compares the **raw** extension, so `README.MD` matches nothing — `matchLanguage` in `lib/languageExts.ts` does its own two-pass match with the extension lower-cased, and must not be swapped back. And the registry splits JSX/TSX out of JavaScript/TypeScript, so a `.tsx` file's button reads "TSX". `.gradle.kts` is Kotlin, not Groovy, which upstream already gets right.
 
+## Indentation, detected per file
+
+The editor hard-coded two spaces for every buffer, which is wrong for most of what an agent writes: Python is four, Go and Makefiles are tabs, and a Makefile's tabs are the format rather than a preference. `lib/detectIndent.ts` reads it off the file, VS Code's default behaviour (`editor.detectIndentation`) and the only one that needs no configuration to be right.
+
+It votes on the DIFFERENCE between consecutive indented lines rather than the smallest indent seen: a file full of 8-column aligned continuation lines still steps by 2, and the step is what survives that. Ties go to the smaller size (a 4-space file also steps by 8 wherever it nests twice), a single observation is not enough evidence to override the fallback, and only the first 64 KB is read, since this runs on the path that opens a file. It lives in its own compartment, so an external reload re-detects without rebuilding the view.
+
+Not done: `.editorconfig`, which is the explicit signal and should win over the guess when a project has one.
+
 ## Inline review comments (two surfaces)
 
 `reviewCommentsExtension(taskId, file, surface)` is one component with two loudness settings, because the same gesture means different things in the two places it runs.
