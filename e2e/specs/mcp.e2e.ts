@@ -12,7 +12,11 @@
 // (Origin) and header-identical comparisons that fetch abstracts away.
 import http from "node:http";
 import fs from "node:fs";
+import { execSync } from "node:child_process";
 import path from "node:path";
+
+/** The seeded repo every spec shares (scripts/e2e-seed.mjs). */
+const fixture = process.env.E2E_FIXTURE ?? path.join(process.cwd(), ".e2e", "fixture-repo");
 import { dataDir } from "../../wdio.conf.js";
 import { archiveTask, requireTermicApi, waitForAppShell } from "../helpers.js";
 
@@ -320,6 +324,14 @@ describe("MCP tools/call: a real task round-trip through the live webview", () =
 
   after(async () => {
     if (taskId) await archiveTask(taskId);
+    // task_diff dirties README to have something to diff. When the task is a
+    // main-checkout one that README is the shared fixture's, and archiving the
+    // task does not undo the edit: the next run's git spec then boots on a
+    // dirty tree. The seed heals this too, but only when the suite is entered
+    // through `make e2e`.
+    try {
+      execSync(`git -C "${fixture}" checkout -q HEAD -- README.md`);
+    } catch { /* nothing of ours to restore */ }
   });
 
   it("task_new creates a task and spawns the fake agent", async () => {

@@ -166,9 +166,32 @@ export async function waitForAppShell(timeout = 30_000): Promise<void> {
 }
 
 /**
+ * Open one of the right panel's tabs.
+ *
+ * By test id, never by text: the tab renders its change count INSIDE the
+ * button, so "Git" reads as "Git29" the moment the checkout is dirty, and
+ * clickByText matches exact text. That made every spec that opens the Git tab
+ * depend on a clean fixture repo, which is not something a spec running tenth
+ * in a suite can assume: the whole "git dirty tree" block failed with "no
+ * clickable element with text: Git" whenever an earlier spec left a file
+ * behind, and passed when git.e2e ran alone.
+ */
+export async function openRightTab(label: "All files" | "Git"): Promise<void> {
+  await browser.execute((l) => {
+    const el = document.querySelector(
+      `[data-testid="right-tab"][data-tab="${l}"]`,
+    ) as HTMLElement | null;
+    if (!el) throw new Error(`no right-panel tab: ${l}`);
+    el.click();
+  }, label);
+}
+
+/**
  * Click a control by its exact visible text (semantic, resilient to markup
  * and class churn). Throws if nothing matches, so a broken selector fails
  * loudly instead of silently no-op'ing.
+ *
+ * Not for anything that can grow a badge or a count: see openRightTab.
  */
 export async function clickByText(text: string): Promise<void> {
   await browser.execute((t) => {

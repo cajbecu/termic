@@ -1,6 +1,11 @@
+import { rmSync } from "node:fs";
+import path from "node:path";
 import {
   archiveTask, ensureActiveTask, openTask, requireTermicApi, snap, waitForAppShell, waitVisible,
 } from "../helpers";
+
+/** The seeded repo every spec shares (scripts/e2e-seed.mjs). */
+const fixture = process.env.E2E_FIXTURE ?? path.join(process.cwd(), ".e2e", "fixture-repo");
 
 // Scratchpads (GH #244): Sublime-style untitled buffers scoped to one task.
 //
@@ -55,6 +60,12 @@ describe("scratchpads", () => {
   let taskId!: string;
   after(async () => {
     if (taskId) await archiveTask(taskId);
+    // The promote case writes notes/from-scratchpad.json into the shared
+    // fixture repo. The seed heals TRACKED files only, by design, so an
+    // untracked file left here survives into the next run and the git spec's
+    // "Working tree is clean" boots red for a reason that has nothing to do
+    // with git. Untracked dirt is the spec's to clean.
+    rmSync(path.join(fixture, "notes"), { recursive: true, force: true });
   });
 
   it("opens from the + menu as an untitled, permanently-dirty tab", async () => {

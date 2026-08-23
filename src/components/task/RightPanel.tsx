@@ -830,7 +830,7 @@ function stripAnsi(s: string): string {
     .replace(/[PX^_][\s\S]*?\\/g, "")
     // Stray control bytes (NUL, BEL, BS, SO, SI, etc.) except
     // tab / LF / CR which the renderer wants to preserve.
-    .replace(/[ --]/g, "");
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "");
 }
 
 /** Stream pane: shows live captured stdout/stderr with auto-scroll-to-bottom

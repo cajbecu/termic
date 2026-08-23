@@ -1374,10 +1374,9 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                       <DropdownTrigger asChild>
                         <button
                           data-testid={`project-empty-new-task-${p.id}`}
-                          // h-[26px] is the task row height (py-1 + an 18px
-                          // content box), so the placeholder and the rows it
-                          // stands in for share one rhythm.
-                          className="flex h-[26px] w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-[var(--color-border)] bg-transparent px-2 text-[13px] text-[var(--color-fg-dim)] hover:border-[var(--color-accent-soft)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)] data-[state=open]:border-[var(--color-accent-soft)] data-[state=open]:text-[var(--color-fg)]"
+                          // Same token as the task row it stands in for, so
+                          // the two cannot drift apart (see --task-row-h).
+                          className="flex h-[var(--task-row-h)] w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-[var(--color-border)] bg-transparent px-2 text-[13px] text-[var(--color-fg-dim)] hover:border-[var(--color-accent-soft)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)] data-[state=open]:border-[var(--color-accent-soft)] data-[state=open]:text-[var(--color-fg)]"
                         >
                           <Plus className="h-3.5 w-3.5 shrink-0" />
                           <span>New task</span>
@@ -1983,7 +1982,7 @@ function ArchivingTaskRow({ w, compact }: { w: Task; compact: boolean }) {
         data-sidebar-task-id={w.id}
         data-sidebar-task-project-id={w.project_id}
         data-task-archiving="true"
-        className="ml-3 flex items-center gap-1.5 rounded-md px-1 py-1 text-[13px] select-none text-[var(--color-fg-faint)] opacity-70"
+        className="ml-3 flex h-[var(--task-row-h)] items-center gap-1.5 rounded-md px-1 text-[13px] select-none text-[var(--color-fg-faint)] opacity-70"
       >
         <span className="shrink-0 h-3.5 w-3.5 mx-0.5" />
         <div className="flex min-w-0 flex-1 items-center gap-1.5">
@@ -2358,7 +2357,10 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
         // the kebab button (which it anchors to).
         onContextMenu={(e) => { e.preventDefault(); setMenuOpen(true); }}
         className={cn(
-          "group/wsrow ml-3 flex items-center gap-1 rounded-md px-1 py-1 text-[13px] cursor-pointer select-none transition-colors",
+          // Fixed height rather than padding around a line box: the line box
+          // is the system's to decide (see --task-row-h) and the rows have to
+          // stay level with each other and with the empty-project placeholder.
+          "group/wsrow ml-3 flex h-[var(--task-row-h)] items-center gap-1 rounded-md px-1 text-[13px] cursor-pointer select-none transition-colors",
           // Strong selection on the header when active AND no child row
           // carries it: collapsed (children hidden) OR the active tab is an
           // edit/diff view (no row). Expanded with an active terminal tab

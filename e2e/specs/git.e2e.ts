@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { archiveTask, clickByText, clickMenuItem, flushEditorMeasure, openTask, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitGone, waitVisible } from "../helpers";
+import { archiveTask, clickByText, clickMenuItem, openRightTab, flushEditorMeasure, openTask, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitGone, waitVisible } from "../helpers";
 
 // Git integration is central to termic (every task is a worktree/checkout).
 // This guards the Git panel: switching to it shows the working-tree status.
@@ -20,7 +20,7 @@ describe("git panel", () => {
     taskId = await openTask("e2e-git");
 
     // Switch the right panel from "All files" to "Git" (a real click).
-    await clickByText("Git");
+    await openRightTab("Git");
     await selectGitView("commit");
 
     // The Git status is fetched async; the clean-tree copy appears once it
@@ -116,7 +116,7 @@ describe("git dirty tree", () => {
     );
 
     // Open the Commit panel (starts clean).
-    await clickByText("Git");
+    await openRightTab("Git");
     await selectGitView("commit");
 
     // Dirty the tree, then force the panel's git poll to re-fetch.
@@ -287,15 +287,6 @@ describe("git history tab", () => {
       if (head === subject) execSync(`git -C "${fixture}" reset --hard HEAD~1`, { stdio: "ignore" });
     } catch { /* the commit never landed */ }
   });
-
-  const openRightTab = (label: "All files" | "Git") =>
-    browser.execute((l) => {
-      const el = document.querySelector(
-        `[data-testid="right-tab"][data-tab="${l}"]`,
-      ) as HTMLElement | null;
-      if (!el) throw new Error(`no right-panel tab: ${l}`);
-      el.click();
-    }, label);
 
   /** Open the Git tab's History sub-tab. The graph was its own top-level tab
    *  (GH #199), then a collapsible section at the foot of the staging view;
@@ -602,15 +593,6 @@ describe("git compare mode", () => {
 
   /** Compare is one of the Git tab's three sub-tabs (Commit / Compare /
    *  History), so getting to it is the Git tab plus one sub-tab click. */
-  const openRightTab = (label: "All files" | "Git") =>
-    browser.execute((l) => {
-      const el = document.querySelector(
-        `[data-testid="right-tab"][data-tab="${l}"]`,
-      ) as HTMLElement | null;
-      if (!el) throw new Error(`no right-panel tab: ${l}`);
-      el.click();
-    }, label);
-
   const openCompare = async () => {
     await openRightTab("Git");
     await selectGitView("compare");
@@ -1344,17 +1326,6 @@ describe("git multi-repo panel", () => {
       ),
     ) as Promise<string[]>;
 
-  /** Click one of the right panel's own tabs. Not clickByText: the label grows
-   *  badge digits ("Git" → "Git21") the moment anything is changed. */
-  const openRightTab = (label: "All files" | "Git") =>
-    browser.execute((l) => {
-      const el = document.querySelector(
-        `[data-testid="right-tab"][data-tab="${l}"]`,
-      ) as HTMLElement | null;
-      if (!el) throw new Error(`no right-panel tab: ${l}`);
-      el.click();
-    }, label);
-
   it("creates a task spanning two member repos", async () => {
     await waitForAppShell();
     await requireTermicApi();
@@ -1582,15 +1553,6 @@ describe("git branch bar layout", () => {
     } catch { /* already gone */ }
   });
 
-  const openRightTab = (label: "All files" | "Git") =>
-    browser.execute((l) => {
-      const el = document.querySelector(
-        `[data-testid="right-tab"][data-tab="${l}"]`,
-      ) as HTMLElement | null;
-      if (!el) throw new Error(`no right-panel tab: ${l}`);
-      el.click();
-    }, label);
-
   /** Widths in CSS pixels, plus the row's own content box (its width minus the
    *  padding its children are laid out inside). */
   const measure = () =>
@@ -1598,10 +1560,13 @@ describe("git branch bar layout", () => {
       const box = (el: HTMLElement) => {
         const r = el.getBoundingClientRect();
         return {
-          width: r.width, left: r.left, right: r.right, top: r.top, bottom: r.bottom,
+          width: r.width, height: r.height,
+          left: r.left, right: r.right, top: r.top, bottom: r.bottom,
           // A truncated element scrolls wider than it renders. This is how
           // "did it end in an ellipsis" is asked without reading pixels.
           clipped: el.scrollWidth > el.clientWidth + 1,
+          // What it would take to show the whole label, ellipsis or not.
+          natural: el.scrollWidth,
         };
       };
       const rowBox = (el: HTMLElement) => {
@@ -1656,7 +1621,12 @@ describe("git branch bar layout", () => {
     expect(m.chip.width).toBeLessThanOrEqual(m.branchRow.inner * 0.7 + 1);
     // It stays on ONE row: this panel drags down to 220px, so the filter row
     // is not allowed to grow a second line the way Compare's bar may.
-    expect(m.branchRow.height).toBeLessThanOrEqual(32);
+    // Asked as a relationship, not a pixel count: WebKit takes its minimum
+    // font size from the system, so a Mac set to larger text renders these
+    // controls taller than a hard-coded ceiling would allow, and the test
+    // would fail for a machine's accessibility setting rather than a bug.
+    expect(m.filter!.top).toBeLessThan(m.chip.bottom);        // same line
+    expect(m.branchRow.height).toBeLessThan(m.chip.height * 2);
   });
 
   it("wraps the compare bar to a second row instead of crushing the base ref", async () => {
@@ -1671,13 +1641,23 @@ describe("git branch bar layout", () => {
     // Both names are readable in full. Neither is allowed to end in an
     // ellipsis while the other one keeps its name, which is what one row of
     // proportional shrinking did to the picker.
-    expect(m.base!.clipped).toBe(false);
-    expect(m.target!.clipped).toBe(false);
+    //
+    // Only asked when a row of its own would actually hold the name, which is
+    // this block's stated premise rather than a given: WebKit's minimum font
+    // size comes from the system, and on a Mac set to larger text these 12px
+    // labels render at 18px, where the name outgrows the panel under every
+    // possible layout. Wrapping cannot rescue a name that does not fit a full
+    // row, so there is nothing left for these two to prove.
+    const fitsOwnRow = m.target!.natural <= m.compareRow!.inner;
+    if (fitsOwnRow) {
+      expect(m.base!.clipped).toBe(false);
+      expect(m.target!.clipped).toBe(false);
+    }
     // The target took a row of its own: it starts below the picker's bottom.
     // (A panel wide enough to fit both keeps them on one row, and then the two
     // assertions above are the ones carrying the weight.)
     if (m.target!.top >= m.base!.bottom) {
-      expect(m.compareRow!.height).toBeGreaterThan(32);
+      expect(m.compareRow!.height).toBeGreaterThan(m.base!.height);
     }
     // Wrapped or not, nothing hangs outside the panel.
     expect(m.target!.right).toBeLessThanOrEqual(m.compareRow!.right + 0.5);

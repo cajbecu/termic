@@ -70,7 +70,7 @@ that breaks later ones, or reset between them.
 The e2e binary exposes `window.__termic` (stores + ipc + invoke — same handle
 the dev bridge uses; enabled via `VITE_E2E=1`, stripped from real release
 builds). Use it to **set up** state fast, to **locate** things (ids), and to
-read what genuinely has no DOM surface (PTY bytes — see rule 3).
+read what genuinely has no DOM surface (PTY bytes — see rule 4).
 
 **Do NOT use it for the assertion when the feature has a visible surface.**
 `tab.workState === "working"` is the detector's private bookkeeping; the
@@ -107,11 +107,17 @@ old/non-e2e binary).
 
 1. **Never sleep.** No `setTimeout` / fixed waits. Use `browser.waitUntil`, the
    `waitFor*` helpers, or auto-retrying `expect`. Every wait is a *condition*.
-2. **Assert on what the user sees, not pixels and not internals.** Screenshots
+2. **Address a control by test id when its label can grow.** `clickByText`
+   matches EXACT text, and the right panel's tabs render a change count inside
+   the button, so "Git" becomes "Git29" as soon as the checkout is dirty. That
+   made the whole `git dirty tree` block pass alone and fail tenth in a suite.
+   Use `openRightTab()`; reserve `clickByText` for labels that are only ever a
+   label.
+3. **Assert on what the user sees, not pixels and not internals.** Screenshots
    are for humans to eyeball, never for assertions. Prefer DOM text /
    `data-*` state attributes over store fields whenever a surface exists
-   (see the section above); fall back to store state only for rule 3.
-3. **Terminal content is NOT in the DOM.** xterm renders to a WebGL canvas, so
+   (see the section above); fall back to store state only for rule 4.
+4. **Terminal content is NOT in the DOM.** xterm renders to a WebGL canvas, so
    `innerText` never contains PTY output no matter how long you wait. Assert
    terminal activity via store state — e.g. `tab.lastOutputAt` (bytes flowed)
    or `tab.liveTitle` (the agent's OSC title) read through `window.__termic`.
@@ -136,9 +142,9 @@ old/non-e2e binary).
    the fixture's OSC title to reach the store, which proves the whole chain
    (process, script, xterm, store) is live. See the postmortem in
    [docs/e2e-tests.md](../../../docs/e2e-tests.md).
-4. **Semantic selectors.** Match by role / visible text (`clickByText`). Add a
-   `data-testid` only where text is ambiguous or localized. Never depend on
-   generated class names.
+5. **Semantic selectors.** Match by role / visible text (`clickByText`). Add a
+   `data-testid` where text is ambiguous, localized, or can grow (rule 2).
+   Never depend on generated class names.
    - **Scope dialog queries to the SPECIFIC dialog, never a bare
      `[role="dialog"]`.** Dialogs stack, and on an occluded window a closing
      dialog's rAF-driven unmount lags, leaving a stale node in the DOM — a bare
@@ -146,7 +152,7 @@ old/non-e2e binary).
      last spec). Find it by title/content: `[...document.querySelectorAll(
      '[role="dialog"]')].find(d => d.textContent.includes("<dialog title>"))`.
      See the RaceDialog cases in `e2e/specs/task.e2e.ts`.
-5. **Deterministic fixtures.** Runs use the isolated `.e2e/profile`
+6. **Deterministic fixtures.** Runs use the isolated `.e2e/profile`
    (`welcomed` + the `fixture-repo` project + the zero-token `fakeagent`).
    Agent flows use `fakeagent` (`scripts/fake-agent.sh`, real PTY, zero tokens).
    Don't depend on state a previous test left behind.
@@ -210,6 +216,21 @@ genuinely remote-less repo falls back to local `main` via `resolve_base_ref`
 Each spec **file** gets its own app launch (one window per file, not per
 `it`); tests within a file share that window and run sequentially, so order
 them so earlier state doesn't break later ones, or reset between them.
+
+**Leave the fixture the way you found it, including UNTRACKED files.** The
+seed self-heals tracked paths (`git checkout HEAD -- .`) and deliberately does
+not touch untracked ones, which are the spec's to own and therefore the spec's
+to remove. A file left behind does not fail the run that created it: it fails
+the NEXT one, in another spec, usually as `git panel` booting on a dirty tree.
+CI never sees it (fresh checkout, one run), so this only ever bites a person
+running `make e2e` twice. `mcp.e2e.ts` restores the README it dirties and
+`scratchpad.e2e.ts` removes the `notes/` it promotes into.
+
+Cleaning up **after a failure** takes more than an `after()` hook that deletes
+what the test returned. `agent race` creates racer 1, then racer 2; a throw in
+between leaves racer 1 on disk and returns no ids at all, so its teardown
+sweeps by NAME as well. Ask what your teardown deletes when the body threw
+half way, not only when it passed.
 
 ## Debugging a failing spec
 

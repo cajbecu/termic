@@ -32,6 +32,15 @@
      Equals Tailwind h-9. Used via h-[var(--bottom-bar-h)] / bottom-[…] and the
      collapsed inline heights. */
   --bottom-bar-h:    36px;
+  /* Sidebar task row height, shared by the row itself and the dashed
+     "new task" placeholder that stands in for it in an empty project.
+     They used to be sized by two different recipes (the row by py-1 plus
+     whatever its text's line box came to, the placeholder by a literal
+     h-[26px]) which agreed only at a 16px root font size. WKWebView takes
+     the root size from the system, and a Mac set to larger text renders it
+     at 18px: rem padding grows, the literal does not, and the placeholder
+     ends up 10px shorter than the rows around it. One token, one height. */
+  --task-row-h:      26px;
   --color-bg:        #0c0c0c;
   --color-bg-1:      #141414;
   --color-bg-2:      #1c1c1c;

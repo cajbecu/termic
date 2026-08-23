@@ -378,6 +378,54 @@ describe("branch new tasks from", () => {
     );
   };
 
+  /** Open the project's New task menu. Radix opens on pointerdown, so a bare
+   *  .click() is not enough. */
+  const openNewTaskMenu = async (pid: string) => {
+    const trigger = `[data-testid="project-new-task-${pid}"]`;
+    await waitVisible(trigger);
+    await browser.execute((sel) => {
+      const el = document.querySelector(sel) as HTMLElement;
+      const opts = { bubbles: true, pointerType: "mouse", button: 0 } as any;
+      el.dispatchEvent(new PointerEvent("pointerdown", opts));
+      el.dispatchEvent(new PointerEvent("pointerup", opts));
+      el.click();
+    }, trigger);
+    await waitVisible('[role="menu"]');
+  };
+
+  /** Drive the menu into `mode`, pick `item`, and retry the WHOLE gesture if
+   *  nothing comes of it.
+   *
+   *  settleMenuMode closes most of the remount window, and CI still lands
+   *  inside it: the run for 41b3c5e timed out here with no menu, no menu item
+   *  and no prompt anywhere on screen. That shape says the click did select
+   *  (Radix closes the menu when it does) while the handler that opens the
+   *  prompt went with the node being replaced. Waiting longer cannot help,
+   *  because there is nothing left on screen to wait for, and no state that
+   *  says so before the fact. Re-open and do it again instead. The gesture is
+   *  idempotent up to the point it works: a lost click creates nothing. */
+  const pickFromNewTaskMenu = async (
+    pid: string,
+    mode: "worktree" | "main",
+    item: string,
+    doneSelector: string,
+    attempts = 3,
+  ) => {
+    for (let attempt = 1; ; attempt++) {
+      await openNewTaskMenu(pid);
+      await settleMenuMode(mode);
+      try {
+        await clickMenuItemUntil(item, doneSelector, 6_000);
+        return;
+      } catch (e) {
+        if (attempt === attempts) throw e;
+        // The menu is usually already gone; this is for the case where the
+        // click never landed at all and it is still up.
+        await browser.keys("Escape");
+      }
+    }
+  };
+
   /** Alphabetical on purpose: "bitbucket" must sort before "origin". */
   const remotes = ["bitbucket", "origin"];
   const remotePath = (r: string) =>
@@ -520,17 +568,7 @@ describe("branch new tasks from", () => {
   });
 
   it("shows the base in the project menu, worktree mode only", async () => {
-    const trigger = `[data-testid="project-new-task-${projectId}"]`;
-    await waitVisible(trigger);
-    // Radix opens on pointerdown, so a bare .click() isn't enough.
-    await browser.execute((sel) => {
-      const el = document.querySelector(sel) as HTMLElement;
-      const opts = { bubbles: true, pointerType: "mouse", button: 0 } as any;
-      el.dispatchEvent(new PointerEvent("pointerdown", opts));
-      el.dispatchEvent(new PointerEvent("pointerup", opts));
-      el.click();
-    }, trigger);
-    await waitVisible('[role="menu"]');
+    await openNewTaskMenu(projectId);
 
     // Mode is remembered app-wide, so don't assume where we start: drive it.
     // Main checkout runs on the live branch, so there's no base to pick.
@@ -551,23 +589,10 @@ describe("branch new tasks from", () => {
   // (create-at-once, Rust auto-names it), unlike every other item in this
   // menu. It now goes through the same prompt as the agent items.
   it("prompts for a name before creating a main-checkout Terminal task", async () => {
-    const trigger = `[data-testid="project-new-task-${projectId}"]`;
-    await waitVisible(trigger);
-    await browser.execute((sel) => {
-      const el = document.querySelector(sel) as HTMLElement;
-      const opts = { bubbles: true, pointerType: "mouse", button: 0 } as any;
-      el.dispatchEvent(new PointerEvent("pointerdown", opts));
-      el.dispatchEvent(new PointerEvent("pointerup", opts));
-      el.click();
-    }, trigger);
-    await waitVisible('[role="menu"]');
-    await clickByText("Main checkout");
-    await settleMenuMode("main");
-    await clickMenuItemUntil("Terminal", 'input[placeholder="Task name"]');
-
+    const nameInput = 'input[placeholder="Task name"]';
     // Menu closes, an inline name input takes its place instead of a task
     // appearing immediately.
-    const nameInput = 'input[placeholder="Task name"]';
+    await pickFromNewTaskMenu(projectId, "main", "Terminal", nameInput);
     await waitVisible(nameInput);
     const prefilled = await browser.execute(
       (sel) => (document.querySelector(sel) as HTMLInputElement).value,
@@ -606,21 +631,8 @@ describe("branch new tasks from", () => {
   // closes immediately, well before the worktree is actually ready, and the
   // task still lands on its own branch.
   it("creates a worktree task from the inline quick-create row without blocking", async () => {
-    const trigger = `[data-testid="project-new-task-${projectId}"]`;
-    await waitVisible(trigger);
-    await browser.execute((sel) => {
-      const el = document.querySelector(sel) as HTMLElement;
-      const opts = { bubbles: true, pointerType: "mouse", button: 0 } as any;
-      el.dispatchEvent(new PointerEvent("pointerdown", opts));
-      el.dispatchEvent(new PointerEvent("pointerup", opts));
-      el.click();
-    }, trigger);
-    await waitVisible('[role="menu"]');
-    await clickByText("Worktree");
-    await settleMenuMode("worktree");
-    await clickMenuItemUntil("Terminal", 'input[placeholder="Task name"]');
-
     const nameInput = 'input[placeholder="Task name"]';
+    await pickFromNewTaskMenu(projectId, "worktree", "Terminal", nameInput);
     await waitVisible(nameInput);
     await browser.execute((sel) => {
       const input = document.querySelector(sel) as HTMLInputElement;
