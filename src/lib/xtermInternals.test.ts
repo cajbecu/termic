@@ -26,6 +26,10 @@ const REACH_INS: Record<string, string> = {
   getLinkData: "termLinkOpener",
   // lib/terminalRenderer.ts — renderer debug snapshot.
   _coreBrowserService: "terminalRenderer",
+  // lib/terminalRenderer.ts — paused render service in the rebuild log line
+  // (a paused xterm draws nothing on ANY renderer, so the field log needs it).
+  _renderService: "terminalRenderer",
+  _isPaused: "terminalRenderer",
 };
 
 describe("xterm bundle still exposes our private reach-ins", () => {
