@@ -10,10 +10,11 @@ path) and `TERMIC_CLI_HELP` (a condensed version of these rules), and
 
 Distribution (a Settings action that appends/installs the block for
 the user's agent setup) is still pending; the plan that tracked it was
-retired when the CLI shipped. Until then, users paste it, or copy one
-task's version of it from the sidebar's task menu ("Copy agent
-briefing", `src/lib/agentBriefing.ts`). Keep this file in lockstep with
-`termic help` and with that builder.
+retired when the CLI shipped. Until then, users paste it. To point ONE
+agent at ONE task there is a short fragment instead: the task menu's
+"Copy agent CLI briefing" (`src/lib/agentBriefing.ts`), which carries
+the address and nothing else. Keep this file in lockstep with `termic
+help`.
 
 Everything between the markers is the instructions content, verbatim.
 
@@ -63,9 +64,11 @@ If you are NOT running inside a Termic task you have no inbox to be
 prompted back at. Then ask for a file (below) and read it when you next
 have a reason to, rather than blocking.
 
-The sidebar's task menu has "Copy agent CLI briefing", which puts this whole
-protocol plus one task's id and path on the user's clipboard, ready to
-paste into another agent.
+The sidebar's task menu has "Copy agent CLI briefing", which puts one
+task's id, directory and that exact command shape on the clipboard as a
+three-line fragment, ready to paste into a prompt for another agent. It
+deliberately does NOT repeat the protocol above, because you are reading
+it here and in `$TERMIC_CLI_HELP` already.
 
 ### Creating a task that produces a result
 
