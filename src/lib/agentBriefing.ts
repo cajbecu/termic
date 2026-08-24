@@ -58,6 +58,11 @@ export function buildAgentBriefing(opts: {
   // and only on the tasks it applies to: without it the reader wires up a
   // report-back that can never arrive. Monitor mode reaches the CLI by
   // contract and needs no warning.
+  //
+  // This line is correct behaviour, NOT a gap to close by handing caged
+  // agents a channel: a cage with a text channel to something uncaged is not
+  // a cage. docs/sandbox.md ("Settled") has the argument, including why the
+  // narrow versions of the idea fail too.
   const caged = isSandboxEnforced(effectiveSandboxMode(task))
     ? `\n\nIt is sandboxed (enforcing), so it cannot run the CLI to reply: ask it to write a file under dir and read that yourself.`
     : "";

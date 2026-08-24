@@ -106,8 +106,38 @@ is the accepted trade-off of Monitoring being a pure observer; the cage
 that actually enforces the boundary is `Enforce`/`EnforceFs`. (Same spirit
 as the webview gap above: a documented, accepted exposure, not a leak.)
 
+## Settled: a caged agent gets NO channel to another agent
+
+Recurring proposal, rejected 2026-08-24. The agent-to-agent protocol
+(docs/cli-agent-instructions.md) has one side prompt the other when its
+work is done, and an `Enforce` / `EnforceFs` agent cannot take part: it
+cannot reach the socket or read the token. The task menu's "Copy agent
+CLI briefing" prints a line saying so on caged tasks. That line is
+correct behaviour, not a TODO.
+
+Do not "fix" it by letting caged agents reach the control plane. The
+verbs are a straight escape (`new --sandbox off --yolo` spawns an uncaged
+agent; `apply` writes past the FS allow-list; `attach` types into an
+uncaged agent), so any proposal has to narrow them, and the narrow ones
+do not survive either:
+
+- **Report-back-only `send`.** Bounds the verb, not the payload. "Run
+  this for me" is text, and the recipient is uncaged.
+- **Reply-only addressing** (may only send to tasks that first sent to
+  it). Bounds the audience, not the payload, and picks the *worst*
+  audience: the one correspondent it is guaranteed to have is an agent
+  already collaborating with it, so the most likely to comply. This
+  makes the deputy more confused, not less.
+
+A cage with a text channel to something uncaged is not a cage. The
+supported way for a caged agent to report is the one the briefing
+prints: have it write a file inside its own worktree and read that from
+outside. If you need the prompt-back protocol, run the task in `Monitor`
+(which reaches the CLI by contract, see the gap above) or uncaged.
+
 ## Do NOT
 
 - Sandbox AuxTerminal, setup, run, or archive scripts.
 - Expose `task_set_sandbox` without SIGKILLing live PTYs by default. `kill_live=false` is an explicit escape hatch with a warning — don't make it the default.
 - Widen `tauri.conf.json`'s CSP without reading "Known gap" above. It applies to the whole webview, not to the component you are working on.
+- Give caged agents any path to another agent (control plane, scoped token, notify side channel). See "Settled" above for why the narrow versions fail too.
