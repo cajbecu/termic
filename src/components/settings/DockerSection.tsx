@@ -16,7 +16,6 @@ import { EditorView, keymap } from "@codemirror/view";
 import { EditorState, Compartment } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { StreamLanguage } from "@codemirror/language";
-import { dockerFile } from "@codemirror/legacy-modes/mode/dockerfile";
 import {
   dockerCheck, dockerImageStatus, dockerGetDockerfile, dockerDefaultDockerfile,
   dockerSetDockerfile, dockerBuildImage, onDockerBuildLog, onDockerBuildDone,
@@ -75,27 +74,39 @@ export function DockerSection() {
   // empty-doc instance swapped out a tick later) ──────────────────────
   useEffect(() => {
     if (!dfLoaded || !hostRef.current || viewRef.current) return;
-    const view = new EditorView({
-      state: EditorState.create({
-        doc: dockerfile,
-        extensions: [
-          history(),
-          keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap]),
-          StreamLanguage.define(dockerFile),
-          EditorView.lineWrapping,
-          themeComp.current.of([
-            resolveEditorTheme(themeId, appIsLight),
-            editorSurfaceTheme(fontSize, false),
-          ]),
-          EditorView.updateListener.of(u => {
-            if (u.docChanged) setDockerfile(u.state.doc.toString());
-          }),
-        ],
-      }),
-      parent: hostRef.current,
+    let cancelled = false;
+    // Dynamic import: @codemirror/legacy-modes is ~150 grammars and this is
+    // the only place in the app that wants the Dockerfile one, so it must
+    // not join the main chunk (src/lib/languageExts.ts does the same for
+    // every legacy-modes grammar; enforced by mainChunkGuard.test.ts).
+    import("@codemirror/legacy-modes/mode/dockerfile").then(({ dockerFile }) => {
+      if (cancelled || !hostRef.current || viewRef.current) return;
+      const view = new EditorView({
+        state: EditorState.create({
+          doc: dockerfile,
+          extensions: [
+            history(),
+            keymap.of([indentWithTab, ...defaultKeymap, ...historyKeymap]),
+            StreamLanguage.define(dockerFile),
+            EditorView.lineWrapping,
+            themeComp.current.of([
+              resolveEditorTheme(themeId, appIsLight),
+              editorSurfaceTheme(fontSize, false),
+            ]),
+            EditorView.updateListener.of(u => {
+              if (u.docChanged) setDockerfile(u.state.doc.toString());
+            }),
+          ],
+        }),
+        parent: hostRef.current,
+      });
+      viewRef.current = view;
     });
-    viewRef.current = view;
-    return () => { view.destroy(); viewRef.current = null; };
+    return () => {
+      cancelled = true;
+      viewRef.current?.destroy();
+      viewRef.current = null;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dfLoaded]);
 
