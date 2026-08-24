@@ -360,6 +360,12 @@ Wire these in the same pass, since the payload already carries them:
 - **Session index groundwork.** `transcript_path` points at the CLI's
   own JSONL. Recording it per task is the cheap half of a local,
   on-device "what did we already try" search, with no upload anywhere.
+- **Auto-resume on usage limit** (#256). `stop_reason` in the `Stop`
+  payload lets termic tell a usage-limit stop apart from a normal
+  turn-end without parsing terminal output. Wire in a reset-time parser
+  and a scheduled re-prompt and overnight runs survive the gap
+  automatically. PTY-based detection (#259) works today but breaks when
+  Claude's menu text changes; `stop_reason` is the stable contract.
 
 ## Settings UX
 
