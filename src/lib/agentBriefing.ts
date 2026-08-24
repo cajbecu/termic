@@ -13,9 +13,17 @@
 // The one load-bearing detail is the QUOTING. The reply address is
 // `$TERMIC_TASK_ID` inside DOUBLE quotes, so the SENDER's shell expands it to
 // the sender's own id at send time and the receiving agent is handed a literal
-// address it can just run. Single quotes there would block expansion, and the
-// block would have to spend a paragraph telling agents to substitute by hand,
-// which is exactly the step they fumble.
+// address it can just run.
+//
+// That trick is self-executing for a SHELL, and the reader is not a shell: it
+// is an agent that will rewrite the line to slot its own prompt in, and while
+// rewriting it flips the outer quotes to single (near-inevitable once its text
+// contains an apostrophe) or "resolves" $TERMIC_TASK_ID to something invented.
+// Either one fails SILENTLY - the reply goes nowhere and the sender waits for
+// a report that cannot arrive - so the last line spends its one sentence
+// telling the reader to leave both alone. It is the only thing in the block
+// that is not already in the CLI's own help; everything else was cut for
+// exactly that reason.
 
 import { copyToClipboard } from "@/lib/clipboard";
 import { cliInstallStatus } from "@/lib/ipc";
@@ -53,6 +61,7 @@ export function buildAgentBriefing(opts: {
 }): string {
   const { task, cli } = opts;
   const project = opts.projectName || "unknown project";
+  const agent = task.cli || "claude";
   // An ENFORCING cage denies the control-plane socket outright (termic-cli's
   // cage_refused), so this agent cannot run the CLI to reply at all. One line,
   // and only on the tasks it applies to: without it the reader wires up a
@@ -67,9 +76,11 @@ export function buildAgentBriefing(opts: {
     ? `\n\nIt is sandboxed (enforcing), so it cannot run the CLI to reply: ask it to write a file under dir and read that yourself.`
     : "";
 
-  return `Termic task "${task.name}" (${project}), id ${task.id}, dir ${task.path}. Hand it work and get a reply with:
+  return `You can talk to another coding agent working alongside you: the Termic task "${task.name}" (project ${project}, ${agent}), id ${task.id}, working in ${task.path}. Prompt it, and it prompts you back when it is done:
 
-  ${cli} send ${task.id} -p "<your prompt here: what you want it to do>. When done: ${cli} send $TERMIC_TASK_ID -p 'done: <what you did>'"${caged}`;
+  ${cli} send ${task.id} -p "<your prompt here: what you want it to do>. When done: ${cli} send $TERMIC_TASK_ID -p 'done: <what you did>'"
+
+Keep the outer double quotes and leave $TERMIC_TASK_ID as written: your shell fills in your own address, which is how it knows where to reply.${caged}`;
 }
 
 /** Copy the briefing for `task` to the clipboard, resolving the CLI command

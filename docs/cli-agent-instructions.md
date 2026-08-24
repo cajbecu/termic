@@ -81,9 +81,13 @@ run it in `monitor` (which reaches the CLI by contract) or uncaged.
 
 The sidebar's task menu has "Copy agent CLI briefing", which puts one
 task's id, directory and that exact command shape on the clipboard as a
-three-line fragment, ready to paste into a prompt for another agent. It
+short fragment, ready to paste into a prompt for another agent. It
 deliberately does NOT repeat the protocol above, because you are reading
-it here and in `$TERMIC_CLI_HELP` already.
+it here and in `$TERMIC_CLI_HELP` already. It keeps exactly one sentence
+the help does not have: leave the outer double quotes and
+`$TERMIC_TASK_ID` alone. The reader is an agent that rewrites the line
+to slot its own prompt in, and mangling either kills the reply address
+with no error.
 
 ### Creating a task that produces a result
 

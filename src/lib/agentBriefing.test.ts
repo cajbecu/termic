@@ -44,17 +44,35 @@ describe("buildAgentBriefing", () => {
     // It gets pasted INSIDE a larger prompt. The protocol lives in the CLI's
     // own help ($TERMIC_CLI_HELP, `send --help`), so re-teaching it here is
     // what made an earlier draft unreadable. Guard the size, not the prose.
-    expect(block.split("\n").length).toBeLessThanOrEqual(3);
+    expect(block.split("\n").length).toBeLessThanOrEqual(5);
   });
 
-  it("names the task and its project", () => {
-    expect(block).toContain(`Termic task "review-auth" (termic)`);
+  it("tells the reader to preserve the quoting and the variable", () => {
+    // The reader is an agent that will REWRITE this line to slot its prompt
+    // in, and flipping the outer quotes to single (or inventing a value for
+    // $TERMIC_TASK_ID) breaks the reply address silently. This sentence is
+    // the only thing here that is not already in the CLI's own help.
+    expect(block).toContain("Keep the outer double quotes and leave $TERMIC_TASK_ID as written");
+  });
+
+  it("frames WHAT this is before naming it", () => {
+    // Pasted cold into someone else's prompt, the identity alone never says
+    // why a task id is sitting in the middle of their instructions.
+    expect(block.startsWith("You can talk to another coding agent working alongside you:")).toBe(true);
+  });
+
+  it("names the task, its project and which agent is running it", () => {
+    expect(block).toContain(`the Termic task "review-auth" (project termic, codex)`);
+  });
+
+  it("says the channel runs both ways", () => {
+    expect(block).toContain("Prompt it, and it prompts you back when it is done");
   });
 
   it("carries the id and the directory, which the reader cannot derive", () => {
     // The name is renameable, so the id is what a command must address.
     expect(block).toContain("id task-abc123");
-    expect(block).toContain("dir /Users/x/.termic/worktrees/review-auth");
+    expect(block).toContain("working in /Users/x/.termic/worktrees/review-auth");
   });
 
   it("addresses the task by id in the command, never by name", () => {
@@ -94,7 +112,7 @@ describe("buildAgentBriefing", () => {
 
   it("degrades to a readable line when the project name is unknown", () => {
     expect(buildAgentBriefing({ task, projectName: null, cli: "termic" }))
-      .toContain(`"review-auth" (unknown project)`);
+      .toContain(`"review-auth" (project unknown project, codex)`);
   });
 
   it("makes no claim about a worktree, which a main-checkout task has none of", () => {
@@ -129,6 +147,6 @@ describe("buildAgentBriefing sandbox caveat", () => {
   });
 
   it("costs nothing on a task it does not apply to", () => {
-    expect(build({ sandbox_mode: "off" }).split("\n").length).toBe(3);
+    expect(build({ sandbox_mode: "off" }).split("\n").length).toBe(5);
   });
 });
