@@ -383,12 +383,6 @@ specs and get an issue at the same time. That is the whole promotion path:
 
 ### Ideas
 
-- **On-device dictation for agent prompts.** Prompts to a coding agent are
-  prose, and one dictated prompt can be broadcast to four agents at once.
-  macOS 26's `SpeechAnalyzer` runs entirely on device, which is the only way
-  this belongs in an app that is otherwise wholly local. Apple Silicon and
-  macOS 26+ only, so strictly additive. Discussion in
-  [#178](https://github.com/simion/termic/issues/178).
 - **Intentional agent-driven orchestration.** The plumbing already ships:
   an agent can spawn a task with `--wait`, prompt another, read its result
   and branch on the exit code. What is missing is intent, and an opinion
