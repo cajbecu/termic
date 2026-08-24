@@ -13,10 +13,11 @@ import {
   FolderCog, RefreshCw, ScrollText, Bug, SlidersHorizontal, Bot, BookText,
   Check, ChevronLeft, ListTodo, Bell, SquareTerminal, FolderPlus, History, Square,
   Play, Swords, Megaphone, Columns2, Rows2, Clock, UserPen, Activity, Code2,
-  NotepadText, type LucideIcon,
+  NotepadText, Waypoints, type LucideIcon,
 } from "lucide-react";
 import { useUI } from "@/store/ui";
 import { copyToClipboard } from "@/lib/clipboard";
+import { copyAgentBriefing } from "@/lib/agentBriefing";
 import { useApp } from "@/store/app";
 import { jumpToNextWaiting } from "@/lib/waitingAgents";
 import { newScratchTab } from "@/lib/scratchTabs";
@@ -237,6 +238,15 @@ export function CommandPalette() {
           run: act(() => { void copyToClipboard(task.branch, `"${task.branch}"`); }),
         });
       }
+      cmds.push({
+        // The paste-into-another-agent briefing (see lib/agentBriefing).
+        id: "copy-agent-briefing", section: "Task", label: "Copy agent CLI briefing",
+        suffix: "Paste into another agent to let it drive this task",
+        icon: Waypoints, keywords: "cli orchestrate remote control clipboard termic agents talk",
+        run: act(() => {
+          void copyAgentBriefing(task, useApp.getState().projects.find(p => p.id === task.project_id)?.name);
+        }),
+      });
       cmds.push({
         id: "resume-override", section: "Task", label: "Resume options…",
         icon: History, keywords: "session continue previous conversation args",

@@ -2756,10 +2756,12 @@ fn pty_spawn(
             // Agent-agnostic discovery hint, the TERMIC_SANDBOX_HELP
             // precedent: any agent that inspects its env learns how to
             // use the control plane without a vendor-specific skill
-            // file. Keep it to the two rules agents get wrong.
+            // file. Keep it to the rules agents get wrong, of which the
+            // biggest is reaching for `--wait` instead of asking the other
+            // agent to prompt them back (src/lib/agentBriefing.ts).
             cmd.env(
                 "TERMIC_CLI_HELP",
-                "TERMIC_CLI is the Termic control CLI. Run `\"$TERMIC_CLI\" help --json` for the full command surface. To create a task that returns a result: `\"$TERMIC_CLI\" new <name> --sandbox enforce --wait -p \"<task>; write your findings to RESULT.md\"`, then read RESULT.md from the task path (`result` and `logs` can peek at a running agent, the file drop is the reliable floor). Prompt an existing task with `\"$TERMIC_CLI\" send <task> -p \"...\" --wait`. Branch on exit codes: 0 done, 3 needs input, 7 timeout, 9 prompt not delivered. Your own task, if any, is $TERMIC_TASK_ID (prefer the id over $TERMIC_TASK: names can be renamed or reused). Once you know the real subject of your work (issue filed, PR opened), retitle your task so the sidebar reads well: `\"$TERMIC_CLI\" rename \"<new name>\"` renames your own task's label (branch and directory keep their names).",
+                "TERMIC_CLI is the Termic control CLI. Run `\"$TERMIC_CLI\" help --json` for the full command surface. Prompt an existing task with `\"$TERMIC_CLI\" send <task> -p \"...\"`; create one with `\"$TERMIC_CLI\" new <name> --sandbox enforce -p \"<task>; write your findings to RESULT.md\"` and read RESULT.md from the task path (`result` and `logs` can peek at a running agent, the file drop is the reliable floor). Coordinate by prompting each other, not by blocking: end every prompt you send with the command you want run when that work is done (`\"$TERMIC_CLI\" send <your task id> -p \"<one-line report>\"`, substituting your own $TERMIC_TASK_ID literally, since the other agent's shell cannot expand your variables), and treat every prompt that arrives in your own terminal as one of those reports. Prefer that over `--wait`: work-done detection is a heuristic, and a waiting agent can do nothing else meanwhile. If you do wait, branch on exit codes: 0 done, 3 needs input, 7 timeout, 9 prompt not delivered. Your own task, if any, is $TERMIC_TASK_ID (prefer the id over $TERMIC_TASK: names can be renamed or reused). Once you know the real subject of your work (issue filed, PR opened), retitle your task so the sidebar reads well: `\"$TERMIC_CLI\" rename \"<new name>\"` renames your own task's label (branch and directory keep their names).",
             );
         }
     }

@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { archiveTask, clickByText, clickWhenVisible, dismissOverlays, ensureActiveTask, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitForWorkBadge, waitGone, waitVisible } from "../helpers";
+import { archiveTask, clickByText, clickMenuItem, clickWhenVisible, dismissOverlays, ensureActiveTask, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitForWorkBadge, waitGone, waitVisible } from "../helpers";
 
 // Click a button by its exact text inside the NewTaskDialog specifically
 // (scoped via the name input's dialog — there can be more than one
@@ -2132,5 +2132,130 @@ describe("extra named ports allocation", () => {
     const stored: any = await taskById(id);
     expect(stored.extra_named_ports).toEqual([{ name: "LATE_PORT", port: stored.port + 1 }]);
     await setPorts([]);
+  });
+});
+
+// P1: "Copy agent CLI briefing" on the task menu — the paste-into-another-agent
+// CLI block that lets two agents drive each other (src/lib/agentBriefing.ts).
+// Cases: the item is reachable from the right-click menu; running it actually
+// reaches the clipboard; the command palette offers the same action.
+//
+// The BLOCK'S CONTENT is pinned by src/lib/agentBriefing.test.ts, not here:
+// the webview holds `clipboard-manager:allow-write-text` and no read
+// permission, so the success toast is the only observable proof the write
+// happened, and it only fires after writeText resolves.
+describe("copy agent briefing", () => {
+  let taskId!: string;
+  after(async () => {
+    await browser.execute(() => {
+      window.__termic!.useUI.getState().closeCommandPalette?.();
+      window.__termic!.useUI.setState({ toasts: [] });
+    });
+    await dismissOverlays();
+    if (taskId) await archiveTask(taskId);
+  });
+
+  // Right-click the task header row: it opens the same menu as the kebab,
+  // and unlike the kebab it is not gated on a hover-only pointer-events flip.
+  const openTaskMenu = (id: string) =>
+    browser.execute((i) => {
+      const row = document.querySelector(`[data-sidebar-task-id="${i}"]`);
+      if (!row) throw new Error(`no sidebar row for task ${i}`);
+      row.dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+      );
+    }, id);
+
+  const menuLabels = () =>
+    browser.execute(() =>
+      [...document.querySelectorAll("[role='menuitem']")].map(
+        (e) => e.textContent?.trim() ?? "",
+      ),
+    );
+
+  const toasts = () =>
+    browser.execute(() =>
+      window.__termic!.useUI.getState().toasts.map((t: any) => `${t.kind}:${t.msg}`),
+    );
+
+  const clearToasts = () =>
+    browser.execute(() => window.__termic!.useUI.setState({ toasts: [] }));
+
+  const waitForCopyToast = async (what: string) => {
+    await browser.waitUntil(
+      async () => (await toasts()).includes("success:Copied agent CLI briefing"),
+      {
+        timeout: 8_000,
+        timeoutMsg: `${what}: clipboard write never confirmed`,
+      },
+    );
+  };
+
+  it("offers the briefing on the task's right-click menu", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    await dismissOverlays();
+    taskId = await openTask("e2e-briefing");
+    await ensureActiveTask(taskId);
+
+    await openTaskMenu(taskId);
+    await browser.waitUntil(
+      async () => (await menuLabels()).includes("Copy agent CLI briefing"),
+      { timeout: 8_000, timeoutMsg: "task menu never offered Copy agent CLI briefing" },
+    );
+    const labels = await menuLabels();
+    // Sits in the copy/edit block, not off in the archive block.
+    expect(labels.indexOf("Copy agent CLI briefing")).toBeGreaterThan(
+      labels.indexOf("Rename"),
+    );
+    expect(labels.indexOf("Copy agent CLI briefing")).toBeLessThan(
+      labels.indexOf("Archive task"),
+    );
+  });
+
+  it("running it writes to the clipboard", async () => {
+    await clearToasts();
+    await clickMenuItem("Copy agent CLI briefing");
+    await waitForCopyToast("task menu");
+    await dismissOverlays();
+    await clearToasts();
+  });
+
+  // Second surface for the same action: the palette is how it is reached
+  // without hunting for the row (CommandPalette.tsx).
+  it("the command palette offers the same action", async () => {
+    await browser.execute(() =>
+      window.__termic!.useUI.getState().openCommandPalette(),
+    );
+    await waitVisible('input[placeholder*="Type a command"]', 8_000);
+    await browser.execute(() => {
+      const input = document.querySelector(
+        'input[placeholder*="Type a command"]',
+      ) as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        "value",
+      )!.set!;
+      setter.call(input, "agent CLI briefing");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          () =>
+            !!document.querySelector('[data-cmd-id="copy-agent-briefing"]'),
+        ),
+      { timeout: 8_000, timeoutMsg: "palette never listed copy-agent-briefing" },
+    );
+    await clearToasts();
+    await browser.execute(() =>
+      (
+        document.querySelector(
+          '[data-cmd-id="copy-agent-briefing"]',
+        ) as HTMLElement
+      ).click(),
+    );
+    await waitForCopyToast("command palette");
+    await clearToasts();
   });
 });

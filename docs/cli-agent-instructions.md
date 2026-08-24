@@ -5,13 +5,15 @@ The canonical instructions for teaching ANY coding agent to use the
 `AGENTS.md` (read by codex, gemini, cursor and friends), a `CLAUDE.md`,
 or any agent's instruction channel, unchanged. The runtime discovery
 floor needs none of this: spawned task PTYs carry `TERMIC_CLI` (binary
-path) and `TERMIC_CLI_HELP` (a two-line version of these rules), and
+path) and `TERMIC_CLI_HELP` (a condensed version of these rules), and
 `termic help --json` returns the whole surface machine-readably.
 
 Distribution (a Settings action that appends/installs the block for
-the user's agent setup) is still pending (see docs/plans/cli.md,
-"Agents as users"). Until then, users paste it. Keep this file in
-lockstep with `termic help`.
+the user's agent setup) is still pending; the plan that tracked it was
+retired when the CLI shipped. Until then, users paste it, or copy one
+task's version of it from the sidebar's task menu ("Copy agent
+briefing", `src/lib/agentBriefing.ts`). Keep this file in lockstep with
+`termic help` and with that builder.
 
 Everything between the markers is the instructions content, verbatim.
 
@@ -30,21 +32,57 @@ code. `$TERMIC_TASK` / `$TERMIC_TASK_ID` name the task you are running
 inside, if any; prefer the id for self-reference (names can be renamed
 or reused).
 
+### Talking to another agent: prompt, do not wait
+
+Every task is an agent with an inbox, and `send` is how you reach it.
+Two agents coordinate by prompting each other, NOT by blocking on each
+other. When you hand out work, end the prompt with the command you want
+run once that work is done, and let the receiving agent pick the moment:
+
+    "$TERMIC_CLI" send review-auth -p 'Review the auth module. Write your
+    findings to RESULT.md in your worktree and change nothing else.
+    When you are done, tell me by running:
+      "$TERMIC_CLI" send 8f3c1d2e -p "auth review done, RESULT.md written"'
+
+Substitute your own `$TERMIC_TASK_ID` literally where `8f3c1d2e` is: the
+other agent's shell cannot expand YOUR variables. A prompt arriving in
+your own terminal is one of those reports; act on it and reply the same
+way. This is the preferred protocol because it costs neither side its
+liveness, and because it does not depend on work-done detection.
+
+Prefer it over `--wait`. `--wait` blocks you on a heuristic (a settled
+terminal is a guess, not a finished job), and a blocked agent can answer
+nothing else meanwhile. Use it only for a short, self-contained step you
+genuinely have nothing else to do during, and branch on its exit codes:
+0 = settled done, 3 = stopped needing input, 7 = your --timeout expired
+(the task keeps running), 9 = the prompt was never delivered. Never
+assume 0, and remember exit 0 means the agent STOPPED, not that the work
+is right.
+
+If you are NOT running inside a Termic task you have no inbox to be
+prompted back at. Then ask for a file (below) and read it when you next
+have a reason to, rather than blocking.
+
+The sidebar's task menu has "Copy agent CLI briefing", which puts this whole
+protocol plus one task's id and path on the user's clipboard, ready to
+paste into another agent.
+
 ### Creating a task that produces a result
 
 The file-drop convention is the reliable floor: instruct the created
 agent, in the prompt, to write its deliverable to a named file, then
-read that file after the wait succeeds. (`result` and `logs` below can
-read a claude agent's last message / the rendered terminal stream, but
-the file you asked for is the deliverable you verify.)
+read that file once it reports back. (`result` and `logs` below can read
+a claude agent's last message / the rendered terminal stream, but the
+file you asked for is the deliverable you verify.)
 
     out=$("$TERMIC_CLI" new review-auth --project myproj \
-      --sandbox enforce --json --wait \
+      --sandbox enforce --json \
       -p "Review the auth module. Write your complete findings to
-          RESULT.md in the repo root. Make no other changes.")
-    code=$?
+          RESULT.md in the repo root. Make no other changes.
+          When done, run: \"\$TERMIC_CLI\" send 8f3c1d2e -p \"review done\"")
     path=$(echo "$out" | jq -r .task.path)
-    [ "$code" -eq 0 ] && cat "$path/RESULT.md"
+    # ... get on with your own work; read "$path/RESULT.md" when the
+    # report prompt lands in your terminal.
 
 Rules that matter:
 
@@ -52,21 +90,16 @@ Rules that matter:
   self-approve inside the sandbox) or `--yolo` (no sandbox, skips
   permissions; prefer the sandbox). Otherwise the agent stops at its
   first permission prompt.
-- `--wait` exit codes are the contract: 0 = agent settled done,
-  3 = agent stopped and needs input, 7 = your --timeout expired
-  (task keeps running), 9 = the prompt was never delivered. Branch on
-  them; never assume 0.
-- Exit 0 means the agent STOPPED, not that the work is correct.
-  Verify the deliverable file exists and says what you need.
 - Task names must be unique per project; a duplicate name is a clean
   error, so pick a fresh name or archive the old task first.
 
 ### Driving an existing task
 
-- `"$TERMIC_CLI" send <task> -p "<text>" --wait` - prompt the RUNNING
+- `"$TERMIC_CLI" send <task> -p "<text>"` - prompt the RUNNING
   agent (queues if it is mid-turn). With no agent running, add
   `--resume` (restore the last session) or `--fresh` (new agent, no
-  context). `-p -` reads stdin. Same exit-code contract as `new --wait`.
+  context). `-p -` reads stdin. This is the notification channel above:
+  ask for a report back rather than adding `--wait`.
 - A task can hold SEVERAL agent tabs. `"$TERMIC_CLI" tab <task>
   --agent <id> -p "<text>"` opens one and prompts it; record the
   printed tab id and pass `--tab <id>` to `send`/`wait`/`logs` to keep
@@ -97,7 +130,8 @@ Rules that matter:
 - `"$TERMIC_CLI" list --json` - all tasks with live work state
   (working / waiting / done / idle / inactive).
 - `"$TERMIC_CLI" wait <task> --timeout 10m` - block until an existing
-  task's agent is quiescent (settled AND empty message queue).
+  task's agent is quiescent (settled AND empty message queue). Last
+  resort; see "Talking to another agent" above for why.
 - `"$TERMIC_CLI" status <task> --json` - one task in depth.
 - `"$TERMIC_CLI" prompts --json` - the user's prompt library. Pass a
   prompt to `new`/`send`/`tab` with `-P <id>` (e.g. `-P builtin:review`);

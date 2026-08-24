@@ -292,6 +292,9 @@ unknown project or agent, duplicate task), 3 agent stopped needing input, \
         open: bool,
         /// Block until the injected prompt's turn settles (delivery
         /// confirmed), or until the agent is quiescent without a prompt.
+        /// Settle detection is a heuristic and you can do nothing while
+        /// blocked: to coordinate with the new agent, prefer asking it in
+        /// the prompt to report back with `termic send <your task id>`.
         #[arg(long)]
         wait: bool,
         /// Give up waiting after this long (exit 7). E.g. 90, 30s, 5m, 1h.
@@ -300,6 +303,8 @@ unknown project or agent, duplicate task), 3 agent stopped needing input, \
     },
 
     /// Block until the task's agent is quiescent (settled, empty queue).
+    /// Coordinating two agents is better done with prompts than with this:
+    /// see the notes under `send`.
     #[command(
         after_help = "Quiescent means the agent settled AND its message queue is empty, so a \
 prompt queued behind the current turn still counts as running. Without \
@@ -365,6 +370,21 @@ prompt's turn, a very short turn can take up to 30s extra to report done; \
 size --timeout accordingly. Each --fresh adds a NEW agent tab to the task \
 (none are reused or closed). Ctrl-C stops watching only.
 
+COORDINATING TWO AGENTS: prompt each other, do not wait on each other. \
+--wait ties you to a work-done heuristic (a settled terminal is a guess, not \
+a finished job) and you can do nothing else while it blocks. Instead end \
+every prompt you send with the command you want run when that work is done, \
+and let the receiving agent choose the moment:
+
+  termic send <task> -p 'Review the auth module; write RESULT.md.
+  When you are done, run:
+    \"$TERMIC_CLI\" send <your-task-id> -p \"auth review done\"'
+
+Substitute your own $TERMIC_TASK_ID literally: the other agent's shell \
+cannot expand your variables. A prompt arriving in your terminal IS that \
+report. With no task of your own to be prompted back at, ask for a file \
+instead and read it when you next have a reason to.
+
 Prints the delivery mode (or the wait outcome) on stdout. With \
 --output-format json, one object: {\"task_id\", \"mode\": \
 \"delivered\"|\"queued\"|\"spawned\", \"capable\", \"wait\": {\"outcome\", \
@@ -401,7 +421,10 @@ stopped needing input, 4 app not running, 5 CLI disabled, 6 refused, \
         #[arg(long, conflicts_with = "resume")]
         fresh: bool,
         /// Block until the prompt is confirmed delivered and its turn
-        /// settles (or the agent asks for input).
+        /// settles (or the agent asks for input). Settle detection is a
+        /// heuristic and you can do nothing while blocked: to coordinate
+        /// with the agent, prefer ending the prompt with an instruction to
+        /// report back via `termic send <your task id>`.
         #[arg(long)]
         wait: bool,
         /// Give up waiting after this long (exit 7). E.g. 90, 30s, 5m, 1h.

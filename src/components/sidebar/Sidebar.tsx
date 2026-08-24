@@ -8,7 +8,7 @@ import { usePrefs } from "@/store/prefs";
 import { Button } from "@/components/ui/Button";
 import { Tip } from "@/components/ui/Tooltip";
 import { Spinner } from "@/components/ui/Spinner";
-import { LayoutGrid, History, FolderPlus, Settings, Plus, Archive, Layers, Moon, Cog, MoreVertical, GitBranch, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Bell, Bug, Mail, Zap, X, Pencil, Copy, ChevronsDownUp, ChevronsUpDown, Check, AudioWaveform, Radio, SquareChevronRight, CircleStop, Trash2, Folder, FolderMinus, FolderOpen, Megaphone, Keyboard, Activity } from "lucide-react";
+import { LayoutGrid, History, FolderPlus, Settings, Plus, Archive, Layers, Moon, Cog, MoreVertical, GitBranch, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Bell, Bug, Mail, Zap, X, Pencil, Copy, ChevronsDownUp, ChevronsUpDown, Check, AudioWaveform, Radio, SquareChevronRight, CircleStop, Trash2, Folder, FolderMinus, FolderOpen, Megaphone, Keyboard, Activity, Waypoints } from "lucide-react";
 import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownSeparator, DropdownLabel, DropdownSub, DropdownSubTrigger, DropdownSubContent } from "@/components/ui/Dropdown";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuLabel, ContextMenuSub, ContextMenuSubTrigger, ContextMenuSubContent } from "@/components/ui/ContextMenu";
 import { ProjectActionsMenuItems } from "./ProjectActionsMenuItems";
@@ -24,6 +24,7 @@ import { formatTerminalTitle } from "@/lib/terminalTitle";
 import { requestCloseTab } from "@/lib/closeTab";
 import { taskRename, taskReorder, projectRename, openPath, projectReorder, taskSetYolo, projectRemove, projectUpdate, projectSetGroup, procmonOpenWindow } from "@/lib/ipc";
 import { copyToClipboard } from "@/lib/clipboard";
+import { copyAgentBriefing } from "@/lib/agentBriefing";
 import { groupOf, projectSections } from "@/lib/projectGroups";
 import { createQuickTask, derivedBranch, type NewTaskMode } from "@/lib/quickTask";
 import { withCreateLock } from "@/lib/createLock";
@@ -2657,6 +2658,17 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                   <span>Copy branch name</span>
                 </DropdownItem>
               )}
+              {/* Paste-ready briefing that teaches ANOTHER agent to drive
+                  THIS task over the CLI, so two agents can hand each other
+                  work. See lib/agentBriefing for why the block steers both
+                  sides off `--wait` and onto prompting each other. */}
+              <DropdownItem
+                className="items-center [&>svg]:mt-0"
+                onSelect={() => { void copyAgentBriefing(w, project?.name); }}
+              >
+                <Waypoints className="h-4 w-4" />
+                <span>Copy agent CLI briefing</span>
+              </DropdownItem>
               {/* Duplicate: only for worktree tasks (the repo-root
                   entry IS the project's checkout, can't be branched
                   off cleanly). Pre-fills the New worktree dialog with
