@@ -13,20 +13,30 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 //     the terminal healthy while it paints nothing
 //   - one dead context reported N ways still costs one loss
 //   - a pane with no geometry defers its attach to the reveal edge
+//   - the first input after AWAY_MS away rebuilds a healthy-looking addon
 //   - dispose() unhooks the wake listeners
 
 const h = vi.hoisted(() => {
   class FakeWebglAddon {
     static instances: FakeWebglAddon[] = [];
+    static attempts = 0;  // constructions asked for, successful or not
     static throwOnConstruct = false;
     lossCb: (() => void) | null = null;
     disposed = false;
     contextLost = false;
+    released = false;
     // A real element: the recovery binds webglcontextlost /
     // webglcontextrestored on it, which is the whole point of these tests.
     canvas = document.createElement("canvas");
-    _renderer = { _gl: { isContextLost: () => this.contextLost }, _canvas: this.canvas };
+    _renderer = {
+      _gl: {
+        isContextLost: () => this.contextLost,
+        getExtension: () => (this.contextLost ? null : { loseContext: () => { this.released = true; } }),
+      },
+      _canvas: this.canvas,
+    };
     constructor() {
+      FakeWebglAddon.attempts++;
       if (FakeWebglAddon.throwOnConstruct) throw new Error("no GL");
       FakeWebglAddon.instances.push(this);
     }
@@ -50,14 +60,30 @@ const h = vi.hoisted(() => {
     observe(t: unknown) { this.targets.push(t); }
     disconnect() { this.targets.length = 0; }
   }
-  return { FakeWebglAddon, FakeCanvasAddon, FakeResizeObserver };
+  // Unsubscribes handed out by the (real) presence module, so a test can
+  // prove dispose() called one rather than infer it from a bail that would
+  // happen anyway.
+  const offs: Array<() => void> = [];
+  const prefs = { terminalRenderer: "webgl" as string };
+  return { FakeWebglAddon, FakeCanvasAddon, FakeResizeObserver, offs, prefs };
 });
 
 vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: h.FakeWebglAddon }));
 vi.mock("@xterm/addon-canvas", () => ({ CanvasAddon: h.FakeCanvasAddon }));
 vi.mock("@/store/prefs", () => ({
-  usePrefs: { getState: () => ({ terminalRenderer: "webgl" }) },
+  usePrefs: { getState: () => h.prefs },
 }));
+vi.mock("@/lib/userPresence", async importOriginal => {
+  const real = await importOriginal<typeof import("@/lib/userPresence")>();
+  return {
+    ...real,
+    onReturnFromAway: (l: (ms: number) => void) => {
+      const off = vi.fn(real.onReturnFromAway(l));
+      h.offs.push(off);
+      return off;
+    },
+  };
+});
 vi.mock("@/lib/terminalFontReady", () => ({
   isTerminalFontReady: () => true,
   terminalFontReady: Promise.resolve(),
@@ -71,7 +97,9 @@ import {
   CONTEXT_LOSS_MAX,
   CONTEXT_LOSS_WINDOW_MS,
   CONTEXT_REATTACH_DELAY_MS,
+  ATTACH_RETRY_MS,
 } from "./terminalRenderer";
+import { AWAY_MS, initUserPresence } from "./userPresence";
 
 vi.stubGlobal("ResizeObserver", h.FakeResizeObserver);
 
@@ -79,9 +107,17 @@ const Fake = h.FakeWebglAddon;
 const RO = h.FakeResizeObserver;
 
 function makeTerm() {
-  return { loadAddon: vi.fn(), refresh: vi.fn(), rows: 24 } as unknown as Terminal & {
+  const renderService = { _isPaused: false };
+  return {
+    loadAddon: vi.fn(),
+    refresh: vi.fn(),
+    rows: 24,
+    _core: { _renderService: renderService },
+    renderService,
+  } as unknown as Terminal & {
     loadAddon: ReturnType<typeof vi.fn>;
     refresh: ReturnType<typeof vi.fn>;
+    renderService: typeof renderService;
   };
 }
 
@@ -95,12 +131,24 @@ function loseContext() {
   a.lossCb?.();
 }
 
+/** A keystroke: the user is (back) at the keyboard. */
+function arrive() {
+  window.dispatchEvent(new KeyboardEvent("keydown"));
+}
+
 describe("loadTerminalRenderer context-loss recovery", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    initUserPresence();
+    // Presence keeps its own module-level clock across tests: stamp it with
+    // the fresh fake clock so an earlier test's absence cannot leak in.
+    arrive();
     Fake.instances = [];
+    Fake.attempts = 0;
     Fake.throwOnConstruct = false;
     RO.instances = [];
+    h.offs.length = 0;
+    h.prefs.terminalRenderer = "webgl";
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -300,6 +348,302 @@ describe("loadTerminalRenderer context-loss recovery", () => {
 
     r.dispose();
     expect(ro.targets.length).toBe(0);
+  });
+
+  it("rebuilds a healthy-looking addon on the first input after AWAY_MS away", () => {
+    const seen: string[] = [];
+    const term = makeTerm();
+    const r = loadTerminalRenderer(term, (_tag, content) => seen.push(content));
+    const first = current();
+    vi.advanceTimersByTime(AWAY_MS);
+    arrive();
+    expect(first.disposed).toBe(true);
+    expect(first.released).toBe(true);  // xterm's dispose leaves the context to GC
+    expect(Fake.instances.length).toBe(2);  // same task: no reattach beat, no flash
+    expect(current().disposed).toBe(false);
+    expect(seen.some(c => c.startsWith("back after") && c.includes("isContextLost=false"))).toBe(true);
+    r.dispose();
+  });
+
+  it("ignores the loss the released context reports on its dead canvas", () => {
+    const term = makeTerm();
+    const r = loadTerminalRenderer(term);
+    const first = current();
+    vi.advanceTimersByTime(AWAY_MS);
+    arrive();
+    first.canvas.dispatchEvent(new Event("webglcontextlost"));
+    vi.advanceTimersByTime(CONTEXT_REATTACH_DELAY_MS);
+    expect(Fake.instances.length).toBe(2);
+    r.dispose();
+  });
+
+  // Field log, laptop over Screen Sharing: every pane's rebuild threw at
+  // getContext, again 100ms later, across a 30s spread, no loss event first.
+  // WebGL was unavailable for a while, not for a beat.
+  it("backs off a failed attach, names the error, then waits for an edge", () => {
+    const seen: string[] = [];
+    const term = makeTerm();
+    const r = loadTerminalRenderer(term, (_tag, content) => seen.push(content));
+    vi.advanceTimersByTime(AWAY_MS);
+    Fake.throwOnConstruct = true;
+    arrive();
+    expect(Fake.instances.length).toBe(1);  // the dropped one; nothing replaced it
+    expect(seen.at(-1)).toBe(`webgl attach failed (no GL), retrying in ${ATTACH_RETRY_MS[0]}ms`);
+    for (const delay of ATTACH_RETRY_MS) {
+      vi.advanceTimersByTime(delay);
+      expect(Fake.instances.length).toBe(1);
+    }
+    expect(seen.at(-1)).toBe("webgl attach failed (no GL) — staying on the DOM renderer");
+    vi.advanceTimersByTime(24 * 60 * 60_000);  // no timer left: a day brings nothing
+    expect(Fake.instances.length).toBe(1);
+
+    // WebGL is back; the next return from absence is the edge that finds it.
+    Fake.throwOnConstruct = false;
+    vi.advanceTimersByTime(AWAY_MS);
+    arrive();
+    expect(Fake.instances.length).toBe(2);
+    expect(current().disposed).toBe(false);
+    r.dispose();
+  });
+
+  // xterm's WebglRenderer appends its canvas to .xterm-screen BEFORE the
+  // GL-state init that throws on a born-lost context, and registers the
+  // removing disposable after it. Each failed attach therefore leaks one
+  // canvas holding a live context into the screen; WebKit caps contexts
+  // per process, and past the cap every later getContext (these retries
+  // included) is born lost too. Field log 2026-08-23: eight panes retrying
+  // wedged the window into blank-on-every-renderer until a reload.
+  describe("failed-activate canvas leak", () => {
+    function makeScreenTerm() {
+      const screen = document.createElement("div");
+      const host = {
+        offsetWidth: 800,
+        offsetHeight: 600,
+        querySelector: (s: string) => (s === ".xterm-screen" ? screen : null),
+      };
+      const term = makeTerm();
+      (term as unknown as { element: unknown }).element = host;
+      return { term, screen };
+    }
+    /** A canvas the way the throwing renderer leaves one: appended, with a
+     *  live webgl2 context on it. */
+    function leakyCanvas(onLose: () => void) {
+      const c = document.createElement("canvas");
+      (c as unknown as { getContext: (t: string) => unknown }).getContext = (t: string) =>
+        t === "webgl2"
+          ? { getExtension: (n: string) => (n === "WEBGL_lose_context" ? { loseContext: onLose } : null) }
+          : null;
+      return c;
+    }
+
+    it("removes the leaked canvas and releases its context when activate throws", () => {
+      const { term, screen } = makeScreenTerm();
+      let released = 0;
+      term.loadAddon.mockImplementation(() => {
+        screen.appendChild(leakyCanvas(() => released++));
+        throw new Error("value must not be falsy");
+      });
+      const r = loadTerminalRenderer(term);
+      expect(screen.querySelectorAll("canvas").length).toBe(0);
+      expect(released).toBe(1);
+      r.dispose();
+    });
+
+    it("leaves pre-existing screen canvases alone", () => {
+      const { term, screen } = makeScreenTerm();
+      const preexisting = document.createElement("canvas");
+      screen.appendChild(preexisting);
+      term.loadAddon.mockImplementation(() => {
+        screen.appendChild(leakyCanvas(() => {}));
+        throw new Error("value must not be falsy");
+      });
+      const r = loadTerminalRenderer(term);
+      expect(Array.from(screen.querySelectorAll("canvas"))).toEqual([preexisting]);
+      r.dispose();
+    });
+
+    it("never accumulates canvases across the whole retry ladder", () => {
+      const { term, screen } = makeScreenTerm();
+      let released = 0;
+      term.loadAddon.mockImplementation(() => {
+        screen.appendChild(leakyCanvas(() => released++));
+        throw new Error("value must not be falsy");
+      });
+      const r = loadTerminalRenderer(term);
+      for (const delay of ATTACH_RETRY_MS) vi.advanceTimersByTime(delay);
+      // Ladder exhausted; edges keep trying (and failing) without leaking.
+      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event("focus"));
+      expect(screen.querySelectorAll("canvas").length).toBe(0);
+      expect(released).toBe(term.loadAddon.mock.calls.length);
+      r.dispose();
+    });
+
+    it("disposes the addon whose activate threw", () => {
+      const { term, screen } = makeScreenTerm();
+      term.loadAddon.mockImplementation(() => {
+        screen.appendChild(leakyCanvas(() => {}));
+        throw new Error("value must not be falsy");
+      });
+      const r = loadTerminalRenderer(term);
+      expect(Fake.instances.length).toBe(1);
+      expect(Fake.instances[0].disposed).toBe(true);
+      r.dispose();
+    });
+  });
+
+  it("a retry that succeeds resets the backoff for the next outage", () => {
+    const term = makeTerm();
+    const r = loadTerminalRenderer(term);
+    vi.advanceTimersByTime(AWAY_MS);
+    Fake.throwOnConstruct = true;
+    arrive();
+    Fake.throwOnConstruct = false;
+    vi.advanceTimersByTime(ATTACH_RETRY_MS[0]);
+    expect(Fake.instances.length).toBe(2);
+    vi.advanceTimersByTime(AWAY_MS);
+    Fake.throwOnConstruct = true;
+    arrive();
+    Fake.throwOnConstruct = false;
+    vi.advanceTimersByTime(ATTACH_RETRY_MS[0]);  // first step again, not the second
+    expect(Fake.instances.length).toBe(3);
+    r.dispose();
+  });
+
+  // The reveal TRANSITION retries; the ~60Hz stream of non-zero deliveries
+  // during a window drag must not, or a down GPU gets a context request per
+  // frame: the churn the backoff ladder exists to prevent.
+  it("a plain resize does not retry WebGL past the backoff", () => {
+    const host = { offsetWidth: 800, offsetHeight: 600 };
+    const term = makeTerm();
+    (term as unknown as { element: unknown }).element = host;
+    Fake.throwOnConstruct = true;
+    const r = loadTerminalRenderer(term);  // mount attach fails
+    const ro = RO.instances[RO.instances.length - 1];
+    ro.cb([{ contentRect: { width: 800, height: 600 } }]);  // first delivery: the reveal
+    const attempts = Fake.attempts;
+    ro.cb([{ contentRect: { width: 810, height: 600 } }]);
+    ro.cb([{ contentRect: { width: 820, height: 600 } }]);
+    expect(Fake.attempts).toBe(attempts);
+    r.dispose();
+  });
+
+  it("an edge attach that succeeds resets the backoff clock, not just the counter", () => {
+    const term = makeTerm();
+    const r = loadTerminalRenderer(term);
+    vi.advanceTimersByTime(AWAY_MS);
+    Fake.throwOnConstruct = true;
+    arrive();                                    // rebuild fails -> retry in 1s
+    vi.advanceTimersByTime(ATTACH_RETRY_MS[0]);  // fails again -> 5s timer pending
+    Fake.throwOnConstruct = false;
+    window.dispatchEvent(new Event("focus"));    // succeeds; must also clear that timer
+    const ok = current();
+    Fake.throwOnConstruct = true;
+    ok.contextLost = true;
+    ok.lossCb?.();                               // a real loss right after
+    vi.advanceTimersByTime(CONTEXT_REATTACH_DELAY_MS);  // re-attach fails
+    Fake.throwOnConstruct = false;
+    vi.advanceTimersByTime(ATTACH_RETRY_MS[0]);  // fresh 1s retry, not the stale 5s one
+    expect(current().disposed).toBe(false);
+    expect(Fake.instances.length).toBe(3);
+    r.dispose();
+  });
+
+  it("leaves the canvas renderer alone on return", () => {
+    h.prefs.terminalRenderer = "canvas";
+    const seen: string[] = [];
+    const term = makeTerm();
+    const r = loadTerminalRenderer(term, (_tag, content) => seen.push(content));
+    vi.advanceTimersByTime(AWAY_MS);
+    arrive();
+    expect(seen.filter(c => c.includes("away"))).toEqual([]);
+    r.dispose();
+  });
+
+  it("a reveal retries WebGL for a pane left on the DOM renderer", () => {
+    const host = { offsetWidth: 800, offsetHeight: 600 };
+    const term = makeTerm();
+    (term as unknown as { element: unknown }).element = host;
+    const r = loadTerminalRenderer(term);
+    vi.advanceTimersByTime(AWAY_MS);
+    Fake.throwOnConstruct = true;
+    arrive();
+    vi.advanceTimersByTime(ATTACH_RETRY_MS.reduce((a, b) => a + b, 0));
+    expect(Fake.instances.length).toBe(1);
+    Fake.throwOnConstruct = false;
+    RO.instances[RO.instances.length - 1].cb([{ contentRect: { width: 800, height: 600 } }]);
+    expect(Fake.instances.length).toBe(2);
+    r.dispose();
+  });
+
+  it("keeps the renderer kind it was loaded with across a rebuild", () => {
+    const term = makeTerm();
+    const r = loadTerminalRenderer(term);
+    h.prefs.terminalRenderer = "dom";  // applies to the next spawn, not this one
+    vi.advanceTimersByTime(AWAY_MS);
+    arrive();
+    expect(Fake.instances.length).toBe(2);
+    r.dispose();
+  });
+
+  it("leaves the addon alone on input inside AWAY_MS", () => {
+    const term = makeTerm();
+    const r = loadTerminalRenderer(term);
+    vi.advanceTimersByTime(AWAY_MS - 1);
+    arrive();
+    expect(current().disposed).toBe(false);
+    expect(Fake.instances.length).toBe(1);
+    r.dispose();
+  });
+
+  it("counts a return-from-away rebuild against nothing: the loss budget stays intact", () => {
+    const term = makeTerm();
+    const r = loadTerminalRenderer(term);
+    for (let i = 0; i < CONTEXT_LOSS_MAX + 2; i++) {
+      vi.advanceTimersByTime(AWAY_MS);
+      arrive();
+    }
+    const n = Fake.instances.length;
+    loseContext();  // a real loss afterwards must still get WebGL back
+    vi.advanceTimersByTime(CONTEXT_REATTACH_DELAY_MS);
+    expect(Fake.instances.length).toBe(n + 1);
+    expect(term.refresh).not.toHaveBeenCalled();  // i.e. the give-up path never ran
+    r.dispose();
+  });
+
+  // Every visited task and tab stays mounted, so a hidden pane must not pay
+  // on the keystroke frame: it is marked stale and rebuilds on its reveal.
+  it("defers a hidden pane's rebuild to the reveal edge", () => {
+    const host = { offsetWidth: 800, offsetHeight: 600 };
+    const term = makeTerm();
+    (term as unknown as { element: unknown }).element = host;
+    const r = loadTerminalRenderer(term);
+    const first = current();
+    host.offsetWidth = 0;  // task switched away: display:none
+    host.offsetHeight = 0;
+    vi.advanceTimersByTime(AWAY_MS);
+    arrive();
+    expect(first.disposed).toBe(false);
+    expect(Fake.instances.length).toBe(1);
+    host.offsetWidth = 800;
+    host.offsetHeight = 600;
+    const ro = RO.instances[RO.instances.length - 1];
+    ro.cb([{ contentRect: { width: 800, height: 600 } }]);
+    expect(first.disposed).toBe(true);
+    expect(Fake.instances.length).toBe(2);
+    // Rebuilt once: a later resize must not rebuild again.
+    ro.cb([{ contentRect: { width: 900, height: 600 } }]);
+    expect(Fake.instances.length).toBe(2);
+    r.dispose();
+  });
+
+  it("dispose() unsubscribes from the return-from-away signal", () => {
+    const term = makeTerm();
+    const r = loadTerminalRenderer(term);
+    const off = h.offs[h.offs.length - 1];
+    expect(off).not.toHaveBeenCalled();
+    r.dispose();
+    expect(off).toHaveBeenCalledTimes(1);
   });
 
   // The canvas listeners outlive their addon's dispose (the dead canvas is
