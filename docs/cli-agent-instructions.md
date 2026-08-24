@@ -16,6 +16,10 @@ agent at ONE task there is a short fragment instead: the task menu's
 the address and nothing else. Keep this file in lockstep with `termic
 help`.
 
+Why caged agents are excluded from all of this, and why the narrow
+versions of "just let them report back" do not work either, is settled
+in [sandbox.md](sandbox.md) ("Settled"). Do not reopen it here.
+
 Everything between the markers is the instructions content, verbatim.
 
 <!-- INSTRUCTIONS START -->
@@ -40,16 +44,20 @@ Two agents coordinate by prompting each other, NOT by blocking on each
 other. When you hand out work, end the prompt with the command you want
 run once that work is done, and let the receiving agent pick the moment:
 
-    "$TERMIC_CLI" send review-auth -p 'Review the auth module. Write your
-    findings to RESULT.md in your worktree and change nothing else.
-    When you are done, tell me by running:
-      "$TERMIC_CLI" send 8f3c1d2e -p "auth review done, RESULT.md written"'
+    "$TERMIC_CLI" send review-auth -p "<your prompt here: what you want it
+    to do>. When done: \"\$TERMIC_CLI\" send $TERMIC_TASK_ID -p 'done:
+    <what you did>'"
 
-Substitute your own `$TERMIC_TASK_ID` literally where `8f3c1d2e` is: the
-other agent's shell cannot expand YOUR variables. A prompt arriving in
-your own terminal is one of those reports; act on it and reply the same
-way. This is the preferred protocol because it costs neither side its
-liveness, and because it does not depend on work-done detection.
+The outer DOUBLE quotes are load-bearing: YOUR shell expands
+`$TERMIC_TASK_ID` at send time, so the other agent receives a literal
+address it can just run. Single quotes there would block expansion and
+leave it guessing at where to reply. `\$TERMIC_CLI` is escaped for the
+opposite reason: the OTHER agent expands its own copy of that one.
+
+A prompt arriving in your own terminal is one of those reports; act on
+it and reply the same way. This is the preferred protocol because it
+costs neither side its liveness, and because it does not depend on
+work-done detection.
 
 Prefer it over `--wait`. `--wait` blocks you on a heuristic (a settled
 terminal is a guess, not a finished job), and a blocked agent can answer
@@ -64,6 +72,13 @@ If you are NOT running inside a Termic task you have no inbox to be
 prompted back at. Then ask for a file (below) and read it when you next
 have a reason to, rather than blocking.
 
+A task sandboxed in `enforce` / `enforce-fs` cannot take part at all: the
+cage denies it the control plane, so it can neither be asked to report
+back nor do so. That is deliberate and permanent, not a bug to work
+around - a cage with a text channel to an uncaged agent is not a cage.
+Ask such a task for a file in its worktree and read that yourself, or
+run it in `monitor` (which reaches the CLI by contract) or uncaged.
+
 The sidebar's task menu has "Copy agent CLI briefing", which puts one
 task's id, directory and that exact command shape on the clipboard as a
 three-line fragment, ready to paste into a prompt for another agent. It
@@ -74,25 +89,37 @@ it here and in `$TERMIC_CLI_HELP` already.
 
 The file-drop convention is the reliable floor: instruct the created
 agent, in the prompt, to write its deliverable to a named file, then
-read that file once it reports back. (`result` and `logs` below can read
-a claude agent's last message / the rendered terminal stream, but the
-file you asked for is the deliverable you verify.)
+read that file. (`result` and `logs` below can read a claude agent's last
+message / the rendered terminal stream, but the file you asked for is
+the deliverable you verify.)
+
+Note which half of the protocol applies. A CAGED task cannot report
+back, so the file is the whole channel and you read it on your own
+schedule:
 
     out=$("$TERMIC_CLI" new review-auth --project myproj \
       --sandbox enforce --json \
       -p "Review the auth module. Write your complete findings to
-          RESULT.md in the repo root. Make no other changes.
-          When done, run: \"\$TERMIC_CLI\" send 8f3c1d2e -p \"review done\"")
+          RESULT.md in the repo root. Make no other changes.")
     path=$(echo "$out" | jq -r .task.path)
-    # ... get on with your own work; read "$path/RESULT.md" when the
-    # report prompt lands in your terminal.
+    # Caged, so nothing will arrive to tell you it finished: get on with
+    # your own work and read "$path/RESULT.md" when you next need it.
+
+An UNCAGED task (or `--sandbox monitor`) can do both: write the file AND
+tell you it did, so you are not left checking.
+
+    "$TERMIC_CLI" new review-auth --project myproj --yolo \
+      -p "Review the auth module. Write RESULT.md, change nothing else.
+          When done: \"\$TERMIC_CLI\" send $TERMIC_TASK_ID -p 'done:
+          <what you did>'"
 
 Rules that matter:
 
 - Unattended tasks need `--sandbox enforce` (permission prompts
   self-approve inside the sandbox) or `--yolo` (no sandbox, skips
   permissions; prefer the sandbox). Otherwise the agent stops at its
-  first permission prompt.
+  first permission prompt. The sandbox costs you the report-back, per
+  the section above: that is the trade, pick per task.
 - Task names must be unique per project; a duplicate name is a clean
   error, so pick a fresh name or archive the old task first.
 

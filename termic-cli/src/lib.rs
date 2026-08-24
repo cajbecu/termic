@@ -279,6 +279,9 @@ unknown project or agent, duplicate task), 3 agent stopped needing input, \
         #[arg(long, value_name = "SESSION_ID")]
         resume: Option<String>,
         /// Sandbox mode for the task. Default: the project's sandbox seeds.
+        /// `enforce` / `enforce-fs` also deny the new agent the control
+        /// plane, so it can never report back to you: ask it for a file in
+        /// its worktree instead. `monitor` reaches the CLI by contract.
         #[arg(long, value_parser = ["off", "monitor", "enforce", "enforce-fs"])]
         sandbox: Option<String>,
         /// Skip agent permission prompts (the agent's YOLO flag).
@@ -376,14 +379,23 @@ a finished job) and you can do nothing else while it blocks. Instead end \
 every prompt you send with the command you want run when that work is done, \
 and let the receiving agent choose the moment:
 
-  termic send <task> -p 'Review the auth module; write RESULT.md.
-  When you are done, run:
-    \"$TERMIC_CLI\" send <your-task-id> -p \"auth review done\"'
+  termic send <task> -p \"<your prompt here: what you want it to do>. When \
+done: termic send $TERMIC_TASK_ID -p 'done: <what you did>'\"
 
-Substitute your own $TERMIC_TASK_ID literally: the other agent's shell \
-cannot expand your variables. A prompt arriving in your terminal IS that \
-report. With no task of your own to be prompted back at, ask for a file \
-instead and read it when you next have a reason to.
+The outer DOUBLE quotes are load-bearing: YOUR shell expands \
+$TERMIC_TASK_ID at send time, so the other agent is handed a literal \
+address it can just run. Single quotes there would block expansion and \
+leave it guessing. A prompt arriving in your terminal IS that report. With \
+no task of your own to be prompted back at, ask for a file instead and \
+read it when you next have a reason to.
+
+A task sandboxed in `enforce` / `enforce-fs` CANNOT take part: the cage \
+denies it the control plane outright, so it can neither be asked to report \
+back nor do so. That is deliberate and will not change - a cage with a \
+text channel to an uncaged agent is not a cage - so do not wire a \
+report-back for one. Ask it for a file in its own worktree and read that \
+yourself, or run the task in `monitor` (which reaches the CLI by contract) \
+or uncaged. `--sandbox` on `new` is where that is chosen.
 
 Prints the delivery mode (or the wait outcome) on stdout. With \
 --output-format json, one object: {\"task_id\", \"mode\": \
@@ -1076,7 +1088,11 @@ fn execute(cli: &Cli) -> Result<Output, CliError> {
     ) {
         return Err(CliError::new(
             exit_code::REFUSED,
-            "this shell is inside a sandboxed termic task, the control plane is unavailable",
+            "this shell is inside a sandboxed termic task, the control plane is unavailable. \
+This is by design and permanent, not a misconfiguration: a cage with a channel to an \
+uncaged agent is not a cage. To report your work, write a file in your own task \
+directory and say so in your final message; whoever is waiting on you reads it from \
+outside.",
         ));
     }
 
