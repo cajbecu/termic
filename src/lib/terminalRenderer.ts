@@ -324,21 +324,57 @@ export function loadTerminalRenderer(term: Terminal, log?: RendererLog): { dispo
   let retryTimer: number | null = null;
   const describe = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+  // The screen div xterm renders into. `term.element` is a plain stub in unit
+  // tests and absent before term.open(), so reach optionally.
+  const screenOf = () =>
+    (term.element as { querySelector?: (s: string) => Element | null } | undefined)
+      ?.querySelector?.(".xterm-screen") ?? null;
+  const screenCanvases = (): HTMLCanvasElement[] => {
+    const screen = screenOf();
+    return screen ? Array.from(screen.querySelectorAll("canvas")) : [];
+  };
+
+  // A failed activate LEAKS a canvas holding a live GL context. xterm's
+  // WebglRenderer constructor appends its canvas to .xterm-screen, then runs
+  // _initializeWebGLState() — the call that throws "value must not be falsy"
+  // when the new context is born lost (GL object constructors return null) —
+  // and only AFTER that registers the disposable that would remove the
+  // canvas. The half-built renderer is unreachable from the addon (the throw
+  // happened before assignment), so the DOM is the only handle left. WebKit
+  // caps live WebGL contexts per process and past the cap every context
+  // anyone asks for is born lost too, including these retries: one GPU
+  // outage plus eight panes retrying leaked dozens of contexts and wedged
+  // the whole window into blank-on-every-renderer until a reload (field log
+  // 2026-08-23). Releasing the context and removing the canvas makes a
+  // failed attach cost nothing.
+  const releaseLeakedCanvases = (prior: Set<HTMLCanvasElement>) => {
+    for (const c of screenCanvases()) {
+      if (prior.has(c)) continue;
+      try {
+        (c.getContext("webgl2") as WebGL2RenderingContext | null)
+          ?.getExtension("WEBGL_lose_context")?.loseContext();
+      } catch { /* not a GL canvas */ }
+      c.remove();
+    }
+  };
+
   const attach = () => {
     if (disposed || addon || kind === "dom") return;
     if (!isTerminalFontReady() || lossBudgetSpent() || !onScreen()) return;
+    const priorCanvases = new Set(screenCanvases());
+    let pending: WebglAddon | CanvasAddon | null = null;
     try {
       if (kind === "canvas") {
         // No GL context, so no onContextLoss and no shared texture atlas to
         // park: the canvas renderer owns its own <canvas> layers inside the
         // terminal element, and disposing it takes them with it. That is the
         // whole reason it exists as a middle option.
-        const c = new CanvasAddon();
+        const c = pending = new CanvasAddon();
         term.loadAddon(c);
         addon = c;
         return;
       }
-      const a = new WebglAddon();
+      const a = pending = new WebglAddon();
       a.onContextLoss(() => { note("onContextLoss (xterm, not restored)"); recoverFromContextLoss(a); });
       // Atlas swaps (font/theme/dpr). Microtask: the event fires before the
       // renderer stores the new atlas; its warm-up runs later, on idle.
@@ -356,6 +392,8 @@ export function loadTerminalRenderer(term: Terminal, log?: RendererLog): { dispo
       // xterm threw before swapping any renderer in, so its DOM renderer
       // still owns the pane and keeps painting.
       addon = null;
+      try { pending?.dispose(); } catch { /* activate threw mid-construction */ }
+      releaseLeakedCanvases(priorCanvases);
       const delay = ATTACH_RETRY_MS[retries];
       note(`webgl attach failed (${describe(e)})${delay === undefined ? " — staying on the DOM renderer" : `, retrying in ${delay}ms`}`);
       if (delay === undefined || retryTimer !== null) return;

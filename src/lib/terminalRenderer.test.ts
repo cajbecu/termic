@@ -406,6 +406,92 @@ describe("loadTerminalRenderer context-loss recovery", () => {
     r.dispose();
   });
 
+  // xterm's WebglRenderer appends its canvas to .xterm-screen BEFORE the
+  // GL-state init that throws on a born-lost context, and registers the
+  // removing disposable after it. Each failed attach therefore leaks one
+  // canvas holding a live context into the screen; WebKit caps contexts
+  // per process, and past the cap every later getContext (these retries
+  // included) is born lost too. Field log 2026-08-23: eight panes retrying
+  // wedged the window into blank-on-every-renderer until a reload.
+  describe("failed-activate canvas leak", () => {
+    function makeScreenTerm() {
+      const screen = document.createElement("div");
+      const host = {
+        offsetWidth: 800,
+        offsetHeight: 600,
+        querySelector: (s: string) => (s === ".xterm-screen" ? screen : null),
+      };
+      const term = makeTerm();
+      (term as unknown as { element: unknown }).element = host;
+      return { term, screen };
+    }
+    /** A canvas the way the throwing renderer leaves one: appended, with a
+     *  live webgl2 context on it. */
+    function leakyCanvas(onLose: () => void) {
+      const c = document.createElement("canvas");
+      (c as unknown as { getContext: (t: string) => unknown }).getContext = (t: string) =>
+        t === "webgl2"
+          ? { getExtension: (n: string) => (n === "WEBGL_lose_context" ? { loseContext: onLose } : null) }
+          : null;
+      return c;
+    }
+
+    it("removes the leaked canvas and releases its context when activate throws", () => {
+      const { term, screen } = makeScreenTerm();
+      let released = 0;
+      term.loadAddon.mockImplementation(() => {
+        screen.appendChild(leakyCanvas(() => released++));
+        throw new Error("value must not be falsy");
+      });
+      const r = loadTerminalRenderer(term);
+      expect(screen.querySelectorAll("canvas").length).toBe(0);
+      expect(released).toBe(1);
+      r.dispose();
+    });
+
+    it("leaves pre-existing screen canvases alone", () => {
+      const { term, screen } = makeScreenTerm();
+      const preexisting = document.createElement("canvas");
+      screen.appendChild(preexisting);
+      term.loadAddon.mockImplementation(() => {
+        screen.appendChild(leakyCanvas(() => {}));
+        throw new Error("value must not be falsy");
+      });
+      const r = loadTerminalRenderer(term);
+      expect(Array.from(screen.querySelectorAll("canvas"))).toEqual([preexisting]);
+      r.dispose();
+    });
+
+    it("never accumulates canvases across the whole retry ladder", () => {
+      const { term, screen } = makeScreenTerm();
+      let released = 0;
+      term.loadAddon.mockImplementation(() => {
+        screen.appendChild(leakyCanvas(() => released++));
+        throw new Error("value must not be falsy");
+      });
+      const r = loadTerminalRenderer(term);
+      for (const delay of ATTACH_RETRY_MS) vi.advanceTimersByTime(delay);
+      // Ladder exhausted; edges keep trying (and failing) without leaking.
+      window.dispatchEvent(new Event("focus"));
+      window.dispatchEvent(new Event("focus"));
+      expect(screen.querySelectorAll("canvas").length).toBe(0);
+      expect(released).toBe(term.loadAddon.mock.calls.length);
+      r.dispose();
+    });
+
+    it("disposes the addon whose activate threw", () => {
+      const { term, screen } = makeScreenTerm();
+      term.loadAddon.mockImplementation(() => {
+        screen.appendChild(leakyCanvas(() => {}));
+        throw new Error("value must not be falsy");
+      });
+      const r = loadTerminalRenderer(term);
+      expect(Fake.instances.length).toBe(1);
+      expect(Fake.instances[0].disposed).toBe(true);
+      r.dispose();
+    });
+  });
+
   it("a retry that succeeds resets the backoff for the next outage", () => {
     const term = makeTerm();
     const r = loadTerminalRenderer(term);
