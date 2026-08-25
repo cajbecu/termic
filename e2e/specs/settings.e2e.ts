@@ -1624,6 +1624,221 @@ describe("settings reorder drags", () => {
   });
 });
 
+// A project's Default CLI is a stored agent id, and the agent registry it
+// names is edited on another page entirely (reordered, renamed, removed). The
+// three tests here pin the contract between the two: the settings control
+// shows what is SAVED (a <select> whose value matches no <option> gets
+// silently re-pointed at the first one by React, which made the page claim a
+// default the project was never set to), and a registry edit either leaves the
+// saved value alone or carries it along.
+describe("project default CLI vs the agent registry", () => {
+  let projectId: string;
+  let originalDefault = "";
+  let originalAgents: string[] = [];
+
+  const agentIds = () =>
+    browser.execute(() =>
+      window.__termic!.useApp.getState().agents.map((a: any) => a.id as string),
+    ) as Promise<string[]>;
+
+  const storedDefault = () =>
+    browser.execute(
+      (id) => window.__termic!.useApp.getState()
+        .projects.find((p: any) => p.id === id)?.default_cli ?? null,
+      projectId,
+    ) as Promise<string | null>;
+
+  const setDefault = (cli: string) =>
+    browser.execute(async (id, value) => {
+      const app = window.__termic!.useApp.getState();
+      const p = app.projects.find((x: any) => x.id === id);
+      await window.__termic!.ipc.projectUpdate({ ...p, default_cli: value });
+      await window.__termic!.useApp.getState().loadAll();
+    }, projectId, cli);
+
+  /** Open the project page's More sub-tab, where Default CLI lives. */
+  const openMore = async () => {
+    await browser.execute(
+      (id) => window.__termic!.useApp.getState().openSettings("repositories", id),
+      projectId,
+    );
+    await waitVisible('[data-repo-tab="advanced"]');
+    await clickWhenVisible('[data-repo-tab="advanced"]');
+    await browser.waitUntil(
+      async () => (await browser.execute(
+        () => document.body.innerText.includes("Default CLI"),
+      )) as boolean,
+      { timeout: 8_000, timeoutMsg: "the More tab never rendered Default CLI" },
+    );
+  };
+
+  /** The Default CLI <select> is the only one on the page offering "shell". */
+  const cliSelect = () =>
+    browser.execute(() => {
+      const sel = [...document.querySelectorAll("select")].find(
+        (s) => [...(s as HTMLSelectElement).options].some((o) => o.value === "shell"),
+      ) as HTMLSelectElement | undefined;
+      return sel
+        ? { value: sel.value, label: sel.selectedOptions[0]?.textContent ?? "" }
+        : null;
+    }) as Promise<{ value: string; label: string } | null>;
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    await dismissOverlays();
+    projectId = (await browser.execute(() =>
+      window.__termic!.useApp.getState()
+        .projects.find((p: any) => p.name === "fixture-repo").id as string,
+    )) as string;
+    originalDefault = (await storedDefault()) ?? "claude";
+    originalAgents = await agentIds();
+  });
+
+  after(async () => {
+    // Leave the project page on its landing sub-tab and shut the overlay:
+    // RepositorySection keeps its sub-tab while the same project stays
+    // selected, so a spec that opens this project next would otherwise find
+    // itself on More instead of Scripts.
+    await browser.execute(() => {
+      (document.querySelector('[data-repo-tab="scripts"]') as HTMLElement | null)?.click();
+      window.__termic!.useApp.getState().closeSettings();
+    });
+    // Shared profile: put both sides back, registry order included.
+    await browser.execute(async (ids, id, def) => {
+      const app = window.__termic!.useApp.getState();
+      const byId = new Map(app.agents.map((a: any) => [a.id, a]));
+      const restored = ids
+        .filter((i: string) => !i.startsWith("rename"))
+        .map((i: string) => byId.get(i))
+        .filter(Boolean);
+      await window.__termic!.ipc.agentsSave(restored);
+      const p = window.__termic!.useApp.getState().projects.find((x: any) => x.id === id);
+      await window.__termic!.ipc.projectUpdate({ ...p, default_cli: def });
+      await window.__termic!.useApp.getState().loadAll();
+    }, originalAgents, projectId, originalDefault);
+  });
+
+  it("shows the saved agent even when the registry no longer offers it", async () => {
+    await setDefault("ghost-agent");
+    await openMore();
+    const sel = await cliSelect();
+    expect(sel?.value).toBe("ghost-agent");
+    expect(sel?.label).toContain("not in your agents list");
+    // Reading the page must not have rewritten what it was reading.
+    expect(await storedDefault()).toBe("ghost-agent");
+  });
+
+  it("keeps the saved default when the agent strip is reordered", async () => {
+    const ids = await agentIds();
+    const last = ids[ids.length - 1];
+    await setDefault(last);
+
+    await browser.execute(() => window.__termic!.useApp.getState().openSettings("agents"));
+    await waitVisible('[data-agent-id][data-kind="agent"]');
+    const strip = (await browser.execute(() =>
+      [...document.querySelectorAll('[data-agent-id][data-kind="agent"]')].map(
+        (e) => (e as HTMLElement).dataset.agentId as string,
+      ),
+    )) as string[];
+    await pointerDrag(
+      `[data-agent-id="${strip[strip.length - 1]}"]`,
+      `[data-agent-id="${strip[0]}"]`,
+      { land: "left" },
+    );
+    await browser.waitUntil(
+      async () => (await agentIds())[0] === strip[strip.length - 1],
+      { timeout: 8_000, timeoutMsg: "the drag never reordered the strip" },
+    );
+
+    expect(await storedDefault()).toBe(last);
+    await openMore();
+    expect((await cliSelect())?.value).toBe(last);
+  });
+
+  it("carries the default along when its agent is renamed", async () => {
+    // A custom agent, since built-ins can't be renamed (their id is fixed).
+    await browser.execute(async () => {
+      const app = window.__termic!.useApp.getState();
+      const fresh = {
+        id: "rename-me", display_name: "Rename me", command: "true", args: [],
+        icon_id: "lucide:terminal", color: "#9aa0a6", builtin: false,
+        capabilities: { yolo_args: [], runtime_yolo_command: "" },
+        sandbox_allowed_paths: [],
+      };
+      // Drop any leftover from an interrupted earlier run: the commit is a
+      // no-op when the id it would mint is already taken, so a stray
+      // "renamed-agent" in the shared profile would quietly pass this test.
+      const keep = app.agents.filter((a: any) => !a.id.startsWith("rename"));
+      await window.__termic!.ipc.agentsSave([...keep, fresh]);
+      await window.__termic!.useApp.getState().loadAll();
+    });
+    await setDefault("rename-me");
+
+    await browser.execute(() => window.__termic!.useApp.getState().openSettings("agents"));
+    await waitVisible('[data-agent-id="rename-me"]');
+    await clickWhenVisible('[data-agent-id="rename-me"]');
+    await waitVisible('[data-agent-card="rename-me"] input');
+    // The card's name input is what mints the id: type a new name, blur.
+    await browser.execute(() => {
+      const input = document.querySelector(
+        '[data-agent-card="rename-me"] input',
+      ) as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, "value",
+      )!.set!;
+      setter.call(input, "Renamed agent");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    // Blur in a separate round trip: the commit reads the name off the
+    // re-rendered card, so blurring inside the same tick as the input event
+    // would commit the name the card still had. Focus immediately before it,
+    // too: blur() fires nothing on an element that does not have focus.
+    await browser.waitUntil(
+      async () => (await browser.execute(() => (document.querySelector(
+        '[data-agent-card="rename-me"] input',
+      ) as HTMLInputElement | null)?.value === "Renamed agent")) as boolean,
+      { timeout: 4_000, timeoutMsg: "the agent name input never took the new name" },
+    );
+    const blurred = await browser.execute(() => {
+      const input = document.querySelector(
+        '[data-agent-card="rename-me"] input',
+      ) as HTMLInputElement;
+      input.focus();
+      const focused = document.activeElement === input;
+      input.blur();
+      return focused;
+    });
+    expect(blurred).toBe(true);
+
+    // The registry keeps the new id (the repoint must not reload the page's
+    // own un-saved edit out from under it) ...
+    await browser.waitUntil(
+      async () => ((await agentIds()) as string[]).includes("renamed-agent"),
+      { timeout: 8_000, timeoutMsg: "the rename never reached the registry" },
+    );
+    // ... and the project that was pinned to the old id follows it.
+    await browser.waitUntil(
+      async () => (await storedDefault()) === "renamed-agent",
+      { timeout: 8_000, timeoutMsg: "the project default did not follow the rename" },
+    );
+    // Let the page's own debounced write land before after() restores the
+    // registry, or the pending save would put the renamed agent back on disk
+    // for whatever spec runs next (the agent-pill spec above hit this too).
+    await browser.waitUntil(
+      async () => (await browser.execute(
+        () => document.body.innerText.includes("Saved"),
+      )) as boolean,
+      { timeout: 8_000, timeoutMsg: "the agents page never confirmed its save" },
+    );
+
+    await openMore();
+    const sel = await cliSelect();
+    expect(sel?.value).toBe("renamed-agent");
+    expect(sel?.label).toBe("Renamed agent");
+  });
+});
+
 // Extra named ports (GH #196): the Repo Settings field writes the personal
 // (projects.json) list — the fixture repo has no .termic.yaml, so the
 // storage target auto-defaults to Personal — and flags invalid/reserved

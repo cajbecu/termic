@@ -372,6 +372,13 @@ export function RepositorySection({ projectId }: { projectId: string }) {
   }
 
   const isMulti = (draft.type ?? "single") === "multi";
+  // Default-CLI choices, and whether the SAVED value is among them. It can
+  // fall out of the list: the agent was removed or disabled, its id changed
+  // with its display name, or the registry simply hasn't loaded yet. See the
+  // select below for why that has to be rendered rather than papered over.
+  const cliChoices = agents.filter(a => !a.disabled && !isTerminalEntry(a));
+  const cliMissing = draft.default_cli !== "shell"
+    && !cliChoices.some(a => a.id === draft.default_cli);
   // For single-repo, files-to-copy source depends on which tab is active.
   const filesArr = isMulti || scriptTarget === "personal"
     ? (Array.isArray(draft.files_to_copy) ? draft.files_to_copy : [])
@@ -830,23 +837,41 @@ export function RepositorySection({ projectId }: { projectId: string }) {
             control={
               <select
                 value={draft.default_cli}
-                onChange={(e) => patch("default_cli", e.target.value)}
+                // A change that matches what's already stored is not an edit:
+                // don't spend a save (and a green flash) on it.
+                onChange={(e) => {
+                  if (e.target.value === draft.default_cli) return;
+                  patch("default_cli", e.target.value);
+                }}
                 className={cn(
                   "rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] pl-3 pr-8 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[140px]",
                   flashRing("default_cli"),
                 )}
               >
+                {/* The saved value ALWAYS gets an option, even when the agent
+                    it names is gone (removed, renamed, disabled) or the
+                    registry hasn't loaded yet. A <select> whose value matches
+                    no <option> is silently re-pointed at the first one by
+                    React, so the page would claim the project defaults to
+                    some other agent, and the next stray pick would save that
+                    lie. Rendered first so a broken default is impossible to
+                    miss. */}
+                {cliMissing && (
+                  <option value={draft.default_cli}>
+                    {draft.default_cli
+                      ? `${draft.default_cli} (not in your agents list)`
+                      : "Not set"}
+                  </option>
+                )}
                 {/* Built from the editable agent registry so custom
                     agents show up here too. Terminal (cli="shell") is
                     always available as the no-agent fallback. Custom
                     terminals (kind: "terminal") are excluded — a project
                     default CLI must be an agent (resume, review, and
                     task semantics all assume one). */}
-                {agents
-                  .filter(a => !a.disabled && !isTerminalEntry(a))
-                  .map(a => (
-                    <option key={a.id} value={a.id}>{a.display_name}</option>
-                  ))}
+                {cliChoices.map(a => (
+                  <option key={a.id} value={a.id}>{a.display_name}</option>
+                ))}
                 <option value="shell">Terminal</option>
               </select>
             }

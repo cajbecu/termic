@@ -8,7 +8,7 @@
 // Saves are debounced (500ms) so typing doesn't hammer the JSON file.
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { settingsLoad, agentsSave, agentsDefaults } from "@/lib/ipc";
+import { settingsLoad, agentsSave, agentsDefaults, projectUpdate } from "@/lib/ipc";
 import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
 import type { Agent, CliInfo } from "@/lib/types";
@@ -39,6 +39,12 @@ export function AgentsSection() {
   const [autoFocusId, setAutoFocusId] = useState<string | null>(null);
   // Pending-delete confirmation. null = closed.
   const [pendingDelete, setPendingDelete] = useState<Agent | null>(null);
+  // Projects that name the pending-delete agent as their default CLI. They
+  // get repointed on confirm, and the dialog says so first.
+  const projects = useApp(s => s.projects);
+  const pinnedProjects = pendingDelete
+    ? projects.filter(p => p.default_cli === pendingDelete.id)
+    : [];
   // Ship-time defaults, fetched from Rust. Used to compute "modified"
   // indicators + drive the reset-to-defaults action so users can pick up
   // updated default flags (e.g. claude's new `--resume {task_slug}`)
@@ -129,7 +135,38 @@ export function AgentsSection() {
       useApp.setState(s => ({
         tasks: s.tasks.map(w => w.cli === id ? { ...w, cli: slug } : w)
       }));
+      // ...and any PROJECT pinned to it as its default CLI. A default left
+      // pointing at an id that no longer exists is not inert: new tasks fall
+      // back to whatever the picker lands on, which is how a project ends up
+      // silently defaulting to an agent nobody chose.
+      void repointProjectDefaults(id, slug);
     }
+  }
+
+  /** Move every project whose default CLI is `from` onto `to`, persisted.
+   *  Called when an agent's id changes with its name, and when one is
+   *  removed (where `to` is the fallback pick). */
+  async function repointProjectDefaults(from: string, to: string) {
+    const affected = useApp.getState().projects.filter(p => p.default_cli === from);
+    if (affected.length === 0) return;
+    try {
+      for (const p of affected) await projectUpdate({ ...p, default_cli: to });
+      // Mirror into the store by hand rather than calling loadAll(): this
+      // page's own registry edit is still sitting in the 500ms debounce, and
+      // a full reload would pull the PRE-edit agents back out of settings.json
+      // and undo the rename we are repointing to.
+      useApp.setState(s => ({
+        projects: s.projects.map(p => p.default_cli === from ? { ...p, default_cli: to } : p),
+      }));
+    } catch (e) { setErr(String(e)); }
+  }
+
+  /** What a project pinned to `id` should fall back to once `id` is gone:
+   *  the first remaining enabled agent, or the plain shell if the registry
+   *  is left with none. */
+  function fallbackCli(id: string): string {
+    const next = agents.find(a => a.id !== id && !a.disabled && !isTerminalEntry(a));
+    return next?.id ?? "shell";
   }
   function patchCaps(id: string, patch: Partial<NonNullable<Agent["capabilities"]>>) {
     mutate(agents.map(a => a.id === id
@@ -145,7 +182,9 @@ export function AgentsSection() {
   }
   function confirmRemoveAgent() {
     if (!pendingDelete) return;
-    mutate(agents.filter(x => x.id !== pendingDelete.id));
+    const gone = pendingDelete.id;
+    mutate(agents.filter(x => x.id !== gone));
+    void repointProjectDefaults(gone, fallbackCli(gone));
     setPendingDelete(null);
   }
   function addAgent() {
@@ -302,6 +341,21 @@ export function AgentsSection() {
               will be removed. Tasks that reference it will fall back to spawning the
               literal command <span className="font-mono text-[var(--color-fg)]">{pendingDelete?.command || "(empty)"}</span>.
             </p>
+            {/* A project pinned to this agent has to land somewhere: say
+                where, here, rather than letting it silently default to
+                whatever the picker offers first. */}
+            {pinnedProjects.length > 0 && (
+              <p className="mt-1 text-[13px] text-[var(--color-fg-dim)]">
+                It is the default CLI for {pinnedProjects.length === 1
+                  ? <span className="font-mono text-[var(--color-fg)]">{pinnedProjects[0].name}</span>
+                  : `${pinnedProjects.length} projects`}, which will switch to{" "}
+                <span className="font-mono text-[var(--color-fg)]">
+                  {pendingDelete
+                    ? (agents.find(a => a.id === fallbackCli(pendingDelete.id))?.display_name ?? "Terminal")
+                    : ""}
+                </span>.
+              </p>
+            )}
           </div>
         </div>
         <div className="mt-4 flex justify-end gap-2">
