@@ -55,6 +55,19 @@ than being pinned to the tail.
 Rows carry `data-launcher-cli="<id>"` so tests can assert the order by id
 instead of by display name.
 
+## Run state in the sidebar
+
+A run tab's controls live in its tab pill (restart + a red Stop while the PTY
+is up, a Play once it exits, `TabBar.tsx`). The sidebar's child row for that
+tab carries the Stop half as well: a live run is otherwise invisible from any
+other task, and the only way to end it is to go back into the task that owns
+it.
+
+Both read the same thing, `tab.ptyId`, which TerminalPane clears on process
+exit. The row shows nothing when the run is stopped (its icon already says it
+is a run tab), and no Play: starting a run is a choice with arguments behind it
+(which command, which member) and belongs to the surfaces that offer them.
+
 ## Task type on a plain-folder project
 
 "Worktree" needs branches, so a project pointing at a plain folder can only

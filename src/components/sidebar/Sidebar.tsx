@@ -8,7 +8,7 @@ import { usePrefs } from "@/store/prefs";
 import { Button } from "@/components/ui/Button";
 import { Tip } from "@/components/ui/Tooltip";
 import { Spinner } from "@/components/ui/Spinner";
-import { LayoutGrid, History, FolderPlus, Settings, Plus, Archive, Layers, Moon, Cog, MoreVertical, GitBranch, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Bell, Bug, Mail, Zap, X, Pencil, Copy, ChevronsDownUp, ChevronsUpDown, Check, AudioWaveform, Radio, SquareChevronRight, CircleStop, Trash2, Folder, FolderMinus, FolderOpen, Megaphone, Keyboard, Activity, Waypoints } from "lucide-react";
+import { LayoutGrid, History, FolderPlus, Settings, Plus, Archive, Layers, Moon, Cog, MoreVertical, GitBranch, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Bell, Bug, Mail, Zap, X, Pencil, Copy, ChevronsDownUp, ChevronsUpDown, Check, AudioWaveform, Radio, SquareChevronRight, CircleStop, Trash2, Folder, FolderMinus, FolderOpen, Megaphone, Keyboard, Activity, Waypoints, Square } from "lucide-react";
 import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownSeparator, DropdownLabel, DropdownSub, DropdownSubTrigger, DropdownSubContent } from "@/components/ui/Dropdown";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuLabel, ContextMenuSub, ContextMenuSubTrigger, ContextMenuSubContent } from "@/components/ui/ContextMenu";
 import { ProjectActionsMenuItems } from "./ProjectActionsMenuItems";
@@ -22,7 +22,7 @@ import { useIsArchiving } from "@/store/archivingTasks";
 import { cn } from "@/lib/utils";
 import { formatTerminalTitle } from "@/lib/terminalTitle";
 import { requestCloseTab } from "@/lib/closeTab";
-import { taskRename, taskReorder, projectRename, openPath, projectReorder, taskSetYolo, projectRemove, projectUpdate, projectSetGroup, procmonOpenWindow } from "@/lib/ipc";
+import { taskRename, taskReorder, projectRename, openPath, projectReorder, taskSetYolo, projectRemove, projectUpdate, projectSetGroup, procmonOpenWindow, ptyKill } from "@/lib/ipc";
 import { copyToClipboard } from "@/lib/clipboard";
 import { copyAgentBriefing } from "@/lib/agentBriefing";
 import { groupOf, projectSections } from "@/lib/projectGroups";
@@ -2781,6 +2781,29 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
               />
             ) : (
               <span className="min-w-0 flex-1 truncate">{title}</span>
+            )}
+            {/* Run tabs (GH #54): a live run is worth seeing without opening
+                the task, and the row is the only place you can see it from
+                another task. Same red filled square as the tab pill's Stop,
+                and it IS that Stop: an indicator you can act on beats an
+                indicator you then have to go find the button for. `ptyId`
+                cleared on exit is what "running" means here, exactly as in
+                TabBar. Nothing renders when the run is stopped: the row's own
+                icon already says it is a run tab. */}
+            {!isTabRenaming && tab.runTab && tab.ptyId && (
+              <button
+                data-no-drag
+                data-testid={`sidebar-run-stop-${tab.id}`}
+                title="Stop run"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const ptyId = tab.ptyId;
+                  if (ptyId) ptyKill(ptyId).catch(() => {});
+                }}
+                className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--color-err)] hover:bg-[var(--color-bg-3)] hover:opacity-80"
+              >
+                <Square className="h-2.5 w-2.5" fill="currentColor" />
+              </button>
             )}
             {/* Trailing slot — status badge by default. Close × only
                 appears when hovering the badge itself, not the whole

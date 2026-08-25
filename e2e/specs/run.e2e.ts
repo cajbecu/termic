@@ -1,6 +1,6 @@
 import { execSync } from "node:child_process";
 import path from "node:path";
-import { archiveTask, ensureActiveTask, openTask, requireTermicApi, snap, waitForAppShell } from "../helpers";
+import { archiveTask, clickWhenVisible, ensureActiveTask, openTask, requireTermicApi, snap, waitForAppShell, waitGone, waitVisible } from "../helpers";
 
 // P0: the Run feature (#54/#124) launches commands in dedicated run tabs.
 // Guards a custom run: it opens a run tab whose PTY actually executes the
@@ -209,6 +209,87 @@ describe("setup script", () => {
       { timeout: 15_000, interval: 250, timeoutMsg: "setup tab never created" },
     );
     await snap("setup-script.png");
+  });
+});
+
+// A run you started is invisible from any other task once you navigate away:
+// the tab pill carries the only Stop, and that pill lives inside the task. The
+// sidebar's Run row mirrors it, so a live run is both visible and stoppable
+// from the tree.
+describe("sidebar run stop", () => {
+  let taskId!: string;
+  let tabId!: string;
+  let ptyId!: string;
+
+  after(async () => {
+    if (ptyId) {
+      await browser.execute(
+        async (id) => { try { await window.__termic!.ipc.ptyKill(id); } catch { /* gone */ } },
+        ptyId,
+      );
+    }
+    if (taskId) await archiveTask(taskId);
+  });
+
+  it("stops a live run from the sidebar row", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask("e2e-sidebar-run");
+
+    await browser.execute((id) => {
+      window.__termic!.runTabs.launchCustomRun(id, {
+        label: "e2e-sidebar-run",
+        command: "sleep 30",
+      });
+    }, taskId);
+    tabId = (await browser.waitUntil(
+      async () =>
+        (await browser.execute(
+          (id) => (window.__termic!.useApp.getState().tabs[id] ?? []).find(
+            (t: any) => t.runTab?.member === "label:e2e-sidebar-run",
+          )?.id,
+          taskId,
+        )) as string | undefined,
+      { timeout: 15_000, timeoutMsg: "run tab was not created" },
+    )) as string;
+
+    // Own the PTY rather than waiting for the tab's own spawn: that one is
+    // rAF-gated in TerminalPane and stalls on an occluded window (see the
+    // note in the first describe). A real PTY under the tab's `ptyId` is the
+    // same state the row reads, and `pty_alive` can then prove the Stop
+    // actually killed something.
+    ptyId = (await browser.execute(async (id) => {
+      const t = window.__termic!;
+      const task = t.useApp.getState().tasks.find((w: any) => w.id === id);
+      const res = await t.ipc.ptySpawn({
+        cwd: task.path, cmd: "sleep", args: ["30"], rows: 24, cols: 80,
+      });
+      return res.id as string;
+    }, taskId)) as string;
+    await browser.execute((id, tab, pty) => {
+      const app = window.__termic!.useApp.getState();
+      app.setTaskCollapsed(id, false);
+      app.patchTab(id, tab, { ptyId: pty });
+    }, taskId, tabId, ptyId);
+
+    const stop = `[data-testid="sidebar-run-stop-${tabId}"]`;
+    await waitVisible(stop);
+    await clickWhenVisible(stop);
+
+    await browser.waitUntil(
+      async () => !(await browser.execute(
+        async (id) => await window.__termic!.ipc.ptyAlive(id), ptyId,
+      )),
+      { timeout: 10_000, timeoutMsg: "the sidebar Stop did not kill the run's PTY" },
+    );
+    await snap("sidebar-run-stop.png");
+
+    // A stopped run leaves no control behind: the row's own icon already
+    // says it is a run tab.
+    await browser.execute((id, tab) => {
+      window.__termic!.useApp.getState().patchTab(id, tab, { ptyId: null });
+    }, taskId, tabId);
+    await waitGone(stop);
   });
 });
 

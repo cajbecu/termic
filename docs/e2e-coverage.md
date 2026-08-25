@@ -47,7 +47,7 @@ until `make e2e` is green and this file reflects it.
 | ✅ A premature done is taken back | A done fired at a stage boundary is undone when the agent goes back to work (spinner returns, stale bullet drops), and the turn's real completion still fires | `agent.e2e.ts` |
 | ✅ Split restore | A pane whose tabs are all gone collapses instead of restoring a blank leg; a task whose main tabs were all non-durable still restores with a main tab and a real activeTab | `tabs-layout.e2e.ts` |
 | ✅ Agent notifications | OSC 9 raises attention carrying the agent's verbatim body; the "waiting for your input" idle nag raises nothing | `agent.e2e.ts` |
-| ✅ Run tabs | A custom run command opens a run tab whose PTY executes it | `run.e2e.ts` |
+| ✅ Run tabs | A custom run command opens a run tab whose PTY executes it; the sidebar's Run row carries the same red Stop while the run is live, killing the PTY from the tree, and drops it once the run is stopped | `run.e2e.ts` |
 | ✅ Task archive | Archived task leaves the active board | `task.e2e.ts` |
 | ✅ Task restore | Archived task shows in History; restore returns it to active | `task.e2e.ts` |
 | ✅ Tab close confirm (unit) | The close prompt carries the same "Show this every time" opt-out (not the branch checkbox slot), stores it only when the close went through, and only a PANE tab close (no `closedTabs` entry, so no Resume) is dressed as destructive | `lib/closeTab.test.ts` |
