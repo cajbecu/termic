@@ -99,6 +99,16 @@ would otherwise die with `git branch ... origin/main → not a valid object name
 A spec that repoints origin (e.g. `git.e2e.ts`'s commit-push) MUST restore the
 seeded origin in teardown, or the later `agent race` test loses its base.
 
+**A spec that commits must commit something NEW.** `make e2e` reseeds, but
+`npm run test:e2e` on its own does not, so the fixture repo carries the last
+run's commits. `git.e2e.ts` used to write a fixed `history-probe.txt` with
+fixed contents: on the second bare run `git add` staged nothing, `git commit`
+exited non-zero, and the `execSync` throw took the whole describe with it (four
+failures, none of them about what they claimed to test). Both the file name and
+the subject are stamped now. The general rule: anything a spec commits should
+be unique per run, and any assertion that a file is an ADD in that commit is
+only true while the name is.
+
 ## Writing a test for a new feature
 
 The full authoring workflow lives in the **`e2e` skill**

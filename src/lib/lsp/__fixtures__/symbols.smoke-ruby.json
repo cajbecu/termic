@@ -1,0 +1,368 @@
+{
+ "server": "ruby-lsp",
+ "language": "ruby",
+ "query": "Store",
+ "definedIn": "lib/models.rb",
+ "symbols": [
+  {
+   "name": "Store",
+   "kind": 5,
+   "file": "lib/models.rb",
+   "line": 3
+  },
+  {
+   "name": "store",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/hash.rbs",
+   "line": 1710
+  },
+  {
+   "name": "@store",
+   "kind": 8,
+   "file": "lib/models.rb",
+   "line": 13
+  },
+  {
+   "name": "storage",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/fiber.rbs",
+   "line": 443
+  },
+  {
+   "name": "storage=",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/fiber.rbs",
+   "line": 467
+  },
+  {
+   "name": "restore",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/marshal.rbs",
+   "line": 206
+  },
+  {
+   "name": "StoreAdmin",
+   "kind": 5,
+   "file": "lib/models.rb",
+   "line": 11
+  },
+  {
+   "name": "store_if_absent",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/ractor.rbs",
+   "line": 428
+  },
+  {
+   "name": "stress",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/gc.rbs",
+   "line": 619
+  },
+  {
+   "name": "stop",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/thread.rbs",
+   "line": 1186
+  },
+  {
+   "name": "source",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/regexp.rbs",
+   "line": 1879
+  },
+  {
+   "name": "stopped?",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/process.rbs",
+   "line": 1968
+  },
+  {
+   "name": "stress=",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/gc.rbs",
+   "line": 642
+  },
+  {
+   "name": "stop?",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/thread.rbs",
+   "line": 664
+  },
+  {
+   "name": "StreamUI",
+   "kind": 5,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/rubygems/stream_ui.rbs",
+   "line": 4
+  },
+  {
+   "name": "strftime",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/time.rbs",
+   "line": 1370
+  },
+  {
+   "name": "sources",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/rubygems/rubygems.rbs",
+   "line": 968
+  },
+  {
+   "name": "StopIteration",
+   "kind": 5,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/errors.rbs",
+   "line": 528
+  },
+  {
+   "name": "sort",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/array.rbs",
+   "line": 3577
+  },
+  {
+   "name": "sort",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/enumerable.rbs",
+   "line": 1409
+  },
+  {
+   "name": "STDERR",
+   "kind": 14,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/constants.rbs",
+   "line": 81
+  },
+  {
+   "name": "sources=",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/rubygems/rubygems.rbs",
+   "line": 980
+  },
+  {
+   "name": "start",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/gc.rbs",
+   "line": 288
+  },
+  {
+   "name": "start",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/thread.rbs",
+   "line": 1170
+  },
+  {
+   "name": "state",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/random.rbs",
+   "line": 167
+  },
+  {
+   "name": "strip",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/string.rbs",
+   "line": 4679
+  },
+  {
+   "name": "to_r",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/complex.rbs",
+   "line": 771
+  },
+  {
+   "name": "to_r",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/float.rbs",
+   "line": 1154
+  },
+  {
+   "name": "to_r",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/integer.rbs",
+   "line": 1315
+  },
+  {
+   "name": "to_r",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/nil_class.rbs",
+   "line": 184
+  },
+  {
+   "name": "to_r",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/rational.rbs",
+   "line": 503
+  },
+  {
+   "name": "to_r",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/string.rbs",
+   "line": 5139
+  },
+  {
+   "name": "to_r",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/time.rbs",
+   "line": 1475
+  },
+  {
+   "name": "setpriority",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/process.rbs",
+   "line": 1038
+  },
+  {
+   "name": "post_reset",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/rubygems/rubygems.rbs",
+   "line": 785
+  },
+  {
+   "name": "setproctitle",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/process.rbs",
+   "line": 1056
+  },
+  {
+   "name": "StandardError",
+   "kind": 5,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/errors.rbs",
+   "line": 509
+  },
+  {
+   "name": "sort!",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/array.rbs",
+   "line": 3589
+  },
+  {
+   "name": "STDOUT",
+   "kind": 14,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/constants.rbs",
+   "line": 91
+  },
+  {
+   "name": "Struct",
+   "kind": 5,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/struct.rbs",
+   "line": 107
+  },
+  {
+   "name": "strip!",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/string.rbs",
+   "line": 4692
+  },
+  {
+   "name": "SourceList",
+   "kind": 5,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/rubygems/source_list.rbs",
+   "line": 14
+  },
+  {
+   "name": "string",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/match_data.rbs",
+   "line": 577
+  },
+  {
+   "name": "string",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/stdlib/stringio/0/stringio.rbs",
+   "line": 1379
+  },
+  {
+   "name": "String",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/kernel.rbs",
+   "line": 682
+  },
+  {
+   "name": "String",
+   "kind": 5,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/string.rbs",
+   "line": 947
+  },
+  {
+   "name": "sort_by",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/enumerable.rbs",
+   "line": 1490
+  },
+  {
+   "name": "force",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/enumerator.rbs",
+   "line": 589
+  },
+  {
+   "name": "system",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/kernel.rbs",
+   "line": 2209
+  },
+  {
+   "name": "$stderr",
+   "kind": 13,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/global_variables.rbs",
+   "line": 175
+  },
+  {
+   "name": "post_reset_hooks",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/rubygems/rubygems.rbs",
+   "line": 790
+  },
+  {
+   "name": "to_set",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/set.rbs",
+   "line": 748
+  },
+  {
+   "name": "lstrip",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/string.rbs",
+   "line": 3667
+  },
+  {
+   "name": "rstrip",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/string.rbs",
+   "line": 4193
+  },
+  {
+   "name": "target",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/refinement.rbs",
+   "line": 20
+  },
+  {
+   "name": "to_str",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/string.rbs",
+   "line": 5160
+  },
+  {
+   "name": "Ractor",
+   "kind": 5,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/ractor.rbs",
+   "line": 205
+  },
+  {
+   "name": "Thread",
+   "kind": 5,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/thread.rbs",
+   "line": 153
+  },
+  {
+   "name": "rmtree",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/pathname.rbs",
+   "line": 1030
+  },
+  {
+   "name": "to_ary",
+   "kind": 6,
+   "file": "file:///opt/homebrew/Cellar/ruby/4.0.6_1/lib/ruby/gems/4.0.0/gems/rbs-3.10.0/core/array.rbs",
+   "line": 3724
+  }
+ ]
+}

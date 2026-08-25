@@ -3,6 +3,8 @@
 // font, but built for future things (themes, terminal opacity, etc.).
 
 import { create } from "zustand";
+import { setDiagnosticsEnabled } from "@/lib/lsp/diagnosticsPref";
+import { setChosenServers, setChosenCommands } from "@/lib/lsp/serverChoice";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listFontFamilies, listMonospaceFonts, themesList } from "@/lib/ipc";
 import {
@@ -33,6 +35,11 @@ const LS_TERMINAL_SIZE = "terminalFontSize";
 const LS_EDITOR_SIZE   = "editorFontSize";
 const LS_LIGATURES     = "codeLigatures";
 const LS_INLINE_BLAME  = "inlineBlame";
+const LS_CODE_NAV      = "codeIntelligence";
+const LS_CODE_DIAGS    = "codeIntelDiagnostics";
+const LS_CODE_SERVERS  = "codeIntelServers";
+const LS_CODE_COMMANDS = "codeIntelCommands";
+const LS_CONFIRM_CODE_NAV = "confirmBeforeCodeIntel";
 const LS_THEME         = "themeMode";
 const LS_DESKTOPNOTIF  = "desktopNotifications";
 const LS_SETTLED_HIGHLIGHT = "settledHighlight";
@@ -603,6 +610,45 @@ interface PrefsState {
    *  Deliberately not a whole-file blame column either: see inlineBlameExt.ts
    *  for why every-line annotation is the expensive shape. */
   inlineBlame: boolean;
+  /** Whether the editor OFFERS code intelligence (GH #174). ON by default: the
+   *  offer costs one IPC call per editor open and nothing else, while burying
+   *  it behind a settings toggle meant nobody found the feature. It never
+   *  turns navigation on by itself — the chip is one click, and arming a
+   *  checkout is where the real cost is agreed to (see docs/plans/lsp.md).
+   *  Turning this OFF hides the chip everywhere, for people who never want
+   *  it: no affordance, nothing imported, no language server. */
+  codeIntelligence: boolean;
+  /** Let the language server report type errors and warnings, on top of the
+   *  navigation it is really here for.
+   *
+   *  OFF by default, which is a deliberate reversal. A type checker's opinion
+   *  about code you are READING is mostly noise: a Django project without
+   *  django-stubs underlines every model query, zuban calls a third-party
+   *  admin widget's types an error, and a WXT extension reports its own
+   *  generated globals as undefined. Every one of those is the environment
+   *  rather than the code, each needs its own configuration to silence, and
+   *  none of them helps you follow a symbol through a diff an agent just
+   *  wrote, which is what this feature exists for.
+   *
+   *  Turning it off costs nothing else: hover, go to definition, find usages,
+   *  the file outline, Search Everywhere and completion all come from the same
+   *  server and are unaffected. Someone who wants the checker turns it on. */
+  codeIntelDiagnostics: boolean;
+  /** Which server to run for a language, by the name the catalog prints
+   *  ({ python: "ty" }). A language with no entry uses termic's own order.
+   *
+   *  Machine-local, and deliberately not part of the project: whether this
+   *  machine runs zuban or basedpyright is not a colleague's decision, and
+   *  the answer usually follows what the person has installed. */
+  codeIntelServers: Record<string, string>;
+  /** A command line to run for a language instead of anything termic knows
+   *  about ({ python: "pylsp" }). The escape hatch for a server we do not
+   *  ship; a project can override it. */
+  codeIntelCommands: Record<string, string>;
+  /** Show the memory disclosure when arming a checkout for code intelligence.
+   *  Ticking "don't ask again" in that prompt is what turns the second
+   *  checkout into a single click. */
+  confirmBeforeCodeIntel: boolean;
   /** List EVERY installed font family in the font pickers, not just the
    *  is_monospace()-detected subset. OFF by default: the wall exists because
    *  proportional fonts break terminal column math, but font-kit's monospace
@@ -668,6 +714,13 @@ interface PrefsState {
   nudgeUiScale:       (dir: 1 | -1) => void;
   setCodeLigatures:   (v: boolean) => void;
   setInlineBlame:     (v: boolean) => void;
+  setCodeIntelligence:  (v: boolean) => void;
+  setCodeIntelDiagnostics: (v: boolean) => void;
+  /** Pick the server for a language, or `null` to go back to termic's order. */
+  setCodeIntelServer: (language: string, server: string | null) => void;
+  /** Set the command line for a language, or `null` to stop using one. */
+  setCodeIntelCommand: (language: string, command: string | null) => void;
+  setConfirmBeforeCodeIntel: (v: boolean) => void;
   toggleInlineBlame:  () => void;
   setShowAllInstalledFonts: (v: boolean) => void;
   /** Restore every Appearance-section pref (fonts, sizes, weight,
@@ -770,6 +823,10 @@ export const APPEARANCE_DEFAULTS = {
   uiScale:               100,
   codeLigatures:         true,
   inlineBlame:           false,
+  codeIntelligence:        true,
+  codeIntelDiagnostics:    false,
+  codeIntelServers:        {},
+  codeIntelCommands:       {},
   showAllInstalledFonts: false,
 } as const;
 
@@ -796,6 +853,30 @@ const initialEditorSize   = lsGetNum(LS_EDITOR_SIZE, APPEARANCE_DEFAULTS.editorF
 const initialUiScale      = clampUiScale(lsGetNum(LS_UI_SCALE, APPEARANCE_DEFAULTS.uiScale));
 const initialLigatures    = lsGetBool(LS_LIGATURES, APPEARANCE_DEFAULTS.codeLigatures);
 const initialInlineBlame  = lsGetBool(LS_INLINE_BLAME, APPEARANCE_DEFAULTS.inlineBlame);
+const initialCodeNav      = lsGetBool(LS_CODE_NAV, APPEARANCE_DEFAULTS.codeIntelligence);
+const initialCodeDiags    = lsGetBool(LS_CODE_DIAGS, APPEARANCE_DEFAULTS.codeIntelDiagnostics);
+/** A corrupt blob falls back to "no preference", which is the default order:
+ *  every language still gets a server. */
+const lsRecord = (key: string): Record<string, string> => {
+  try {
+    const raw = localStorage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed as Record<string, unknown>)
+        .filter(([, v]) => typeof v === "string" && v),
+    ) as Record<string, string>;
+  } catch { return {}; }
+};
+const initialCodeServers = lsRecord(LS_CODE_SERVERS);
+const initialCodeCommands = lsRecord(LS_CODE_COMMANDS);
+setDiagnosticsEnabled(initialCodeDiags);
+// Same mirror, for the server choice: read once at load, then on every change.
+setChosenServers(initialCodeServers);
+setChosenCommands(initialCodeCommands);
+/** Show the memory disclosure when arming a checkout. Ticking "don't ask
+ *  again" is what makes the second checkout a single click. */
+const initialConfirmCodeNav = lsGetBool(LS_CONFIRM_CODE_NAV, true);
 const initialShowAllFonts = lsGetBool(LS_SHOW_ALL_FONTS, APPEARANCE_DEFAULTS.showAllInstalledFonts);
 const initialTheme        = parseThemeMode(lsGet(LS_THEME, "claude"));
 const initialDesktopNotif = lsGetBool(LS_DESKTOPNOTIF, false);
@@ -880,6 +961,11 @@ export const usePrefs = create<PrefsState>(set => ({
   uiScale: initialUiScale,
   codeLigatures: initialLigatures,
   inlineBlame: initialInlineBlame,
+  codeIntelligence: initialCodeNav,
+  codeIntelDiagnostics: initialCodeDiags,
+  codeIntelServers: initialCodeServers,
+  codeIntelCommands: initialCodeCommands,
+  confirmBeforeCodeIntel: initialConfirmCodeNav,
   showAllInstalledFonts: initialShowAllFonts,
   taskExpandMode: initialTaskExpandMode,
   hideInactiveProjects: initialHideInactiveProjects,
@@ -977,6 +1063,47 @@ export const usePrefs = create<PrefsState>(set => ({
     try { localStorage.setItem(LS_INLINE_BLAME, v ? "1" : "0"); } catch {}
     set({ inlineBlame: v });
   },
+  setConfirmBeforeCodeIntel: (v) => {
+    if (usePrefs.getState().confirmBeforeCodeIntel === v) return;
+    try { localStorage.setItem(LS_CONFIRM_CODE_NAV, v ? "1" : "0"); } catch {}
+    set({ confirmBeforeCodeIntel: v });
+  },
+  setCodeIntelligence: (v) => {
+    if (usePrefs.getState().codeIntelligence === v) return;  // bear trap 8
+    try { localStorage.setItem(LS_CODE_NAV, v ? "1" : "0"); } catch {}
+    set({ codeIntelligence: v });
+  },
+  setCodeIntelCommand: (language, command) => {
+    const value = command?.trim() || null;
+    const cur = usePrefs.getState().codeIntelCommands;
+    if ((cur[language] ?? null) === value) return;  // bear trap 8
+    const next = { ...cur };
+    if (value) next[language] = value;
+    else delete next[language];
+    try { localStorage.setItem(LS_CODE_COMMANDS, JSON.stringify(next)); } catch {}
+    setChosenCommands(next);
+    set({ codeIntelCommands: next });
+  },
+  setCodeIntelServer: (language, server) => {
+    const cur = usePrefs.getState().codeIntelServers;
+    if ((cur[language] ?? null) === server) return;  // bear trap 8
+    const next = { ...cur };
+    if (server) next[language] = server;
+    else delete next[language];
+    try { localStorage.setItem(LS_CODE_SERVERS, JSON.stringify(next)); } catch {}
+    // Mirrored into a DOM-free module the resolver paths can read without
+    // importing this store: see lib/lsp/serverChoice.ts.
+    setChosenServers(next);
+    set({ codeIntelServers: next });
+  },
+  setCodeIntelDiagnostics: (v) => {
+    if (usePrefs.getState().codeIntelDiagnostics === v) return;  // bear trap 8
+    try { localStorage.setItem(LS_CODE_DIAGS, v ? "1" : "0"); } catch {}
+    // Mirrored into a DOM-free module the diagnostics paths can read without
+    // importing this store: see lib/lsp/diagnosticsPref.ts.
+    setDiagnosticsEnabled(v);
+    set({ codeIntelDiagnostics: v });
+  },
   toggleInlineBlame: () => {
     usePrefs.getState().setInlineBlame(!usePrefs.getState().inlineBlame);
   },
@@ -1000,6 +1127,8 @@ export const usePrefs = create<PrefsState>(set => ({
     s.setUiScale(d.uiScale);
     s.setCodeLigatures(d.codeLigatures);
     s.setInlineBlame(d.inlineBlame);
+    s.setCodeIntelligence(d.codeIntelligence);
+    s.setCodeIntelDiagnostics(d.codeIntelDiagnostics);
     s.setShowAllInstalledFonts(d.showAllInstalledFonts);
   },
   setThemeMode: (m) => {

@@ -1,0 +1,44 @@
+{
+ "server": "sourcekit-lsp",
+ "language": "swift",
+ "query": "Store",
+ "definedIn": "Sources/LspFixture/Models.swift",
+ "symbols": [
+  {
+   "name": "Store",
+   "kind": 23,
+   "file": "Sources/LspFixture/Models.swift",
+   "line": 1
+  },
+  {
+   "name": "StoreAdmin",
+   "kind": 23,
+   "file": "Sources/LspFixture/Models.swift",
+   "line": 6
+  },
+  {
+   "name": "init(store:)",
+   "kind": 9,
+   "file": "Sources/LspFixture/Models.swift",
+   "line": 6
+  },
+  {
+   "name": "store",
+   "kind": 7,
+   "file": "Sources/LspFixture/Models.swift",
+   "line": 7
+  },
+  {
+   "name": "storeByID(_:)",
+   "kind": 12,
+   "file": "Sources/LspFixture/Models.swift",
+   "line": 10
+  },
+  {
+   "name": "store",
+   "kind": 26,
+   "file": "Sources/LspFixture/Uses.swift",
+   "line": 2
+  }
+ ]
+}

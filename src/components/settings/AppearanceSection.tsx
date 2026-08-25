@@ -2,10 +2,13 @@
 // Mirrors Termic's split: "Mono Font" governs the editor; "Terminal Font"
 // governs xterm. Sizes are independent.
 
+import { CodeIntelServers } from "./CodeIntelServers";
 import { usePrefs, resolveTheme, BUNDLED_FONT_ID, MONO_FONT_OPTIONS, APPEARANCE_DEFAULTS, availableMonoFonts, availableMonoFontsAsync, sortFontOptions, stackFor } from "@/store/prefs";
 import type { TerminalRendererKind } from "@/store/prefs";
 import { useEffect, useRef, useState } from "react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { codeIntelName } from "@/lib/lsp/featureName";
 import { EDITOR_THEMES, resolveEditorTheme, editorSurfaceTheme } from "@/lib/editorTheme";
 import { Button } from "@/components/ui/Button";
 import { Checkbox } from "@/components/ui/Checkbox";
@@ -28,6 +31,7 @@ export function AppearanceSection() {
   // Terminal leads: the embedded terminal is the product, and it is the font
   // stack people come here to change.
   const [subTab, setSubTab] = useState<AppearanceTab>("terminal");
+  const [serversOpen, setServersOpen] = useState(false);
   // ...which means the landing tab is the one whose preview spawns a REAL pty
   // (TerminalPreview -> AuxTerminal). Mounting it on arrival would start a
   // shell in $HOME every time Appearance opens, including drive-by visits to
@@ -60,6 +64,10 @@ export function AppearanceSection() {
   const setUiScale = usePrefs(s => s.setUiScale);
   const codeLigatures = usePrefs(s => s.codeLigatures);
   const inlineBlame = usePrefs(s => s.inlineBlame);
+  const codeIntelligence = usePrefs(s => s.codeIntelligence);
+  const codeIntelDiagnostics = usePrefs(s => s.codeIntelDiagnostics);
+  const setCodeIntelDiagnostics = usePrefs(s => s.setCodeIntelDiagnostics);
+  const setCodeIntelligence = usePrefs(s => s.setCodeIntelligence);
   const setInlineBlame = usePrefs(s => s.setInlineBlame);
   const setCodeLigatures = usePrefs(s => s.setCodeLigatures);
   const showAllInstalledFonts = usePrefs(s => s.showAllInstalledFonts);
@@ -107,6 +115,8 @@ export function AppearanceSection() {
     uiScale               === APPEARANCE_DEFAULTS.uiScale &&
     codeLigatures         === APPEARANCE_DEFAULTS.codeLigatures &&
     inlineBlame           === APPEARANCE_DEFAULTS.inlineBlame &&
+    codeIntelligence        === APPEARANCE_DEFAULTS.codeIntelligence &&
+    codeIntelDiagnostics    === APPEARANCE_DEFAULTS.codeIntelDiagnostics &&
     showAllInstalledFonts === APPEARANCE_DEFAULTS.showAllInstalledFonts;
 
   return (
@@ -290,6 +300,93 @@ export function AppearanceSection() {
         value={inlineBlame}
         onChange={setInlineBlame}
       />
+
+      {/* ONE bounded section, not three loose toggles among the editor's.
+          Everything here belongs to the same feature and the same decision,
+          and read as a flat list it was impossible to tell where "code
+          intelligence" started and the editor's own preferences stopped. The
+          border is doing the work a heading alone could not. */}
+      {/* Grouped by a RULE and a heading, not by a box. The bordered card read
+          as a section but its padding pushed every label ~28px right of the
+          toggles above it, so the one group that was supposed to look
+          deliberate was the only one out of alignment. A divider plus the same
+          h2 the Window/Sidebar/Panes sections use groups it without moving
+          anything. */}
+      <section
+        data-testid="code-intel-settings"
+        className="mt-2 border-t border-[var(--color-border-soft)] pt-6"
+      >
+        {/* The name follows the switch below it. With type checking off this
+            feature IS navigation, and a heading promising "intelligence"
+            sends the reader looking for a checker they have not turned on. */}
+        <h2 className="text-[15px] font-medium">{codeIntelName(codeIntelDiagnostics)}</h2>
+        <p className="mt-1 text-[13px] leading-relaxed text-[var(--color-fg-dim)]">
+          Go to definition, find usages, an outline of the file, and types on hover, using the
+          same tools a full IDE uses.{codeIntelDiagnostics ? " Type errors are underlined too." : ""}{" "}
+          Nothing runs until you switch it on for a project, from the compass button above the
+          editor.
+        </p>
+
+        <div className="mt-5 flex flex-col gap-6">
+          <Toggle
+            label="Offer it in the editor"
+            hint="Turning this off hides the button everywhere and runs nothing at all."
+            value={codeIntelligence}
+            onChange={setCodeIntelligence}
+          />
+
+          <Toggle
+            label="Type checking"
+            badge="Experimental"
+            // Two sentences: what it does, and what to expect. The long
+            // version explained mypy's config model in a settings row, which
+            // is a paragraph nobody finishes; the detail it was carrying now
+            // lives where somebody hunting a specific underline will look
+            // (docs/lsp.md), and the rule id is printed on the underline
+            // itself so it can be looked up.
+            hint="Underlines type errors, using your project's own checker config. Expect false alarms on framework code (missing stubs, a library's own annotations): each underline names the rule, so you can silence it in that config. Navigation works either way."
+            value={codeIntelDiagnostics}
+            onChange={setCodeIntelDiagnostics}
+          />
+
+          {/* Only once the feature is offered: with it off there is nothing
+              running, nothing installed, and no reason to talk about versions. */}
+          {/* Collapsed by default. The list answers "what could run, and what
+              do I already have" — a question people ask once and then stop
+              asking. Open, it is a dozen rows sitting between two switches
+              that get read far more often. */}
+          {codeIntelligence && (
+            <div className="border-t border-[var(--color-border-soft)] pt-4">
+              <button
+                type="button"
+                data-testid="lsp-servers-toggle"
+                aria-expanded={serversOpen}
+                onClick={() => setServersOpen(o => !o)}
+                className="flex w-full items-center gap-1.5 text-left"
+              >
+                {serversOpen
+                  ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />
+                  : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />}
+                <span className="text-[13px] font-medium">Servers</span>
+                <span className="text-[12px] text-[var(--color-fg-dim)]">
+                  what can run, and what this machine already has
+                </span>
+              </button>
+              {serversOpen && (
+                <div className="mt-3">
+                  <p className="mb-3 text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
+                    One per language, started only for a project you switch this on for. Where a
+                    language has more than one, pick the one you want; Automatic uses the order
+                    below. A copy inside the project (<code className="font-mono">node_modules</code>,
+                    a virtualenv) always wins over these.
+                  </p>
+                  <CodeIntelServers />
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </section>
       </div>}
 
       {subTab === "interface" && <div className="flex flex-col gap-8">
@@ -563,11 +660,24 @@ function LetterSpacingPicker({ value, onChange }: { value: number; onChange: (px
   );
 }
 
-function Toggle({ label, hint, value, onChange }: { label: string; hint?: string; value: boolean; onChange: (v: boolean) => void }) {
+function Toggle({ label, hint, value, onChange, badge }: {
+  label: string; hint?: string; value: boolean; onChange: (v: boolean) => void;
+  /** A word beside the label: "Experimental". Set it only where the honest
+   *  answer is that the feature does not work everywhere yet, and take it off
+   *  when that stops being true. A badge on everything says nothing. */
+  badge?: string;
+}) {
   return (
     <div className="flex items-start justify-between gap-6">
       <div className="min-w-0 flex-1">
-        <div className="text-[14px] font-medium">{label}</div>
+        <div className="flex items-center gap-2">
+          <span className="text-[14px] font-medium">{label}</span>
+          {badge && (
+            <span className="rounded border border-[var(--color-border)] px-1.5 py-px text-[10.5px] uppercase tracking-wide text-[var(--color-fg-dim)]">
+              {badge}
+            </span>
+          )}
+        </div>
         {hint && <div className="mt-0.5 whitespace-pre-line text-[12.5px] text-[var(--color-fg-dim)]">{hint}</div>}
       </div>
       {/* 100% inline-style geometry — Tailwind size utilities were getting

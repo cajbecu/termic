@@ -77,6 +77,33 @@ export interface Project {
    *  All spotlight UI + commands are gated on this flag. */
   spotlight_enabled?: boolean;
 
+  /** Standing instruction to arm code intelligence (GH #174) for this project's
+   *  checkouts: "off" (default), "main" (the main checkout only) or "all"
+   *  (every worktree too). Three values rather than a boolean because the two
+   *  "on"s differ by an order of magnitude: the main checkout is one server
+   *  per language ever, while worktrees are one server EACH. Machine-local, in
+   *  projects.json, deliberately not in the committed .termic.yaml. */
+  code_intel_auto?: "off" | "main" | "all";
+
+  /** Which languages get code intelligence here, by server id ("typescript",
+   *  "python", "rust", "go"). Undefined means all of them.
+   *
+   *  Per language because a repo is usually several: a Django project holds
+   *  Python and the JavaScript in its templates, and each server is its own
+   *  process with its own memory bill. */
+  code_intel_languages?: string[];
+
+  /** Raw LSP settings overrides, keyed by server id (`"typescript"`, `"python"`, etc.).
+   *  The "Advanced box" that bypasses the config files and sends a raw block to the server. */
+  code_intel_settings?: Record<string, unknown>;
+  /** Which server THIS project runs for a language, by the name the catalog
+   *  prints ({ python: "ty" }). Overrides the machine-wide pick. */
+  code_intel_servers?: Record<string, string>;
+  /** A command line to run instead of anything termic knows about
+   *  ({ python: "pylsp" }). Beats every other choice, here and machine-wide,
+   *  because it is the most explicit thing anybody said. */
+  code_intel_commands?: Record<string, string>;
+
   /** "single" (default) = one git repo, worktrees branched off it.
    *  "multi" = host repo for shared CLAUDE.md / AGENTS.md / .claude/
    *  + a list of member project ids. Tasks under a multi project

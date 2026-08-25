@@ -1,0 +1,6 @@
+[project]
+name = "lsp-fixture-python"
+version = "0.0.0"
+
+[tool.mypy]
+python_version = "3.12"

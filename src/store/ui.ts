@@ -168,6 +168,10 @@ interface UIState {
   /** ⌘P file finder — task id to scope the search to; null = closed.
    *  Lives here so opening doesn't churn the task tree. */
   fileFinderTaskId: string | null;
+  /** Search Everywhere (double-Shift, GH #174): files always, symbols when a
+   *  checkout is armed. Separate from the file finder on purpose — ⌘P stays a
+   *  single-purpose thing, since most people never turn code intelligence on. */
+  searchEverywhereTaskId: string | null;
   /** Global fuzzy project picker (⌘N) — search any loaded project and
    *  start a new task for it without scrolling the sidebar. */
   projectPickerOpen: boolean;
@@ -280,6 +284,8 @@ interface UIState {
   closeSandbox: () => void;
   openFileFinder: (taskId: string) => void;
   closeFileFinder: () => void;
+  openSearchEverywhere: (taskId: string) => void;
+  closeSearchEverywhere: () => void;
   openProjectPicker: () => void;
   closeProjectPicker: () => void;
   openCommandPalette: () => void;
@@ -393,6 +399,7 @@ export const useUI = create<UIState>(set => ({
   raceCompareId: null,
   sandboxForTaskId: null,
   fileFinderTaskId: null,
+  searchEverywhereTaskId: null,
   findInFilesTaskId: null,
   projectPickerOpen: false,
   commandPaletteOpen: false,
@@ -454,6 +461,8 @@ export const useUI = create<UIState>(set => ({
   clearCommitReveal: () => set({ commitReveal: null }),
   closeSandbox:      () => set({ sandboxForTaskId: null }),
   openFileFinder:    (taskId) => set({ fileFinderTaskId: taskId }),
+  openSearchEverywhere:  (taskId) => set({ searchEverywhereTaskId: taskId }),
+  closeSearchEverywhere: () => set({ searchEverywhereTaskId: null }),
   closeFileFinder:   () => set({ fileFinderTaskId: null }),
   openFindInFiles:   (taskId) => set({ findInFilesTaskId: taskId }),
   closeFindInFiles:  () => set({ findInFilesTaskId: null }),

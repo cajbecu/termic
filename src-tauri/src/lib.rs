@@ -156,6 +156,59 @@ pub struct Project {
     #[serde(default)]
     pub spotlight_enabled: bool,
 
+    /// Standing instruction to arm code intelligence (GH #174) for this
+    /// project's checkouts: `"off"` (default), `"main"` (the main checkout
+    /// only) or `"all"` (every worktree too).
+    ///
+    /// Three values rather than a boolean because the two "on"s differ by an
+    /// order of magnitude: the main checkout is one server per language ever,
+    /// however many tasks share it, while worktrees are one server PER
+    /// WORKTREE — ten agents is ten indexes, which at rust-analyzer's ~3.1 GB
+    /// is ~31 GB. A single "on" would hide that difference.
+    ///
+    /// Machine-local, in `projects.json`, deliberately NOT in the committed
+    /// `.termic.yaml`: whether to spend this machine's memory is not a
+    /// decision a colleague gets to push.
+    #[serde(default)]
+    pub code_intel_auto: Option<String>,
+
+    /// Which languages get code intelligence in this project, by server id
+    /// (`"typescript"`, `"python"`, `"rust"`, `"go"`). `None` means all of
+    /// them, which is the default and what most projects want.
+    ///
+    /// Per language because a repo is usually several: a Django project holds
+    /// Python and the JavaScript in its templates, and those are two separate
+    /// processes with two separate memory bills. Every editor with optional
+    /// language servers models it this way (Sublime's LSP package, Zed, Helix,
+    /// Neovim); Fleet's single workspace-wide Smart Mode is the outlier. So
+    /// someone who wants ty on a Django repo but not a second server for its
+    /// sprinkling of JavaScript can say exactly that.
+    #[serde(default)]
+    pub code_intel_languages: Option<Vec<String>>,
+
+    /// Raw LSP settings overrides, keyed by server id (`"typescript"`, `"python"`, etc.).
+    /// This is the "Advanced box" that bypasses our abstraction and sends a raw block
+    /// into either `initializationOptions` or `settings` depending on what the server expects.
+    #[serde(default)]
+    pub code_intel_settings: Option<std::collections::HashMap<String, serde_json::Value>>,
+
+    /// Which server THIS project runs for a language, by the name the catalog
+    /// prints (`{"python": "ty"}`). Overrides the machine-wide pick; absent
+    /// means "whatever this machine is set to".
+    ///
+    /// Machine-local like the rest of `projects.json`, and deliberately not in
+    /// the committed `.termic.yaml`: which binary a colleague has installed is
+    /// not a fact about the repo.
+    #[serde(default)]
+    pub code_intel_servers: Option<std::collections::HashMap<String, String>>,
+
+    /// A command line to run INSTEAD of anything termic knows about, keyed the
+    /// same way (`{"python": "pylsp"}`). The escape hatch for a server we do
+    /// not ship: pyright-langserver, jedi, a wrapper script. Beats every other
+    /// choice, because it is the most explicit thing anybody said.
+    #[serde(default)]
+    pub code_intel_commands: Option<std::collections::HashMap<String, String>>,
+
     /// True when `root_path` is NOT a git repo — e.g. a parent folder
     /// that contains several independent git repos (issue #4). Such a
     /// project can only spawn repo-root tasks (the agent runs at
@@ -3167,6 +3220,11 @@ fn project_add(root_path: String, non_git: Option<bool>) -> Result<Project, Stri
         project_type: ProjectType::Single,
         members: Vec::new(),
         spotlight_enabled: false,
+        code_intel_auto: None,
+        code_intel_languages: None,
+        code_intel_servers: None,
+        code_intel_commands: None,
+        code_intel_settings: None,
         non_git,
         // New projects start ungrouped; grouping is a sidebar action.
         group: None,
@@ -3347,6 +3405,11 @@ fn project_add_multi(root_path: String, name: String, members: Vec<ProjectMember
         project_type: ProjectType::Multi,
         members,
         spotlight_enabled: false,
+        code_intel_auto: None,
+        code_intel_languages: None,
+        code_intel_settings: None,
+        code_intel_servers: None,
+        code_intel_commands: None,
         non_git,
         group: None,
         run_scripts: Vec::new(),
@@ -5718,6 +5781,32 @@ fn procmon_roots(manager: &PtyManager) -> Vec<procmon::Root> {
             })
             .collect()
     };
+    // Language servers (GH #174). They are the first thing termic runs that
+    // can cost more than every agent in the window combined, and they never
+    // release what they take, so they belong in the same table as everything
+    // else rather than in a settings pane nobody opens. Being roots here also
+    // makes them signallable: procmon_signal's ownership check is exactly this
+    // list, so the window's stop button works on them with no special case.
+    //
+    // No task_id on purpose: a server is shared by every task on its checkout,
+    // so filing it under one of them would be a lie about what stopping it
+    // costs.
+    {
+        let g = LSP_SERVERS.lock().unwrap();
+        if let Some(map) = g.as_ref() {
+            for (id, srv) in map.iter() {
+                roots.push(procmon::Root {
+                    key: format!("lsp:{id}"),
+                    kind: "lsp".into(),
+                    pty_id: None,
+                    task_id: None,
+                    tab_id: None,
+                    pid: srv.pid as u32,
+                    out_bytes: None,
+                });
+            }
+        }
+    }
     // Termic itself, so our own cost sits in the same table as the agents'
     // instead of being taken on faith. Every PTY is one of our children, so
     // the sampler excludes their subtrees from this row.
@@ -10181,6 +10270,1986 @@ fn run_script_streaming(
     });
 }
 
+// ───────────────────────────── language servers ──────────────────────────────
+//
+// Code intelligence (GH #174). A language server is a child process speaking
+// JSON-RPC over stdio with `Content-Length` framing; the webview speaks plain
+// JSON strings to `@codemirror/lsp-client`. This host owns the difference:
+// framing, the child's lifetime, and the server→client requests the CM client
+// refuses to answer.
+//
+// Three things here are not plumbing, and getting any of them wrong is silence
+// or a confidently wrong answer rather than an error (docs/plans/lsp.md):
+//
+//  1. **Answer server→client requests.** `@codemirror/lsp-client` replies
+//     `-32601 MethodNotFound` to every one of them. pyright/basedpyright ABORT
+//     on that, ty hangs forever waiting for `workspace/configuration`, and
+//     pyrefly answered a find-references with 9 hits instead of 309. So the
+//     host answers them before the webview ever sees them: `[null]` per
+//     requested item for `workspace/configuration` (the one reply every server
+//     tested accepts, and the length ty asserts on), and a null result for
+//     everything else, which is what a client that supports nothing should say
+//     without erroring.
+//  2. **Send `workspaceFolders` as well as `rootUri`.** The CM client sends
+//     only `rootUri`; ruby-lsp reads only `workspaceFolders`, clangd only
+//     `rootUri`, and phpactor exits outright on a null root. The host merges
+//     the missing half into the outgoing `initialize`.
+//  3. **`Content-Length` is BYTES.** The classic hand-rolled-framer bug, and
+//     it bites on the first non-ASCII docstring rather than in review.
+//
+// Servers are NOT sandboxed, deliberately: only the agent CLI PTY is in that
+// threat model (docs/sandbox.md), and a language server is the user's own
+// toolchain. sourcekit-lsp's client guide requires the real environment too.
+
+struct LspServer {
+    /// Process-group leader, so the whole tree can be signalled at once.
+    pid: i32,
+    /// Outgoing messages, drained by this server's writer thread.
+    ///
+    /// NOT the pipe itself. Writing to a child's stdin BLOCKS once its buffer
+    /// is full — a server that has stopped reading (busy indexing, wedged,
+    /// dying) would otherwise stall whichever thread called `lsp_send`, which
+    /// is a Tauri IPC thread, and take the map mutex down with it. That is the
+    /// synchronous-IO-freezes-the-webview trap in CLAUDE.md, reached through a
+    /// pipe instead of a file. The queue makes every send a move.
+    tx: std::sync::mpsc::Sender<String>,
+    root: String,
+    language: String,
+    command: String,
+    /// The PAGE LOAD that started it. A webview reload throws away the map
+    /// that enforces one server per (checkout, language), so without this
+    /// there is no way to tell a server somebody is using from one whose
+    /// Channel died with the page that made it. See `lsp_reap_foreign`.
+    page: String,
+}
+
+static LSP_SERVERS: std::sync::Mutex<Option<HashMap<String, LspServer>>> =
+    std::sync::Mutex::new(None);
+
+/// One JSON-RPC message, framed, written straight to the pipe. Only the
+/// server's own writer thread calls this.
+fn lsp_write(stdin: &mut std::process::ChildStdin, body: &str) -> std::io::Result<()> {
+    // Byte length, not `str::len()` on a lossy conversion and not char count.
+    write!(stdin, "Content-Length: {}\r\n\r\n", body.as_bytes().len())?;
+    stdin.write_all(body.as_bytes())?;
+    stdin.flush()
+}
+
+/// Reply to a server→client request without involving the webview.
+///
+/// `workspace/configuration` gets one `null` per requested item: ty panics and
+/// exits when the array length does not match, and every other server tested
+/// treats `null` as "no configuration", which is true of us. Everything else
+/// gets a null result rather than an error, because an error reply is what
+/// kills pyright.
+fn lsp_reply_to_server_request(
+    msg: &serde_json::Value,
+    root: &Path,
+    user: &serde_json::Value,
+) -> Option<String> {
+    let id = msg.get("id")?.clone();
+    let method = msg.get("method")?.as_str()?;
+    let result = match method {
+        "workspace/configuration" => {
+            let items = msg
+                .get("params")
+                .and_then(|p| p.get("items"))
+                .and_then(|i| i.as_array())
+                .cloned()
+                .unwrap_or_else(|| vec![serde_json::Value::Null]);
+            // One entry per requested item, in order. ty asserts on the length
+            // and exits when it does not match.
+            serde_json::Value::Array(
+                items
+                    .iter()
+                    .map(|item| {
+                        let ours = lsp_config_for(item, root);
+                        let section = item.get("section").and_then(|s| s.as_str()).unwrap_or("");
+                        // The project's own answer, layered over termic's.
+                        // Null on either side means "no opinion", and two
+                        // no-opinions still have to answer null rather than
+                        // `{}`: a server that asked for a section it does not
+                        // get is fine, a server handed an empty object where
+                        // it expected null is not necessarily.
+                        match lsp_user_section(user, section) {
+                            serde_json::Value::Null => ours,
+                            theirs if ours.is_null() => theirs,
+                            theirs => lsp_merge(&ours, &theirs),
+                        }
+                    })
+                    .collect(),
+            )
+        }
+        // `client/registerCapability`, `window/workDoneProgress/create`,
+        // `workspace/*Refresh`, `window/showMessageRequest`: a null result is
+        // an accepted answer for all of them, and the alternative (an error,
+        // or no reply at all) is what makes servers exit, hang, or block
+        // find-references behind a 60s timeout.
+        _ => serde_json::Value::Null,
+    };
+    serde_json::to_string(&serde_json::json!({
+        "jsonrpc": "2.0", "id": id, "result": result,
+    }))
+    .ok()
+}
+
+/// What to answer for ONE requested configuration section.
+///
+/// `null` is the right answer almost everywhere — it means "no configuration",
+/// which is true of us, and every server tested accepts it. The exception is
+/// Python: **pyright and basedpyright find the interpreter through
+/// `python.pythonPath` from this very reply**, and `VIRTUAL_ENV` (which the
+/// spawn does export) is the one interpreter mechanism they ignore. Answering
+/// null there means they analyse the project against whatever `python` they
+/// happen to find, so every third-party import is unresolved and the file
+/// fills with errors that are about our handshake rather than the code.
+/// Merge `over` into `base`, `over` winning, objects merged branch by branch.
+///
+/// The user's answer beats termic's default, always. The one thing that must
+/// NOT happen is a project setting being silently half-applied because the
+/// default underneath it had a deeper shape.
+fn lsp_merge(base: &serde_json::Value, over: &serde_json::Value) -> serde_json::Value {
+    match (base, over) {
+        (serde_json::Value::Object(b), serde_json::Value::Object(o)) => {
+            let mut out = b.clone();
+            for (k, v) in o {
+                let merged = match b.get(k) {
+                    Some(existing) => lsp_merge(existing, v),
+                    None => v.clone(),
+                };
+                out.insert(k.clone(), merged);
+            }
+            serde_json::Value::Object(out)
+        }
+        // Arrays REPLACE. Every list a server takes (extraPaths, buildFlags,
+        // cargo features) is one someone will want to correct, and a list you
+        // cannot shorten is a list you cannot fix.
+        _ => over.clone(),
+    }
+}
+
+/// The user's slice of a pulled config section.
+///
+/// A server asks for a dotted section (`python.analysis`) and termic holds the
+/// settings as a tree, so `python.analysis.diagnosticMode` has to be walked
+/// down to. A section the user said nothing about returns null, which is what
+/// this function's caller treats as "no opinion".
+fn lsp_user_section(settings: &serde_json::Value, section: &str) -> serde_json::Value {
+    if section.is_empty() {
+        return settings.clone();
+    }
+    let mut node = settings;
+    for part in section.split('.') {
+        match node.get(part) {
+            Some(next) => node = next,
+            None => return serde_json::Value::Null,
+        }
+    }
+    node.clone()
+}
+
+fn lsp_config_for(item: &serde_json::Value, root: &Path) -> serde_json::Value {
+    let section = item.get("section").and_then(|s| s.as_str()).unwrap_or("");
+    let venv = root.join(".venv");
+    let interpreter = venv.join("bin").join("python");
+    match section {
+        "python" if interpreter.is_file() => serde_json::json!({
+            "pythonPath": interpreter.to_string_lossy(),
+            "venvPath": root.to_string_lossy(),
+            "venv": ".venv",
+        }),
+        // ty reads its settings from here too, and naming the environment
+        // explicitly is what stops it inferring one. `environment.python`
+        // takes the venv (or an interpreter); without it ty falls back to
+        // whatever it can discover from the cwd, which is right often enough
+        // to be confusing when it is wrong — a project whose stubs are
+        // installed in a venv ty is not looking at reports errors about
+        // packages that ARE installed.
+        "ty" if interpreter.is_file() => serde_json::json!({
+            "environment": { "python": venv.to_string_lossy() },
+        }),
+        "python.analysis" if interpreter.is_file() => serde_json::json!({
+            // Only what is needed to find the environment. Everything else is
+            // the server's own default, deliberately: a client that invents
+            // analysis settings is a client that argues with the project's
+            // pyproject.toml.
+            "extraPaths": [root.to_string_lossy()],
+        }),
+        _ => serde_json::Value::Null,
+    }
+}
+
+/// Merge the halves of `initialize` the CM client does not send.
+///
+/// Returns the message unchanged unless it is an `initialize` request.
+fn lsp_patch_initialize(body: &str, root: &Path) -> String {
+    let Ok(mut msg) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.to_string();
+    };
+    if msg.get("method").and_then(|m| m.as_str()) != Some("initialize") {
+        return body.to_string();
+    }
+    let uri = lsp_path_to_uri(root);
+    let name = root
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".into());
+    if let Some(params) = msg.get_mut("params").and_then(|p| p.as_object_mut()) {
+        // Withdraw the PULL-diagnostics claim the CodeMirror client makes.
+        //
+        // It advertises `textDocument.diagnostic` and then only implements
+        // PUSH, which is the worst of both: ty (and zuban, and ruff-server)
+        // stop pushing the moment a client claims pull, and answer nothing,
+        // and the editor shows no diagnostics at all with no error anywhere.
+        // Measured on ty 0.0.73: 0 diagnostics with the claim, 2 without it.
+        //
+        // Withdrawing it costs nothing on the other side, because a server
+        // that does pull advertises its provider regardless: TypeScript 7
+        // still offers `diagnosticProvider` here, and we still poll it (see
+        // lib/lsp/pullDiagnostics.ts). Claim what we do, poll what they offer.
+        if let Some(td) = params
+            .get_mut("capabilities")
+            .and_then(|c| c.get_mut("textDocument"))
+            .and_then(|t| t.as_object_mut())
+        {
+            td.remove("diagnostic");
+        }
+        params.insert("rootUri".into(), serde_json::json!(uri));
+        params.insert("rootPath".into(), serde_json::json!(root.to_string_lossy()));
+        params.insert(
+            "workspaceFolders".into(),
+            serde_json::json!([{ "uri": uri, "name": name }]),
+        );
+        params.insert("processId".into(), serde_json::json!(std::process::id()));
+    }
+    serde_json::to_string(&msg).unwrap_or_else(|_| body.to_string())
+}
+
+/// `file://` URI for an absolute path. Percent-encodes what a path can hold
+/// and a URI cannot; deliberately minimal rather than a dependency.
+fn lsp_path_to_uri(p: &Path) -> String {
+    let mut out = String::from("file://");
+    for b in p.to_string_lossy().as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Which executable to drive for a language at a checkout, and with what args.
+///
+/// Resolution order is the plan's, minus the installer tier that does not
+/// exist yet: the checkout's own toolchain first (a repo pinning its own
+/// TypeScript must win over anything global), then PATH — via
+/// `shell_env::resolved_path`, because a GUI-launched `.app` gets a bare PATH
+/// from launchd and would otherwise see none of the user's tools.
+/// A server termic will download, pinned to a version and a SHA-256.
+///
+/// Pinning is the whole point: this fetches a binary and then runs it against
+/// the user's source, so "trust GitHub at runtime" becomes "trust the termic
+/// release you already installed". `latest` is never resolved at run time, and
+/// the digest is checked BEFORE anything is unpacked or executed.
+struct LspInstall {
+    /// Human name + version, for the UI's offer.
+    label: &'static str,
+    /// The upstream repo, hardcoded. `latest` is resolved WITHIN it, never
+    /// across it: the host and the project are decided by this build, only the
+    /// version is not.
+    repo: &'static str,
+    /// The asset name for this platform in that repo's releases. Upstream
+    /// keeps these stable across releases; when one changes, the install fails
+    /// with "no asset matching …" rather than fetching something else.
+    asset: &'static str,
+    /// The version this release was TESTED against, and the fallback when the
+    /// release API cannot be reached. Not a ceiling: see `lsp_resolve_asset`.
+    version: &'static str,
+    url: &'static str,
+    sha256: &'static str,
+    /// Roughly what the user is about to download, for the same offer.
+    bytes: u64,
+    /// `gz` = one gzipped binary; `tar.gz` = an archive to unpack.
+    archive: &'static str,
+    /// Path of the executable inside the unpacked directory. Empty for `gz`,
+    /// which lands as the binary itself.
+    exe_in_archive: &'static str,
+    args: &'static [&'static str],
+}
+
+/// The install manifest, per (language, os, arch).
+///
+/// The version here is the one this release was TESTED against, and the
+/// fallback when the release API cannot be reached. It is not a ceiling:
+/// `lsp_install` resolves the LATEST release of the same hardcoded repo and
+/// verifies the bytes against the digest that release's API record carries.
+///
+/// That trade is deliberate. A hard pin ages badly in a way the user pays for
+/// (a stale rust-analyzer stops understanding a language its own compiler has
+/// moved on from, and a stale ty is a bug we already fixed upstream), and
+/// re-pinning four servers across four platforms by hand every few weeks is
+/// the kind of chore that quietly stops happening. What the pin genuinely buys
+/// is integrity, and the API digest buys that too: a truncated download, a
+/// corrupted CDN copy or a mismatched asset is refused either way. What it
+/// does NOT buy, and this is worth being honest about rather than implying
+/// otherwise, is provenance: the digest and the bytes come from the same
+/// place. The mitigation is that the PLACE is decided here, at build time, and
+/// is always the project's own upstream repo over TLS.
+///
+/// Not here on purpose: **gopls** (upstream publishes zero release assets and
+/// it needs `go` on PATH at run time anyway), **sourcekit-lsp** (ships with the
+/// toolchain and must match the user's `sourcekitd`), and everything else in
+/// the plan's tier 2. Those are PATH-only or nothing.
+fn lsp_install_spec(language: &str) -> Option<LspInstall> {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let key = (language, os, arch);
+    Some(match key {
+        // TypeScript 7 is a native Go binary: full TS/TSX navigation with no
+        // Node runtime. NOT one file — the executable needs its ~26 MB of
+        // sibling `lib.*.d.ts`, and shipping only the binary makes LSP mode
+        // return zero diagnostics silently, so the whole `package/lib`
+        // directory is what gets unpacked.
+        ("typescript", "macos", "aarch64") => LspInstall {
+            label: "TypeScript 7", version: "7.0.2",
+            repo: "microsoft/typescript", asset: "typescript-darwin-arm64.tgz",
+            url: "https://github.com/microsoft/typescript/releases/download/v7.0.2/typescript-darwin-arm64.tgz",
+            sha256: "902e2fe1cf0799198ef902c6b8c310a450fef629a6baba41d45641ef75c04ebd",
+            bytes: 9_270_373, archive: "tar.gz", exe_in_archive: "package/lib/tsc",
+            args: &["--lsp", "--stdio"],
+        },
+        ("typescript", "macos", "x86_64") => LspInstall {
+            label: "TypeScript 7", version: "7.0.2",
+            repo: "microsoft/typescript", asset: "typescript-darwin-x64.tgz",
+            url: "https://github.com/microsoft/typescript/releases/download/v7.0.2/typescript-darwin-x64.tgz",
+            sha256: "eba158cb54050f723d5ff781438f33de5640054440bb4f2bd170cfe9bc2eb551",
+            bytes: 10_057_523, archive: "tar.gz", exe_in_archive: "package/lib/tsc",
+            args: &["--lsp", "--stdio"],
+        },
+        ("typescript", "linux", "aarch64") => LspInstall {
+            label: "TypeScript 7", version: "7.0.2",
+            repo: "microsoft/typescript", asset: "typescript-linux-arm64.tgz",
+            url: "https://github.com/microsoft/typescript/releases/download/v7.0.2/typescript-linux-arm64.tgz",
+            sha256: "c83d931ac9dd7549cde6e71246aa9d6a9812843023df3e277fe3b5dcf41dd0ea",
+            bytes: 8_900_516, archive: "tar.gz", exe_in_archive: "package/lib/tsc",
+            args: &["--lsp", "--stdio"],
+        },
+        ("typescript", "linux", "x86_64") => LspInstall {
+            label: "TypeScript 7", version: "7.0.2",
+            repo: "microsoft/typescript", asset: "typescript-linux-x64.tgz",
+            url: "https://github.com/microsoft/typescript/releases/download/v7.0.2/typescript-linux-x64.tgz",
+            sha256: "7ecad6f67377e831856367ab062ef394f21506a611405bf8ac0ff039348637d3",
+            bytes: 9_669_334, archive: "tar.gz", exe_in_archive: "package/lib/tsc",
+            args: &["--lsp", "--stdio"],
+        },
+        ("python", "macos", "aarch64") => LspInstall {
+            label: "ty", version: "0.0.73",
+            repo: "astral-sh/ty", asset: "ty-aarch64-apple-darwin.tar.gz",
+            url: "https://github.com/astral-sh/ty/releases/download/0.0.73/ty-aarch64-apple-darwin.tar.gz",
+            sha256: "9adcc77248a6ef6c4f185a71dfec87d7d0499c1d0a5e61e32dff4f8b21d8cd83",
+            bytes: 11_604_225, archive: "tar.gz", exe_in_archive: "ty-aarch64-apple-darwin/ty",
+            args: &["server"],
+        },
+        ("python", "macos", "x86_64") => LspInstall {
+            label: "ty", version: "0.0.73",
+            repo: "astral-sh/ty", asset: "ty-x86_64-apple-darwin.tar.gz",
+            url: "https://github.com/astral-sh/ty/releases/download/0.0.73/ty-x86_64-apple-darwin.tar.gz",
+            sha256: "0ea1cf4577dfac855b3ae15b02326b9ba27c0d020373938f59cd4a662bce2e08",
+            bytes: 11_956_667, archive: "tar.gz", exe_in_archive: "ty-x86_64-apple-darwin/ty",
+            args: &["server"],
+        },
+        ("python", "linux", "aarch64") => LspInstall {
+            label: "ty", version: "0.0.73",
+            repo: "astral-sh/ty", asset: "ty-aarch64-unknown-linux-gnu.tar.gz",
+            url: "https://github.com/astral-sh/ty/releases/download/0.0.73/ty-aarch64-unknown-linux-gnu.tar.gz",
+            sha256: "0c15d14bc72b0e1f3d441a85fa5bf2ab8983a6aa0da6ce58b3af84d9aba97a2b",
+            bytes: 11_669_469, archive: "tar.gz", exe_in_archive: "ty-aarch64-unknown-linux-gnu/ty",
+            args: &["server"],
+        },
+        ("python", "linux", "x86_64") => LspInstall {
+            label: "ty", version: "0.0.73",
+            repo: "astral-sh/ty", asset: "ty-x86_64-unknown-linux-gnu.tar.gz",
+            url: "https://github.com/astral-sh/ty/releases/download/0.0.73/ty-x86_64-unknown-linux-gnu.tar.gz",
+            sha256: "706e455274bd57ab58d201c0def9033d338672f157e4dc3d5256f07b483fcbf4",
+            bytes: 12_404_612, archive: "tar.gz", exe_in_archive: "ty-x86_64-unknown-linux-gnu/ty",
+            args: &["server"],
+        },
+        // The STANDALONE build, never rustup's component: that one is
+        // dynamically linked against librustc_driver and libLLVM, which are
+        // not in its tarball, so it only runs inside a toolchain tree.
+        ("rust", "macos", "aarch64") => LspInstall {
+            label: "rust-analyzer", version: "2026-08-17.4",
+            repo: "rust-lang/rust-analyzer", asset: "rust-analyzer-aarch64-apple-darwin.gz",
+            url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-08-17.4/rust-analyzer-aarch64-apple-darwin.gz",
+            sha256: "ece932daf2f077be87bf745d2eb0a62cbc550f4b1e2e31ca76dfafdd0cc599b3",
+            bytes: 13_829_387, archive: "gz", exe_in_archive: "", args: &[],
+        },
+        ("rust", "macos", "x86_64") => LspInstall {
+            label: "rust-analyzer", version: "2026-08-17.4",
+            repo: "rust-lang/rust-analyzer", asset: "rust-analyzer-x86_64-apple-darwin.gz",
+            url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-08-17.4/rust-analyzer-x86_64-apple-darwin.gz",
+            sha256: "134a7d305991de776864e43d1e6c291f60fa2888d4b9b7749864c562c5dc28b7",
+            bytes: 14_550_902, archive: "gz", exe_in_archive: "", args: &[],
+        },
+        ("rust", "linux", "aarch64") => LspInstall {
+            label: "rust-analyzer", version: "2026-08-17.4",
+            repo: "rust-lang/rust-analyzer", asset: "rust-analyzer-aarch64-unknown-linux-gnu.gz",
+            url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-08-17.4/rust-analyzer-aarch64-unknown-linux-gnu.gz",
+            sha256: "941ad31c4256eec3c8457257b0fcfb696d2b4f80c0e5a996f7375a92130c2447",
+            bytes: 14_284_102, archive: "gz", exe_in_archive: "", args: &[],
+        },
+        ("rust", "linux", "x86_64") => LspInstall {
+            label: "rust-analyzer", version: "2026-08-17.4",
+            repo: "rust-lang/rust-analyzer", asset: "rust-analyzer-x86_64-unknown-linux-gnu.gz",
+            url: "https://github.com/rust-lang/rust-analyzer/releases/download/2026-08-17.4/rust-analyzer-x86_64-unknown-linux-gnu.gz",
+            sha256: "a559eaa29920e4c12718fba101f2055f1da0ad8bc458ef9dc1a670778cc66901",
+            bytes: 14_834_607, archive: "gz", exe_in_archive: "", args: &[],
+        },
+        _ => return None,
+    })
+}
+
+/// One release asset: where to get it, what it should hash to, and which
+/// version it belongs to.
+struct ResolvedAsset {
+    version: String,
+    url: String,
+    sha256: String,
+    /// True when this came from the compiled-in manifest rather than the
+    /// release API, i.e. offline or the API refused us.
+    pinned: bool,
+}
+
+/// The latest release of the manifest's repo, or the tested pin when the API
+/// is unreachable.
+///
+/// GitHub's release API reports a per-asset `digest` (`sha256:…`), which is
+/// what makes resolving `latest` verifiable at all; a project that stops
+/// publishing one falls back to the pin rather than downloading unverified
+/// bytes. Rate limits and offline machines land in the same fallback.
+async fn lsp_resolve_asset(spec: &LspInstall) -> ResolvedAsset {
+    let fallback = || ResolvedAsset {
+        version: spec.version.to_string(),
+        url: spec.url.to_string(),
+        sha256: spec.sha256.to_string(),
+        pinned: true,
+    };
+    let api = format!("https://api.github.com/repos/{}/releases/latest", spec.repo);
+    let Ok(client) = reqwest::Client::builder()
+        // GitHub rejects an API request with no User-Agent.
+        .user_agent(concat!("termic/", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(20))
+        .build()
+    else {
+        return fallback();
+    };
+    let Ok(resp) = client.get(&api).send().await else { return fallback() };
+    if !resp.status().is_success() {
+        return fallback();
+    }
+    let Ok(body) = resp.json::<serde_json::Value>().await else { return fallback() };
+    let version = body.get("tag_name").and_then(|t| t.as_str()).unwrap_or("").trim_start_matches('v');
+    let Some(assets) = body.get("assets").and_then(|a| a.as_array()) else { return fallback() };
+    let Some(asset) = assets.iter().find(|a| {
+        a.get("name").and_then(|n| n.as_str()) == Some(spec.asset)
+    }) else {
+        // The asset name changed upstream. Falling back to the pin is the
+        // honest answer: it is a build we tested, and the alternative is
+        // guessing at a filename.
+        return fallback();
+    };
+    let url = asset.get("browser_download_url").and_then(|u| u.as_str()).unwrap_or("");
+    let digest = asset
+        .get("digest")
+        .and_then(|d| d.as_str())
+        .and_then(|d| d.strip_prefix("sha256:"))
+        .unwrap_or("");
+    if url.is_empty() || digest.len() != 64 || version.is_empty() {
+        return fallback();
+    }
+    ResolvedAsset {
+        version: version.to_string(),
+        url: url.to_string(),
+        sha256: digest.to_string(),
+        pinned: false,
+    }
+}
+
+/// Where a downloaded server lives: termic-owned, versioned, and deletable
+/// wholesale. Never anywhere on the user's PATH.
+fn lsp_server_dir(language: &str, version: &str) -> Result<PathBuf, String> {
+    Ok(data_dir()
+        .map_err(|e| e.to_string())?
+        .join("servers")
+        .join(language)
+        .join(version))
+}
+
+/// The installed executable for a language, whichever version is present.
+///
+/// Scans rather than looking up the pinned version, because `lsp_install`
+/// resolves the LATEST release: after the first upgrade the directory on disk
+/// is newer than anything this build has a constant for. Newest install wins,
+/// and older ones are left alone so a bad upgrade can be recovered by deleting
+/// one directory.
+fn lsp_installed_exe(language: &str) -> Option<(String, Vec<String>)> {
+    let spec = lsp_install_spec(language)?;
+    let rel = if spec.exe_in_archive.is_empty() { "server" } else { spec.exe_in_archive };
+    let base = data_dir().ok()?.join("servers").join(language);
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in fs::read_dir(&base).ok()?.flatten() {
+        // Belt and braces with the staging move: anything dot-prefixed is
+        // termic's own bookkeeping, never a version.
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let exe = entry.path().join(rel);
+        if !exe.is_file() {
+            continue;
+        }
+        let when = entry.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+        if best.as_ref().is_none_or(|(b, _)| when > *b) {
+            best = Some((when, exe));
+        }
+    }
+    let (_, exe) = best?;
+    Some((
+        exe.to_string_lossy().to_string(),
+        spec.args.iter().map(|s| s.to_string()).collect(),
+    ))
+}
+
+/// Does this candidate actually run?
+///
+/// One case, and it is not hypothetical: `rust-analyzer` on PATH is usually
+/// rustup's SHIM, which prints "rust-analyzer is unavailable for the active
+/// toolchain" and exits when the component is not installed. Driving it looks
+/// exactly like a server that answers nothing. Verified live on this machine
+/// before the check existed.
+fn lsp_candidate_runs(exe: &str, probe: &[&str]) -> bool {
+    // Cached by path, because resolution now runs on every editor open (the
+    // chip asks what can serve this file) and spawning a process per open is
+    // exactly the kind of cost that shows up as "the editor feels slow".
+    // Never invalidated: a binary that starts working mid-session is rare, and
+    // an INSTALL resolves to a new path, so it cannot read a stale entry.
+    if let Some(hit) = LSP_PROBE_CACHE.lock().unwrap().as_ref().and_then(|m| m.get(exe)) {
+        return *hit;
+    }
+    let ok = lsp_candidate_runs_uncached(exe, probe);
+    LSP_PROBE_CACHE
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(exe.to_string(), ok);
+    ok
+}
+
+static LSP_PROBE_CACHE: std::sync::Mutex<Option<HashMap<String, bool>>> =
+    std::sync::Mutex::new(None);
+
+fn lsp_candidate_runs_uncached(exe: &str, probe: &[&str]) -> bool {
+    Command::new(exe)
+        .args(probe)
+        .env("PATH", shell_env::resolved_path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// The chain, with one candidate PROMOTED to the front.
+///
+/// The Django lesson (docs/ideas/lsp-tuning.md): the fix for a language server
+/// answering badly was not a setting, it was a different process. Python
+/// resolves zuban -> ty -> basedpyright, which is right often enough to be a
+/// default and wrong often enough that somebody has to be able to say so.
+///
+/// `preferred` is a server NAME as the catalog prints it ("zuban", "ty",
+/// "typescript-language-server"). An unknown name, or one that resolves to
+/// nothing on this machine, falls through to the normal order rather than
+/// leaving the reader with no server at all: a preference is a preference, not
+/// an assertion that the binary exists.
+fn lsp_resolve_server_preferring(
+    root: &Path,
+    language: &str,
+    preferred: Option<&str>,
+    custom: Option<&str>,
+) -> Option<(String, Vec<String>)> {
+    // A command the user typed wins outright. It is the most explicit thing
+    // anybody said, and it is the only way to run a server termic has never
+    // heard of (pyright-langserver, jedi, a wrapper script). Unlike a pick, it
+    // is NOT probed for existence first: if it is wrong, the reader needs to
+    // see it fail rather than have termic quietly run something else.
+    if let Some(line) = custom.map(str::trim).filter(|l| !l.is_empty()) {
+        let mut parts = split_command_line(line);
+        if !parts.is_empty() {
+            let exe = parts.remove(0);
+            // A bare name goes through PATH; a path (absolute or ./relative)
+            // is taken as given, so a script inside the repo works.
+            let resolved = if exe.contains('/') {
+                // `./x` and `x` name the same file; keeping the dot would put
+                // it in the spawned process's argv[0] and in every error
+                // message about it.
+                let rel = exe.strip_prefix("./").unwrap_or(&exe);
+                let p = if exe.starts_with('/') { PathBuf::from(&exe) } else { root.join(rel) };
+                p.to_string_lossy().to_string()
+            } else {
+                shell_env::resolved_path()
+                    .split(':')
+                    .filter(|d| !d.is_empty())
+                    .map(|d| Path::new(d).join(&exe))
+                    .find(|p| p.is_file())
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or(exe)
+            };
+            return Some((resolved, parts));
+        }
+    }
+    if let Some(name) = preferred {
+        if let Some(found) = lsp_resolve_named(root, language, name) {
+            return Some(found);
+        }
+    }
+    lsp_resolve_server(root, language)
+}
+
+/// Split a command line the way a person expects, without a shell.
+///
+/// No shell, deliberately: this string comes from a settings field and running
+/// it through `sh -c` would make every stray `;` or backtick executable. So:
+/// whitespace separates arguments, and double or single quotes group them,
+/// which covers `--flag "with spaces"` and nothing more exciting.
+fn split_command_line(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    let mut any = false;
+    for ch in line.chars() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => cur.push(c),
+            (None, c @ ('"' | '\'')) => { quote = Some(c); any = true; }
+            (None, c) if c.is_whitespace() => {
+                if any || !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                    any = false;
+                }
+            }
+            (None, c) => cur.push(c),
+        }
+    }
+    if any || !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Resolve ONE named candidate, or nothing. Split out so the preference and
+/// the default order cannot drift: both go through the same probes.
+fn lsp_resolve_named(root: &Path, language: &str, name: &str) -> Option<(String, Vec<String>)> {
+    let path_env = shell_env::resolved_path();
+    let on_path = |exe: &str| -> Option<String> {
+        for dir in path_env.split(':').filter(|d| !d.is_empty()) {
+            let cand = Path::new(dir).join(exe);
+            if cand.is_file() {
+                return Some(cand.to_string_lossy().to_string());
+            }
+        }
+        None
+    };
+    let local = |rel: &str| -> Option<String> {
+        let cand = root.join(rel);
+        cand.is_file().then(|| cand.to_string_lossy().to_string())
+    };
+    match (language, name) {
+        ("python", "zuban") => local(".venv/bin/zuban")
+            .or_else(|| on_path("zuban"))
+            .or_else(zuban_installed)
+            .map(|exe| (exe, vec!["server".to_string()])),
+        ("python", "ty") => local(".venv/bin/ty")
+            .or_else(|| on_path("ty"))
+            .or_else(|| lsp_installed_exe("python").map(|(exe, _)| exe))
+            .map(|exe| (exe, vec!["server".to_string()])),
+        ("python", "basedpyright") => local(".venv/bin/basedpyright-langserver")
+            .or_else(|| on_path("basedpyright-langserver"))
+            .map(|exe| (exe, vec!["--stdio".to_string()])),
+        ("python", "pyright") => local(".venv/bin/pyright-langserver")
+            .or_else(|| on_path("pyright-langserver"))
+            .map(|exe| (exe, vec!["--stdio".to_string()])),
+        // The catalog prints tsgo under its product name, so accept both.
+        ("typescript", "tsgo") | ("typescript", "TypeScript 7 (tsgo)") => {
+            local("node_modules/.bin/tsgo")
+                .or_else(|| on_path("tsgo"))
+                .or_else(|| lsp_installed_exe("typescript").map(|(exe, _)| exe))
+                .map(|exe| (exe, vec!["--lsp".to_string(), "--stdio".to_string()]))
+        }
+        ("typescript", "typescript-language-server") => {
+            local("node_modules/.bin/typescript-language-server")
+                .or_else(|| on_path("typescript-language-server"))
+                .map(|exe| (exe, vec!["--stdio".to_string()]))
+        }
+        // Every other language has exactly one server today, so a preference
+        // for it is the default order anyway.
+        _ => None,
+    }
+}
+
+fn lsp_resolve_server(root: &Path, language: &str) -> Option<(String, Vec<String>)> {
+    let path_env = shell_env::resolved_path();
+    let on_path = |exe: &str| -> Option<String> {
+        for dir in path_env.split(':').filter(|d| !d.is_empty()) {
+            let cand = Path::new(dir).join(exe);
+            if cand.is_file() {
+                return Some(cand.to_string_lossy().to_string());
+            }
+        }
+        None
+    };
+    let local = |rel: &str| -> Option<String> {
+        let cand = root.join(rel);
+        cand.is_file().then(|| cand.to_string_lossy().to_string())
+    };
+
+    let from_toolchain = match language {
+        // TypeScript 7 is a native Go binary (`tsgo`), no Node runtime at all.
+        // A project's own copy is preferred: the server is version-locked to
+        // the syntax the repo compiles with.
+        "typescript" => local("node_modules/.bin/tsgo")
+            .or_else(|| on_path("tsgo"))
+            .map(|exe| (exe, vec!["--lsp".to_string(), "--stdio".to_string()]))
+            .or_else(|| {
+                local("node_modules/.bin/typescript-language-server")
+                    .or_else(|| on_path("typescript-language-server"))
+                    .map(|exe| (exe, vec!["--stdio".to_string()]))
+            }),
+        // zuban FIRST when it is there, because it is the only one of these
+        // that understands a framework. Measured on a Django project with no
+        // django-stubs installed: zuban answers `objects: Manager[StorePage]`
+        // and reports nothing wrong, while ty says "Class `StorePage` has no
+        // attribute `objects`" — which is true of the source and useless to
+        // the reader. Django installs those attributes at runtime, and zuban
+        // ships targeted support for exactly that.
+        //
+        // Installed ON REQUEST, never silently. zuban is dual licensed
+        // AGPL-3.0 / commercial, and termic is AGPL-3.0-or-later itself, so
+        // the open-source half is compatible and carrying it is not the
+        // problem an earlier version of this comment claimed. What stops it
+        // being BUNDLED is mechanical: it ships as a PyPI wheel, so it needs a
+        // Python interpreter, which only the user's machine has. Hence
+        // `lsp_install_zuban`, a virtualenv termic owns, behind a button.
+        "python" => local(".venv/bin/zuban")
+            .or_else(|| on_path("zuban"))
+            // termic's own copy, installed on request. Last of the three
+            // zubans so a project's or a user's always wins.
+            .or_else(zuban_installed)
+            .map(|exe| (exe, vec!["server".to_string()]))
+            // ty next: a single Rust binary, the fastest of the measured set,
+            // and correct on Django once django-stubs is installed.
+            .or_else(|| {
+                local(".venv/bin/ty")
+                    .or_else(|| on_path("ty"))
+                    .map(|exe| (exe, vec!["server".to_string()]))
+            })
+            .or_else(|| {
+                local(".venv/bin/basedpyright-langserver")
+                    .or_else(|| on_path("basedpyright-langserver"))
+                    .or_else(|| local(".venv/bin/pyright-langserver"))
+                    .or_else(|| on_path("pyright-langserver"))
+                    .map(|exe| (exe, vec!["--stdio".to_string()]))
+            }),
+        // `rustup which` first: a toolchain's own component matches the
+        // compiler, while a pinned standalone build hard-rejects toolchains
+        // below its minimum (which moves over time).
+        // Each candidate is checked SEPARATELY. Filtering the whole chain meant
+        // a rustup shim that prints a path for a component it does not have
+        // (which `rustup_rust_analyzer`'s own comment warns about) failed the
+        // check and took the answer with it: a perfectly good
+        // `~/.cargo/bin/rust-analyzer` was never consulted.
+        "rust" => rustup_rust_analyzer()
+            .filter(|exe| lsp_candidate_runs(exe, &["--version"]))
+            .or_else(|| on_path("rust-analyzer")
+                .filter(|exe| lsp_candidate_runs(exe, &["--version"])))
+            .map(|exe| (exe, vec![])),
+        // PATH-only, and it stays that way: upstream publishes no prebuilt
+        // binary at all, and it needs `go` on PATH at run time regardless.
+        "go" => on_path("gopls")
+            .filter(|exe| lsp_candidate_runs(exe, &["version"]))
+            .map(|exe| (exe, vec![])),
+        // C, C++ and Objective-C, all three from clangd, which is the reason
+        // this arm is worth having: on macOS `/usr/bin/clangd` ships with the
+        // Command Line Tools, so a Mac that can compile C already has the
+        // server and there is nothing to download or agree to.
+        //
+        // Distributions version the binary (`clangd-18`), so PATH alone finds
+        // nothing on a Debian that has it installed. Newest first, and the
+        // list is deliberately finite rather than a glob: a directory scan
+        // over every PATH entry runs on each editor open.
+        //
+        // `--background-index` is what makes find-usages work across files at
+        // all; without it clangd answers from the open translation unit and
+        // looks broken. It writes that index into `<project>/.cache/clangd`,
+        // which is disclosed before the server starts (see MEMORY_NOTE) rather
+        // than discovered later in a git status. Lowest thread priority,
+        // because an agent is compiling in the next pane.
+        "cpp" => {
+            let clangd_args = vec![
+                "--background-index".to_string(),
+                "--background-index-priority=background".to_string(),
+            ];
+            let mut found = on_path("clangd");
+            if found.is_none() {
+                for v in ["21", "20", "19", "18", "17", "16", "15", "14"] {
+                    found = on_path(&format!("clangd-{v}"));
+                    if found.is_some() {
+                        break;
+                    }
+                }
+            }
+            found
+                .filter(|exe| lsp_candidate_runs(exe, &["--version"]))
+                .map(|exe| (exe, clangd_args))
+        }
+        // Swift. `/usr/bin/sourcekit-lsp` on any Mac with the Command Line
+        // Tools; on Linux it comes with the Swift toolchain, and swiftly puts
+        // it on PATH. `xcrun --find` is NOT used: it is a process spawn per
+        // lookup and the shim on PATH resolves to the same binary.
+        "swift" => on_path("sourcekit-lsp")
+            .filter(|exe| lsp_candidate_runs(exe, &["--help"]))
+            .map(|exe| (exe, vec![])),
+        // Ruby. The project's own bundle first, because a Rails app's gems are
+        // the whole point of asking: a ruby-lsp resolved from PATH under a
+        // different Ruby cannot see them. `bin/ruby-lsp` is what `bundle
+        // binstubs` writes, and `bundle exec` is not used, ruby-lsp re-execs
+        // into the project's bundle by itself.
+        "ruby" => local("bin/ruby-lsp")
+            .or_else(|| local(".bundle/bin/ruby-lsp"))
+            .or_else(|| on_path("ruby-lsp"))
+            .map(|exe| (exe, vec![])),
+        _ => None,
+    };
+    // The user's own toolchain wins; termic's download is the fallback, not
+    // the default. A repo that pins its own compiler must be the one driven.
+    from_toolchain.or_else(|| lsp_installed_exe(language))
+}
+
+/// rustup's copy of rust-analyzer, if the component is actually installed.
+/// `rustup which` prints a path even when it is not, so the caller still has
+/// to check that it runs.
+fn rustup_rust_analyzer() -> Option<String> {
+    let out = Command::new("rustup")
+        .args(["which", "rust-analyzer"])
+        .env("PATH", shell_env::resolved_path())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!p.is_empty() && Path::new(&p).is_file()).then_some(p)
+}
+
+/// Download, verify and unpack the pinned server for a language.
+///
+/// The digest is checked before anything is unpacked, and nothing is ever put
+/// on the user's PATH: everything lands under a termic-owned, versioned
+/// directory that can be deleted wholesale. Returns the executable's path.
+#[tauri::command]
+async fn lsp_install(language: String) -> Result<String, String> {
+    let spec = lsp_install_spec(&language)
+        .ok_or_else(|| format!("termic has no server it can install for {language} on this platform"))?;
+    // Already installed: this is idempotent, so a second click is free rather
+    // than a second download. Getting a NEWER build is `lsp_update`, an
+    // explicit act, because a server swapped under a live session would start
+    // answering from a different index mid-read.
+    if let Some((exe, _)) = lsp_installed_exe(&language) {
+        return Ok(exe);
+    }
+    let asset = lsp_resolve_asset(&spec).await;
+    lsp_install_version(&language, &spec, &asset).await
+}
+
+/// Download one resolved asset, verify it, unpack it, and return its
+/// executable. Shared by the first install and every upgrade, so the digest
+/// check and the staging dance cannot differ between them.
+async fn lsp_install_version(
+    language: &str,
+    spec: &LspInstall,
+    asset: &ResolvedAsset,
+) -> Result<String, String> {
+    let dir = lsp_server_dir(language, &asset.version)?;
+    let exe_rel = if spec.exe_in_archive.is_empty() { "server" } else { spec.exe_in_archive };
+    if dir.join(exe_rel).is_file() {
+        return Ok(dir.join(exe_rel).to_string_lossy().to_string());
+    }
+
+    let bytes = reqwest::get(&asset.url)
+        .await
+        .map_err(|e| format!("download failed: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("download failed: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("download failed: {e}"))?;
+
+    // Verify BEFORE unpacking. A mismatch means the release and its own
+    // advertised digest disagree, and the only safe thing to do with a binary
+    // about to be run against the user's source is refuse it.
+    let digest = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(&bytes);
+        format!("{:x}", h.finalize())
+    };
+    if digest != asset.sha256 {
+        return Err(format!(
+            "checksum mismatch for {} {}: expected {}, got {digest}",
+            spec.label, asset.version, asset.sha256
+        ));
+    }
+    dlog(&format!(
+        "[lsp] installing {} {} ({}) from {}",
+        spec.label,
+        asset.version,
+        if asset.pinned { "pinned fallback, release API unreachable" } else { "latest, digest from the release API" },
+        asset.url,
+    ));
+
+    // Unpack into a staging directory and move it into place, so a crash
+    // mid-unpack cannot leave a half-written server that the resolver would
+    // then happily run.
+    // Staging goes in a SIBLING directory, not inside the one the resolver
+    // scans, and keeps the version in its name.
+    //
+    // `dir.with_extension("incoming")` did neither: it rewrote everything after
+    // the last dot, so `servers/python/0.0.73` staged at `servers/python/0.0.incoming`
+    // and `servers/rust/2026-08-17.4` at `2026-08-17.incoming` — inside
+    // `servers/<language>/`, which `lsp_installed_exe` scans, taking the entry
+    // with the NEWEST mtime. That is always the staging dir while an install
+    // runs, so opening a file mid-install resolved a half-written, not-yet-
+    // chmodded binary, and a crash mid-unpack left it newest forever: the
+    // resolver returned garbage, `lsp_check_update` reported the version as
+    // "0.0.incoming", and the prune kept it while deleting a real install.
+    // Every version staging to ONE path also let two installs delete each
+    // other's tree.
+    let staging = dir
+        .parent()
+        .ok_or("no server directory")?
+        .join(".staging")
+        .join(&asset.version);
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    {
+        let staging = staging.clone();
+        let archive = spec.archive;
+        tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            use flate2::read::GzDecoder;
+            match archive {
+                "gz" => {
+                    // One gzipped binary, no archive around it.
+                    let mut out = fs::File::create(staging.join("server")).map_err(|e| e.to_string())?;
+                    let mut dec = GzDecoder::new(std::io::Cursor::new(&bytes[..]));
+                    std::io::copy(&mut dec, &mut out).map_err(|e| e.to_string())?;
+                }
+                "tar.gz" => {
+                    let dec = GzDecoder::new(std::io::Cursor::new(&bytes[..]));
+                    tar::Archive::new(dec).unpack(&staging).map_err(|e| e.to_string())?;
+                }
+                other => return Err(format!("unknown archive kind: {other}")),
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+    }
+
+    let staged_exe = staging.join(exe_rel);
+    if !staged_exe.is_file() {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("{} {} did not contain {exe_rel}", spec.label, asset.version));
+    }
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&staged_exe, fs::Permissions::from_mode(0o755))
+            .map_err(|e| e.to_string())?;
+    }
+    // Strip the quarantine flag if one was set. A `curl` download does not get
+    // one and neither does this on macOS 15, but the flag is per-download-API
+    // and silently turns the first spawn into a Gatekeeper prompt, so it is
+    // cleared after the digest has already been verified, exactly as Homebrew
+    // and pnpm do.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("/usr/bin/xattr")
+            .args(["-dr", "com.apple.quarantine"])
+            .arg(&staging)
+            .status();
+    }
+
+    if let Some(parent) = dir.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let _ = fs::remove_dir_all(&dir);
+    fs::rename(&staging, &dir).map_err(|e| e.to_string())?;
+    let exe = dir.join(exe_rel);
+    exe.is_file()
+        .then(|| exe.to_string_lossy().to_string())
+        .ok_or_else(|| format!("{} installed but its executable is missing", spec.label))
+}
+
+/// Installed versions of a language's server, newest first.
+fn lsp_installed_versions(language: &str) -> Vec<(String, std::time::SystemTime)> {
+    let Ok(base) = data_dir().map(|d| d.join("servers").join(language)) else {
+        return vec![];
+    };
+    let Ok(entries) = fs::read_dir(&base) else { return vec![] };
+    let mut out: Vec<(String, std::time::SystemTime)> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| {
+            let when = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+            (e.file_name().to_string_lossy().to_string(), when)
+        })
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1));
+    out
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LspUpdate {
+    language: String,
+    label: String,
+    /// The version being driven today, if termic installed one.
+    installed: Option<String>,
+    /// What upstream's latest release is, or None when the API could not be
+    /// reached (offline, rate-limited, asset renamed).
+    latest: Option<String>,
+    /// True when `latest` is present and differs from `installed`.
+    upgradable: bool,
+}
+
+/// Is there a newer build of a language's server than the one installed?
+///
+/// Asked on demand, never on a timer: a background check would be a network
+/// call the user did not ask for, in an app whose whole claim is that it talks
+/// to nothing but termic.dev.
+/// One server termic knows how to drive, and whether this machine has it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LspCatalogServer {
+    /// What a person calls it.
+    name: String,
+    /// `downloaded` when termic can fetch it, `path` when it is only ever the
+    /// user's own copy (a licence that forbids redistribution, or upstream
+    /// publishing no binary at all).
+    source: &'static str,
+    /// Resolved executable, when this machine already has one.
+    exe: Option<String>,
+    /// The version termic would fetch, for a downloadable one.
+    version: Option<String>,
+    /// Why it is PATH-only, or what it is good at. One short line.
+    note: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LspCatalogEntry {
+    language: String,
+    label: &'static str,
+    servers: Vec<LspCatalogServer>,
+}
+
+/// Where termic keeps its own zuban, if the user asked for one.
+///
+/// zuban ships as a PyPI wheel rather than a standalone binary, so "install"
+/// means a virtualenv termic owns, NOT a package added to the project's
+/// environment (the project's environment is the project's) and NOT anything
+/// on the user's PATH. Deleting termic's data directory removes it.
+fn zuban_dir() -> Option<PathBuf> {
+    Some(data_dir().ok()?.join("servers").join("python-zuban"))
+}
+
+/// termic's own zuban, when it has one.
+fn zuban_installed() -> Option<String> {
+    let exe = zuban_dir()?.join("bin").join("zuban");
+    exe.is_file().then(|| exe.to_string_lossy().to_string())
+}
+
+/// The zuban this release installs. Bumped deliberately, like every other
+/// pinned server: `latest` would mean two machines running different analysers
+/// and a release that behaves differently the week after it shipped.
+const ZUBAN_VERSION: &str = "0.9.1";
+
+/// Install zuban into a virtualenv termic owns.
+///
+/// Worth the extra machinery because zuban is the only Python server measured
+/// here that understands Django's ORM WITHOUT stubs: on a real project ty
+/// reports every `Model.objects` as missing while zuban types it correctly.
+/// It is AGPL-3.0, which termic (also AGPL-3.0-or-later) can carry happily;
+/// what stops it being bundled is that it is a Python package, so it needs an
+/// interpreter that only the user's machine has.
+///
+/// `uv` first because it is an order of magnitude faster and increasingly the
+/// thing a Python developer already has; `python3 -m venv` is the fallback
+/// that works on any Mac.
+#[tauri::command]
+async fn lsp_install_zuban() -> Result<String, String> {
+    if let Some(exe) = zuban_installed() {
+        return Ok(exe);
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = zuban_dir().ok_or("no data directory")?;
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let (path, inject) = shell_env::spawn_env();
+
+        let run = |program: &str, args: &[&str]| -> Result<(), String> {
+            let mut cmd = Command::new(program);
+            cmd.args(args).env("PATH", &path);
+            for (k, v) in &inject {
+                // Not the index. `PIP_INDEX_URL` / `UV_INDEX_URL` out of the
+                // login shell would silently redirect a fetch termic is
+                // vouching for to a host termic knows nothing about.
+                if k.starts_with("PIP_") || k.starts_with("UV_") {
+                    continue;
+                }
+                cmd.env(k, v);
+            }
+            let out = cmd
+                .output()
+                .map_err(|e| format!("{program}: {e}"))?;
+            if out.status.success() {
+                return Ok(());
+            }
+            // The server's own words, not ours: a pip failure names the reason
+            // (no network, no interpreter, a wheel that does not build here)
+            // far better than any message this could invent.
+            let err = String::from_utf8_lossy(&out.stderr);
+            Err(format!("{program} failed: {}", err.trim().lines().last().unwrap_or("").trim()))
+        };
+
+        let venv = dir.to_string_lossy().to_string();
+        let uv = shell_env::resolved_path()
+            .split(':')
+            .map(|d| PathBuf::from(d).join("uv"))
+            .find(|p| p.is_file());
+        // PINNED, and wheels only.
+        //
+        // The rest of this installer verifies a digest before anything is
+        // unpacked or run, and this path was doing `pip install zuban`:
+        // whatever PyPI served at that moment, and if no wheel matched, a
+        // source build, which executes the project's PEP 517 backend as the
+        // user BEFORE anything has been checked. `--only-binary` refuses that
+        // outright, and a pinned version means two machines get the same
+        // server.
+        let spec = format!("zuban=={ZUBAN_VERSION}");
+        if let Some(uv) = uv {
+            run(&uv.to_string_lossy(), &["venv", &venv])?;
+            run(
+                &uv.to_string_lossy(),
+                &["pip", "install", "--only-binary", ":all:", "--python",
+                  &format!("{venv}/bin/python"), &spec],
+            )?;
+        } else {
+            run("python3", &["-m", "venv", &venv])?;
+            run(&format!("{venv}/bin/pip"),
+                &["install", "--only-binary", ":all:", &spec])?;
+        }
+
+        zuban_installed().ok_or_else(|| {
+            "zuban installed but its executable is not where it was expected".to_string()
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Every server termic supports, per language, with what this machine has.
+///
+/// Answered WITHOUT a checkout, because this is the app-level list: someone
+/// reading Settings wants to know what is supported at all, not what a
+/// particular repo resolves to. A project-local copy (`node_modules/.bin`,
+/// `.venv/bin`) still wins at run time, which is why the rows say "if present"
+/// rather than naming this list as the decision.
+///
+/// The order within a language mirrors `lsp_resolve_server`. It is a second
+/// copy of that knowledge and the one thing that can drift, so a new server
+/// goes in both (see docs/lsp.md's checklist).
+#[tauri::command]
+async fn lsp_catalog() -> Vec<LspCatalogEntry> {
+    fn seek(exe: &str) -> Option<String> {
+        shell_env::resolved_path()
+            .split(':')
+            .map(|dir| PathBuf::from(dir).join(exe))
+            .find(|p| p.is_file())
+            .map(|p| p.to_string_lossy().to_string())
+    }
+    fn downloadable(language: &str) -> (Option<String>, Option<String>) {
+        let installed = lsp_installed_exe(language).map(|(exe, _)| exe);
+        let version = lsp_install_spec(language).map(|s| format!("{} {}", s.label, s.version));
+        (installed, version)
+    }
+
+    let mut out = Vec::new();
+
+    let (ts_installed, ts_version) = downloadable("typescript");
+    out.push(LspCatalogEntry {
+        language: "typescript".into(),
+        label: "TypeScript, JavaScript, TSX",
+        servers: vec![
+            LspCatalogServer {
+                name: "TypeScript 7 (tsgo)".into(),
+                source: "downloaded",
+                exe: seek("tsgo").or(ts_installed),
+                version: ts_version,
+                note: "A repo's own node_modules copy is preferred over this one.",
+            },
+            LspCatalogServer {
+                name: "typescript-language-server".into(),
+                source: "path",
+                exe: seek("typescript-language-server"),
+                version: None,
+                note: "Used when it is on your PATH and no tsgo is: a repo-local tsgo, one on your PATH, then this, and only then termic's download.",
+            },
+        ],
+    });
+
+    let (py_installed, py_version) = downloadable("python");
+    out.push(LspCatalogEntry {
+        language: "python".into(),
+        label: "Python",
+        servers: vec![
+            LspCatalogServer {
+                name: "zuban".into(),
+                source: "installable",
+                exe: seek("zuban").or_else(zuban_installed),
+                version: None,
+                note: "The best answer for Django: it types `Model.objects` with no stubs installed, where the others report it missing. A Python package, so termic installs it into its own virtualenv rather than bundling it.",
+            },
+            LspCatalogServer {
+                name: "ty".into(),
+                source: "downloaded",
+                // PATH too, not just termic's own copy. A user with
+                // `uv tool install ty` was shown "termic downloads it" in grey
+                // while that very binary was driving their editor, which is
+                // rule 1 (name the server that will actually run) broken in
+                // the one panel whose whole job is to answer that.
+                exe: seek("ty").or(py_installed),
+                version: py_version,
+                note: "What termic fetches when this machine has nothing.",
+            },
+            LspCatalogServer {
+                name: "basedpyright".into(),
+                source: "path",
+                exe: seek("basedpyright-langserver").or_else(|| seek("pyright-langserver")),
+                version: None,
+                note: "Used when it is on your PATH and the two above are not.",
+            },
+        ],
+    });
+
+    let (rs_installed, rs_version) = downloadable("rust");
+    out.push(LspCatalogEntry {
+        language: "rust".into(),
+        label: "Rust",
+        servers: vec![LspCatalogServer {
+            name: "rust-analyzer".into(),
+            source: "downloaded",
+            exe: rustup_rust_analyzer().or_else(|| seek("rust-analyzer")).or(rs_installed),
+            version: rs_version,
+            note: "Your toolchain's own copy first (`rustup component add rust-analyzer`), then termic's.",
+        }],
+    });
+
+    out.push(LspCatalogEntry {
+        language: "go".into(),
+        label: "Go",
+        servers: vec![LspCatalogServer {
+            name: "gopls".into(),
+            source: "path",
+            exe: seek("gopls"),
+            version: None,
+            note: "PATH only: upstream publishes no binaries, and it needs the Go toolchain at run time anyway. `go install golang.org/x/tools/gopls@latest`.",
+        }],
+    });
+
+    out.push(LspCatalogEntry {
+        language: "cpp".into(),
+        label: "C, C++, Objective-C",
+        servers: vec![LspCatalogServer {
+            name: "clangd".into(),
+            source: "path",
+            // The versioned names Debian and Fedora install under. macOS has
+            // the unversioned one from the Command Line Tools.
+            exe: seek("clangd")
+                .or_else(|| ["21", "20", "19", "18", "17", "16", "15", "14"].iter().find_map(|v| seek(&format!("clangd-{v}")))),
+            version: None,
+            note: "Ships with the Xcode Command Line Tools on macOS, and with LLVM on Linux (`apt install clangd`). It answers from your build: without a compile_commands.json at the root, expect missing includes and thin answers.",
+        }],
+    });
+
+    out.push(LspCatalogEntry {
+        language: "swift".into(),
+        label: "Swift",
+        servers: vec![LspCatalogServer {
+            name: "sourcekit-lsp".into(),
+            source: "path",
+            exe: seek("sourcekit-lsp"),
+            version: None,
+            note: "Ships with the Xcode Command Line Tools on macOS, and with the Swift toolchain on Linux. A SwiftPM package answers best once it has been built at least once.",
+        }],
+    });
+
+    out.push(LspCatalogEntry {
+        language: "ruby".into(),
+        label: "Ruby",
+        servers: vec![LspCatalogServer {
+            name: "ruby-lsp".into(),
+            source: "path",
+            exe: seek("ruby-lsp"),
+            version: None,
+            note: "The project's own binstub (`bundle binstubs ruby-lsp`) is used before any copy on your PATH, because a Rails app's gems are the point. Otherwise `gem install ruby-lsp`.",
+        }],
+    });
+
+    out
+}
+
+#[tauri::command]
+async fn lsp_check_update(language: String) -> Result<LspUpdate, String> {
+    let spec = lsp_install_spec(&language)
+        .ok_or_else(|| format!("termic installs no server for {language} on this platform"))?;
+    let installed = lsp_installed_versions(&language).first().map(|(v, _)| v.clone());
+    let asset = lsp_resolve_asset(&spec).await;
+    // `pinned` means the API did not answer, so "latest" would be this build's
+    // constant rather than upstream's truth. Reporting that as an available
+    // update would offer a DOWNGRADE to whoever already upgraded past it.
+    let latest = (!asset.pinned).then(|| asset.version.clone());
+    Ok(LspUpdate {
+        language,
+        label: spec.label.to_string(),
+        upgradable: matches!((&installed, &latest), (Some(i), Some(l)) if i != l),
+        installed,
+        latest,
+    })
+}
+
+/// Install the newest build alongside the running one.
+///
+/// Deliberately NOT a swap: a server replaced under a live session would start
+/// answering from a different index mid-read, and its process is still holding
+/// the old one anyway. The new version becomes the one driven at the next
+/// spawn, which is what "restart to apply" means everywhere else in this app.
+///
+/// The previous version is kept (the newest two are), so a bad upgrade is
+/// recovered by deleting one directory rather than by re-downloading.
+#[tauri::command]
+async fn lsp_update(language: String) -> Result<LspUpdate, String> {
+    let spec = lsp_install_spec(&language)
+        .ok_or_else(|| format!("termic installs no server for {language} on this platform"))?;
+    let asset = lsp_resolve_asset(&spec).await;
+    if asset.pinned {
+        return Err("could not reach the release API, so there is nothing newer to install".into());
+    }
+    let before = lsp_installed_versions(&language).first().map(|(v, _)| v.clone());
+    if before.as_deref() == Some(asset.version.as_str()) {
+        return Ok(LspUpdate {
+            language, label: spec.label.to_string(),
+            installed: before, latest: Some(asset.version), upgradable: false,
+        });
+    }
+    lsp_install_version(&language, &spec, &asset).await?;
+
+    // Keep the newest two: the one just installed and the one it replaced.
+    for (version, _) in lsp_installed_versions(&language).into_iter().skip(2) {
+        if let Ok(dir) = lsp_server_dir(&language, &version) {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+    Ok(LspUpdate {
+        language,
+        label: spec.label.to_string(),
+        installed: Some(asset.version.clone()),
+        latest: Some(asset.version),
+        upgradable: false,
+    })
+}
+
+/// Is this checkout a Django project whose environment is missing the type
+/// stubs a static checker needs?
+///
+/// Django injects `Model.objects` (and every related manager) at runtime
+/// through its metaclass, so a checker reading the source alone is CORRECT to
+/// say `objects` does not exist — and every model query in the project lights
+/// up red. `django-stubs` declares them (`objects: ClassVar[Manager[Self]]`),
+/// and with it installed ty reports zero diagnostics on the same file.
+/// Measured, on both.
+///
+/// The user reads that wall of red as "this feature is broken" rather than as
+/// "this environment is missing a package", so the app says which it is. It
+/// does NOT install anything: the project's environment is the project's.
+fn django_without_stubs(root: &Path) -> bool {
+    let site = root.join(".venv/lib");
+    let Ok(versions) = fs::read_dir(&site) else { return false };
+    for v in versions.flatten() {
+        let packages = v.path().join("site-packages");
+        if !packages.join("django").is_dir() {
+            continue;
+        }
+        // The stub-only distribution is `django-stubs`, per PEP 561.
+        return !packages.join("django-stubs").is_dir();
+    }
+    false
+}
+
+/// A TypeScript checkout whose config the server will never find.
+///
+/// TypeScript discovers a project by walking UP from the file it is asked
+/// about. A repo whose only `tsconfig.json` sits in a generated sibling
+/// directory therefore has none as far as the server is concerned, and every
+/// file is analysed as its own inferred project: no path aliases (`@/…`), and
+/// none of the ambient `.d.ts` a framework generates.
+///
+/// Observed on a WXT extension, where `defineBackground` is declared in
+/// `.wxt/types/imports.d.ts` and the editor reported "Cannot find name
+/// 'defineBackground'" on the very line that used it. The code was correct and
+/// the build was fine; nothing had told the server where the project was. The
+/// same shape covers Nuxt (`.nuxt`) and SvelteKit (`.svelte-kit`), and all
+/// three are gitignored, so a fresh worktree has neither the config nor the
+/// generated types.
+fn typescript_without_tsconfig(root: &Path) -> Option<String> {
+    // Only worth saying about something that is actually a JS/TS project.
+    if !root.join("package.json").is_file() {
+        return None;
+    }
+    if root.join("tsconfig.json").is_file() || root.join("jsconfig.json").is_file() {
+        return None;
+    }
+    let generated = [".wxt", ".nuxt", ".svelte-kit"]
+        .into_iter()
+        .find(|dir| root.join(dir).join("tsconfig.json").is_file());
+    let base = "There is no tsconfig.json at the top of this checkout, so the server reads \
+                every file on its own: path aliases and any globals a framework generates are \
+                invisible, and the code that uses them is reported as undefined even though it \
+                builds.";
+    Some(match generated {
+        Some(dir) => format!(
+            "{base} This project generates one at `{dir}/tsconfig.json`, which TypeScript cannot \
+             find by itself. A `tsconfig.json` here containing {{\"extends\": \"./{dir}/tsconfig.json\"}} \
+             is what makes it discoverable."
+        ),
+        None => base.to_string(),
+    })
+}
+
+/// sourcekit-lsp against a package that has never been built.
+///
+/// Swift indexes WHILE BUILDING: the compiler writes the index store, and
+/// sourcekit-lsp reads it. On a package with no `.build` it answers about the
+/// file in front of it and finds nothing anywhere else, which reads as "find
+/// usages is broken" rather than "there is no index yet". Observed on the
+/// fixture project, which is why the smoke harness builds it once.
+fn swift_without_a_build(root: &Path) -> Option<String> {
+    if !root.join("Package.swift").is_file() || root.join(".build").is_dir() {
+        return None;
+    }
+    Some(
+        "This package has not been built, and Swift's index is written by the compiler: until \
+         `swift build` has run once, definitions and usages outside the open file are invisible."
+            .to_string(),
+    )
+}
+
+/// ruby-lsp against an unlocked bundle.
+///
+/// Observed, not guessed: ruby-lsp writes "Project contains a Gemfile, but no
+/// Gemfile.lock. Run `bundle install` to lock gems and restart the server" to
+/// stderr and EXITS, before answering `initialize`. From the app that looks
+/// exactly like a server that failed to start, which is the least useful thing
+/// termic could say about a one-command fix.
+fn ruby_without_lockfile(root: &Path) -> Option<String> {
+    if !root.join("Gemfile").is_file() || root.join("Gemfile.lock").is_file() {
+        return None;
+    }
+    Some(
+        "This checkout has a Gemfile but no Gemfile.lock, and ruby-lsp exits at startup rather \
+         than run against an unlocked bundle. `bundle install` here, then turn this on again."
+            .to_string(),
+    )
+}
+
+/// clangd with no compilation database.
+///
+/// clangd does not parse a build system: it reads `compile_commands.json` to
+/// learn each file's include paths and flags. Without one it falls back to
+/// guessed flags, so a file that compiles fine is reported with missing
+/// headers and answers hover and go-to-definition from a fraction of what it
+/// should see. It is the single biggest difference between clangd looking
+/// broken and clangd looking excellent, and it is one command to fix.
+///
+/// Only said about a project we can see is C or C++: a `CMakeLists.txt` in a
+/// repo of Python bindings is not a reason to lecture anyone.
+fn cpp_without_compile_commands(root: &Path) -> Option<String> {
+    // Generators put it in the build directory; a symlink or a copy at the top
+    // is the convention clangd looks for, and it also searches parent paths of
+    // each source file.
+    if root.join("compile_commands.json").is_file() || root.join(".clangd").is_file() {
+        return None;
+    }
+    let cmake = root.join("CMakeLists.txt").is_file();
+    let meson = root.join("meson.build").is_file();
+    if !cmake && !meson && !root.join("Makefile").is_file() {
+        return None;
+    }
+    let base = "There is no compile_commands.json at the top of this checkout, so clangd guesses \
+                each file's include paths and flags: headers it cannot find are reported as \
+                missing and go-to-definition sees only part of the project.";
+    Some(match (cmake, meson) {
+        (true, _) => format!(
+            "{base} `cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -B build` writes one, and a symlink \
+             to it at the top of the repo is what clangd looks for."
+        ),
+        (_, true) => format!("{base} Meson writes one into its build directory; symlink it here."),
+        _ => format!("{base} `bear -- make` records one from a plain make build."),
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LspOffer {
+    /// Resolved executable, when one is already available.
+    exe: Option<String>,
+    /// What termic would download if there is nothing on the machine.
+    install_label: Option<String>,
+    install_bytes: Option<u64>,
+    /// Something about this checkout that will make the answers look broken,
+    /// said before the user concludes the feature is. Empty when there is
+    /// nothing to warn about.
+    caveat: Option<String>,
+}
+
+/// What can be offered for a language at this checkout: an executable already
+/// present, a download termic can make, or nothing at all.
+#[tauri::command]
+async fn lsp_offer(
+    root: String,
+    language: String,
+    // The server the user picked for this language, if they picked one. The
+    // offer must answer about the process that will ACTUALLY start, or the
+    // chip names one server and another one runs (rule 1 in docs/lsp.md).
+    preferred: Option<String>,
+    // A command line to run instead of anything termic knows about.
+    custom: Option<String>,
+) -> Result<LspOffer, String> {
+    let root_str = root.clone();
+    let exe = lsp_resolve_server_preferring(
+        &PathBuf::from(root), &language, preferred.as_deref(), custom.as_deref(),
+    ).map(|(e, _)| e);
+    let spec = lsp_install_spec(&language);
+    let root_buf = PathBuf::from(&root_str);
+    let caveat = match language.as_str() {
+        "python" if django_without_stubs(&root_buf) => Some(
+            "This looks like a Django project without django-stubs installed. \
+             Django adds `objects` and related managers at runtime, so without \
+             the stubs a type checker reports them as missing and every model \
+             query looks wrong. `pip install django-stubs` in this project's \
+             environment fixes it."
+                .to_string(),
+        ),
+        "typescript" => typescript_without_tsconfig(&root_buf),
+        "cpp" => cpp_without_compile_commands(&root_buf),
+        "ruby" => ruby_without_lockfile(&root_buf),
+        "swift" => swift_without_a_build(&root_buf),
+        _ => None,
+    };
+    Ok(LspOffer {
+        exe,
+        install_label: spec.as_ref().map(|s| format!("{} {}", s.label, s.version)),
+        install_bytes: spec.as_ref().map(|s| s.bytes),
+        caveat,
+    })
+}
+
+/// Spawn a server for (checkout root, language) and stream its messages to the
+/// webview over a Channel. A Channel rather than `emit`: Tauri's event
+/// listeners may process events out of order when a listener is async, and
+/// out-of-order delivery corrupts JSON-RPC.
+#[tauri::command]
+async fn lsp_start(
+    root: String,
+    language: String,
+    channel: tauri::ipc::Channel<String>,
+    options: Option<serde_json::Value>,
+    // Which page load is asking. Optional so an older frontend (or a test)
+    // still starts a server; it just cannot be reaped by page.
+    page: Option<String>,
+    // The server the user picked for this language, if any.
+    preferred: Option<String>,
+    // A command line to run instead of anything termic knows about.
+    custom: Option<String>,
+) -> Result<String, String> {
+    use std::io::{BufReader, Read as _};
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    let root_path = PathBuf::from(&root);
+    if !root_path.is_dir() {
+        return Err(format!("no such checkout: {root}"));
+    }
+    let (exe, args) = lsp_resolve_server_preferring(
+        &root_path, &language, preferred.as_deref(), custom.as_deref(),
+    ).ok_or_else(|| format!("no language server found for {language}"))?;
+    let opts = options.unwrap_or(serde_json::Value::Null);
+    // An EMPTY settings object is "no opinion", not a configuration. The
+    // frontend always sends an object, so a checkout with nothing configured
+    // was answering `{}` to a `workspace/configuration` item with no section,
+    // which rule 2 in docs/lsp.md says must never be sent: a server handed an
+    // empty object where it expected null can read it as a real, empty config.
+    let init_options = opts
+        .get("initializationOptions")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let user_settings = opts
+        .get("settings")
+        .cloned()
+        .filter(|v| !matches!(v, serde_json::Value::Object(m) if m.is_empty()))
+        .unwrap_or(serde_json::Value::Null);
+
+    let mut cmd = Command::new(&exe);
+    // PATH and the toolchain pointers, NOT the user's secrets.
+    //
+    // `spawn_env` returns the login-shell delta, which is how an agent CLI gets
+    // its ANTHROPIC_API_KEY. A language server has no business with that: this
+    // resolution prefers a binary from INSIDE the checkout
+    // (`node_modules/.bin/tsgo`, `.venv/bin/zuban`), so a cloned repo can
+    // choose the process, and it runs uncaged with the network. Handing it
+    // every token the rc exports made "open a file in someone else's repo" a
+    // credential-exfiltration path. What a server actually needs is the PATH
+    // to find its own subprocesses, the virtualenv it should analyse against,
+    // and the toolchain to build with.
+    let (path, inject) = shell_env::spawn_env();
+    const SERVER_ENV_ALLOWED: &[&str] = &[
+        "VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT",
+        "CONDA_PREFIX", "CONDA_DEFAULT_ENV",
+        "RUSTUP_TOOLCHAIN", "RUSTUP_HOME", "CARGO_HOME",
+        "GOFLAGS", "GOPATH", "GOROOT", "GOPRIVATE", "GOMODCACHE", "GOWORK",
+        "PYTHONPATH", "MYPYPATH", "NODE_PATH",
+        "LANG", "LC_ALL", "LC_CTYPE",
+    ];
+    let inject: Vec<(String, String)> = inject
+        .into_iter()
+        .filter(|(k, _)| SERVER_ENV_ALLOWED.contains(&k.as_str()))
+        .collect();
+    cmd.args(&args)
+        // The cwd is not cosmetic: rust-analyzer and ty fall back to the
+        // process cwd when they distrust the root, and ty has been observed
+        // indexing the user's whole home directory from a wrong one.
+        .current_dir(&root_path)
+        .env("PATH", path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    for (k, v) in inject {
+        cmd.env(k, v);
+    }
+    // Python resolves its interpreter through VIRTUAL_ENV in every candidate
+    // server except pyright, and a worktree's venv is the one that matches the
+    // code being read.
+    let venv = root_path.join(".venv");
+    if language == "python" && venv.is_dir() {
+        cmd.env("VIRTUAL_ENV", &venv);
+    }
+
+    let mut child = cmd.spawn().map_err(|e| format!("{exe}: {e}"))?;
+    let pid = child.id() as i32;
+    let stdin = child.stdin.take().ok_or("no stdin")?;
+    let stdout = child.stdout.take().ok_or("no stdout")?;
+    let stderr = child.stderr.take();
+    let id = Uuid::new_v4().to_string();
+
+    // Writer thread: owns the pipe, drains the queue, and ends when the last
+    // sender is dropped (lsp_stop, or the map entry going away).
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    {
+        let mut stdin = stdin;
+        thread::spawn(move || {
+            let mut init_opts = init_options;
+            while let Ok(body) = rx.recv() {
+                let mut out_body = body;
+                if !init_opts.is_null() && out_body.contains("\"method\":\"initialize\"") {
+                    if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&out_body) {
+                        if parsed.get("method").and_then(|v| v.as_str()) == Some("initialize") {
+                            if let Some(params) = parsed.get_mut("params").and_then(|v| v.as_object_mut()) {
+                                let current_init = params.get("initializationOptions").cloned().unwrap_or(serde_json::Value::Null);
+                                let merged = lsp_merge(&current_init, &init_opts);
+                                params.insert("initializationOptions".to_string(), merged);
+                                if let Ok(new_body) = serde_json::to_string(&parsed) {
+                                    out_body = new_body;
+                                }
+                            }
+                            init_opts = serde_json::Value::Null;
+                        }
+                    }
+                }
+                if lsp_write(&mut stdin, &out_body).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    {
+        let mut g = LSP_SERVERS.lock().unwrap();
+        g.get_or_insert_with(HashMap::new).insert(
+            id.clone(),
+            LspServer {
+                pid,
+                tx,
+                root: root.clone(),
+                language: language.clone(),
+                command: exe.clone(),
+                page: page.clone().unwrap_or_default(),
+            },
+        );
+    }
+
+    // Reader: de-frame, answer what the webview cannot, forward the rest.
+    let reader_id = id.clone();
+    let reply_root = root_path.clone();
+    let reply_settings = user_settings.clone();
+    thread::spawn(move || {
+        let mut r = BufReader::new(stdout);
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            let n = match r.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            buf.extend_from_slice(&chunk[..n]);
+            // One pass per complete message currently in the buffer.
+            loop {
+                let Some(head_end) = buf
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                    .map(|p| p + 4)
+                else {
+                    break;
+                };
+                let header = String::from_utf8_lossy(&buf[..head_end]).to_lowercase();
+                let len = header
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok());
+                let Some(len) = len else {
+                    // A frame with no length is unrecoverable: drop what we
+                    // have rather than resyncing on a byte that might be
+                    // inside a payload.
+                    buf.drain(..head_end);
+                    continue;
+                };
+                // A ceiling, because the header is attacker-adjacent: it comes
+                // from a process the CHECKOUT can choose (resolution prefers
+                // node_modules/.bin over PATH). `Content-Length:
+                // 18446744073709551615` parses fine, and `head_end + len` then
+                // wraps in release, sails past the "do we have it all yet"
+                // check, and panics the reader thread on a backwards slice —
+                // taking the cleanup above with it. 64 MiB is far past any real
+                // LSP payload (the largest measured here is a few hundred KB of
+                // completions).
+                const MAX_FRAME: usize = 64 * 1024 * 1024;
+                if len > MAX_FRAME {
+                    dlog(&format!("[lsp] refusing a {len}-byte frame from a language server"));
+                    break;
+                }
+                if buf.len() < head_end + len {
+                    break;
+                }
+                let body = buf[head_end..head_end + len].to_vec();
+                buf.drain(..head_end + len);
+                let Ok(text) = String::from_utf8(body) else { continue };
+                let parsed: serde_json::Value =
+                    serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+                // A server→client REQUEST has both an id and a method. The
+                // webview's client would answer it with an error, so it never
+                // gets to see one.
+                let is_request =
+                    parsed.get("id").is_some() && parsed.get("method").is_some();
+                if is_request {
+                    if let Some(reply) =
+                        lsp_reply_to_server_request(&parsed, &reply_root, &reply_settings)
+                    {
+                        let g = LSP_SERVERS.lock().unwrap();
+                        if let Some(s) = g.as_ref().and_then(|m| m.get(&reader_id)) {
+                            let _ = s.tx.send(reply);
+                        }
+                    }
+                    continue;
+                }
+                if channel.send(text).is_err() {
+                    // The webview went away (a reload: ⌘R is routine here, and
+                    // a Channel dies with the page that made it). RETURNING
+                    // skipped the cleanup below, so the entry stayed in the
+                    // map, the child was never signalled and never reaped, and
+                    // its writer thread sat on a channel nobody would drain.
+                    // The next editor open spawned a SECOND server: two
+                    // rust-analyzers at ~3 GB, one of them unreachable.
+                    break;
+                }
+            }
+        }
+        // The child died (crash, or a `shutdown` we asked for), OR the webview
+        // that owned this channel went away. Drop it from the map so the next
+        // open spawns a fresh one instead of writing into a closed pipe, and
+        // make sure the process is actually gone: dropping a `Child` on Unix
+        // neither kills nor reaps it, so a server that outlived its reader
+        // would linger as a wedged process and then a zombie.
+        {
+            let mut g = LSP_SERVERS.lock().unwrap();
+            if let Some(m) = g.as_mut() {
+                m.remove(&reader_id);
+            }
+        }
+        // Signal the GROUP: language servers fork (cargo check, node) and
+        // signalling the leader alone leaves the children behind.
+        unsafe { libc::kill(-pid, libc::SIGTERM) };
+        let _ = child.wait();
+    });
+
+    // stderr is the server's own log. Kept off the JSON-RPC path entirely and
+    // drained so a chatty server cannot block on a full pipe.
+    if let Some(err) = stderr {
+        let tag = format!("{language} lsp");
+        thread::spawn(move || {
+            use std::io::BufRead as _;
+            for line in BufReader::new(err).lines().map_while(Result::ok) {
+                dlog(&format!("[{tag}] {line}"));
+            }
+        });
+    }
+
+    Ok(id)
+}
+
+/// One message from the webview to a server.
+#[tauri::command]
+async fn lsp_send(id: String, message: String) -> Result<(), String> {
+    let g = LSP_SERVERS.lock().unwrap();
+    let s = g
+        .as_ref()
+        .and_then(|m| m.get(&id))
+        .ok_or("that language server is no longer running")?;
+    let root = PathBuf::from(&s.root);
+    let body = lsp_patch_initialize(&message, &root);
+    // Enqueue and return. The lock is held for a move, never for IO.
+    s.tx.send(body).map_err(|_| "that language server is no longer reading".to_string())
+}
+
+/// Stop a server and reclaim its memory. SIGTERM to the whole process group:
+/// several of these fork helpers (sourcekit-lsp fans out more `swift-frontend`
+/// children than the machine has cores) and signalling the leader alone leaves
+/// them behind.
+#[tauri::command]
+async fn lsp_stop(id: String) -> Result<(), String> {
+    let server = {
+        let mut g = LSP_SERVERS.lock().unwrap();
+        g.as_mut().and_then(|m| m.remove(&id))
+    };
+    if let Some(s) = server {
+        unsafe {
+            libc::kill(-s.pid, libc::SIGTERM);
+        }
+    }
+    Ok(())
+}
+
+/// Kill every language server that a DIFFERENT page load started.
+///
+/// The leak this closes, observed on a dev machine: six live `tsgo` processes
+/// on one checkout, spawned minutes apart, holding about 300 MB each. One
+/// server per (checkout, language) is enforced by a map in the webview, and a
+/// reload (⌘R, an HMR full reload, a renderer crash) throws that map away
+/// while the processes keep running. The fresh page starts its own, and the
+/// old ones are unreachable forever: their Channel died with the page, so
+/// nothing can send to them and they will never answer anyone again.
+///
+/// `lsp_start`'s reader thread does drop a server whose Channel is dead, but
+/// only when the server next SENDS something, and an idle one never does.
+/// This is the sweep for those: called once at app start, before anything is
+/// armed, because the orphans exist whether or not this page ever turns code
+/// intelligence on.
+///
+/// A server with no page stamp is left alone. That means an older frontend
+/// leaks exactly as it did before rather than having its live servers killed
+/// by a new one, which is the safer way to be wrong.
+#[tauri::command]
+async fn lsp_reap_foreign(page: String) -> Result<usize, String> {
+    Ok(reap_foreign_servers(&page))
+}
+
+/// The body of `lsp_reap_foreign`, synchronous so it can be tested: the
+/// command itself is `async` for the IPC layer's sake and there is no async
+/// work in it.
+fn reap_foreign_servers(page: &str) -> usize {
+    let orphans: Vec<LspServer> = {
+        let mut g = LSP_SERVERS.lock().unwrap();
+        match g.as_mut() {
+            None => Vec::new(),
+            Some(m) => {
+                let ids: Vec<String> = m
+                    .iter()
+                    .filter(|(_, s)| !s.page.is_empty() && s.page != page)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                ids.iter().filter_map(|id| m.remove(id)).collect()
+            }
+        }
+    };
+    for s in &orphans {
+        dlog(&format!(
+            "[lsp] reaping orphaned {} for {} (pid {}, page {})",
+            s.language, s.root, s.pid, s.page
+        ));
+        // The GROUP: these fork (node, cargo check), and signalling the leader
+        // alone leaves the children behind, which is the leak twice over.
+        unsafe { libc::kill(-s.pid, libc::SIGTERM) };
+    }
+    orphans.len()
+}
+
+#[derive(Serialize)]
+struct LspServerInfo {
+    id: String,
+    root: String,
+    language: String,
+    command: String,
+    pid: i32,
+}
+
+/// Live servers, for the UI that has to make this cost visible.
+#[tauri::command]
+async fn lsp_list() -> Result<Vec<LspServerInfo>, String> {
+    let g = LSP_SERVERS.lock().unwrap();
+    Ok(g.as_ref()
+        .map(|m| {
+            m.iter()
+                .map(|(id, s)| LspServerInfo {
+                    id: id.clone(),
+                    root: s.root.clone(),
+                    language: s.language.clone(),
+                    command: s.command.clone(),
+                    pid: s.pid,
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 // ─────────────────────────── streaming run scripts ───────────────────────────
 
 /// Tracks running script PIDs (process-group leaders) keyed by "ws_id:kind".
@@ -14450,6 +16519,7 @@ pub fn run() {
             task_rename, project_rename,
             pty_spawn, pty_write, pty_resize, pty_kill,
             procmon_start, procmon_sample, procmon_stop, procmon_signal, procmon_open_window,
+            lsp_offer, lsp_catalog, lsp_install, lsp_install_zuban, lsp_check_update, lsp_update, lsp_start, lsp_send, lsp_stop, lsp_reap_foreign, lsp_list,
             notify, open_path, reveal_path, open_file_external, open_external_url, browser_command_check, home_dir, project_tasks_path_default, tasks_path_conflicts, default_shell, path_exists, path_is_git_repo, log_line, pty_debug_append, terminal_stage_file, install_notification_sound, play_completion_sound,
             settings_load, settings_save, discovery_dismiss, agents_save, agents_defaults, run_capture_command, discover_repos, detect_clis,
             automation::automation_result,
@@ -14552,6 +16622,17 @@ fn cleanup_children(app: &tauri::AppHandle) {
         if let Some(map) = g.as_mut() {
             for (_, pid) in map.drain() {
                 unsafe { libc::kill(-pid, libc::SIGKILL); }
+            }
+        }
+    }
+    // Language servers (GH #174). SIGKILL the whole group: rust-analyzer
+    // outlives a polite quit and then holds gigabytes and a core on a machine
+    // whose owner thinks they closed the app.
+    {
+        let mut g = LSP_SERVERS.lock().unwrap();
+        if let Some(map) = g.as_mut() {
+            for (_, s) in map.drain() {
+                unsafe { libc::kill(-s.pid, libc::SIGKILL); }
             }
         }
     }
@@ -14831,6 +16912,659 @@ mod tests {
     fn external_read_errors_on_a_missing_path() {
         let d = tempdir().unwrap();
         assert!(read_external_file(d.path().join("nope.txt").to_str().unwrap()).is_err());
+    }
+
+    // ── language-server host (GH #174) ──
+    //
+    // Three behaviours here are load-bearing and invisible when wrong: a
+    // server that gets the wrong reply exits, hangs, or answers a
+    // find-references with a fraction of the hits. See the host's own comment.
+
+    #[test]
+    fn configuration_reply_matches_the_requested_item_count() {
+        // ty asserts on the length and exits when it does not match, so a
+        // blanket `[]` or a single null is not a safe general answer.
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 7, "method": "workspace/configuration",
+            "params": { "items": [ {"section": "python"}, {"section": "ty"} ] },
+        });
+        let reply: serde_json::Value =
+            serde_json::from_str(&lsp_reply_to_server_request(&req, Path::new("/tmp/none"), &serde_json::Value::Null).unwrap())
+                .unwrap();
+        assert_eq!(reply["id"], 7);
+        assert_eq!(reply["result"], serde_json::json!([null, null]));
+    }
+
+    #[test]
+    fn termics_own_zuban_is_the_last_resort_not_the_first() {
+        // A project's own copy, then the user's, then termic's. Anything else
+        // and a repo pinning a specific zuban silently gets a different one.
+        // (Only the ORDER is asserted here; the install itself needs a network
+        // and an interpreter, which `make lsp-smoke` covers.)
+        let dir = tempfile::tempdir().unwrap();
+        let venv_bin = dir.path().join(".venv/bin");
+        fs::create_dir_all(&venv_bin).unwrap();
+        let local_zuban = venv_bin.join("zuban");
+        fs::write(&local_zuban, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&local_zuban, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let (exe, args) = lsp_resolve_server(dir.path(), "python").expect("a python server");
+        assert_eq!(exe, local_zuban.to_string_lossy());
+        assert_eq!(args, vec!["server".to_string()]);
+    }
+
+    #[test]
+    fn a_typescript_checkout_with_no_discoverable_config_says_so() {
+        // The WXT case, verbatim: the only tsconfig is the generated one in a
+        // sibling directory, which TypeScript never finds by walking up, so
+        // `defineBackground` (declared in .wxt/types/imports.d.ts) is reported
+        // as an undefined name on the line that uses it.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("package.json"), "{}").unwrap();
+        fs::create_dir_all(dir.path().join(".wxt")).unwrap();
+        fs::write(dir.path().join(".wxt/tsconfig.json"), "{}").unwrap();
+        let note = typescript_without_tsconfig(dir.path()).expect("a caveat");
+        assert!(note.contains(".wxt/tsconfig.json"), "{note}");
+        assert!(note.contains("extends"), "names the fix: {note}");
+
+        // With a real one at the top there is nothing to say.
+        fs::write(dir.path().join("tsconfig.json"), "{}").unwrap();
+        assert!(typescript_without_tsconfig(dir.path()).is_none());
+    }
+
+    #[test]
+    fn a_checkout_that_is_not_a_js_project_gets_no_typescript_caveat() {
+        // Every Rust repo would otherwise be told it is missing a tsconfig.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(typescript_without_tsconfig(dir.path()).is_none());
+        // A jsconfig counts too: it is the same discovery mechanism.
+        fs::write(dir.path().join("package.json"), "{}").unwrap();
+        fs::write(dir.path().join("jsconfig.json"), "{}").unwrap();
+        assert!(typescript_without_tsconfig(dir.path()).is_none());
+    }
+
+    #[test]
+    fn a_reload_kills_only_the_servers_the_old_page_started() {
+        use std::os::unix::process::CommandExt as _;
+        // Real children, in their own process groups, so the SIGTERM this
+        // sends has somewhere to land and the test proves the kill rather
+        // than just the bookkeeping.
+        let spawn = || {
+            let mut c = std::process::Command::new("sleep");
+            c.arg("30");
+            unsafe { c.pre_exec(|| { libc::setsid(); Ok(()) }) };
+            c.spawn().expect("sleep")
+        };
+        let (mut old, mut mine, mut unstamped) = (spawn(), spawn(), spawn());
+        let (old_pid, mine_pid) = (old.id() as i32, mine.id() as i32);
+
+        let put = |id: &str, child: &std::process::Child, page: &str| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut g = LSP_SERVERS.lock().unwrap();
+            g.get_or_insert_with(HashMap::new).insert(
+                id.to_string(),
+                LspServer {
+                    pid: child.id() as i32,
+                    tx,
+                    root: "/repo".into(),
+                    language: "typescript".into(),
+                    command: "tsgo".into(),
+                    page: page.to_string(),
+                },
+            );
+        };
+        put("from-the-old-page", &old, "page-1");
+        put("from-this-page", &mine, "page-2");
+        // An older frontend that sends no stamp. Left alone on purpose: a
+        // server somebody may be using must not be killed by a new page that
+        // cannot tell, and leaking exactly as before is the safer wrong.
+        put("unstamped", &unstamped, "");
+
+        assert_eq!(reap_foreign_servers("page-2"), 1);
+        {
+            let g = LSP_SERVERS.lock().unwrap();
+            let m = g.as_ref().unwrap();
+            assert!(!m.contains_key("from-the-old-page"), "the orphan is dropped");
+            assert!(m.contains_key("from-this-page"), "this page's server survives");
+            assert!(m.contains_key("unstamped"), "an unstamped server survives");
+        }
+        // The orphan is actually signalled, not just forgotten: that was the
+        // entire bug (six live tsgo processes, each holding its index).
+        assert!(old.wait().is_ok());
+        unsafe { assert_eq!(libc::kill(old_pid, 0), -1, "the orphan is gone") };
+        unsafe { assert_eq!(libc::kill(mine_pid, 0), 0, "this page's server is alive") };
+
+        // Idempotent: nothing left that belongs to another page.
+        assert_eq!(reap_foreign_servers("page-2"), 0);
+
+        {
+            let mut g = LSP_SERVERS.lock().unwrap();
+            let m = g.as_mut().unwrap();
+            m.remove("from-this-page");
+            m.remove("unstamped");
+        }
+        let _ = mine.kill();
+        let _ = mine.wait();
+        let _ = unstamped.kill();
+        let _ = unstamped.wait();
+    }
+
+    #[test]
+    fn an_unbuilt_swift_package_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(swift_without_a_build(dir.path()).is_none(), "not a package, nothing to say");
+        fs::write(dir.path().join("Package.swift"), "// swift-tools-version:5.9\n").unwrap();
+        let note = swift_without_a_build(dir.path()).expect("a caveat");
+        assert!(note.contains("swift build"), "names the fix: {note}");
+        fs::create_dir_all(dir.path().join(".build")).unwrap();
+        assert!(swift_without_a_build(dir.path()).is_none());
+    }
+
+    #[test]
+    fn a_ruby_checkout_with_an_unlocked_bundle_says_so() {
+        // Observed against ruby-lsp 0.26.11: it exits before answering
+        // initialize, so without this the app can only report a dead server.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(ruby_without_lockfile(dir.path()).is_none(), "no Gemfile, nothing to say");
+        fs::write(dir.path().join("Gemfile"), "source 'https://rubygems.org'\n").unwrap();
+        let note = ruby_without_lockfile(dir.path()).expect("a caveat");
+        assert!(note.contains("bundle install"), "names the fix: {note}");
+        fs::write(dir.path().join("Gemfile.lock"), "").unwrap();
+        assert!(ruby_without_lockfile(dir.path()).is_none());
+    }
+
+    #[test]
+    fn a_cmake_checkout_with_no_compilation_database_says_so() {
+        // clangd's single biggest failure mode, and the one command that ends
+        // it. Without this the reader sees "file not found" on an include that
+        // compiles, and concludes code intelligence does not work.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("CMakeLists.txt"), "").unwrap();
+        let note = cpp_without_compile_commands(dir.path()).expect("a caveat");
+        assert!(note.contains("CMAKE_EXPORT_COMPILE_COMMANDS"), "names the fix: {note}");
+
+        // Present at the top: nothing to say.
+        fs::write(dir.path().join("compile_commands.json"), "[]").unwrap();
+        assert!(cpp_without_compile_commands(dir.path()).is_none());
+    }
+
+    #[test]
+    fn a_checkout_that_is_not_a_c_project_gets_no_clangd_caveat() {
+        // A Python repo with a Makefile must not be told about clangd flags.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(cpp_without_compile_commands(dir.path()).is_none());
+        // A hand-written .clangd is the user having already answered this.
+        fs::write(dir.path().join("meson.build"), "").unwrap();
+        fs::write(dir.path().join(".clangd"), "CompileFlags:\n  Add: [-I/x]\n").unwrap();
+        assert!(cpp_without_compile_commands(dir.path()).is_none());
+    }
+
+    #[test]
+    fn a_typed_command_beats_everything_termic_knows() {
+        use std::os::unix::fs::PermissionsExt;
+        // The escape hatch: a server termic does not ship (pylsp, jedi, a
+        // wrapper script). It must win over both the pick and the default
+        // order, because it is the most explicit thing anybody said.
+        let dir = tempfile::tempdir().unwrap();
+        let venv = dir.path().join(".venv/bin");
+        fs::create_dir_all(&venv).unwrap();
+        let zuban = venv.join("zuban");
+        fs::write(&zuban, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&zuban, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (exe, args) = lsp_resolve_server_preferring(
+            dir.path(), "python", Some("zuban"), Some("./scripts/pylsp --stdio"),
+        ).unwrap();
+        // A relative path resolves against the CHECKOUT, so a script committed
+        // to the repo works without anybody typing an absolute path.
+        assert_eq!(exe, dir.path().join("scripts/pylsp").to_string_lossy());
+        assert_eq!(args, vec!["--stdio".to_string()]);
+
+        // Empty or whitespace is "not set", not "run nothing".
+        let (exe, _) =
+            lsp_resolve_server_preferring(dir.path(), "python", None, Some("   ")).unwrap();
+        assert!(exe.ends_with("/zuban"), "{exe}");
+    }
+
+    #[test]
+    fn a_command_line_splits_without_a_shell() {
+        // No `sh -c`: this string comes from a settings field, and a shell
+        // would make every stray `;` or backtick executable.
+        assert_eq!(split_command_line("pylsp"), vec!["pylsp"]);
+        assert_eq!(split_command_line("  pylsp   --stdio  "), vec!["pylsp", "--stdio"]);
+        // Quotes group, which is the one thing a path with a space needs.
+        assert_eq!(
+            split_command_line(r#"/opt/My Tools/ls -p "a b" 'c d'"#),
+            vec!["/opt/My", "Tools/ls", "-p", "a b", "c d"],
+        );
+        // An EMPTY quoted argument is an argument, not nothing: `--flag ""`.
+        assert_eq!(split_command_line(r#"x --flag """#), vec!["x", "--flag", ""]);
+        assert!(split_command_line("   ").is_empty());
+        // Shell metacharacters are ordinary characters here, which is the
+        // point: they reach the process as arguments or not at all.
+        assert_eq!(split_command_line("x; rm -rf /"), vec!["x;", "rm", "-rf", "/"]);
+    }
+
+    #[test]
+    fn a_picked_server_beats_the_default_order() {
+        use std::os::unix::fs::PermissionsExt;
+        // A checkout with BOTH zuban and ty in its virtualenv. The default
+        // order prefers zuban (it understands Django); somebody who wants ty
+        // has no way to say so without this, which was the whole complaint.
+        let dir = tempfile::tempdir().unwrap();
+        let venv = dir.path().join(".venv/bin");
+        fs::create_dir_all(&venv).unwrap();
+        for name in ["zuban", "ty"] {
+            let p = venv.join(name);
+            fs::write(&p, "#!/bin/sh\n").unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let (exe, _) = lsp_resolve_server_preferring(dir.path(), "python", None, None).unwrap();
+        assert!(exe.ends_with("/zuban"), "the default order still leads with zuban: {exe}");
+
+        let (exe, args) = lsp_resolve_server_preferring(dir.path(), "python", Some("ty"), None).unwrap();
+        assert!(exe.ends_with("/ty"), "the pick was ignored: {exe}");
+        assert_eq!(args, vec!["server".to_string()], "and it is spawned ty's way");
+    }
+
+    #[test]
+    fn a_pick_that_resolves_to_nothing_falls_back_instead_of_failing() {
+        use std::os::unix::fs::PermissionsExt;
+        // A preference is a preference, not an assertion that the binary is
+        // installed. Someone who picks basedpyright and then works on a
+        // machine without it should still get navigation, not silence.
+        let dir = tempfile::tempdir().unwrap();
+        let venv = dir.path().join(".venv/bin");
+        fs::create_dir_all(&venv).unwrap();
+        let zuban = venv.join("zuban");
+        fs::write(&zuban, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&zuban, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Names that CANNOT resolve here, whatever this machine has installed.
+        // Deliberately not "basedpyright": plenty of dev machines have it on
+        // PATH, so that case tests the machine rather than the fallback.
+        for name in ["not-a-server", "typescript-language-server"] {
+            let (exe, _) =
+                lsp_resolve_server_preferring(dir.path(), "python", Some(name), None).unwrap();
+            assert!(exe.ends_with("/zuban"), "{name} did not fall back: {exe}");
+        }
+    }
+
+    #[test]
+    fn a_ruby_checkouts_own_binstub_beats_anything_on_path() {
+        // A Rails app's gems are the reason to run ruby-lsp at all, and a copy
+        // resolved from PATH under a different Ruby cannot see them.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("bin")).unwrap();
+        let binstub = dir.path().join("bin/ruby-lsp");
+        fs::write(&binstub, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&binstub, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let (exe, args) = lsp_resolve_server(dir.path(), "ruby").expect("a ruby server");
+        assert_eq!(exe, binstub.to_string_lossy());
+        assert!(args.is_empty(), "ruby-lsp takes no arguments: {args:?}");
+    }
+
+    #[test]
+    fn a_project_setting_is_layered_over_termics_own_answer() {
+        // The user's block wins, key by key, without erasing the interpreter
+        // termic worked out. Getting this wrong is silent: pyright would
+        // analyse against the wrong Python and report errors about packages
+        // that ARE installed.
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join(".venv/bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("python"), "").unwrap();
+        let user = serde_json::json!({
+            "python": { "analysis": { "typeCheckingMode": "strict" } },
+        });
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "workspace/configuration",
+            "params": { "items": [ {"section": "python"} ] },
+        });
+        let reply: serde_json::Value =
+            serde_json::from_str(&lsp_reply_to_server_request(&req, dir.path(), &user).unwrap())
+                .unwrap();
+        let section = &reply["result"][0];
+        assert_eq!(section["analysis"]["typeCheckingMode"], "strict");
+        assert!(section["pythonPath"].as_str().unwrap().ends_with(".venv/bin/python"));
+    }
+
+    #[test]
+    fn a_section_only_the_user_knows_about_is_still_answered() {
+        // termic answers null for anything it has no opinion on, and a naive
+        // "ours or theirs" would drop the user's block on exactly the settings
+        // it exists for (gopls has no config file at all).
+        let user = serde_json::json!({ "gopls": { "buildFlags": ["-tags=integration"] } });
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "workspace/configuration",
+            "params": { "items": [ {"section": "gopls"}, {"section": "unrelated"} ] },
+        });
+        let reply: serde_json::Value =
+            serde_json::from_str(&lsp_reply_to_server_request(&req, Path::new("/tmp/none"), &user).unwrap())
+                .unwrap();
+        // Arity is still one per item, and the section nobody claimed is null.
+        assert_eq!(reply["result"].as_array().unwrap().len(), 2);
+        assert_eq!(reply["result"][0]["buildFlags"], serde_json::json!(["-tags=integration"]));
+        assert_eq!(reply["result"][1], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn merging_settings_replaces_lists_and_keeps_untouched_branches() {
+        // Every list a server takes (extraPaths, buildFlags, cargo features)
+        // is one somebody will need to SHORTEN, and a list you cannot shorten
+        // is a list you cannot fix.
+        let base = serde_json::json!({ "a": { "x": 1, "list": [1, 2] }, "b": 2 });
+        let over = serde_json::json!({ "a": { "list": [3] } });
+        let merged = lsp_merge(&base, &over);
+        assert_eq!(merged, serde_json::json!({ "a": { "x": 1, "list": [3] }, "b": 2 }));
+    }
+
+    #[test]
+    fn a_dotted_section_walks_into_the_settings_tree() {
+        // Servers ask for `python.analysis`; the settings are held as a tree.
+        let user = serde_json::json!({ "python": { "analysis": { "extraPaths": ["./src"] } } });
+        assert_eq!(
+            lsp_user_section(&user, "python.analysis"),
+            serde_json::json!({ "extraPaths": ["./src"] })
+        );
+        // A section nobody wrote is "no opinion", not an empty object: a
+        // server handed `{}` where it expected null may treat it as a real,
+        // empty configuration.
+        assert_eq!(lsp_user_section(&user, "python.missing"), serde_json::Value::Null);
+        assert_eq!(lsp_user_section(&serde_json::Value::Null, "anything"), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn unknown_server_requests_get_a_null_result_not_an_error() {
+        // An error reply to client/registerCapability aborts pyright's Node
+        // process outright, which reads to the user as "nothing happens".
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": "abc", "method": "client/registerCapability",
+            "params": { "registrations": [] },
+        });
+        let reply: serde_json::Value =
+            serde_json::from_str(&lsp_reply_to_server_request(&req, Path::new("/tmp/none"), &serde_json::Value::Null).unwrap())
+                .unwrap();
+        assert_eq!(reply["id"], "abc");
+        assert!(reply["result"].is_null());
+        assert!(reply.get("error").is_none());
+    }
+
+    #[test]
+    fn python_gets_the_checkouts_interpreter_and_everything_else_gets_null() {
+        // pyright and basedpyright find the interpreter through
+        // `python.pythonPath` in THIS reply, and ignore VIRTUAL_ENV. Answer
+        // null and they analyse against some other Python, so every
+        // third-party import is unresolved and the file fills with errors
+        // about our handshake rather than about the code.
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".venv/bin")).unwrap();
+        fs::write(dir.path().join(".venv/bin/python"), "#!/bin/sh\n").unwrap();
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "workspace/configuration",
+            "params": { "items": [ {"section": "python"}, {"section": "ty"}, {"section": "ruff"} ] },
+        });
+        let reply: serde_json::Value =
+            serde_json::from_str(&lsp_reply_to_server_request(&req, dir.path(), &serde_json::Value::Null).unwrap()).unwrap();
+        let items = reply["result"].as_array().unwrap();
+        // Still one entry per requested item, in order: ty asserts on that.
+        assert_eq!(items.len(), 3);
+        assert_eq!(
+            items[0]["pythonPath"].as_str().unwrap(),
+            dir.path().join(".venv/bin/python").to_string_lossy(),
+        );
+        // ty takes the environment rather than inferring one, so a project
+        // whose stubs live in the venv is analysed against that venv.
+        assert_eq!(
+            items[1]["environment"]["python"].as_str().unwrap(),
+            dir.path().join(".venv").to_string_lossy(),
+        );
+        // Anything we have nothing to say about stays null, which is what
+        // every other server wants to hear.
+        assert!(items[2].is_null());
+    }
+
+    #[test]
+    fn a_checkout_with_no_venv_still_answers_null() {
+        // No interpreter to name, so do not invent one: a wrong pythonPath is
+        // worse than none.
+        let dir = tempdir().unwrap();
+        let req = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "workspace/configuration",
+            "params": { "items": [ {"section": "python"} ] },
+        });
+        let reply: serde_json::Value =
+            serde_json::from_str(&lsp_reply_to_server_request(&req, dir.path(), &serde_json::Value::Null).unwrap()).unwrap();
+        assert_eq!(reply["result"], serde_json::json!([null]));
+    }
+
+    #[test]
+    fn notifications_are_not_replied_to() {
+        // A reply to a notification is a protocol violation; only messages
+        // carrying an id are requests.
+        let note = serde_json::json!({
+            "jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
+            "params": {},
+        });
+        assert!(lsp_reply_to_server_request(&note, Path::new("/tmp/none"), &serde_json::Value::Null).is_none());
+    }
+
+    #[test]
+    fn initialize_gains_the_root_the_cm_client_does_not_send() {
+        // clangd reads only rootUri, ruby-lsp only workspaceFolders, and
+        // phpactor exits on a null root. The client sends one of the two.
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": { "processId": null, "rootUri": null, "capabilities": {} },
+        })
+        .to_string();
+        let out: serde_json::Value =
+            serde_json::from_str(&lsp_patch_initialize(&msg, Path::new("/tmp/repo"))).unwrap();
+        assert_eq!(out["params"]["rootUri"], "file:///tmp/repo");
+        assert_eq!(out["params"]["rootPath"], "/tmp/repo");
+        assert_eq!(out["params"]["workspaceFolders"][0]["uri"], "file:///tmp/repo");
+        assert_eq!(out["params"]["workspaceFolders"][0]["name"], "repo");
+        assert!(out["params"]["processId"].as_u64().unwrap() > 0);
+        // The capabilities the client did send survive untouched.
+        assert!(out["params"]["capabilities"].is_object());
+    }
+
+    #[test]
+    fn the_pull_diagnostics_claim_is_withdrawn() {
+        // The CodeMirror client claims pull and implements only push. ty reads
+        // the claim, stops pushing, and the editor goes quiet with nothing to
+        // show for it: 0 diagnostics with the claim, 2 without (measured on ty
+        // 0.0.73). Servers that really do pull advertise their provider
+        // whether we claim it or not, and we poll that.
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0", "id": 0, "method": "initialize",
+            "params": { "capabilities": { "textDocument": {
+                "diagnostic": { "dynamicRegistration": true },
+                "hover": { "contentFormat": ["markdown"] },
+            } } },
+        })
+        .to_string();
+        let out: serde_json::Value =
+            serde_json::from_str(&lsp_patch_initialize(&msg, Path::new("/tmp/repo"))).unwrap();
+        let td = &out["params"]["capabilities"]["textDocument"];
+        assert!(td.get("diagnostic").is_none(), "the pull claim survived");
+        // Everything else the client asked for is untouched.
+        assert!(td.get("hover").is_some());
+    }
+
+    #[test]
+    fn only_initialize_is_rewritten() {
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "textDocument/hover", "params": {},
+        })
+        .to_string();
+        assert_eq!(lsp_patch_initialize(&msg, Path::new("/tmp/repo")), msg);
+        // Not JSON at all: pass it through rather than dropping the message.
+        assert_eq!(lsp_patch_initialize("nonsense", Path::new("/tmp/repo")), "nonsense");
+    }
+
+    #[test]
+    fn content_length_counts_bytes_not_characters() {
+        // The classic hand-rolled-framer bug: it bites on the first non-ASCII
+        // docstring, not in review.
+        let body = "{\"m\":\"café — ok\"}";
+        let mut sink: Vec<u8> = Vec::new();
+        write!(sink, "Content-Length: {}\r\n\r\n", body.as_bytes().len()).unwrap();
+        sink.extend_from_slice(body.as_bytes());
+        let text = String::from_utf8(sink).unwrap();
+        let (head, rest) = text.split_once("\r\n\r\n").unwrap();
+        let len: usize = head.strip_prefix("Content-Length: ").unwrap().parse().unwrap();
+        assert_eq!(len, rest.as_bytes().len());
+        assert_ne!(len, body.chars().count());
+    }
+
+    #[test]
+    fn file_uris_escape_what_a_path_may_hold() {
+        assert_eq!(lsp_path_to_uri(Path::new("/tmp/my repo")), "file:///tmp/my%20repo");
+        assert_eq!(lsp_path_to_uri(Path::new("/tmp/a#b")), "file:///tmp/a%23b");
+        assert_eq!(lsp_path_to_uri(Path::new("/tmp/plain-1_2.3")), "file:///tmp/plain-1_2.3");
+    }
+
+    #[test]
+    fn every_pinned_server_names_a_digest_and_a_payload() {
+        // A pin with an empty digest would download and run an unverified
+        // binary against the user's source. The shape is checked here because
+        // the list is edited by hand on every upstream release.
+        for lang in ["typescript", "python", "rust"] {
+            let spec = lsp_install_spec(lang)
+                .unwrap_or_else(|| panic!("no pinned server for {lang} on this platform"));
+            assert_eq!(spec.sha256.len(), 64, "{lang}: not a sha256");
+            assert!(spec.sha256.chars().all(|c| c.is_ascii_hexdigit()), "{lang}: not hex");
+            assert!(spec.url.starts_with("https://"), "{lang}: not https");
+            // Never resolve `latest` at run time: the point of pinning is that
+            // the binary is decided by the termic release, not by whatever
+            // upstream published this morning.
+            assert!(!spec.url.contains("/latest/"), "{lang}: unpinned url");
+            assert!(spec.url.contains(spec.version), "{lang}: url does not carry the pinned version");
+            assert!(spec.bytes > 1_000_000, "{lang}: implausible size");
+            assert!(matches!(spec.archive, "gz" | "tar.gz"), "{lang}: unknown archive kind");
+            if spec.archive == "gz" {
+                assert!(spec.exe_in_archive.is_empty(), "{lang}: a bare gz has no inner path");
+            } else {
+                assert!(!spec.exe_in_archive.is_empty(), "{lang}: an archive needs its exe path");
+            }
+        }
+    }
+
+    #[test]
+    fn an_upgrade_is_offered_only_when_both_halves_are_known() {
+        // The rule the UI depends on: no version comparison when the release
+        // API did not answer. Reporting the compiled-in fallback as "latest"
+        // would offer a DOWNGRADE to anyone who had already upgraded past it.
+        let cases = [
+            (Some("1.0.0"), Some("1.1.0"), true),
+            (Some("1.1.0"), Some("1.1.0"), false),
+            (Some("1.1.0"), None, false),          // offline: say nothing
+            (None, Some("1.1.0"), false),          // nothing installed yet
+            (None, None, false),
+        ];
+        for (installed, latest, want) in cases {
+            let got = matches!(
+                (installed.map(str::to_string), latest.map(str::to_string)),
+                (Some(ref i), Some(ref l)) if i != l
+            );
+            assert_eq!(got, want, "installed={installed:?} latest={latest:?}");
+        }
+    }
+
+    #[test]
+    fn nothing_is_pinned_for_the_path_only_languages() {
+        // gopls publishes no release assets and needs `go` at run time, so
+        // offering to download it would be a promise we cannot keep.
+        assert!(lsp_install_spec("go").is_none());
+        assert!(lsp_install_spec("elvish").is_none());
+    }
+
+    #[test]
+    fn django_without_stubs_is_named_rather_than_left_looking_broken() {
+        // Django adds `objects` at runtime, so a checker reading the source is
+        // right to say it is missing — and every model query in the project
+        // goes red. Measured: ty reports that error without django-stubs and
+        // ZERO diagnostics on the same file with it. The user reads red as
+        // "this feature is broken", so the app has to say which it is.
+        let dir = tempdir().unwrap();
+        let packages = dir.path().join(".venv/lib/python3.12/site-packages");
+        fs::create_dir_all(packages.join("django")).unwrap();
+        assert!(django_without_stubs(dir.path()));
+
+        // With the stubs, nothing to warn about.
+        fs::create_dir_all(packages.join("django-stubs")).unwrap();
+        assert!(!django_without_stubs(dir.path()));
+    }
+
+    #[test]
+    fn a_project_that_is_not_django_gets_no_django_warning() {
+        let dir = tempdir().unwrap();
+        // No venv at all.
+        assert!(!django_without_stubs(dir.path()));
+        // A venv with no Django in it.
+        fs::create_dir_all(dir.path().join(".venv/lib/python3.12/site-packages/flask")).unwrap();
+        assert!(!django_without_stubs(dir.path()));
+    }
+
+    #[test]
+    fn a_checkout_with_no_toolchain_offers_nothing() {
+        // The offer has to be able to say "no", or the UI shows a toggle that
+        // can never work.
+        let dir = tempdir().unwrap();
+        assert!(lsp_resolve_server(dir.path(), "elvish").is_none());
+    }
+
+    #[test]
+    fn a_candidate_that_does_not_run_is_not_a_server() {
+        // rust-analyzer on PATH is usually rustup's SHIM, which prints
+        // "rust-analyzer is unavailable for the active toolchain" and exits 1
+        // when the component is missing. Driving it looks exactly like a
+        // server that answers nothing, which is the worst failure this
+        // subsystem has. Verified live on this machine before the check
+        // existed.
+        let dir = tempdir().unwrap();
+        let good = dir.path().join("runs");
+        let bad = dir.path().join("shim");
+        fs::write(&good, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(&bad, "#!/bin/sh\necho 'unavailable for the active toolchain' >&2\nexit 1\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for p in [&good, &bad] {
+                fs::set_permissions(p, fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        // The uncached form: the cached one is keyed by path forever, which
+        // would make this test order-dependent against its siblings.
+        assert!(lsp_candidate_runs_uncached(good.to_str().unwrap(), &["--version"]));
+        assert!(!lsp_candidate_runs_uncached(bad.to_str().unwrap(), &["--version"]));
+        // A path that is not there at all is not a server either.
+        assert!(!lsp_candidate_runs_uncached(dir.path().join("absent").to_str().unwrap(), &["--version"]));
+        // And the cache answers the same, then keeps answering.
+        assert!(lsp_candidate_runs(good.to_str().unwrap(), &["--version"]));
+        fs::remove_file(&good).unwrap();
+        assert!(lsp_candidate_runs(good.to_str().unwrap(), &["--version"]));
+    }
+
+    #[test]
+    fn the_checkouts_own_toolchain_wins_over_path() {
+        // A repo pinning its own TypeScript must be the one driven, or
+        // navigation answers with a different compiler's idea of the code.
+        let dir = tempdir().unwrap();
+        let bin = dir.path().join("node_modules/.bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("tsgo"), "#!/bin/sh\n").unwrap();
+        let (exe, args) = lsp_resolve_server(dir.path(), "typescript").unwrap();
+        assert_eq!(exe, bin.join("tsgo").to_string_lossy());
+        assert_eq!(args, vec!["--lsp".to_string(), "--stdio".to_string()]);
     }
 
     // ── post-launch session capture (GH #243) ──

@@ -1,0 +1,38 @@
+{
+ "server": "gopls",
+ "language": "go",
+ "query": "Store",
+ "definedIn": "stores/models.go",
+ "symbols": [
+  {
+   "name": "Store",
+   "kind": 23,
+   "file": "stores/models.go",
+   "line": 3
+  },
+  {
+   "name": "StoreAdmin.Store",
+   "kind": 8,
+   "file": "stores/models.go",
+   "line": 8
+  },
+  {
+   "name": "StoreByID",
+   "kind": 12,
+   "file": "stores/models.go",
+   "line": 11
+  },
+  {
+   "name": "StoreAdmin",
+   "kind": 23,
+   "file": "stores/models.go",
+   "line": 7
+  },
+  {
+   "name": "Store.Name",
+   "kind": 8,
+   "file": "stores/models.go",
+   "line": 4
+  }
+ ]
+}

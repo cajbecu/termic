@@ -232,6 +232,14 @@ no metered markup, no backend daemon. Here's what the window gives you on top:
 - **Find + edit in-app.** ⌘P fuzzy file finder, ⇧⌘F find-in-files
   (`git grep`, .gitignore-aware, streams live). CodeMirror 6 editor with
   side-by-side / unified diffs and **Markdown preview** (including inline **Mermaid diagrams**).
+- **Code navigation** ([#174](https://github.com/simion/termic/issues/174)).
+  ⌘-click or F12 to go to a definition, ⇧F12 for usages, ⌘F12 for a file
+  outline, hover for types, double-⇧ to search symbols across the repo.
+  Real language servers from your own toolchain (TypeScript, Python, Rust,
+  Go, C/C++, Swift, Ruby), one per checkout, nothing running until you switch
+  it on for a project and agree to what it costs. Pick a different server per
+  language or per project, or point it at a binary of your own. Type checking
+  is a separate, experimental switch.
 - **Fork-style Git UI.** A dedicated staging area inspired by the Fork app. Stage, unstage, and commit without dropping to a terminal.
 - **AI review**: open the Review dialog, pick an agent, it gets the diff
   + a review prompt and starts streaming. Or leave **GitHub-style inline
@@ -354,15 +362,6 @@ specs and get an issue at the same time. That is the whole promotion path:
 
 ### Planned
 
-- **Code intelligence via language server plugins.**
-  ([#174](https://github.com/simion/termic/issues/174)) Cmd-click
-  go-to-definition, find class / symbol, hover types, inline diagnostics.
-  Pluggable language servers (rust-analyzer, typescript-language-server,
-  pyright, gopls) resolved from the user's toolchain automatically, with a
-  fast heuristic pass (ripgrep + tree-sitter) for languages that have no
-  server present. The commenting half of #174 shipped in 0.27.0; this is
-  the code-navigation half. Design and measurements in
-  [docs/plans/lsp.md](docs/plans/lsp.md).
 - **Mobile app.** ([#165](https://github.com/simion/termic/issues/165)) A
   companion app for checking on and steering tasks while away from the Mac.
 - **MCP server endpoint.** ([#176](https://github.com/simion/termic/issues/176))

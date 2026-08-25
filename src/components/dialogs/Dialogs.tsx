@@ -27,6 +27,7 @@ import { CommandPalette } from "./CommandPalette";
 import { PromptDestinationDialog } from "./PromptDestinationDialog";
 import { PromptPalette } from "./PromptPalette";
 import { SyntaxPalette } from "./SyntaxPalette";
+import { SearchEverywhereDialog } from "./SearchEverywhereDialog";
 import { ScratchCloseDialog } from "./ScratchCloseDialog";
 import { ScratchSaveDialog } from "./ScratchSaveDialog";
 import { Loader2 } from "lucide-react";
@@ -65,6 +66,7 @@ export function Dialogs() {
       <PromptDestinationDialog />
       <PromptPalette />
       <SyntaxPalette />
+      <SearchEverywhereDialog />
       <ScratchCloseDialog />
       <ScratchSaveDialog />
       {/* Blocking work overlay: shown while a slow IPC call is in flight

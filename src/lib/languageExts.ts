@@ -34,6 +34,13 @@ function stream(mode: Parameters<typeof StreamLanguage.define>[0]): LanguageSupp
  *    the registry entry on purpose: being first, it replaces it rather than
  *    sitting next to it in the picker.
  *  - Elixir  — simply absent from the registry.
+ *  - Svelte  — absent, and the HTML fallback it used to get missed `{#if}`
+ *    blocks and every `<script>` in the file.
+ *  - Astro   — no CodeMirror grammar exists anywhere. `lib/astroMode` builds
+ *    one out of the two parsers the file is actually made of.
+ *
+ *  React and Vue need nothing here: the registry's JSX / TSX and Vue entries
+ *  are real grammars, and Vue's loads `@codemirror/lang-vue`.
  *
  *  Every loader is a dynamic import, so a grammar costs nothing until a file
  *  that needs it is opened. */
@@ -50,6 +57,18 @@ const CUSTOM: LanguageDescription[] = [
     alias: ["proto", "proto3", "grpc"],
     extensions: ["proto"],
     load: () => import("@/lib/protoMode").then(m => stream(m.proto3)),
+  }),
+  LanguageDescription.of({
+    name: "Svelte",
+    alias: ["svelte"],
+    extensions: ["svelte"],
+    load: () => import("@replit/codemirror-lang-svelte").then(m => m.svelte()),
+  }),
+  LanguageDescription.of({
+    name: "Astro",
+    alias: ["astro"],
+    extensions: ["astro"],
+    load: () => import("@/lib/astroMode").then(m => m.astro()),
   }),
   LanguageDescription.of({
     name: "Elixir",
@@ -77,8 +96,9 @@ const OVERLAY_RULES: Array<{ name: string; extensions?: string[]; filename?: Reg
   // Component/template formats with no grammar of their own get tag
   // highlighting from HTML. `<script>` / `<style>` blocks miss deep JS/CSS
   // parsing, which is the same trade VS Code makes bare. `hbs`/`handlebars`
-  // and `vue` are already upstream.
-  { name: "HTML", extensions: ["astro", "svelte", "ejs", "mustache", "twig", "njk"] },
+  // and `vue` are already upstream; `astro` and `svelte` have grammars of
+  // their own in CUSTOM above, and were here until they did.
+  { name: "HTML", extensions: ["ejs", "mustache", "twig", "njk"] },
   { name: "Markdown", extensions: ["mdx"] },
   { name: "Python", extensions: ["pyi"] },
   { name: "Ruby", extensions: ["rake"] },

@@ -1,0 +1,19 @@
+{
+ "server": "tsc",
+ "language": "typescript",
+ "query": "EditorPane",
+ "symbols": [
+  {
+   "name": "EditorPane",
+   "kind": 12,
+   "file": "src/components/task/EditorPane.tsx",
+   "line": 112
+  },
+  {
+   "name": "EditorPane",
+   "kind": 13,
+   "file": "src/components/task/TaskView.tsx",
+   "line": 46
+  }
+ ]
+}

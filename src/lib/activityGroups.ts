@@ -103,6 +103,9 @@ const KIND_LABELS: Record<string, string> = {
   setup: "Setup script",
   custom: "Command",
   app: "Termic",
+  // Not filed under a task: one server serves every task on its checkout, so
+  // stopping it stops navigation for all of them (GH #174).
+  lsp: "Language server",
 };
 
 /** What we know about a tab from the task's persisted metadata: the Activity

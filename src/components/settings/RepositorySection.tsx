@@ -13,7 +13,7 @@ import type { Project, ProjectMember, RepoConfig } from "@/lib/types";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Checkbox } from "@/components/ui/Checkbox";
-import { Trash2, Check, Layers, X, AudioWaveform, SlidersHorizontal } from "lucide-react";
+import { Trash2, Check, Layers, X, AudioWaveform, Compass, SlidersHorizontal } from "lucide-react";
 import { useTasksPathConflicts } from "./Controls";
 import { ExcludeEditor } from "./ExcludeEditor";
 import { ScriptField } from "./ScriptField";
@@ -22,10 +22,27 @@ import { LINK_CLICK_MODIFIER as CLICK_MOD } from "@/lib/previewBrowser";
 import { cn, cleanLines } from "@/lib/utils";
 import { isValidPortName } from "@/lib/namedPorts";
 import { isTerminalEntry } from "@/lib/agents";
+import { CodeIntelSettings } from "./CodeIntelSettings";
+import { CodeIntelServers } from "./CodeIntelServers";
+import { codeIntelName } from "@/lib/lsp/featureName";
+import { usePrefs } from "@/store/prefs";
+
+/** The servers termic can drive, by the id the Rust host knows them by. Not
+ *  every language CodeMirror highlights: these are the four something can
+ *  actually answer for today. */
+const CODE_INTEL_LANGUAGES = [
+  { id: "typescript", label: "TypeScript / JavaScript" },
+  { id: "python", label: "Python" },
+  { id: "rust", label: "Rust" },
+  { id: "go", label: "Go" },
+] as const;
 
 export function RepositorySection({ projectId }: { projectId: string }) {
   const project = useApp(s => s.projects.find(p => p.id === projectId));
   const loadAll = useApp(s => s.loadAll);
+  // The feature's name follows the type-checking switch (lib/lsp/featureName).
+  // Up here with the other hooks: this component early-returns further down.
+  const typeChecking = usePrefs(s => s.codeIntelDiagnostics);
   // App-wide browser, only to describe what "follow the app-wide setting"
   // currently resolves to in the dropdown label. MUST stay up here with the
   // other hooks: this component early-returns when no project is selected,
@@ -213,6 +230,12 @@ export function RepositorySection({ projectId }: { projectId: string }) {
 
   function patch<K extends keyof Project>(k: K, v: Project[K]) {
     touchedKeys.current.add(k as string);
+    // The auto-start planner caches what a checkout is written in. Changing
+    // which languages this project serves is the one edit that makes that
+    // guess wrong, so drop it rather than waiting for a relaunch.
+    if (k === "code_intel_languages" || k === "code_intel_auto") {
+      void import("@/lib/lsp/autoStart").then(m => m.forgetDetectedLanguages()).catch(() => {});
+    }
     setDraft(d => {
       if (!d) return d;
       const next = { ...d, [k]: v };
@@ -660,6 +683,100 @@ export function RepositorySection({ projectId }: { projectId: string }) {
             <div className="mt-3">
               <ExcludeEditor value={rc?.exclude ?? []} onChange={patchExclude} />
             </div>
+          </div>
+
+          {/* Code intelligence (GH #174). Three choices rather than a checkbox,
+              because the two "on"s differ by an order of magnitude and a
+              single "on" would hide that: the main checkout is one server per
+              language however many tasks share it, while worktrees are one
+              server EACH. Machine-local (projects.json), deliberately not in
+              the committed .termic.yaml: whether to spend this machine's
+              memory is not a decision a colleague should be able to push. */}
+          <div className="border-t border-[var(--color-border-soft)] pt-6">
+            <div className="mb-3 flex items-center gap-2 text-[14px] font-medium text-[var(--color-fg)]">
+              <Compass className="h-4 w-4 text-[var(--color-accent)]" />
+              {codeIntelName(typeChecking)}
+            </div>
+            <p className="mb-3 text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
+              Arm new tasks for this project automatically, instead of asking in each one. A language server runs per CHECKOUT, from your own toolchain, and holds its index (hundreds of megabytes to several gigabytes) until it stops.
+            </p>
+            <div className="mb-4">
+              <div className="mb-2 text-[12.5px] font-medium text-[var(--color-fg)]">Languages</div>
+              <p className="mb-2 text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
+                Which languages get a server here. A repo is usually several (a Django project has Python and the JavaScript in its templates), and each server is its own process with its own memory, so they are chosen one at a time. Unticked languages show no button at all.
+              </p>
+              <div className="flex flex-wrap gap-x-5 gap-y-2">
+                {CODE_INTEL_LANGUAGES.map(({ id, label }) => {
+                  const list = draft.code_intel_languages;
+                  const on = !list || list.includes(id);
+                  return (
+                    <label key={id} className="flex cursor-pointer items-center gap-2 select-none">
+                      <Checkbox
+                        checked={on}
+                        onChange={(v) => {
+                          // Undefined means "all", so the first untick has to
+                          // materialise the full list minus this one, or every
+                          // other language would be dropped with it.
+                          const cur = list ?? CODE_INTEL_LANGUAGES.map(l => l.id);
+                          const next = v ? [...cur, id] : cur.filter(x => x !== id);
+                          patch("code_intel_languages", (
+                            next.length === CODE_INTEL_LANGUAGES.length ? undefined : next
+                          ) as any);
+                        }}
+                      />
+                      <span className="text-[13px] text-[var(--color-fg)]">{label}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              {([
+                ["off", "Off", "Each task asks. Nothing runs until you say so."],
+                ["main", "Main checkout only", "One server per language, ever. Every task on the main checkout shares it, so the tenth costs what the first did."],
+                ["all", "Main checkout and worktrees", "One server per language PER WORKTREE, and it multiplies: four languages across ten worktrees would be forty. rust-analyzer alone holds about 3 GB, so termic starts at most 6 this way and leaves the rest to the button on the editor, where each one's cost is shown."],
+              ] as const).map(([value, label, hint]) => (
+                <label key={value} className="flex cursor-pointer items-start gap-3 select-none">
+                  <input
+                    type="radio"
+                    name="code-nav-auto"
+                    checked={(draft.code_intel_auto ?? "off") === value}
+                    onChange={() => patch("code_intel_auto", value as any)}
+                    className="mt-1 accent-[var(--color-accent)]"
+                  />
+                  <div>
+                    <span className="text-[13.5px] font-medium text-[var(--color-fg)]">{label}</span>
+                    <p className="mt-0.5 text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">{hint}</p>
+                  </div>
+                </label>
+              ))}
+            </div>
+
+            {/* WHICH server, per project. The same panel Settings -> Editor
+                shows, pointed at this project: a repo that needs pyright can
+                say so without changing what the reader's other repos use, and
+                each row prints the machine setting it is overriding. */}
+            <div className="mt-4 border-t border-[var(--color-border-soft)] pt-4">
+              <div className="mb-2 text-[12.5px] font-medium text-[var(--color-fg)]">
+                Language servers for this project
+              </div>
+              <p className="mb-3 text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
+                Leave everything on Automatic to follow your machine's settings.
+              </p>
+              <CodeIntelServers
+                project={draft}
+                onProjectChange={(p) => {
+                  if (p.code_intel_servers) patch("code_intel_servers", p.code_intel_servers);
+                  if (p.code_intel_commands) patch("code_intel_commands", p.code_intel_commands);
+                }}
+              />
+            </div>
+
+            <CodeIntelSettings 
+              project={draft} 
+              onChange={(p) => patch("code_intel_settings", p.code_intel_settings as any)}
+            />
           </div>
 
           {/* Spotlight — lives in Scripts & run because it controls

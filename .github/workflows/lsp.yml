@@ -1,0 +1,81 @@
+name: Language servers
+
+# Downloads and drives the REAL language servers (GH #174).
+#
+# Off the PR path on purpose. The main e2e suite covers the protocol against a
+# deliberately hostile fake server (`e2e/fixtures/fake-lsp.mjs`) — fast,
+# deterministic, no network — and that is the right thing to gate a PR on.
+# What it CANNOT catch is upstream moving out from under us: a renamed release
+# asset, a moved download, a digest that no longer matches, an archive whose
+# executable is somewhere else. Those break nothing until a user clicks
+# Install, and then they break completely.
+#
+# So this runs nightly against the real internet: install each server the way
+# the app does, then drive the downloaded TypeScript and Python servers against
+# real type errors and assert real diagnostics reach the editor.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch or SHA to run against
+        required: false
+        type: string
+  schedule:
+    # 04:30 UTC, an hour after the perf nightly so two macOS runners never
+    # contend. Nothing waits on this.
+    - cron: '30 4 * * *'
+
+# A slow nightly must never pile up behind itself.
+concurrency:
+  group: lsp-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  servers:
+    name: download + drive real servers (macos-14)
+
+    # Cron is upstream-only, so forks stop getting nightly failure mail.
+    # Manual dispatch stays open everywhere.
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'simion/termic'
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Seed fixture profile
+        run: node scripts/e2e-seed.mjs
+
+      - name: Build e2e binary
+        run: npm run e2e:build
+
+      - name: Download and drive the servers
+        env:
+          # The opt-in switch the spec reads. Without it the spec skips, which
+          # is what keeps ~35 MB of downloads off every PR.
+          E2E_LSP_DOWNLOADS: '1'
+        run: npm run test:e2e -- --spec e2e/specs/codenav-download.e2e.ts
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lsp-nightly-logs
+          path: |
+            .e2e/artifacts/**
+          if-no-files-found: ignore
+          retention-days: 7

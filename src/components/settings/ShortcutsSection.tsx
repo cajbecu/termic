@@ -11,6 +11,7 @@ import { RotateCcw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   SHORTCUT_DEFS,
+  FIXED_SHORTCUTS,
   GROUP_ORDER,
   NON_CONFLICTING_GROUPS,
   DEFAULT_BINDINGS,
@@ -25,6 +26,7 @@ import {
   IS_MAC,
   type ShortcutId,
 } from "@/lib/shortcuts";
+import { groupLabel } from "@/components/dialogs/ShortcutsHelpDialog";
 
 // Terminal copy/paste are native (⌘C / ⌘V) on macOS and only wired/rebindable
 // on Linux/Windows, so hide their rows from the macOS shortcuts list.
@@ -34,6 +36,9 @@ const HIDDEN_ON_MAC: Set<ShortcutId> = IS_MAC
 
 export function ShortcutsSection() {
   const shortcuts = usePrefs(s => s.shortcuts);
+  // The code-navigation group is named after the feature, which is named
+  // after what it is currently doing (lib/lsp/featureName.ts).
+  const typeChecking = usePrefs(s => s.codeIntelDiagnostics);
   const setShortcut = usePrefs(s => s.setShortcut);
   const resetShortcut = usePrefs(s => s.resetShortcut);
   const resetAllShortcuts = usePrefs(s => s.resetAllShortcuts);
@@ -109,11 +114,16 @@ export function ShortcutsSection() {
 
       {GROUP_ORDER.map(group => {
         const defs = SHORTCUT_DEFS.filter(d => d.group === group && !HIDDEN_ON_MAC.has(d.id));
-        if (defs.length === 0) return null;
+        // Gestures that cannot be expressed as a chord (double-Shift). Shown
+        // here read-only rather than hidden: a reader who comes looking for
+        // "how do I open Search everywhere" should find it in the same list,
+        // and finding it absent reads as "this app does not have it".
+        const fixed = FIXED_SHORTCUTS.filter(f => f.group === group);
+        if (defs.length === 0 && fixed.length === 0) return null;
         return (
           <div key={group} className="flex flex-col gap-2">
             <div className="px-1 text-[11.5px] uppercase tracking-wider text-[var(--color-fg-faint)]">
-              {group}
+              {groupLabel(group, typeChecking)}
             </div>
             <div className="rounded-lg border border-[var(--color-border-soft)] overflow-hidden">
               {defs.map((def, i) => {
@@ -170,6 +180,31 @@ export function ShortcutsSection() {
                   </div>
                 );
               })}
+              {fixed.map((f, i) => (
+                <div
+                  key={f.id}
+                  data-testid="fixed-shortcut-row"
+                  className="flex items-center justify-between gap-4 px-4 py-2.5 text-[13.5px]"
+                  style={{
+                    borderTop: defs.length === 0 && i === 0
+                      ? undefined
+                      : "1px solid var(--color-border-soft)",
+                  }}
+                >
+                  <div className="flex min-w-0 flex-col">
+                    <span className="truncate">{f.label}</span>
+                    <span className="truncate text-[11.5px] text-[var(--color-fg-faint)]">{f.hint}</span>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {/* No recorder, and a word saying why. An empty slot where
+                        every other row has a button reads as a bug. */}
+                    <span className="text-[11.5px] text-[var(--color-fg-faint)]">{f.fixedReason}</span>
+                    <div className="flex min-h-[28px] min-w-[80px] items-center justify-center gap-1 px-2 py-1">
+                      {f.glyphs.map((g, idx) => <Key key={idx} glyph={g} />)}
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         );

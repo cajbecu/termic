@@ -14,6 +14,8 @@ import * as ipc from "@/lib/ipc";
 import { groupOf } from "@/lib/projectGroups";
 import { useRace } from "@/store/race";
 import { useFileViewed } from "@/store/fileViewed";
+import { useCodeIntel } from "@/store/codeIntel";
+import { useNavHistory } from "@/store/navHistory";
 import { takeUnattendedSpawn } from "@/lib/unattendedSpawns";
 import { failCliQueuedPromptsInTabs } from "@/lib/cliPromptReports";
 import { focusTerminalTab, focusMainTab, focusPaneTab } from "@/lib/tabFocus";
@@ -617,6 +619,24 @@ export const useApp = create<AppState>((set, get) => ({
     // of it may prune paths. Archived tasks keep their marks until the task is
     // gone for good, matching the race prune above.
     useFileViewed.getState().prune(new Set(tasks.map(t => t.id)));
+    // Code-navigation grants are refcounted against the tasks that armed them
+    // and are deliberately not sticky (GH #174): when a checkout's last task
+    // is archived or deleted, the grant lapses and the server is reaped with
+    // it, so an enablement can never outlive the work that motivated it. This
+    // is the reconcile for a task that went away behind our back — archived in
+    // another window, or deleted on disk.
+    useCodeIntel.getState().pruneTo([...liveTaskIds]);
+    // The jump trail goes the same way: a Back that lands in an archived
+    // task's file would fail silently, since the tab cannot be reopened.
+    useNavHistory.getState().pruneTo([...liveTaskIds]);
+    // A project with a standing "always" instruction gets its servers started
+    // by the TASK existing, not by an editor being opened on the right kind of
+    // file, and stopped when the last covered task goes. Dynamic because the
+    // client is behind mainChunkGuard, and fire-and-forget because loadAll is
+    // on the hot path: nothing here may make the task list wait on a process.
+    void import("@/lib/lsp/autoStart")
+      .then(m => m.syncAutoStart())
+      .catch(() => {});
   },
 
   refreshClis: async () => {

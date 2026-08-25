@@ -39,7 +39,7 @@ logLine("[termic] boot build=resume-fix-v3-sidebar-bypass").catch(() => {});
 // release bundles: both flags are statically false there.
 if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
   void (async () => {
-    const [app, ui, prefs, race, ipc, core, runTabs, scriptRuns, prompts, agentRace, signalLog, reviewComments, deepLink, previewBrowser, pendingTasks, archivingTasks, cmLanguage] =
+    const [app, ui, prefs, race, ipc, core, runTabs, scriptRuns, prompts, agentRace, signalLog, reviewComments, deepLink, previewBrowser, pendingTasks, archivingTasks, cmLanguage, cmAutocomplete, codeIntel, lspStatus, navHistory, pageSession] =
       await Promise.all([
         import("@/store/app"),
         import("@/store/ui"),
@@ -58,6 +58,11 @@ if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
         import("@/store/pendingTasks"),
         import("@/store/archivingTasks"),
         import("@codemirror/language"),
+        import("@codemirror/autocomplete"),
+        import("@/store/codeIntel"),
+        import("@/store/lspStatus"),
+        import("@/store/navHistory"),
+        import("@/lib/lsp/pageSession"),
       ]);
     (window as unknown as Record<string, unknown>).__termic = {
       useApp: app.useApp,
@@ -102,7 +107,35 @@ if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
       // CodeMirror's own indentation facet. Indentation is detected per file
       // (lib/detectIndent), and the only honest way to assert what the editor
       // decided is to read it from the state the editor actually uses.
-      cm: { indentUnit: cmLanguage.indentUnit },
+      // CodeMirror's indentation facet (indentation is detected per file, see
+      // lib/detectIndent) and its completion command, which a spec needs to
+      // open the popup without depending on WKWebView routing a keystroke into
+      // a contenteditable.
+      cm: {
+        indentUnit: cmLanguage.indentUnit,
+        startCompletion: cmAutocomplete.startCompletion,
+        // How far the grammar has actually got. A spec that asks "is what is
+        // on screen highlighted" by looking at the DOM is racing the parse;
+        // this is the state the highlight is derived FROM, so it answers
+        // deterministically.
+        syntaxTree: cmLanguage.syntaxTree,
+      },
+      // Code-intelligence grants (GH #174). In memory by design (a grant that
+      // survived a relaunch would be exactly the stickiness it refuses), so a
+      // spec has to arm a checkout through the store the chip writes to.
+      useCodeIntel: codeIntel.useCodeIntel,
+      // The store plus `grantKey`, because a grant is keyed by (checkout,
+      // server) and a spec must not hand-roll that key.
+      codeIntel,
+      // What each language server is doing: the phases a real server passes
+      // through go by far too fast to catch by racing one.
+      lspStatus,
+      // The jump trail behind Back / Forward.
+      navHistory,
+      // This page load's stamp. A spec cannot simulate the reload it guards
+      // against (that would end its own session), so it drives the sweep the
+      // way the next page does: reap everything NOT stamped with this.
+      lspPageId: pageSession.LSP_PAGE_ID,
     };
   })();
 }

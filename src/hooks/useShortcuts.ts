@@ -21,10 +21,12 @@
 //   ⇧⌘F      → find in files · ⇧⌘B → broadcast · ⌘, → settings
 //   ⇧⌘P      → command palette · ⌥⌘P → prompt palette
 //   Shortcuts cheat-sheet: icon-only, no keyboard binding
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import { usePrefs, APPEARANCE_DEFAULTS } from "@/store/prefs";
+import { useNavHistory } from "@/store/navHistory";
+import { trackDoubleShift, NO_TAPS, type TapState } from "@/lib/doubleTap";
 import { requestCloseTab, requestClosePaneTab } from "@/lib/closeTab";
 import { focusMainTab, focusPaneTab } from "@/lib/tabFocus";
 import { jumpToNextWaiting } from "@/lib/waitingAgents";
@@ -84,6 +86,10 @@ function navigatePane(
 }
 
 export function useShortcuts() {
+  // Double-tap state for the Shift gesture, in a ref so a re-render never
+  // loses a half-finished tap.
+  const doubleShift = useRef<TapState>(NO_TAPS);
+
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       // macOS: inside a focused terminal, Ctrl is the terminal's OWN modifier
@@ -93,6 +99,28 @@ export function useShortcuts() {
       // (not Cmd) is down and a terminal has focus, bail so the keystroke
       // reaches the shell/editor. App shortcuts still work via Cmd. (issue #10)
       if (IS_MAC && e.ctrlKey && !e.metaKey && inTermFocused()) return;
+
+      // Double-Shift → Search Everywhere (GH #174), JetBrains' gesture. Not a
+      // registry binding because the registry describes chords, and this is a
+      // double tap of a modifier with nothing else in it. Files always, and
+      // symbols where a checkout is armed — most people never turn code
+      // intelligence on, so a symbols-only dialog would be a dead key for
+      // them (see SearchEverywhereDialog).
+      {
+        const tap = trackDoubleShift(doubleShift.current, e.key, e.timeStamp || Date.now(), {
+          repeat: e.repeat,
+          otherModifier: e.metaKey || e.ctrlKey || e.altKey,
+        });
+        doubleShift.current = tap.state;
+        if (tap.fired) {
+          const id = useApp.getState().activeTaskId;
+          if (id) {
+            e.preventDefault();
+            useUI.getState().openSearchEverywhere(id);
+            return;
+          }
+        }
+      }
 
 
 
@@ -408,47 +436,49 @@ export function useShortcuts() {
         }
 
         // ⌘[ / ⌘] → task nav across AWAKE tasks.
-        case "task-prev":
-        case "task-next": {
-          // ...unless the active tab is a folder listing with somewhere to go
-          // (issue #151): then these are its back/forward, the binding every
-          // browser uses. Deliberately overloaded, like ⇧⌘D (split-pane-below
-          // / discard-file) — but the claim is CONDITIONAL: at either end of
-          // the trail goDirHistory declines and the key falls straight through
-          // to task switching below. So ⌘[ only ever diverts when it has real
-          // work, and browsing a folder never silently kills the app's
-          // most-used navigation key.
-          // Which listing (if any) may claim the key is decided by
-          // `dirHistoryTarget`, a pure function over DOM-focus facts — see
-          // its comment for why focus outranks activePaneId. Keeping the
-          // decision there rather than inline is what lets every branch be
-          // unit-tested instead of only the ones e2e happens to reach.
-          if (taskId) {
-            const active = document.activeElement as HTMLElement | null;
-            const splitEl = inSplitPane()
-              ? (active?.closest?.("[data-split-leaf]") as HTMLElement | null)
-              : null;
-            const candidateId = dirHistoryTarget(state, taskId, {
-              inBottom: inBottom(),
-              splitPaneId: splitEl?.getAttribute("data-pane-id") ?? null,
-              inMainPane: inMainPane(),
-              noFocus: !active || active === document.body,
-            });
-            if (candidateId
-                && goDirHistory(taskId, candidateId, cmd === "task-next" ? 1 : -1)) {
-              e.preventDefault();
-              return;
-            }
+        case "nav-back":
+        case "nav-forward": {
+          // Back and Forward. Two histories, one meaning, no fallback.
+          //
+          // This used to switch tasks, with the folder listing and then the
+          // jump trail claiming the key conditionally on top of that: three
+          // behaviours chosen by where focus happened to be, each with its own
+          // escape hatch so it "never silently stole" the chord. All of that
+          // machinery existed to protect task switching, which ⌥⌘↑ / ⌥⌘↓
+          // already do (and do inside a split, which this never did). Removing
+          // it removes the conditionals with it.
+          //
+          // The folder listing goes first because it is the more local
+          // history and the one you can see; `dirHistoryTarget` is a pure
+          // function over DOM-focus facts, so which listing may claim the key
+          // stays unit-testable instead of inline here.
+          if (!taskId) return;
+          const forward = cmd === "nav-forward";
+          const active = document.activeElement as HTMLElement | null;
+          const splitEl = inSplitPane()
+            ? (active?.closest?.("[data-split-leaf]") as HTMLElement | null)
+            : null;
+          const candidateId = dirHistoryTarget(state, taskId, {
+            inBottom: inBottom(),
+            splitPaneId: splitEl?.getAttribute("data-pane-id") ?? null,
+            inMainPane: inMainPane(),
+            noFocus: !active || active === document.body,
+          });
+          if (candidateId && goDirHistory(taskId, candidateId, forward ? 1 : -1)) {
+            e.preventDefault();
+            return;
           }
-          const task = awakeTasks();
-          if (task.length <= 1) return;
-          e.preventDefault();
-          const fwd = cmd === "task-next";
-          const idx = task.findIndex(w => w.id === taskId);
-          const nextIdx = idx < 0
-            ? (fwd ? 0 : task.length - 1)
-            : fwd ? (idx + 1) % task.length : (idx - 1 + task.length) % task.length;
-          state.setActiveTask(task[nextIdx].id);
+          // Then the jump trail. No pref check and no focus check: the trail
+          // only has entries because somebody followed a symbol, and having
+          // followed one, Back should work from wherever they ended up.
+          const history = useNavHistory.getState();
+          if (forward ? history.canForward() : history.canBack()) {
+            e.preventDefault();
+            void (async () => {
+              const nav = await import("@/lib/lsp/navigate");
+              await (forward ? nav.goForward(null) : nav.goBack(null));
+            })();
+          }
           return;
         }
 

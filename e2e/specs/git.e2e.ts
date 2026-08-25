@@ -271,7 +271,15 @@ describe("git history tab", () => {
   let taskId!: string;
   /** Subject of the commit this spec makes, unique per run so a leftover
    *  fixture commit from an earlier run can't satisfy the assertions. */
-  const subject = `e2e history probe ${Date.now()}`;
+  // Stamped, and so is the FILE. This spec used to commit a fixed
+  // `history-probe.txt` containing a fixed "probe\n": on the second run
+  // against a fixture repo that still had the first run's commit, `git add`
+  // staged nothing, `git commit` exited non-zero, and the whole describe fell
+  // over on an execSync throw. It also asserts the file is an ADD in this
+  // commit, which is only true while the name is new.
+  const stamp = Date.now();
+  const subject = `e2e history probe ${stamp}`;
+  const probe = `history-probe-${stamp}.txt`;
   /** The fixture's own branch, read rather than assumed: the picker lists it
    *  by name and `main` vs `master` depends on the seeding git's defaults. */
   const BRANCH = execSync(`git -C "${fixture}" branch --show-current`).toString().trim();
@@ -313,8 +321,8 @@ describe("git history tab", () => {
 
     // A commit made OUTSIDE the app: the tab must read the repo, not some
     // in-app cache of what termic itself committed.
-    writeFileSync(path.join(fixture, "history-probe.txt"), "probe\n");
-    execSync(`git -C "${fixture}" add history-probe.txt`);
+    writeFileSync(path.join(fixture, probe), "probe\n");
+    execSync(`git -C "${fixture}" add "${probe}"`);
     execSync(`git -C "${fixture}" commit -q -m "${subject}"`);
 
     await openGraph();
@@ -346,10 +354,13 @@ describe("git history tab", () => {
     await waitVisible('[data-testid="history-commit-detail"]');
     await browser.waitUntil(
       () =>
-        browser.execute(() =>
+        // `probe` is PASSED, never closed over: this callback is serialised
+        // and evaluated in the webview, where a Node-side variable does not
+        // exist ("Can't find variable: probe").
+        browser.execute((file) =>
           [...document.querySelectorAll('[data-testid="history-file-row"]')].some(
-            (e) => e.getAttribute("data-path") === "history-probe.txt",
-          ),
+            (e) => e.getAttribute("data-path") === file,
+          ), probe,
         ),
       { timeout: 10_000, timeoutMsg: "the commit's file list never appeared" },
     );
@@ -364,24 +375,24 @@ describe("git history tab", () => {
   it("opens a file's diff AT that commit, not the working tree", async () => {
     // Dirty the file in the working tree first: a commit diff that leaked the
     // worktree side would show this text.
-    writeFileSync(path.join(fixture, "history-probe.txt"), "probe\nWORKTREE ONLY\n");
+    writeFileSync(path.join(fixture, probe), "probe\nWORKTREE ONLY\n");
 
-    await browser.execute(() => {
+    await browser.execute((file) => {
       const f = [...document.querySelectorAll('[data-testid="history-file-row"]')].find(
-        (e) => e.getAttribute("data-path") === "history-probe.txt",
+        (e) => e.getAttribute("data-path") === file,
       ) as HTMLElement;
       f.click();
-    });
+    }, probe);
 
     // The tab carries the commit scope...
     const scope = await browser.waitUntil(
       async () =>
-        browser.execute((id) => {
+        browser.execute((id, file) => {
           const tab = (window.__termic!.useApp.getState().tabs[id] ?? []).find(
-            (t: any) => t.type === "diff" && t.path === "history-probe.txt",
+            (t: any) => t.type === "diff" && t.path === file,
           );
           return tab?.scope ?? null;
-        }, taskId),
+        }, taskId, probe),
       { timeout: 10_000, timeoutMsg: "no diff tab opened for the commit's file" },
     ) as unknown as string;
     expect(scope).toMatch(/^commit:[0-9a-f]{7,}$/);
@@ -390,16 +401,17 @@ describe("git history tab", () => {
     // an add in this commit (no left side), and the right side is the
     // committed content, never the dirtied working tree.
     const sides = await browser.execute(
-      (id, sc) => window.__termic!.ipc.taskFileDiffSides(id, "history-probe.txt", sc),
+      (id, sc, file) => window.__termic!.ipc.taskFileDiffSides(id, file, sc),
       taskId,
       scope,
+      probe,
     );
     expect(sides.original_exists).toBe(false);
     expect(sides.modified).toBe("probe\n");
     expect(sides.modified).not.toContain("WORKTREE ONLY");
 
     // Restore the working tree for the specs that follow.
-    writeFileSync(path.join(fixture, "history-probe.txt"), "probe\n");
+    writeFileSync(path.join(fixture, probe), "probe\n");
   });
 
   it("keeps the review affordances off a historical diff", async () => {

@@ -14,6 +14,75 @@
   - A component that stays MOUNTED while off screen (every visited task, every open tab) must gate that listener on an app-wide claim, not "am I laid out". Several instances answer the latter yes at once, and capture + `stopPropagation` means the loser doesn't just misfire, it eats the chord from whoever should have had it. Store state can't finish the job either: it doesn't model the bottom split, the right panel, or a modal on top. See the ⌘F bullet in [gotchas.md](gotchas.md#reactzustand-traps).
 - **Help modal** (`ShortcutsHelpDialog`, triggered by `open-shortcuts`): read-only, grouped by `GROUP_ORDER`. Edit button jumps to Settings → Shortcuts.
 
+## Code navigation keys
+
+The five editor jumps (`go-to-definition` F12, `find-usages` ⇧F12,
+`go-to-implementation` ⌥⇧B, `go-to-type-definition` ⌥⇧T, `file-structure` ⌘F12)
+are ordinary `SHORTCUT_DEFS` entries, so they appear in the help sheet and in
+Settings → Shortcuts like anything else. They were five literal key strings in
+a CodeMirror keymap: they worked for whoever already knew F12, could not be
+found, and could not be changed.
+
+They stay a **CodeMirror keymap** rather than moving to the window handler,
+because they must fire only while an editor has focus (F12 in a terminal
+belongs to the terminal). `bindingToCmKey` converts a `Binding` into
+CodeMirror's notation, and the keymap is built per editor mount, so a rebind
+takes effect on the next open rather than instantly.
+
+Two defaults are deliberately NOT IntelliJ's. ⌥⌘B (its go-to-implementation)
+already toggles the right sidebar here, and the editor's copy fired on top of
+it; the duplicate-chord test in `shortcuts.test.ts` is what surfaced that. ⌃⇧B
+cannot be expressed at all, because a `Binding` folds Ctrl into Cmd and it
+would read as ⌘⇧B on a Mac.
+
+**F12 needs no modifier**, which is why `isValidBinding` exempts F1-F20: a
+function key types nothing, so it cannot swallow input.
+
+They live in their own **Code navigation** group, named after the feature and
+therefore after the type-checking switch (`groupLabel` in
+`ShortcutsHelpDialog`). Back / Forward stay in Navigation: they walk a folder
+listing's trail as well as the symbol trail, so filing them here would describe
+half of what they do.
+
+## Shortcuts that cannot be rebound
+
+`FIXED_SHORTCUTS` is a small separate list for gestures that are not a chord.
+Double-Shift (Search everywhere) is the only entry today; it is handled in
+`useShortcuts` through `lib/doubleTap.ts`.
+
+They are deliberately NOT in `SHORTCUT_DEFS`: everything there has a `Binding`,
+and the bindings map, the conflict check, the Settings recorder and the
+localStorage migration all assume one. A def without a binding would need a
+special case in each.
+
+Both surfaces render them read-only, with their keys spelled out literally and
+a word where the recorder would be ("Double tap"). Shown rather than hidden,
+because a reader looking for "how do I open Search everywhere" reads its
+absence as the app not having it.
+
+## Back and Forward (⌘[ / ⌘])
+
+One chord, one idea: go back to where you just were. It used to mean three
+things chosen by where focus happened to be (switch task, walk a folder
+listing's trail, retrace a symbol jump), with the two histories claiming it
+conditionally on top of task switching and each carrying an escape hatch so it
+"never silently stole" the key.
+
+All of that machinery existed to protect task switching, which ⌥⌘↑ / ⌥⌘↓
+already do and do inside a split too (tabs have ⇧⌘[ / ⇧⌘]). Removing it removed
+the conditionals with it: the handler is now the folder listing if it has
+somewhere to go, else the symbol jump trail, else nothing. A key that quietly
+changes which task you are looking at once a history runs out is how people
+lose their place.
+
+The listing goes first because it is the more local history and the one you can
+see. `dirHistoryTarget` (pure, unit-tested) decides which listing may claim it
+from DOM-focus facts, rather than that logic living inline in the handler.
+
+The ids are `nav-back` / `nav-forward`. They were `task-prev` / `task-next`, and
+before that `workspace-prev` / `workspace-next`; `lib/lsMigration.ts` carries a
+user's rebind across both renames.
+
 ## Glyphs
 
 `bindingGlyphs(b)` returns `["⌥","⇧","⌘", key]`. Help modal uses raw glyphs (⌘ ⌥ ⇧); settings editor uses `glyphLabel` (Cmd/Ctrl, Option/Alt). `isValidBinding` requires Cmd/Ctrl or Option to prevent swallowing normal typing. The top-bar command-palette button (docs/ui.md) builds its tooltip the same way, so a rebind retitles it.

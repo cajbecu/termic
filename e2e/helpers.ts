@@ -108,7 +108,28 @@ export interface TermicApi {
   useArchivingTasks: { getState: () => any };
   /** CodeMirror's indentation facet, for asserting what a file was detected
    *  as (lib/detectIndent). */
-  cm: { indentUnit: unknown };
+  cm: {
+    indentUnit: unknown;
+    startCompletion: (view: unknown) => boolean;
+    /** `syntaxTree(state)` — how far the grammar has actually parsed. A spec
+     *  that asks the DOM whether the screen is highlighted races the parse;
+     *  this is the state the highlight is derived from. */
+    syntaxTree: (state: unknown) => { length: number };
+  };
+  /** Code-intelligence grants (GH #174): which checkouts may run a language
+   *  server, and which tasks hold that grant open. Never persisted. */
+  useCodeIntel: { getState: () => any; setState: (p: any) => void };
+  /** The whole code-intel module: `useCodeIntel` plus `grantKey`, since a
+   *  grant is keyed by (checkout, server). */
+  codeIntel: { useCodeIntel: any; grantKey: (root: string, server: string) => string };
+  /** Live per-server phase (starting / indexing / ready / failed). */
+  lspStatus: { useLspStatus: any; statusKey: (root: string, server: string) => string };
+  /** The jump trail behind Back / Forward. */
+  navHistory: { useNavHistory: any };
+  /** This page load's stamp, which every server it starts carries. A reload
+   *  cannot be simulated from inside a spec, so the reap is driven with a
+   *  DIFFERENT id, which is exactly what the next page load would send. */
+  lspPageId: string;
 }
 
 declare global {

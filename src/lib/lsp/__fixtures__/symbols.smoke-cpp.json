@@ -1,0 +1,68 @@
+{
+ "server": "clangd",
+ "language": "cpp",
+ "query": "Store",
+ "definedIn": "src/models.h",
+ "symbols": [
+  {
+   "name": "Store",
+   "kind": 5,
+   "file": "src/models.h",
+   "line": 5
+  },
+  {
+   "name": "StoreAdmin",
+   "kind": 5,
+   "file": "src/models.h",
+   "line": 9
+  },
+  {
+   "name": "StoreByID",
+   "kind": 12,
+   "file": "src/models.cpp",
+   "line": 3
+  },
+  {
+   "name": "store",
+   "kind": 8,
+   "file": "src/models.h",
+   "line": 10
+  },
+  {
+   "name": "atomic_store",
+   "kind": 12,
+   "file": "file:///Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c%2B%2B/v1/__memory/shared_ptr.h",
+   "line": 1515
+  },
+  {
+   "name": "atomic_store",
+   "kind": 12,
+   "file": "file:///Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c%2B%2B/v1/__atomic/atomic.h",
+   "line": 482
+  },
+  {
+   "name": "atomic_store",
+   "kind": 12,
+   "file": "file:///Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c%2B%2B/v1/__atomic/atomic.h",
+   "line": 487
+  },
+  {
+   "name": "atomic_store_explicit",
+   "kind": 12,
+   "file": "file:///Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c%2B%2B/v1/__atomic/atomic.h",
+   "line": 502
+  },
+  {
+   "name": "atomic_store_explicit",
+   "kind": 12,
+   "file": "file:///Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c%2B%2B/v1/__atomic/atomic.h",
+   "line": 495
+  },
+  {
+   "name": "atomic_store_explicit",
+   "kind": 12,
+   "file": "file:///Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/c%2B%2B/v1/__memory/shared_ptr.h",
+   "line": 1523
+  }
+ ]
+}

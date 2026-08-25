@@ -41,9 +41,15 @@ const FORBIDDEN = [
   "@codemirror/lang-",
   "@codemirror/legacy-modes",
   "codemirror-lang-",
+  // Code intelligence (GH #174) is off by default and most users never arm it,
+  // so its client, its LSP types and everything they pull in must be behind a
+  // dynamic import. The chip that OFFERS it sits in the main chunk, so this is
+  // the same shape as the syntax palette: the affordance is cheap, the
+  // machinery is fetched only when it is used.
+  "@codemirror/lsp-client",
 ];
 /** Our own modules that exist to pull the forbidden packages in. */
-const FORBIDDEN_LOCAL = ["lib/languageExts"];
+const FORBIDDEN_LOCAL = ["lib/languageExts", "lib/lsp/host", "lib/lsp/editorExtension"];
 
 const EXTS = [".ts", ".tsx", ".js", ".jsx"];
 

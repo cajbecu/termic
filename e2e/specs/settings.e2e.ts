@@ -172,6 +172,174 @@ describe("settings rail", () => {
     ["cli", "CLI & MCP", "Enable CLI"],
   ];
 
+  describe("choosing a language server", () => {
+    // The Django lesson made concrete: the fix for a server answering badly is
+    // a DIFFERENT server, and until now the resolution order was ours alone.
+    // This drives the picker the way a person does, and asserts the two things
+    // that make it real: the choice is remembered, and it reaches the code
+    // that resolves a binary.
+    const openServers = async () => {
+      // This describe can run first, so the shell and the bridge are not
+      // somebody else's precondition.
+      await waitForAppShell();
+      await requireTermicApi();
+      await browser.execute(() => window.__termic!.useApp.getState().openSettings("appearance"));
+      // The tab control, not a label from one particular tab: Appearance
+      // remembers which sub-tab was last open, so waiting for "Terminal font"
+      // waits for a tab this page may not be showing.
+      await waitVisible('[data-appearance-tab="editor"]');
+      await browser.execute(() =>
+        (document.querySelector('[data-appearance-tab="editor"]') as HTMLElement).click());
+      await waitVisible('[data-testid="code-intel-settings"]');
+      // TOGGLE, so clicking blindly closes it for the case that follows. The
+      // list is collapsed by default and stays open once expanded, so this
+      // clicks only when the catalog is not already on screen.
+      const listed = async () => await browser.execute(() =>
+        !!document.querySelector('[data-testid="lsp-catalog-python"]')) as boolean;
+      if (!await listed()) {
+        await browser.execute(() => {
+          const el = document.querySelector('[data-testid="lsp-servers-toggle"]') as HTMLElement;
+          el?.click();
+        });
+      }
+      await waitVisible('[data-testid="lsp-catalog-python"]');
+    };
+
+    const chosen = () => browser.execute(() =>
+      window.__termic!.usePrefs.getState().codeIntelServers) as Promise<Record<string, string>>;
+
+    after(async () => {
+      await browser.execute(() =>
+        window.__termic!.usePrefs.getState().setCodeIntelServer("python", null));
+    });
+
+    it("starts on Automatic, which is termic's own order", async () => {
+      await openServers();
+      expect(await chosen()).toEqual({});
+      const autoChecked = await browser.execute(() =>
+        (document.querySelector('[data-testid="lsp-pick-python-auto"]') as HTMLInputElement)
+          ?.checked);
+      expect(autoChecked).toBe(true);
+    });
+
+    it("remembers a pick, and the resolver is told about it", async () => {
+      await openServers();
+      await browser.execute(() =>
+        (document.querySelector('[data-testid="lsp-pick-python-ty"]') as HTMLElement).click());
+      await browser.waitUntil(async () => (await chosen()).python === "ty", {
+        timeout: 5_000, timeoutMsg: "the pick was not remembered",
+      });
+
+      // The half that matters: what the app asks Rust for. `lsp_offer`
+      // answers about the process that would ACTUALLY start, so a pick that
+      // never reached it would leave the chip naming one server while another
+      // ran (rule 1 in docs/lsp.md).
+      const offered = await browser.execute(async () =>
+        await window.__termic!.invoke("lsp_offer", {
+          root: window.__termic!.useApp.getState().projects[0]?.root_path,
+          language: "python",
+          preferred: "ty",
+        })) as { exe: string | null };
+      // Only assert the shape: whether ty is installed is this machine's
+      // business, and a spec that needs it installed is a spec that fails on
+      // somebody else's laptop.
+      expect(offered).toHaveProperty("exe");
+    });
+
+    it("goes back to Automatic", async () => {
+      await openServers();
+      await browser.execute(() =>
+        (document.querySelector('[data-testid="lsp-pick-python-auto"]') as HTMLElement).click());
+      await browser.waitUntil(async () => (await chosen()).python === undefined, {
+        timeout: 5_000, timeoutMsg: "clearing the pick did not stick",
+      });
+    });
+
+    it("runs a command of your own, ahead of everything termic ships", async () => {
+      // The escape hatch: a server we do not ship (pyright, jedi, a wrapper
+      // script). It is the reason the catalog can stay a closed set.
+      await openServers();
+      // A REAL focus/blur. React maps onBlur to `focusout`, so a synthetic
+      // "blur" event reaches nothing; the field commits on blur rather than
+      // per keystroke because each write stops the running server.
+      await browser.execute(() => {
+        const el = document.querySelector('[data-testid="lsp-command-python"]') as HTMLInputElement;
+        el.focus();
+        el.value = "pyright-langserver --stdio";
+        el.blur();
+      });
+      await browser.waitUntil(async () => {
+        const cmds = await browser.execute(() =>
+          window.__termic!.usePrefs.getState().codeIntelCommands) as Record<string, string>;
+        return cmds.python === "pyright-langserver --stdio";
+      }, { timeout: 5_000, timeoutMsg: "the command was not remembered" });
+
+      // And it reaches resolution: lsp_offer answers about the process that
+      // would actually start, so the command has to come back as the exe.
+      const offered = await browser.execute(async () =>
+        await window.__termic!.invoke("lsp_offer", {
+          root: window.__termic!.useApp.getState().projects[0]?.root_path,
+          language: "python",
+          custom: "/usr/bin/true --stdio",
+        })) as { exe: string | null };
+      expect(offered.exe).toBe("/usr/bin/true");
+
+      // Clearing it goes back to the servers above.
+      await browser.execute(() => {
+        const el = document.querySelector('[data-testid="lsp-command-python"]') as HTMLInputElement;
+        el.focus();
+        el.value = "";
+        el.blur();
+      });
+      await browser.waitUntil(async () => {
+        const cmds = await browser.execute(() =>
+          window.__termic!.usePrefs.getState().codeIntelCommands) as Record<string, string>;
+        return cmds.python === undefined;
+      }, { timeout: 5_000, timeoutMsg: "clearing the command did not stick" });
+    });
+
+    it("lets a project override what the machine is set to", async () => {
+      // "This repo needs pyright" is a narrower statement than "on this
+      // machine I like zuban", so it wins. Driven through the IPC rather than
+      // the Repository page's form, which is a separate surface with its own
+      // debounce: what this asserts is the precedence, not the form.
+      const project = await browser.execute(() =>
+        window.__termic!.useApp.getState().projects[0]) as any;
+      await browser.execute(async (p) => {
+        await window.__termic!.ipc.projectUpdate({ ...p, code_intel_servers: { python: "ty" } });
+        await window.__termic!.useApp.getState().loadAll();
+      }, project);
+
+      await browser.execute(() =>
+        window.__termic!.usePrefs.getState().setCodeIntelServer("python", "zuban"));
+      const stored = await browser.execute(() =>
+        window.__termic!.useApp.getState().projects[0]?.code_intel_servers) as Record<string, string>;
+      expect(stored.python).toBe("ty");
+      // The precedence itself is unit-tested (`serverChoice.test.ts`), which
+      // is where it belongs: it is a pure function over these two records, and
+      // driving it from here would test the same thing through a window.
+      const machine = await browser.execute(() =>
+        window.__termic!.usePrefs.getState().codeIntelServers) as Record<string, string>;
+      expect(machine.python).toBe("zuban");
+
+      await browser.execute(async (p) => {
+        await window.__termic!.ipc.projectUpdate({ ...p, code_intel_servers: {} });
+        await window.__termic!.useApp.getState().loadAll();
+      }, project);
+      await browser.execute(() =>
+        window.__termic!.usePrefs.getState().setCodeIntelServer("python", null));
+    });
+
+    it("offers no choice for a language with only one server", async () => {
+      // A radio group of one asks the reader to decide something already
+      // decided. Rust and Go have exactly one server each.
+      await openServers();
+      const radios = await browser.execute(() =>
+        document.querySelectorAll('[data-testid="lsp-catalog-rust"] input[type="radio"]').length);
+      expect(radios).toBe(0);
+    });
+  });
+
   it("lists every page in band order", async () => {
     await waitForAppShell();
     await requireTermicApi();

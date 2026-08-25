@@ -14,13 +14,15 @@ import { EditorView, ViewPlugin, keymap, tooltips } from "@codemirror/view";
 import { indentWithTab } from "@codemirror/commands";
 import { basicSetup } from "codemirror";
 import { search } from "@codemirror/search";
-import { lintGutter } from "@codemirror/lint";
+import { lintGutter, setDiagnostics } from "@codemirror/lint";
 import { indentUnit } from "@codemirror/language";
 import { taskFileRead, fileReadExternal, taskFileWrite, scratchRead, scratchWrite, scratchSetMeta } from "@/lib/ipc";
 import { langForId, langForPath } from "@/lib/languageExts";
 import { PLAIN_TEXT, effectiveLanguageId, normalizeLanguageId } from "@/lib/languages";
 import { detectSyntaxFromContent } from "@/lib/detectSyntax";
 import { detectIndent, type IndentStyle } from "@/lib/detectIndent";
+import { useCodeIntel, checkoutRoot, grantKey } from "@/store/codeIntel";
+import { lspServerFor } from "@/lib/lsp/languages";
 import { attachHiddenScrollRestore } from "@/lib/hiddenScrollRestore";
 import { reviewCommentsExtension, dispatchSelectionComment } from "./reviewCommentsExt";
 import { inlineBlameExtension, invalidateBlame, refreshBlame, markBlameStale } from "./inlineBlameExt";
@@ -31,6 +33,8 @@ import { usePrefs, resolveTheme } from "@/store/prefs";
 import { resolveEditorTheme, editorSurfaceTheme } from "@/lib/editorTheme";
 import { deriveScratchTitle } from "@/lib/scratchTitle";
 import { createLangSwitch } from "@/lib/langSwitch";
+import { forceParsing } from "@codemirror/language";
+import { navHint } from "@/lib/lsp/navHint";
 import { gotoLocation as revealLine } from "@/lib/gotoLocation";
 
 /** How long after the last keystroke a scratchpad's buffer is flushed to the
@@ -164,6 +168,15 @@ export function EditorPane({ task, tab, active, onContent }: {
   // content, and a reload (or a preview tab recycling onto another file)
   // re-reads it.
   const indentCompRef = useRef(new Compartment());
+  // Code intelligence (GH #174) gets the same treatment as blame: its own
+  // compartment, so arming a task reconfigures in place instead of rebuilding
+  // the view, and with the feature off the extension is never constructed —
+  // no client, no server, nothing imported.
+  const lspCompRef = useRef(new Compartment());
+  // Drops this editor's hold on the shared server. The LAST editor to release
+  // a checkout's server is what starts its idle reap, so failing to call this
+  // leaks a process holding gigabytes.
+  const lspReleaseRef = useRef<(() => void) | null>(null);
   // Blame lives in its own compartment so the pref (and the palette's toggle)
   // can switch it on and off without rebuilding the view. With it off the
   // extension is not constructed at all, so nothing is fetched, no state
@@ -261,6 +274,19 @@ export function EditorPane({ task, tab, active, onContent }: {
     // next file's content.
     setErr(null);
     setLoading(true);
+    // Where the time goes when a file opens, behind localStorage.editorDebug
+    // === "1" (same convention as ptyDebug). Every stage of the open is
+    // awaited before the view exists, so a window where the TEXT is on screen
+    // unstyled should be impossible; when someone sees one, this says which
+    // stage was actually slow instead of inviting a guess.
+    const openedAt = performance.now();
+    const elog = (stage: string) => {
+      try {
+        if (localStorage.getItem("editorDebug") !== "1") return;
+        // eslint-disable-next-line no-console
+        console.log(`[editor] ${Math.round(performance.now() - openedAt)}ms ${stage}`);
+      } catch { /* private mode */ }
+    };
     const langIsCurrent = langSwitchRef.current.claim();
     (async () => {
       try {
@@ -280,7 +306,9 @@ export function EditorPane({ task, tab, active, onContent }: {
             ? langForPath(tab.path) : Promise.resolve(null),
         ]);
         if (!alive || !hostRef.current) return;
+        elog(`read + grammar (${content.length} chars, ${byPath?.id ?? "no path match"})`);
         const resolved = await resolveSyntax(tab, content, byPath);
+        elog(`syntax resolved: ${resolved.id}${resolved.ext ? "" : " (NO GRAMMAR)"}`);
         // A "Set syntax" pick made while the grammar was loading owns the
         // compartment now; this one is stale and must not land on top of it.
         if (!alive || !hostRef.current || !langIsCurrent()) return;
@@ -480,6 +508,7 @@ export function EditorPane({ task, tab, active, onContent }: {
               // compartment so a reload can re-detect without rebuilding the
               // view. See lib/detectIndent.
               indentCompRef.current.of(indentExtension(detectIndent(content))),
+              lspCompRef.current.of([]),
               EditorView.updateListener.of(u => {
                 if (u.docChanged) {
                   // A programmatic reload (file changed on disk) carries the
@@ -493,6 +522,12 @@ export function EditorPane({ task, tab, active, onContent }: {
               }),
               blameCompRef.current.of(buildBlame(blameOnRef.current ?? false)),
               langCompRef.current.of(lang ? [lang] : []),
+              // ⌘-click always answers, even with no server running: it
+              // offers to turn code intelligence on for a language something
+              // can serve, and says so plainly for one nothing can. Silence
+              // was the old behaviour and it reads as a broken editor.
+              // Main-chunk safe by construction (see lib/lsp/navHint.ts).
+              navHint(task.id, () => langIdRef.current ?? resolved.id),
               themeCompRef.current.of(
                 buildTheme(editorFontSize, codeLigatures, editorThemeId),
               ),
@@ -501,6 +536,24 @@ export function EditorPane({ task, tab, active, onContent }: {
           parent: hostRef.current,
         });
         viewRef.current = view;
+        elog("view created");
+        // The first frame that actually carries a highlight token. If this is
+        // hundreds of ms after "view created", the grammar is in place and
+        // CodeMirror is still parsing; if the gap is zero, the flash someone
+        // reported is not the editor at all.
+        if (localStorage.getItem("editorDebug") === "1") {
+          const started = performance.now();
+          const tick = () => {
+            if (!viewRef.current) return;
+            if (view.dom.querySelector('[class*="tok-"], .cm-line span')) {
+              elog(`first highlighted token (+${Math.round(performance.now() - started)}ms after view)`);
+              return;
+            }
+            if (performance.now() - started > 5000) return;
+            setTimeout(tick, 8);
+          };
+          tick();
+        }
         // E2E-only: expose the CodeMirror view on its DOM node so the
         // WebdriverIO suite can drive real edits/saves through the editor's
         // own API (synthetic key/text events don't route to a contenteditable
@@ -527,6 +580,26 @@ export function EditorPane({ task, tab, active, onContent }: {
           revealLine(view, tab.revealAt.line, tab.revealAt.col);
           useApp.getState().consumeReveal(task.id, tab.id);
         }
+        // Colour what is ON SCREEN before handing the editor over.
+        //
+        // CodeMirror parses from the START of the document, and highlighting
+        // needs the tree. Open at the top and the first paint is coloured;
+        // open DEEP (a restored scroll position, or a go-to-definition landing
+        // at line 2300) and the viewport is a thousand lines past anything
+        // parsed, so the text paints plain and colours in only when the
+        // background parse catches up. Measured on a 2400-line Python file:
+        // text at 31ms, first coloured token at 973ms. That is the "white text
+        // for half a second" everybody sees and nobody could place, and it
+        // never reproduces at the top of a file, which is where anyone
+        // debugging it naturally looks.
+        //
+        // `forceParsing` runs that parse synchronously up to the end of the
+        // viewport, capped. The cap is what keeps this honest: a file too big
+        // to parse in the budget falls back to exactly the old behaviour
+        // rather than blocking the open. 60ms is under the frame budget this
+        // repo holds itself to for an editor open, and covers a few thousand
+        // lines of any grammar measured here.
+        forceParsing(view, view.viewport.to, 60);
       } catch (e) {
         if (!alive) return;
         const msg = String(e);
@@ -657,11 +730,8 @@ export function EditorPane({ task, tab, active, onContent }: {
     const view = viewRef.current;
     if (!view) return;
     // A timer, not requestAnimationFrame: WebKit freezes rAF while the window
-    // is occluded, so a tab that becomes active in the background — a
-    // `termic://` deep link, a CLI-opened file, an agent's jump — would never
-    // get focus, and the editor would still be inert when you came back to the
-    // window. Same reasoning as lib/tabFocus.ts (0e66f79). Cleared on the way
-    // out so it cannot fire into a destroyed view.
+    // is occluded, so a tab that became active in the background would still
+    // be unfocused when you came back to it (lib/tabFocus.ts, 0e66f79).
     const timer = window.setTimeout(() => view.focus(), 0);
     return () => window.clearTimeout(timer);
   }, [active]);
@@ -696,11 +766,85 @@ export function EditorPane({ task, tab, active, onContent }: {
     v.dispatch({ effects: blameCompRef.current.reconfigure(buildBlame(inlineBlame)) });
   }, [inlineBlame, buildBlame]);
 
+  // What this buffer is highlighted as, and the one place a language is
+  // decided (a manual Set-syntax pick beats the derived answer). Declared
+  // above the code-intelligence effect, which reads it.
+  const syntaxId = effectiveLanguageId(tab);
+
+  // ── code intelligence (GH #174) ──────────────────────────────────────────
+  //
+  // Three things have to be true before a server exists: the feature is
+  // OFFERED (app-wide pref, off by default), this task's CHECKOUT is armed
+  // (the grant, which is where the memory cost is actually agreed to), and the
+  // buffer is a language something can answer for. A pad is excluded outright:
+  // it has no path, so it has no URI, and a language server has nothing useful
+  // to say about a note.
+  const codeIntelOffered = usePrefs(s => s.codeIntelligence);
+  const project = useApp(s => s.projects.find(p => p.id === task.project_id));
+  const navRoot = checkoutRoot(task, project);
+  // Per checkout AND per language: a repo with Python and JavaScript in it is
+  // two servers and two decisions, so arming one must not start the other.
+  const navServer = lspServerFor(syntaxId);
+  const navArmed = useCodeIntel(s =>
+    (navServer ? s.grants[grantKey(navRoot, navServer)]?.length ?? 0 : 0) > 0);
+  const navOn = codeIntelOffered && navArmed && !isScratch;
+  // The URI the server knows this buffer by. A task file is task-relative and
+  // has to be made absolute; an EXTERNAL file (GH #240 — a definition followed
+  // into site-packages or the module cache) is already absolute and is NOT
+  // under the task at all, which is the whole point of that tab type. Getting
+  // this wrong would tell the server about a path that does not exist and it
+  // would answer about nothing.
+  const navAbsPath = tab.type === "external" ? tab.path : `${task.path}/${filePath}`;
+  useEffect(() => {
+    // `loading` is in the deps so this runs again once the view exists: the
+    // mount effect is async (file read + grammar chunk), so on a cold open
+    // this fires first with no view to reconfigure.
+    const v = viewRef.current;
+    if (!v) return;
+    let alive = true;
+    const detach = () => {
+      lspReleaseRef.current?.();
+      lspReleaseRef.current = null;
+    };
+    if (!navOn) {
+      detach();
+      // Dropping the extension leaves the LINT state field behind, so the last
+      // squiggles a now-dead server reported would stay on screen, pointing at
+      // code nobody is checking any more.
+      // Both in ONE transaction, with the effects MERGED: setDiagnostics
+      // carries its own effect, and overwriting `effects` with the
+      // reconfigure would silently drop the clear.
+      const clear = setDiagnostics(v.state, []);
+      const clearEffects = clear.effects
+        ? (Array.isArray(clear.effects) ? clear.effects : [clear.effects])
+        : [];
+      v.dispatch({ ...clear, effects: [...clearEffects, lspCompRef.current.reconfigure([])] });
+      return;
+    }
+    // The whole subsystem is behind this import, so an unarmed app never
+    // fetches the client, the LSP types, or anything they pull in.
+    (async () => {
+      const { codeIntelExtension } = await import("@/lib/lsp/editorExtension");
+      const built = await codeIntelExtension({
+        root: navRoot,
+        absPath: navAbsPath,
+        registryName: syntaxId,
+      });
+      if (!alive || !built) { built?.release(); return; }
+      const view = viewRef.current;
+      if (!view) { built.release(); return; }
+      detach();
+      lspReleaseRef.current = built.release;
+      view.dispatch({ effects: lspCompRef.current.reconfigure(built.extension) });
+    })();
+    return () => { alive = false; detach(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navOn, navRoot, navAbsPath, loading, syntaxId]);
+
   // "Set syntax" (breadcrumb button / command palette) writes `tab.syntax`;
   // the content sniff writes `tab.syntaxAuto`. Either way the language
   // compartment is reconfigured in place — no view rebuild, so the cursor,
   // undo history and scroll position survive changing a file's syntax.
-  const syntaxId = effectiveLanguageId(tab);
   useEffect(() => {
     const v = viewRef.current;
     if (!v || langIdRef.current === syntaxId) return;

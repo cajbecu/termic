@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { archiveTask, dismissOverlays, ensureActiveTask, openTask, requireTermicApi, snap, waitForAppShell } from "../helpers";
 
@@ -505,12 +505,29 @@ describe("file tree", () => {
   //   - a failure on a settle reload keeps the listing the tree already had,
   //     instead of dropping the key and rendering a spinner with nothing coming,
   //   - a failure on first expand says so and offers a retry.
+  /**
+   * Make a leftover chmod-000 directory writable again, then remove it.
+   *
+   * These two cases restore the mode in a `finally`, which covers a failed
+   * assertion but NOT a killed process: interrupt a run here and the fixture
+   * repo keeps a directory nobody can read or delete. Every later run then
+   * fails somewhere else entirely, in another spec's teardown, on
+   * `git clean -fd: permission denied` — a leftover that costs half an hour to
+   * connect back to this test.
+   */
+  const resetUnreadable = (dir: string) => {
+    if (!existsSync(dir)) return;
+    try { execSync(`chmod -R u+rwx "${dir}"`); } catch { /* already readable */ }
+    rmSync(dir, { recursive: true, force: true });
+  };
+
   it("keeps a folder's contents when a settle reload cannot read it", async () => {
     await waitForAppShell();
     await requireTermicApi();
     taskId = taskId ?? (await openTask("e2e-tree"));
 
     const dir = path.join(fixture, "e2e-unreadable");
+    resetUnreadable(dir);
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, "kid.txt"), "k\n");
     await browser.execute(
@@ -560,6 +577,7 @@ describe("file tree", () => {
     taskId = taskId ?? (await openTask("e2e-tree"));
 
     const dir = path.join(fixture, "e2e-denied");
+    resetUnreadable(dir);
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, "kid.txt"), "k\n");
     execSync(`chmod 000 "${dir}"`);

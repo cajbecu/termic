@@ -24,8 +24,8 @@ export type Binding = {
 export type ShortcutId =
   | "sidebar-prev"
   | "sidebar-next"
-  | "task-prev"
-  | "task-next"
+  | "nav-back"
+  | "nav-forward"
   | "task-prev-arrow"
   | "task-next-arrow"
   | "jump-next-waiting"
@@ -58,9 +58,15 @@ export type ShortcutId =
   | "zoom-reset"
   | "stage-file"
   | "discard-file"
-  | "add-selection-to-agent";
+  | "add-selection-to-agent"
+  | "go-to-definition"
+  | "find-usages"
+  | "go-to-implementation"
+  | "go-to-type-definition"
+  | "file-structure";
 
-export type ShortcutGroup = "Navigation" | "Tabs" | "Terminal" | "Git" | "General";
+export type ShortcutGroup =
+  | "Navigation" | "Code navigation" | "Tabs" | "Terminal" | "Git" | "General";
 
 export interface ShortcutDef {
   id: ShortcutId;
@@ -85,11 +91,42 @@ export const SHORTCUT_DEFS: ShortcutDef[] = [
     hint: "Task or expanded tab above", defaultBinding: B("ArrowUp", { alt: true }) },
   { id: "sidebar-next", group: "Navigation", label: "Next sidebar row",
     hint: "Task or expanded tab below", defaultBinding: B("ArrowDown", { alt: true }) },
-  { id: "task-prev", group: "Navigation", label: "Previous task",
-    hint: "In a folder listing with somewhere to go back to, this is back instead.",
+  // ⌘[ / ⌘] mean BACK and FORWARD, and nothing else.
+  //
+  // They used to switch tasks as well, with the folder listing and then the
+  // jump trail claiming them conditionally on top — three meanings for one
+  // chord, decided by where the focus happened to be. Switching tasks was the
+  // redundant one: ⌥⌘↑ / ⌥⌘↓ already do it (and do it in a split too), and
+  // tabs have ⇧⌘[ / ⇧⌘]. One key, one idea: go back to where I just was.
+  { id: "nav-back", group: "Navigation", label: "Back",
+    hint: "Where you came from: the previous symbol you jumped from, or the folder you were just in.",
     defaultBinding: B("[", { cmd: true }) },
-  { id: "task-next", group: "Navigation", label: "Next task",
-    hint: "In a folder listing with somewhere to go forward to, this is forward instead.",
+  // Code navigation (GH #174). These fire only while an editor has focus, and
+  // only on a checkout the reader has switched it on for; they are listed here
+  // like any other key, because a shortcut nobody can find is a feature nobody
+  // has. The defaults are IntelliJ's, which is where most of this app's users
+  // learned them.
+  { id: "go-to-definition", group: "Code navigation", label: "Go to definition",
+    hint: "In the editor. Lands on the source, not a stub; ⌘-click does the same.",
+    defaultBinding: B("F12") },
+  { id: "find-usages", group: "Code navigation", label: "Find usages",
+    hint: "In the editor. ⌘-clicking a definition asks the same question.",
+    defaultBinding: B("F12", { shift: true }) },
+  // NOT IntelliJ's ⌥⌘B and ⌃⇧B. ⌥⌘B already toggles the right sidebar here,
+  // and the editor's copy of it fired on top of that (this table's own
+  // duplicate-chord test is what surfaced it). ⌃⇧B cannot be expressed at all:
+  // a Binding folds Ctrl into Cmd, so on a Mac it would read as ⌘⇧B.
+  { id: "go-to-implementation", group: "Code navigation", label: "Go to implementation",
+    hint: "From an interface or an abstract method to what implements it.",
+    defaultBinding: B("b", { alt: true, shift: true }) },
+  { id: "go-to-type-definition", group: "Code navigation", label: "Go to type definition",
+    hint: "From a value to the type it has.",
+    defaultBinding: B("t", { alt: true, shift: true }) },
+  { id: "file-structure", group: "Code navigation", label: "File structure",
+    hint: "What is in this file, filterable, without scrolling it.",
+    defaultBinding: B("F12", { cmd: true }) },
+  { id: "nav-forward", group: "Navigation", label: "Forward",
+    hint: "Retrace a Back.",
     defaultBinding: B("]", { cmd: true }) },
   { id: "task-prev-arrow", group: "Navigation", label: "Pane up / previous task",
     hint: "With a horizontal split: focus the pane above. Otherwise: go to the previous task.",
@@ -204,7 +241,42 @@ export const SHORTCUT_DEFS: ShortcutDef[] = [
     defaultBinding: B("d", { cmd: true, shift: true }) },
 ];
 
-export const GROUP_ORDER: ShortcutGroup[] = ["Navigation", "Tabs", "Terminal", "Git", "General"];
+export const GROUP_ORDER: ShortcutGroup[] =
+  ["Navigation", "Code navigation", "Tabs", "Terminal", "Git", "General"];
+
+/**
+ * Shortcuts that exist, are worth finding, and cannot be rebound.
+ *
+ * Kept OUT of `SHORTCUT_DEFS` deliberately. Everything there is a `Binding`,
+ * and a Binding is one chord: the bindings map, the conflict check, the
+ * recorder in Settings and the localStorage migration all assume it. A def
+ * with no binding would have to be special-cased in each of them.
+ *
+ * So: a small separate list, rendered read-only in the help sheet and in
+ * Settings, with its keys spelled out rather than derived. Discoverability is
+ * the point; a gesture nobody can find is a feature nobody has.
+ */
+export interface FixedShortcut {
+  id: string;
+  group: ShortcutGroup;
+  label: string;
+  hint: string;
+  /** Exactly what is printed, in order. Not derived from a Binding. */
+  glyphs: string[];
+  /** Why it cannot be changed, shown where the recorder would be. */
+  fixedReason: string;
+}
+
+export const FIXED_SHORTCUTS: FixedShortcut[] = [
+  {
+    id: "search-everywhere",
+    group: "Code navigation",
+    label: "Search everywhere",
+    hint: "Files always; classes and functions too, once a checkout has code navigation on.",
+    glyphs: ["⇧", "⇧"],
+    fixedReason: "Double tap",
+  },
+];
 
 /** Groups of rebindable commands that intentionally share a binding and can
  *  NEVER fire at the same time, so the Shortcuts settings page must not flag
@@ -265,8 +337,24 @@ export function bindingFromEvent(e: KeyboardEvent, digitMode = false): Binding |
  *  Pure Shift+letter = capitals (normal typing) — always rejected. */
 export function isValidBinding(b: Binding): boolean {
   if (b.cmd || b.alt) return true;
+  // A function key types nothing, so it needs no modifier to be safe: F12 on
+  // its own is go-to-definition in every IDE this app's users come from.
+  if (/^F([1-9]|1[0-9]|20)$/.test(b.key)) return true;
   // Shift+punctuation (e.g. ⇧?) is a valid shortcut; Shift+letter is not.
   return b.shift && !/^[a-z0-9]$/i.test(b.key);
+}
+
+/**
+ * A binding, in CodeMirror's own key notation ("Mod-Alt-b").
+ *
+ * The code-navigation keys live in a CodeMirror keymap rather than the window
+ * handler, because they must only fire while an editor has focus, and CM
+ * spells its modifiers differently from us. `cmd` becomes `Mod-`, which is
+ * exactly our own Cmd/Ctrl fold.
+ */
+export function bindingToCmKey(b: Binding): string {
+  return [b.cmd && "Mod", b.alt && "Alt", b.shift && "Shift", b.key]
+    .filter(Boolean).join("-");
 }
 
 /** True on macOS. The handler folds Cmd≡Ctrl so shortcuts FIRE on every

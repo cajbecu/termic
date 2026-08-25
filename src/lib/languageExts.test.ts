@@ -74,11 +74,22 @@ describe("languageIdForPath", () => {
     expect(id("test/foo_test.exs")).toBe("Elixir");
   });
 
-  it("gives component templates the HTML grammar", () => {
-    expect(id("App.svelte")).toBe("HTML");
-    expect(id("page.astro")).toBe("HTML");
+  it("gives the component formats a real grammar where one exists", () => {
+    // These three each have a parser that knows the format. Svelte and Astro
+    // used to fall back to HTML here, which read the tags and left every line
+    // of actual code, `{#if}` blocks and Astro frontmatter alike, grey.
+    expect(id("App.vue")).toBe("Vue");
+    expect(id("App.svelte")).toBe("Svelte");
+    expect(id("page.astro")).toBe("Astro");
+    // JSX and TSX are the registry's, and are why React needs nothing here.
+    expect(id("App.jsx")).toBe("JSX");
+    expect(id("App.tsx")).toBe("TSX");
+  });
+
+  it("still falls back to HTML for the formats with no grammar at all", () => {
     expect(id("row.hbs")).toBe("HTML");
-    expect(id("App.vue")).toBe("Vue"); // upstream has a real one
+    expect(id("index.ejs")).toBe("HTML");
+    expect(id("page.njk")).toBe("HTML");
   });
 
   it("gives up rather than guessing", () => {

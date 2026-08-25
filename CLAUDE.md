@@ -132,6 +132,7 @@ Deeper references — read when working in that area:
 - [docs/sandbox.md](docs/sandbox.md) — sandbox-exec + CONNECT proxy, YOLO interaction, deny debugging
 - [docs/shortcuts.md](docs/shortcuts.md) — shortcut system architecture, adding shortcuts, glyph rendering
 - [docs/themes.md](docs/themes.md) — custom theme file format (`~/.config/termic/themes/*.json`), ui/terminal key reference
+- [docs/lsp.md](docs/lsp.md) — language servers: the rules a new one must obey, and `make lsp-smoke`
 - [docs/ui.md](docs/ui.md) — UI conventions, window chrome/drag, right-panel footer, settled detection
 - [docs/gotchas.md](docs/gotchas.md) — common bugs (encountered + fixed), React/Zustand traps
 - [docs/automation.md](docs/automation.md) — automation bridge, E2E testing (use the `e2e` skill, don't improvise)

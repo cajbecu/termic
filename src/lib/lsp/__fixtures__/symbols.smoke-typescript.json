@@ -1,0 +1,26 @@
+{
+ "server": "tsc",
+ "language": "typescript",
+ "query": "Store",
+ "definedIn": "src/models.ts",
+ "symbols": [
+  {
+   "name": "Store",
+   "kind": 5,
+   "file": "src/models.ts",
+   "line": 1
+  },
+  {
+   "name": "StoreAdmin",
+   "kind": 5,
+   "file": "src/models.ts",
+   "line": 5
+  },
+  {
+   "name": "describeStore",
+   "kind": 12,
+   "file": "src/uses.ts",
+   "line": 3
+  }
+ ]
+}

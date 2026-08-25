@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/store/app";
 import { taskSpotlightStatus } from "@/lib/ipc";
+import { reapOrphanedServers } from "@/lib/lsp/pageSession";
 import { installPointerEventsGuard } from "@/lib/pointerEventsGuard";
 import { initCliRpc } from "@/lib/cliRpc";
 import { initAgentStatePush } from "@/lib/cliAgentState";
@@ -81,6 +82,14 @@ export function App() {
     useApp.getState().refreshClis();
     // Kick off the update check + changelog fetch (idempotent).
     useUpdate.getState().init();
+
+    // Language servers left over from a PREVIOUS page load. A reload throws
+    // away the map that keeps one server per (checkout, language) while the
+    // processes it tracked keep running, unreachable, holding their index.
+    // Here rather than in the LSP code because the orphans exist whether or
+    // not this session ever arms anything, and `lib/lsp/host` is not allowed
+    // on the app-start path at all (lib/mainChunkGuard.test.ts).
+    void reapOrphanedServers();
 
     // Custom theme files: the first-paint cache already painted the active
     // one at module load — this fetch populates the picker list and

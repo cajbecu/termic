@@ -585,6 +585,84 @@ describe("code editor", () => {
 
     await snap("code-editor-hscroll.png");
   });
+  /** A file long enough that its end is far past anything CodeMirror parses
+   *  for the first screen. 2400 lines of Python measured at ~940ms of plain
+   *  text before this was fixed. */
+  const deepFile = () => {
+    const out: string[] = [];
+    for (let i = 0; i < 400; i++) {
+      out.push(`class Model${i}(Base):`);
+      out.push(`    name: str = 'm${i}'`);
+      out.push(`    def build(self, n: int) -> dict:`);
+      out.push(`        return {'id': n, 'name': self.name}`);
+      out.push("");
+      out.push("");
+    }
+    return out.join("\n") + "\n";
+  };
+
+  it("colours the text it shows, even opening deep in a long file", async () => {
+    // The bug this pins: CodeMirror parses from the START of the document, so
+    // a view that opens at line 2300 (a restored scroll position, a
+    // go-to-definition, a Find-in-Files hit) had its viewport a thousand lines
+    // past anything parsed. The text painted plain and coloured in only when
+    // the background parse caught up, which reads as the editor being broken
+    // for half a second. It never reproduces at the top of a file, which is
+    // where anyone debugging it looks first.
+    //
+    // Asserted as an INVARIANT, not a duration: at the first moment the
+    // document has text on screen, that text is already coloured. A threshold
+    // would be a timing test and would rot on a slower machine.
+    writeFileSync(path.join(fixture, "deep.py"), deepFile());
+    await browser.execute(
+      (id) => window.__termic!.useApp.getState().bumpFsRevision(id),
+      taskId,
+    );
+    await browser.execute((id) => {
+      window.__termic!.useApp.getState().openPreviewTab(id, {
+        type: "edit", path: "deep.py", title: "deep.py", revealAt: { line: 2300 },
+      });
+    }, taskId);
+    await waitVisible(`[data-task-id="${taskId}"] .cm-editor`);
+
+    // The parse, not the pixels. `syntaxTree(state).length` is how far the
+    // grammar has got, and the highlight is derived from it, so "the tree
+    // reaches the end of what is on screen" is the same statement as "what is
+    // on screen is coloured" without racing a repaint.
+    const measure = async () => await browser.execute((id) => {
+      const dom = document.querySelector(`[data-task-id="${id}"] .cm-editor`) as unknown as
+        { __cmView?: { state: unknown; viewport: { from: number; to: number } } } | null;
+      const view = dom?.__cmView;
+      if (!view) return null;
+      const tree = window.__termic!.cm.syntaxTree(view.state);
+      return { tree: tree.length, from: view.viewport.from, to: view.viewport.to };
+    }, taskId) as { tree: number; from: number; to: number } | null;
+
+    // WAIT for the parse to cover the viewport rather than sampling once.
+    // Parsing runs on a time budget (`forceParsing(view, viewport.to, 60)`),
+    // so a loaded machine can need a second slice: a one-shot read measured
+    // 3,001 characters against a 48,058-character viewport on a box running
+    // three e2e suites at once, and failed a feature that works. The timeout
+    // is what keeps this honest — a parse that never arrives still fails.
+    const covered = await browser.waitUntil(
+      async () => {
+        const m = await measure();
+        return m && m.tree >= m.from ? m : false;
+      },
+      { timeout: 15_000, timeoutMsg: "the parse never reached the visible text" },
+    ) as { tree: number; from: number; to: number };
+
+    // Really deep: without this the case would pass on a viewport at the top
+    // of the file, which is the one place the bug never happened.
+    expect(covered.from).toBeGreaterThan(10_000);
+    // And the parse reached what is on screen. Deliberately measured against
+    // the START of the viewport rather than its end: the last few lines can
+    // still be parsing, and a viewport grows by a line or two once tokens
+    // render and change the line heights. The difference that matters is
+    // 48,000 characters wide, not 200.
+    expect(covered.tree).toBeGreaterThanOrEqual(covered.from);
+  });
+
 });
 
 // The syntax theme is configured independently per app mode (dark / light):
@@ -1508,14 +1586,17 @@ describe("directory links", () => {
     }, taskId);
   });
 
-  it("hands Cmd+[ to task switching when focus is in the right panel", async () => {
-    // The other half of the conditional claim: a listing the user is not
-    // driving must not eat the key. Focus in the file tree (or any dialog /
-    // sidebar) means the keyboard belongs to that, so Cmd+[ has to reach the
-    // task switcher even though the main pane still shows a listing.
+  it("does nothing at all when focus is in the right panel", async () => {
+    // Cmd+[ means BACK, and nothing else. It used to switch tasks when no
+    // listing claimed it, which is why this case exists at all: focus in the
+    // file tree is not focus in the listing, so the listing must not walk, and
+    // there is no longer anything for the key to fall through TO. Tasks have
+    // Opt+Cmd+Up/Down, which also work inside a split; tabs have Shift+Cmd+[.
     const before = ((await activeTab()) as any).dirHistoryIndex as number;
     expect(before).toBeGreaterThan(0); // there IS a trail it could have walked
 
+    // A second task, so "did not switch" is a real assertion rather than a
+    // statement about there being nowhere to go.
     const second = await openTask("e2e-dirlinks-focus");
     await browser.waitUntil(
       () =>
@@ -1553,15 +1634,13 @@ describe("directory links", () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "[", metaKey: true, bubbles: true }));
     });
 
-    // Task switched, and the listing did NOT walk.
-    await browser.waitUntil(
-      () =>
-        browser.execute(
-          (id) => window.__termic!.useApp.getState().activeTaskId !== id,
-          taskId,
-        ),
-      { timeout: 10_000, timeoutMsg: "Cmd+[ was swallowed by a listing nobody was driving" },
-    );
+    // Give anything that WOULD happen a chance to happen: the task switch was
+    // asynchronous, so asserting immediately would pass against the old
+    // behaviour too and prove nothing.
+    await browser.pause(500);
+    expect(
+      await browser.execute(() => window.__termic!.useApp.getState().activeTaskId),
+    ).toBe(taskId);
     const listing = await browser.execute(
       (id) => (window.__termic!.useApp.getState().tabs[id] ?? []).find((t: any) => t.type === "dir"),
       taskId,
@@ -1572,12 +1651,11 @@ describe("directory links", () => {
     await browser.execute((id) => window.__termic!.useApp.getState().setActiveTask(id), taskId);
   });
 
-  it("falls through to task switching once the trail runs out", async () => {
-    // The whole point of the conditional claim: at the END of the trail the
-    // key must reach the task switcher rather than being swallowed.
-
-    // A second task to switch TO. It only counts as switchable once it has
-    // mounted and materialised its tabs, so wait for that before switching back.
+  it("stops at the end of the trail instead of switching task", async () => {
+    // The old fallback, now removed: every press walks the listing while it
+    // has history, and the one after that does nothing. A key that quietly
+    // changes what you are looking at once a history runs out is how people
+    // lose their place.
     const second = await openTask("e2e-dirlinks-2");
     await browser.waitUntil(
       () =>
@@ -1600,8 +1678,8 @@ describe("directory links", () => {
         );
       });
 
-    // Drain the trail: every press so far has somewhere to go, so the task
-    // must NOT change while the listing still has history behind it.
+    // Drain the trail. Every press has somewhere to go, and the task must not
+    // change on any of them.
     let steps = ((await activeTab()) as any).dirHistoryIndex as number;
     expect(steps).toBeGreaterThan(0);
     while (steps > 0) {
@@ -1616,15 +1694,27 @@ describe("directory links", () => {
       steps--;
     }
 
-    // Trail exhausted — this one falls through and switches task.
+    // Trail exhausted. One more press changes nothing: same task, same folder.
     await back();
+    await browser.pause(500);
+    expect(
+      await browser.execute(() => window.__termic!.useApp.getState().activeTaskId),
+    ).toBe(taskId);
+    expect(((await activeTab()) as any).dirHistoryIndex).toBe(0);
+
+    // And Opt+Cmd+Down, which is what switching tasks is FOR, still does.
+    await browser.execute(() => {
+      window.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "ArrowDown", metaKey: true, altKey: true, bubbles: true,
+      }));
+    });
     await browser.waitUntil(
       () =>
         browser.execute(
           (id) => window.__termic!.useApp.getState().activeTaskId !== id,
           taskId,
         ),
-      { timeout: 10_000, timeoutMsg: "Cmd+[ was swallowed instead of switching task" },
+      { timeout: 10_000, timeoutMsg: "Opt+Cmd+Down did not switch task either" },
     );
 
     await archiveTask(second);
@@ -2606,8 +2696,16 @@ describe("comment on an editor selection for the agent", () => {
     expect(await browser.execute(() =>
       document.querySelector('[data-testid="review-comments-pill"]')!.textContent))
       .toContain("2 pending comments");
+    // Radix opens on POINTERDOWN, so a bare .click() is not enough: this
+    // failed roughly one run in three with "the Send button never appeared",
+    // on a popover that opens fine by hand. Same sequence the project specs
+    // use for their Radix menus.
     await browser.execute(() => {
-      (document.querySelector('[data-testid="review-comments-pill"]') as HTMLElement).click();
+      const el = document.querySelector('[data-testid="review-comments-pill"]') as HTMLElement;
+      const opts = { bubbles: true, pointerType: "mouse", button: 0 } as any;
+      el.dispatchEvent(new PointerEvent("pointerdown", opts));
+      el.dispatchEvent(new PointerEvent("pointerup", opts));
+      el.click();
     });
     await waitFor('[data-testid="review-comments-send"]', "the Send button never appeared");
     await browser.execute(() => {

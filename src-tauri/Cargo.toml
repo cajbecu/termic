@@ -60,6 +60,14 @@ base64 = "0.22"
 # handler (native PDF preview). Already in the tree via tauri/url, so pinning
 # it direct doesn't change resolution.
 percent-encoding = "2"
+# Pinned language-server downloads (GH #174). All four are already in the tree
+# via tauri-plugin-updater, so pinning them direct does not change resolution.
+# reqwest for the fetch, sha2 to verify the pinned digest BEFORE anything is
+# executed, flate2 + tar to unpack the two archive shapes upstream publishes.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "charset", "http2"] }
+sha2 = "0.10"
+flate2 = "1"
+tar = "0.4"
 tauri-plugin-clipboard-manager = "2.3.2"
 # Format-preserving TOML, for writing our own table into the user's
 # codex config without disturbing their comments, ordering, or the rest

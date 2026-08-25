@@ -1,0 +1,19 @@
+{
+ "server": "rust-analyzer",
+ "language": "rust",
+ "query": "LspServer",
+ "symbols": [
+  {
+   "name": "LspServer",
+   "kind": 23,
+   "file": "src/lib.rs",
+   "line": 10254
+  },
+  {
+   "name": "LspServerInfo",
+   "kind": 23,
+   "file": "src/lib.rs",
+   "line": 11314
+  }
+ ]
+}

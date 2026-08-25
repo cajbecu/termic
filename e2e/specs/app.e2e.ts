@@ -92,6 +92,87 @@ describe("top-bar tooltips name their shortcut", () => {
 // P1: the command palette (⌘K). Cases: opens and lists commands; filtering
 // narrows the list; running a command performs its action and closes the
 // palette; Escape closes it.
+describe("keyboard shortcuts sheet", () => {
+  // The sheet is the only place a shortcut is discoverable, and it is
+  // data-driven from SHORTCUT_DEFS: a key implemented in a CodeMirror keymap
+  // and never registered there works for whoever already knew about it and
+  // for nobody else. That is exactly what the five code-navigation keys were.
+  const sheetText = async () => {
+    await browser.execute(() => window.__termic!.useUI.getState().openShortcutsHelp?.());
+    await waitVisible('input[placeholder*="Search shortcuts"]', 8_000);
+    return await browser.execute(() => {
+      const input = document.querySelector('input[placeholder*="Search shortcuts"]');
+      return (input?.closest('[role="dialog"]') as HTMLElement | null)?.innerText ?? "";
+    }) as string;
+  };
+
+  after(async () => {
+    await browser.execute(() => window.__termic!.useUI.getState().closeShortcutsHelp?.());
+  });
+
+  it("lists the code-navigation keys", async () => {
+    const text = await sheetText();
+    for (const label of [
+      "Go to definition", "Find usages", "Go to implementation",
+      "Go to type definition", "File structure",
+    ]) {
+      // The label in the message, since expect() here takes no second arg.
+      if (!text.includes(label)) throw new Error(`the sheet does not list "${label}"`);
+    }
+  });
+
+  it("lists Back and Forward, which is what ⌘[ and ⌘] now mean", async () => {
+    const text = await sheetText();
+    expect(text).toContain("Back");
+    expect(text).toContain("Forward");
+    // And NOT the task switching they used to do: that moved to ⌥⌘↑ / ⌥⌘↓
+    // permanently, and a sheet naming both would be describing two features.
+    expect(text).not.toContain("Previous task");
+  });
+
+  it("lists double-Shift, with no recorder and a reason", async () => {
+    // The gesture nobody guesses. It cannot be a Binding (a double tap is not
+    // a chord), so it is a read-only row rather than absent: a reader looking
+    // for "how do I open Search everywhere" finds it in the same list.
+    const text = await sheetText();
+    expect(text).toContain("Search everywhere");
+    const row = await browser.execute(() => {
+      const el = document.querySelector('[data-shortcut-id="search-everywhere"]') as HTMLElement;
+      return { text: el?.innerText ?? "", keys: el?.querySelectorAll("kbd").length ?? 0 };
+    }) as { text: string; keys: number };
+    // Two keycaps, both Shift, and the word that explains the missing button.
+    expect(row.keys).toBe(2);
+    expect(row.text).toContain("Double tap");
+  });
+
+  it("gives the code-navigation keys a section of their own", async () => {
+    // They were mixed into Navigation with tab and pane movement, which is
+    // where a reader stops looking for them.
+    const text = await sheetText();
+    expect(text).toContain("Code navigation");
+    // And the section is named after the feature, which follows the type
+    // checking switch (off by default here).
+    expect(text).not.toContain("Code intelligence");
+  });
+
+  it("prints a key for every row it shows", async () => {
+    // A row with no glyphs is a shortcut somebody cleared, or a def with a
+    // binding the glyph renderer cannot spell. Either way the row is useless.
+    await browser.execute(() => window.__termic!.useUI.getState().openShortcutsHelp?.());
+    await waitVisible('input[placeholder*="Search shortcuts"]', 8_000);
+    const empty = await browser.execute(() => {
+      const dialog = document.querySelector('input[placeholder*="Search shortcuts"]')!
+        .closest('[role="dialog"]') as HTMLElement;
+      // The rows of the LIST, by testid: matching on layout classes also
+      // caught the dialog's own header, which has no key by design.
+      return [...dialog.querySelectorAll('[data-testid="shortcut-row"]')]
+        .filter(row => row.querySelectorAll("kbd").length === 0)
+        .map(row => (row as HTMLElement).innerText);
+    }) as string[];
+    expect(empty).toEqual([]);
+  });
+});
+
 describe("command palette", () => {
   let taskId!: string;
   after(async () => {

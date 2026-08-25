@@ -1,0 +1,577 @@
+{
+ "server": "zuban",
+ "language": "python",
+ "query": "Store",
+ "symbols": [
+  {
+   "name": "Store",
+   "kind": 5,
+   "file": "stores/models.py",
+   "line": 64
+  },
+  {
+   "name": "StoreSampleProductPage",
+   "kind": 5,
+   "file": "stores/models.py",
+   "line": 351
+  },
+  {
+   "name": "StoreSitemap",
+   "kind": 5,
+   "file": "stores/models.py",
+   "line": 370
+  },
+  {
+   "name": "StoreAISetup",
+   "kind": 5,
+   "file": "stores/models.py",
+   "line": 414
+  },
+  {
+   "name": "StoreAISetupSamplePage",
+   "kind": 5,
+   "file": "stores/models.py",
+   "line": 1005
+  },
+  {
+   "name": "StoreMinimal",
+   "kind": 5,
+   "file": "guapa_api/schemas/ai_setup.py",
+   "line": 263
+  },
+  {
+   "name": "StoreOut",
+   "kind": 5,
+   "file": "guapa_api/schemas/stores.py",
+   "line": 7
+  },
+  {
+   "name": "StoreCreate",
+   "kind": 5,
+   "file": "guapa_api/schemas/stores.py",
+   "line": 68
+  },
+  {
+   "name": "StoreUpdate",
+   "kind": 5,
+   "file": "guapa_api/schemas/stores.py",
+   "line": 100
+  },
+  {
+   "name": "StoreSitemapIn",
+   "kind": 5,
+   "file": "guapa_api/schemas/stores.py",
+   "line": 132
+  },
+  {
+   "name": "StoreSitemapOut",
+   "kind": 5,
+   "file": "guapa_api/schemas/stores.py",
+   "line": 140
+  },
+  {
+   "name": "StoreAltGrpSampleProductOut",
+   "kind": 5,
+   "file": "guapa_api/schemas/stores.py",
+   "line": 151
+  },
+  {
+   "name": "StoreAltGrpSampleGroupOut",
+   "kind": 5,
+   "file": "guapa_api/schemas/stores.py",
+   "line": 170
+  },
+  {
+   "name": "StoreAltGrpSampleOut",
+   "kind": 5,
+   "file": "guapa_api/schemas/stores.py",
+   "line": 179
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "guapa_api/tests.py",
+   "line": 12
+  },
+  {
+   "name": "StoreAltGrpSampleApiTests",
+   "kind": 5,
+   "file": "guapa_api/tests.py",
+   "line": 90
+  },
+  {
+   "name": "StoreCrawlThrottleApiTests",
+   "kind": 5,
+   "file": "guapa_api/tests.py",
+   "line": 297
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "guapa_api/endpoints/offers.py",
+   "line": 11
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "guapa_api/endpoints/ai_setup.py",
+   "line": 10
+  },
+  {
+   "name": "StoreAISetup",
+   "kind": 13,
+   "file": "guapa_api/endpoints/ai_setup.py",
+   "line": 10
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "guapa_api/endpoints/offer_groups.py",
+   "line": 7
+  },
+  {
+   "name": "StoreAltGrpSampleOut",
+   "kind": 13,
+   "file": "guapa_api/endpoints/stores.py",
+   "line": 13
+  },
+  {
+   "name": "StoreCreate",
+   "kind": 13,
+   "file": "guapa_api/endpoints/stores.py",
+   "line": 14
+  },
+  {
+   "name": "StoreOut",
+   "kind": 13,
+   "file": "guapa_api/endpoints/stores.py",
+   "line": 15
+  },
+  {
+   "name": "StoreSitemapIn",
+   "kind": 13,
+   "file": "guapa_api/endpoints/stores.py",
+   "line": 16
+  },
+  {
+   "name": "StoreSitemapOut",
+   "kind": 13,
+   "file": "guapa_api/endpoints/stores.py",
+   "line": 17
+  },
+  {
+   "name": "StoreUpdate",
+   "kind": 13,
+   "file": "guapa_api/endpoints/stores.py",
+   "line": 18
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "guapa_api/endpoints/stores.py",
+   "line": 21
+  },
+  {
+   "name": "StoreSitemap",
+   "kind": 13,
+   "file": "guapa_api/endpoints/stores.py",
+   "line": 21
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "stores/admin.py",
+   "line": 40
+  },
+  {
+   "name": "StoreSampleProductPage",
+   "kind": 13,
+   "file": "stores/admin.py",
+   "line": 40
+  },
+  {
+   "name": "StoreSitemap",
+   "kind": 13,
+   "file": "stores/admin.py",
+   "line": 40
+  },
+  {
+   "name": "StoreAISetup",
+   "kind": 13,
+   "file": "stores/admin.py",
+   "line": 40
+  },
+  {
+   "name": "StoreAlreadyActiveFilter",
+   "kind": 5,
+   "file": "stores/admin.py",
+   "line": 148
+  },
+  {
+   "name": "StoreSampleProductPageInline",
+   "kind": 5,
+   "file": "stores/admin.py",
+   "line": 166
+  },
+  {
+   "name": "StoreSitemapInline",
+   "kind": 5,
+   "file": "stores/admin.py",
+   "line": 177
+  },
+  {
+   "name": "StoreAdmin",
+   "kind": 5,
+   "file": "stores/admin.py",
+   "line": 188
+  },
+  {
+   "name": "StoreAISetupRegionFilter",
+   "kind": 5,
+   "file": "stores/admin.py",
+   "line": 634
+  },
+  {
+   "name": "StoreAISetupBulkForm",
+   "kind": 5,
+   "file": "stores/admin.py",
+   "line": 653
+  },
+  {
+   "name": "StoreAISetupAdmin",
+   "kind": 5,
+   "file": "stores/admin.py",
+   "line": 751
+  },
+  {
+   "name": "StoreAISetup",
+   "kind": 13,
+   "file": "stores/tasks.py",
+   "line": 12
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "stores/signals.py",
+   "line": 6
+  },
+  {
+   "name": "StoreAISetup",
+   "kind": 13,
+   "file": "stores/signals.py",
+   "line": 6
+  },
+  {
+   "name": "StoreSitemap",
+   "kind": 13,
+   "file": "stores/signals.py",
+   "line": 6
+  },
+  {
+   "name": "StoreSitemap",
+   "kind": 13,
+   "file": "stores/management/commands/store_ai_setup_lib/step7_discover_sitemap.py",
+   "line": 9
+  },
+  {
+   "name": "StoreAISetup",
+   "kind": 13,
+   "file": "stores/management/commands/store_ai_setup.py",
+   "line": 57
+  },
+  {
+   "name": "StoresConfig",
+   "kind": 5,
+   "file": "stores/apps.py",
+   "line": 4
+  },
+  {
+   "name": "StoreDomainSearchMixin",
+   "kind": 13,
+   "file": "products/admin.py",
+   "line": 18
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "products/tasks/alternatives_hops.py",
+   "line": 22
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "products/tests/test_schedule_crawl_products.py",
+   "line": 9
+  },
+  {
+   "name": "SelectProductsPerStoreTestCase",
+   "kind": 5,
+   "file": "products/tests/test_schedule_crawl_products.py",
+   "line": 12
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "products/tests/test_crawl_rate_limited.py",
+   "line": 10
+  },
+  {
+   "name": "StoreSitemap",
+   "kind": 13,
+   "file": "products/management/commands/crawl_sitemaps.py",
+   "line": 17
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "products/management/commands/crawl_sitemaps.py",
+   "line": 17
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "products/management/commands/crawl_pricy_hist.py",
+   "line": 4
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "products/management/commands/goc_brands.py",
+   "line": 10
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "products/management/commands/clean_invalid_dot_prices.py",
+   "line": 5
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "products/management/commands/clean_invalid_hist.py",
+   "line": 3
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "products/management/commands/clean_repetitive_hist.py",
+   "line": 7
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "products/management/commands/crawl_trovaprezzi_api.py",
+   "line": 62
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "products/management/commands/bf_price_manipulation_report.py",
+   "line": 10
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "products/management/commands/check_broken_selectors.py",
+   "line": 15
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "reddit/management/commands/reddit_bot.py",
+   "line": 9
+  },
+  {
+   "name": "StoreDomainSearchMixin",
+   "kind": 5,
+   "file": "common/utils/admin_utils.py",
+   "line": 497
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "api/endpoints/product_similar.py",
+   "line": 19
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "api/endpoints/config.py",
+   "line": 9
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "api/endpoints/product_stats.py",
+   "line": 34
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "api/endpoints/coupons.py",
+   "line": 21
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "api/tests/test_product_stats_api.py",
+   "line": 7
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "api/tests/test_resolve_widget.py",
+   "line": 6
+  },
+  {
+   "name": "StoresView",
+   "kind": 13,
+   "file": "website/urls.py",
+   "line": 13
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "website/views/search_product.py",
+   "line": 35
+  },
+  {
+   "name": "StoresView",
+   "kind": 5,
+   "file": "website/views/stores.py",
+   "line": 4
+  },
+  {
+   "name": "StoresView",
+   "kind": 13,
+   "file": "website/views/__init__.py",
+   "line": 6
+  },
+  {
+   "name": "StoreDomainSearchMixin",
+   "kind": 13,
+   "file": "website/admin.py",
+   "line": 13
+  },
+  {
+   "name": "StoreDomainSearchMixin",
+   "kind": 13,
+   "file": "offers/admin.py",
+   "line": 21
+  },
+  {
+   "name": "StorePage",
+   "kind": 13,
+   "file": "offers/admin.py",
+   "line": 34
+  },
+  {
+   "name": "StoreImage",
+   "kind": 13,
+   "file": "offers/admin.py",
+   "line": 34
+  },
+  {
+   "name": "StorePageAdmin",
+   "kind": 5,
+   "file": "offers/admin.py",
+   "line": 1954
+  },
+  {
+   "name": "StoreImageAdmin",
+   "kind": 5,
+   "file": "offers/admin.py",
+   "line": 2177
+  },
+  {
+   "name": "StoreImage",
+   "kind": 13,
+   "file": "offers/tasks/store_images.py",
+   "line": 21
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "offers/tasks/crawlers/cuponeria.py",
+   "line": 16
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "offers/tasks/crawlers/tipli.py",
+   "line": 18
+  },
+  {
+   "name": "StorePage",
+   "kind": 13,
+   "file": "offers/tasks/store_pages.py",
+   "line": 11
+  },
+  {
+   "name": "StoreImage",
+   "kind": 13,
+   "file": "offers/tasks/store_pages.py",
+   "line": 11
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "offers/tests/test_store_image_filtering.py",
+   "line": 24
+  },
+  {
+   "name": "StoreImage",
+   "kind": 13,
+   "file": "offers/tests/test_store_image_filtering.py",
+   "line": 24
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "offers/models.py",
+   "line": 7
+  },
+  {
+   "name": "StorePage",
+   "kind": 5,
+   "file": "offers/models.py",
+   "line": 347
+  },
+  {
+   "name": "StoreImage",
+   "kind": 5,
+   "file": "offers/models.py",
+   "line": 379
+  },
+  {
+   "name": "StoreImage",
+   "kind": 13,
+   "file": "offers/management/commands/delete_store_images_banner_offers.py",
+   "line": 7
+  },
+  {
+   "name": "StorePage",
+   "kind": 13,
+   "file": "offers/management/commands/process_all_store_pages.py",
+   "line": 6
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "offers/management/commands/create_store_pages.py",
+   "line": 6
+  },
+  {
+   "name": "StorePage",
+   "kind": 13,
+   "file": "offers/management/commands/create_store_pages.py",
+   "line": 7
+  },
+  {
+   "name": "StoreImage",
+   "kind": 13,
+   "file": "offers/signals.py",
+   "line": 5
+  }
+ ]
+}

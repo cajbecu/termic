@@ -160,3 +160,16 @@ PLAN-*.md
 
 # Nightly perf run output (report.json + the workers NDJSON handoff).
 .perf/
+
+# e2e fixture server writes this where it is launched
+.fake-lsp.json
+
+# `make lsp-smoke` runs REAL language servers against the fixture projects in
+# e2e/fixtures/lsp-projects, and they write into the checkout they are given:
+# clangd's background index (.cache/clangd), ruby-lsp's own bundle (.ruby-lsp),
+# a built Swift package's index (.build). The compilation database is generated
+# rather than committed because every path in it is absolute.
+e2e/fixtures/lsp-projects/swift/.build/
+e2e/fixtures/lsp-projects/*/.cache/
+e2e/fixtures/lsp-projects/*/.ruby-lsp/
+e2e/fixtures/lsp-projects/cpp/compile_commands.json

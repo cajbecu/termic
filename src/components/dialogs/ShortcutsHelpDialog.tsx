@@ -10,12 +10,29 @@ import { AppDialog } from "@/components/ui/Dialog";
 import { Command, Search, X, Pencil } from "lucide-react";
 import {
   SHORTCUT_DEFS,
+  FIXED_SHORTCUTS,
   GROUP_ORDER,
   bindingGlyphs,
   IS_MAC,
   type ShortcutGroup,
   type ShortcutId,
 } from "@/lib/shortcuts";
+import { codeIntelName } from "@/lib/lsp/featureName";
+
+/** One printed line: a label, the keys, and (for the fixed ones) why there is
+ *  no recorder next to it. */
+interface Row {
+  id: string;
+  label: string;
+  glyphs: string[];
+  fixed: string | null;
+}
+
+/** The "Code navigation" group is named after the feature, which is itself
+ *  named after what it is currently doing (lib/lsp/featureName.ts). */
+export function groupLabel(group: ShortcutGroup, typeChecking: boolean): string {
+  return group === "Code navigation" ? codeIntelName(typeChecking) : group;
+}
 
 // Terminal copy/paste are native (⌘C / ⌘V) on macOS and only wired on
 // Linux/Windows, so omit them from the macOS cheat sheet.
@@ -28,26 +45,39 @@ export function ShortcutsHelpDialog() {
   const close = useUI(s => s.closeShortcutsHelp);
   const openSettings = useApp(s => s.openSettings);
   const shortcuts = usePrefs(s => s.shortcuts);
+  const typeChecking = usePrefs(s => s.codeIntelDiagnostics);
   const [query, setQuery] = useState("");
 
   // Reset the filter each time the sheet opens so it never reopens
   // pre-filtered from a prior visit.
   useEffect(() => { if (open) setQuery(""); }, [open]);
 
-  // Group → matching defs, filtered by the search query (label + hint).
+  // Group → matching rows, filtered by the search query (label + hint).
+  //
+  // Two sources: the rebindable defs, and the handful of gestures that cannot
+  // be expressed as a chord (double-Shift). Both are things a reader is here
+  // to FIND, so the search has to reach both; only the rebindable half has a
+  // binding to print, so each row carries its own glyphs.
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const out: { group: ShortcutGroup; defs: typeof SHORTCUT_DEFS }[] = [];
+    const matches = (label: string, hint?: string) =>
+      !q || label.toLowerCase().includes(q) || (hint ?? "").toLowerCase().includes(q);
+    const out: { group: ShortcutGroup; rows: Row[] }[] = [];
     for (const group of GROUP_ORDER) {
-      const defs = SHORTCUT_DEFS.filter(d =>
-        d.group === group &&
-        !HIDDEN_ON_MAC.has(d.id) &&
-        (!q || d.label.toLowerCase().includes(q) || (d.hint ?? "").toLowerCase().includes(q)),
-      );
-      if (defs.length) out.push({ group, defs });
+      const rows: Row[] = [
+        ...SHORTCUT_DEFS
+          .filter(d => d.group === group && !HIDDEN_ON_MAC.has(d.id) && matches(d.label, d.hint))
+          .map(d => ({
+            id: d.id, label: d.label, glyphs: bindingGlyphs(shortcuts[d.id]), fixed: null,
+          })),
+        ...FIXED_SHORTCUTS
+          .filter(f => f.group === group && matches(f.label, f.hint))
+          .map(f => ({ id: f.id, label: f.label, glyphs: f.glyphs, fixed: f.fixedReason })),
+      ];
+      if (rows.length) out.push({ group, rows });
     }
     return out;
-  }, [query]);
+  }, [query, shortcuts]);
 
   function edit() {
     close();
@@ -112,14 +142,26 @@ export function ShortcutsHelpDialog() {
           <div className="px-1 py-6 text-center text-[12.5px] text-[var(--color-fg-faint)]">
             No shortcuts match “{query}”.
           </div>
-        ) : groups.map(({ group, defs }) => (
+        ) : groups.map(({ group, rows }) => (
           <div key={group} className="flex flex-col">
-            <div className="mb-1 px-1 text-[12px] text-[var(--color-fg-dim)]">{group}</div>
-            {defs.map(def => (
-              <div key={def.id} className="flex items-center justify-between gap-4 px-1 py-2">
-                <span className="min-w-0 truncate text-[13.5px] text-[var(--color-fg)]">{def.label}</span>
+            <div className="mb-1 px-1 text-[12px] text-[var(--color-fg-dim)]">
+              {groupLabel(group, typeChecking)}
+            </div>
+            {rows.map(row => (
+              <div
+                key={row.id}
+                data-testid="shortcut-row"
+                data-shortcut-id={row.id}
+                className="flex items-center justify-between gap-4 px-1 py-2"
+              >
+                <span className="min-w-0 truncate text-[13.5px] text-[var(--color-fg)]">{row.label}</span>
                 <div className="flex shrink-0 items-center gap-1">
-                  {bindingGlyphs(shortcuts[def.id]).map((g, i) => <KeyCap key={i} glyph={g} />)}
+                  {/* Why it has no recorder, said in one word rather than by
+                      leaving the reader to wonder why this row is different. */}
+                  {row.fixed && (
+                    <span className="text-[11px] text-[var(--color-fg-faint)]">{row.fixed}</span>
+                  )}
+                  {row.glyphs.map((g, i) => <KeyCap key={i} glyph={g} />)}
                 </div>
               </div>
             ))}

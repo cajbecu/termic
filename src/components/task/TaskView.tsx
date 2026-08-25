@@ -42,6 +42,7 @@ import { MARKDOWN, effectiveLanguageId, languageLabel } from "@/lib/languages";
 import { dirnamePosix, MARKDOWN_EXT_RE } from "@/lib/markdownPaths";
 import { isSvgPath, keepsDisplayWhenHidden, previewKindForPath } from "@/lib/previewPaths";
 import { restoreScratchTabs } from "@/lib/scratchTabs";
+import { CodeIntelChip } from "./CodeIntelChip";
 const EditorPane = lazy(() => import("./EditorPane").then(m => ({ default: m.EditorPane })));
 const DiffPane   = lazy(() => import("./DiffPane").then(m => ({ default: m.DiffPane })));
 const MarkdownPane = lazy(() => import("./MarkdownPane").then(m => ({ default: m.MarkdownPane })));
@@ -184,6 +185,14 @@ function EditorBreadcrumb({ task }: { task: Task }) {
             terminal an edge. It goes on the bar this file already has, next
             to the other per-file actions. Editor tabs only: a diff has no
             editable buffer, so its syntax always follows its path. */}
+        {/* Code intelligence is armed HERE, next to the language it applies to,
+            rather than in Settings: the moment it would help is while reading
+            code, not while browsing preferences. Renders nothing at all unless
+            the app-wide pref offers it and something can answer for this
+            language (GH #174). */}
+        {tab.type === "edit" && (
+          <CodeIntelChip task={task} registryName={effectiveLanguageId(tab)} />
+        )}
         {tab.type === "edit" && (
           <button
             data-testid="syntax-button"

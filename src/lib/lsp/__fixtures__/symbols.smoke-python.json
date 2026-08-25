@@ -1,0 +1,32 @@
+{
+ "server": "zuban",
+ "language": "python",
+ "query": "Store",
+ "definedIn": "models.py",
+ "symbols": [
+  {
+   "name": "Store",
+   "kind": 5,
+   "file": "models.py",
+   "line": 1
+  },
+  {
+   "name": "StoreAdmin",
+   "kind": 5,
+   "file": "models.py",
+   "line": 6
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "uses.py",
+   "line": 1
+  },
+  {
+   "name": "Store",
+   "kind": 13,
+   "file": "broken.py",
+   "line": 1
+  }
+ ]
+}

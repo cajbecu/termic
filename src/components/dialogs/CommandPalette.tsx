@@ -216,6 +216,14 @@ export function CommandPalette() {
         run: act(() => useUI.getState().openFileFinder(task.id)),
       });
       cmds.push({
+        // Double-Shift is the gesture (JetBrains'), but a gesture nobody can
+        // read about is a gesture nobody finds: the palette is where someone
+        // learns this exists.
+        id: "search-everywhere", section: "Task", label: "Search everywhere",
+        icon: Search, keywords: "symbol symbols class classes file goto double shift jetbrains",
+        run: act(() => useUI.getState().openSearchEverywhere(task.id)),
+      });
+      cmds.push({
         id: "find-in-files", section: "Task", label: "Find in files",
         icon: Search, shortcutId: "find-in-files", keywords: "grep search ripgrep",
         run: act(() => useUI.getState().openFindInFiles(task.id)),

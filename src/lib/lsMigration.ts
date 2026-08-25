@@ -30,9 +30,23 @@ const RENAMES: ReadonlyArray<readonly [string, string]> = [
 ];
 
 // Renamed shortcut IDs, remapped in place inside the `shortcutBindings` blob.
-const SHORTCUT_ID_RENAMES: ReadonlyArray<readonly [string, string]> = [
-  ["workspace-prev", "task-prev"],
-  ["workspace-next", "task-next"],
+//
+// Every entry must point at an id that EXISTS TODAY, never at one that was
+// itself renamed later. An id renamed twice (`workspace-prev` -> `task-prev`
+// -> `nav-back`) gets one entry straight to the final name, not two hops.
+// Two hops happen to work here because the loop below runs the pairs in
+// order, which means the correctness of a user's rebind rests on the order
+// two unrelated lines happen to sit in. `lsMigration.test.ts` pins it.
+//
+// Exported for that test only.
+export const SHORTCUT_ID_RENAMES: ReadonlyArray<readonly [string, string]> = [
+  // ⌘[ / ⌘] stopped switching tasks and became Back / Forward, so a
+  // rebind of the old id carries to the new one: the key the user chose is
+  // the key they still get.
+  ["workspace-prev", "nav-back"],
+  ["workspace-next", "nav-forward"],
+  ["task-prev", "nav-back"],
+  ["task-next", "nav-forward"],
   ["workspace-prev-arrow", "task-prev-arrow"],
   ["workspace-next-arrow", "task-next-arrow"],
   ["new-workspace-quick", "new-task-quick"],

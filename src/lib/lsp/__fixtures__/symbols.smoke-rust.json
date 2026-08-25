@@ -1,0 +1,20 @@
+{
+ "server": "rust-analyzer",
+ "language": "rust",
+ "query": "Store",
+ "definedIn": "src/lib.rs",
+ "symbols": [
+  {
+   "name": "Store",
+   "kind": 23,
+   "file": "src/lib.rs",
+   "line": 1
+  },
+  {
+   "name": "StoreAdmin",
+   "kind": 23,
+   "file": "src/lib.rs",
+   "line": 5
+  }
+ ]
+}

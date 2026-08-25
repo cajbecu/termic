@@ -144,6 +144,14 @@ check-web: ## Type-check the frontend (no Vite bundle — fast).
 check-all: check check-web ## Run everything: rust + frontend type checks. CI-style.
 .PHONY: check-all
 
+lsp-smoke: ## Drive the REAL language servers on this machine against tiny fixture projects. Local only, never CI. LANG_ONLY=python for one. See docs/lsp.md.
+	@node scripts/lsp-smoke.mjs
+.PHONY: lsp-smoke
+
+lsp-smoke-record: ## Same, plus refresh the recorded workspace/symbol answers the offline suite ranks.
+	@node scripts/lsp-smoke.mjs --record
+.PHONY: lsp-smoke-record
+
 e2e: ## Build the e2e binary (--features e2e) and run the WebdriverIO suite. Real window, local Mac only. See docs/e2e-tests.md.
 	@# Self-sufficient: install JS deps + (re)seed the throwaway fixture profile
 	@# if needed, so a fresh checkout can `make e2e` with no manual steps. Uses
