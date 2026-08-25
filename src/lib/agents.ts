@@ -754,6 +754,21 @@ export const envForCli = (cli: string): Record<string, string> => findAgent(cli)
  *  resolves (`detected` empty), or when filtering would empty the
  *  picker, the detection step is skipped and the enabled set returned
  *  whole. An id absent from `detected` defaults to visible. */
+/** Reorder a launcher's CLI list so the project's default comes first.
+ *  The agent registry's order is a global preference ("which agents do I
+ *  care about"); which one a given repo starts with is a per-project one,
+ *  and in a launcher the per-project answer wins. Keeps the rest in
+ *  registry order, and leaves the list alone when the default is empty or
+ *  names something the list doesn't offer. */
+export function defaultCliFirst<T extends { id: string }>(
+  list: readonly T[],
+  defaultCli: string | undefined,
+): T[] {
+  const head = defaultCli ? list.find(a => a.id === defaultCli) : undefined;
+  if (!head) return [...list];
+  return [head, ...list.filter(a => a.id !== head.id)];
+}
+
 export function visibleCliIds(
   candidateIds: readonly string[],
   agents: Agent[],

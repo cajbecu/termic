@@ -10,7 +10,7 @@ import { AppDialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
-import { visibleCliIds, isTerminalCli, agentDisplayName } from "@/lib/agents";
+import { defaultCliFirst, visibleCliIds, isTerminalCli, agentDisplayName } from "@/lib/agents";
 import { taskCreate, taskCreateMulti, settingsLoad, taskImportableWorktrees, taskImportWorktree, sandboxAvailable, taskOpenRepo, projectGitBranches, projectBranchContext } from "@/lib/ipc";
 import { launchSetupTab } from "@/lib/runTabs";
 import { seedPromptWhenReady } from "@/lib/seedPrompt";
@@ -77,7 +77,13 @@ export function NewTaskDialog() {
       ? agents
       : CLIS.map(id => ({ id, display_name: id, color: "" } as any));
     const visible = visibleCliIds(list.map(a => a.id), agents, detectedClis);
-    return [...list.filter(a => visible.has(a.id)), SHELL_CHOICE];
+    // Project default first, same rule (and same reason) as the + menu's
+    // launcher rows: the pill that is already selected on open should be the
+    // one your eye lands on, wherever that agent sits in the registry.
+    return defaultCliFirst(
+      [...list.filter(a => visible.has(a.id)), SHELL_CHOICE],
+      project?.default_cli,
+    );
   })();
 
   const [name, setName] = useState("");

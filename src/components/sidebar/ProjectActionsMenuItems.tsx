@@ -11,14 +11,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
-import { visibleCliIds } from "@/lib/agents";
+import { defaultCliFirst, visibleCliIds } from "@/lib/agents";
 import { importQuickWorktree, readNewTaskMode, writeNewTaskMode, type NewTaskMode } from "@/lib/quickTask";
 import { taskImportableWorktrees, taskRestore, projectBranchContext, projectUpdate } from "@/lib/ipc";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { DropdownItem, DropdownLabel, DropdownSeparator, DropdownSub, DropdownSubTrigger, DropdownSubContent } from "@/components/ui/Dropdown";
 import { GitBranch, GitBranchPlus, Link2, TerminalSquare, SquareChevronRight, Settings2, FolderGit2, Flag, Check, ChevronRight, History } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { BranchContext, ImportableWorktree, Project } from "@/lib/types";
+import type { Agent, BranchContext, ImportableWorktree, Project } from "@/lib/types";
+
+/** One row of the agent list: a registry entry, or the synthetic Terminal
+ *  (cli = "shell") entry, which has no registry record of its own. */
+type LauncherRow = Pick<Agent, "id" | "display_name"> & Partial<Pick<Agent, "icon_id">>;
 
 /** Compact "10m" / "17h" / "2d" label for an archived-task timestamp.
  *  Unlike the tab strip's Resume entries (always seconds/minutes old), a
@@ -88,6 +92,16 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
   // drop the toggle.
   const isNonGit = !!project?.non_git;
   const visibleClis = visibleCliIds(agents.map(a => a.id), agents, detectedClis);
+  // The launcher rows: every offered agent plus Terminal, with THIS project's
+  // default CLI hoisted to the top. It is the pick behind most opens of this
+  // menu, and pinning it to the first row means it stays put when the agent
+  // registry is reordered in Settings. Terminal takes part: a repo whose
+  // default is a plain shell gets the same treatment.
+  const SHELL_ROW: LauncherRow = { id: "shell", display_name: "Terminal" };
+  const launcherRows = defaultCliFirst(
+    [...agents.filter(a => visibleClis.has(a.id)), SHELL_ROW],
+    project?.default_cli,
+  );
 
   // Worktrees the user made outside termic (`git worktree add`) that aren't
   // open as tasks yet (issue #92). Adopting one is a single click here — the
@@ -272,22 +286,32 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
         </div>
       )}
 
-      {agents.filter(a => visibleClis.has(a.id)).map(a => (
-        <DropdownItem key={a.id} onSelect={() => pick(a.id)}>
-          <span className={cn("shrink-0", CLI_BRAND_COLOR[a.icon_id] || "text-[var(--color-fg-dim)]")}>
-            <CliIcon cli={a.icon_id} className="h-4 w-4" />
-          </span>
+      {/* Terminal (the plain login shell) is one of these rows, not a
+          special case appended at the end: it goes through the same inline
+          name prompt as an agent in both modes, so a Main-checkout shell
+          gets a real name instead of whatever Rust auto-assigns. */}
+      {launcherRows.map(a => (
+        // data-launcher-cli: the rows all render the same shape, so e2e needs
+        // a handle that survives a display-name change (and says which id a
+        // row actually launches).
+        <DropdownItem key={a.id} data-launcher-cli={a.id} onSelect={() => pick(a.id)}>
+          {a.id === "shell" ? (
+            <TerminalSquare className="h-4 w-4 shrink-0 text-[var(--color-fg-dim)]" />
+          ) : (
+            <span className={cn("shrink-0", CLI_BRAND_COLOR[a.icon_id ?? ""] || "text-[var(--color-fg-dim)]")}>
+              <CliIcon cli={a.icon_id ?? ""} className="h-4 w-4" />
+            </span>
+          )}
           <span className="truncate">{a.display_name}</span>
+          {/* Says WHY this row is first, so the order doesn't read as random
+              once someone reorders their agents in Settings. */}
+          {a.id === project?.default_cli && (
+            <span className="ml-auto shrink-0 pl-2 text-[11px] text-[var(--color-fg-faint)]">
+              default
+            </span>
+          )}
         </DropdownItem>
       ))}
-
-      {/* Plain login-shell variant. Goes through the same inline name prompt
-          as agents in both modes, so a Main-checkout shell gets a real name
-          instead of silently landing on whatever Rust auto-assigns. */}
-      <DropdownItem onSelect={() => pick("shell")}>
-        <TerminalSquare className="h-4 w-4 shrink-0 text-[var(--color-fg-dim)]" />
-        <span className="truncate">Terminal</span>
-      </DropdownItem>
 
       {/* Custom command needs a name + a command, so it always opens the
           dialog (which now respects worktree vs main-checkout mode). */}

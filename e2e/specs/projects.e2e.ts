@@ -1355,3 +1355,85 @@ describe("multi main checkout (New Task dialog)", () => {
     ]);
   });
 });
+
+
+// The project + menu is a launcher, so its first row is the one people reach
+// for without reading: it must be the project's OWN default CLI, wherever
+// that agent happens to sit in the Settings registry order.
+describe("new task menu puts the project default first", () => {
+  let projectId = "";
+  let originalDefault = "";
+
+  const openMenu = async () => {
+    const trigger = `[data-testid="project-new-task-${projectId}"]`;
+    await waitVisible(trigger);
+    await browser.execute((sel) => {
+      const el = document.querySelector(sel) as HTMLElement;
+      const opts = { bubbles: true, pointerType: "mouse", button: 0 } as any;
+      el.dispatchEvent(new PointerEvent("pointerdown", opts));
+      el.dispatchEvent(new PointerEvent("pointerup", opts));
+      el.click();
+    }, trigger);
+    await waitVisible('[role="menu"]');
+  };
+
+  /** The launcher rows, in display order, as the cli ids they create. */
+  const cliRows = () =>
+    browser.execute(() =>
+      [...document.querySelectorAll('[role="menu"] [data-launcher-cli]')].map(
+        (el) => (el as HTMLElement).dataset.launcherCli as string,
+      ),
+    ) as Promise<string[]>;
+
+  const setDefault = (cli: string) =>
+    browser.execute(async (id, value) => {
+      const app = window.__termic!.useApp.getState();
+      const p = app.projects.find((x: any) => x.id === id);
+      await window.__termic!.ipc.projectUpdate({ ...p, default_cli: value });
+      await window.__termic!.useApp.getState().loadAll();
+    }, projectId, cli);
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    await dismissOverlays();
+    const p = (await browser.execute(() =>
+      window.__termic!.useApp.getState().projects.find((x: any) => x.name === "fixture-repo"),
+    )) as any;
+    projectId = p.id;
+    originalDefault = p.default_cli ?? "claude";
+  });
+
+  after(async () => {
+    await browser.keys("Escape");
+    await setDefault(originalDefault);
+  });
+
+  it("leads with the default agent, then the registry order", async () => {
+    const ids = (await browser.execute(() =>
+      window.__termic!.useApp.getState().agents.map((a: any) => a.id as string),
+    )) as string[];
+    const last = ids[ids.length - 1];
+    await setDefault(last);
+
+    await openMenu();
+    const rows = await cliRows();
+    expect(rows[0]).toBe(last);
+    // Still one row per agent, plus Terminal: hoisting is a move, not a copy.
+    expect(rows.filter((r) => r === last)).toHaveLength(1);
+    // Terminal keeps the tail, and everything between holds its registry
+    // order (which agents are offered at all is detection's business, not
+    // this test's).
+    expect(rows[rows.length - 1]).toBe("shell");
+    const rest = rows.slice(1).filter((r) => r !== "shell");
+    expect(rest).toEqual(ids.filter((i) => rest.includes(i)));
+    await browser.keys("Escape");
+  });
+
+  it("hoists Terminal too when that is the default", async () => {
+    await setDefault("shell");
+    await openMenu();
+    expect((await cliRows())[0]).toBe("shell");
+    await browser.keys("Escape");
+  });
+});

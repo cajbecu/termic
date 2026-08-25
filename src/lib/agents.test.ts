@@ -21,7 +21,7 @@ vi.mock("@/lib/utils", () => ({
   slugify: (s: string) => s.toLowerCase().replace(/\s+/g, "-"),
 }));
 
-import { spawnArgsForCli, visibleCliIds, cliSupportsIdSession, cliSupportsResumeById, agentDisplayName, decideResume, isTerminalCli, workDoneCapable, terminalLaunchCommand, classifyAgentTitle, compileSignals, BUILTIN_TITLE_SIGNALS, hasPendingWork, notificationWantsAttention, PENDING_TAIL_ROWS } from "@/lib/agents";
+import { spawnArgsForCli, defaultCliFirst, visibleCliIds, cliSupportsIdSession, cliSupportsResumeById, agentDisplayName, decideResume, isTerminalCli, workDoneCapable, terminalLaunchCommand, classifyAgentTitle, compileSignals, BUILTIN_TITLE_SIGNALS, hasPendingWork, notificationWantsAttention, PENDING_TAIL_ROWS } from "@/lib/agents";
 import type { Agent, CliInfo } from "@/lib/types";
 
 // ── spawnArgsForCli ───────────────────────────────────────────────────
@@ -264,6 +264,42 @@ describe("decideResume", () => {
   it("cwd-resume is suppressed right after a failed resume", () => {
     expect(d({ idCapable: false, isPrimary: true, hasResumableHistory: true, failedResume: true }).kind)
       .toBe("fresh");
+  });
+});
+
+// ── defaultCliFirst ───────────────────────────────────────────────────
+
+describe("defaultCliFirst", () => {
+  const rows = [{ id: "claude" }, { id: "codex" }, { id: "gemini" }, { id: "shell" }];
+
+  it("hoists the project default and keeps the rest in registry order", () => {
+    expect(defaultCliFirst(rows, "gemini").map(r => r.id))
+      .toEqual(["gemini", "claude", "codex", "shell"]);
+  });
+
+  it("treats the plain shell like any other row", () => {
+    expect(defaultCliFirst(rows, "shell").map(r => r.id))
+      .toEqual(["shell", "claude", "codex", "gemini"]);
+  });
+
+  it("leaves an already-first default alone", () => {
+    expect(defaultCliFirst(rows, "claude").map(r => r.id))
+      .toEqual(["claude", "codex", "gemini", "shell"]);
+  });
+
+  it("leaves the order alone for an empty or unknown default", () => {
+    // A default naming a removed / renamed agent must not silently promote
+    // some OTHER row into the first slot, which is where the picker's answer
+    // to \"what does this project use\" comes from.
+    expect(defaultCliFirst(rows, "").map(r => r.id)).toEqual(rows.map(r => r.id));
+    expect(defaultCliFirst(rows, undefined).map(r => r.id)).toEqual(rows.map(r => r.id));
+    expect(defaultCliFirst(rows, "next-claude").map(r => r.id)).toEqual(rows.map(r => r.id));
+  });
+
+  it("does not mutate the input list", () => {
+    const input = [...rows];
+    defaultCliFirst(input, "gemini");
+    expect(input.map(r => r.id)).toEqual(["claude", "codex", "gemini", "shell"]);
   });
 });
 

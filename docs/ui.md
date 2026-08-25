@@ -34,6 +34,27 @@ A feature is Experimental when it is off by default **because we are not yet con
 
 It shows as a badge, on the rail item and next to the page title, not as a separate Labs page. The badge is dropped when the feature graduates: it survived a release with no bug reports against it and has e2e coverage. Graduating drops the badge and gets a changelog line; it does not move the page, because a settings page that moves twice is worse than one labelled honestly. A dedicated Experimental page only earns its place when several features qualify at once, which today they do not (there are no residents: the CLI graduated in 0.26.0, dropping the badge and flipping `cli_enabled` to default ON in the same change, since a badge that says "still settling" alongside a setting we ship enabled reads as a contradiction).
 
+## The new-task launcher's CLI order
+
+The project `+` menu (`sidebar/ProjectActionsMenuItems.tsx`) and the New Task
+dialog's Default CLI pills list the same thing: every offered agent, then
+Terminal. Both hoist **this project's** default CLI to the front
+(`defaultCliFirst` in `lib/agents.ts`, unit-tested), and the menu marks that
+row `default`.
+
+Two orders are in play and they answer different questions. Settings → Agents
+& Terminals is a global preference ("which agents do I care about, in what
+order"), and dragging its pills reorders that list for the whole app. Which
+agent a given repo starts with is a per-project answer stored as
+`Project.default_cli`, and in a launcher that one wins: the first row is the
+one people click without reading, so it has to be the pick they configured,
+wherever that agent happens to sit in the registry. Terminal takes part like
+any other row (a repo defaulting to a plain shell gets it hoisted too), rather
+than being pinned to the tail.
+
+Rows carry `data-launcher-cli="<id>"` so tests can assert the order by id
+instead of by display name.
+
 ## Window chrome / drag
 
 macOS overlay title bar, hidden title, 84px reserved left for traffic lights. Three drag mechanisms (each fails differently):
