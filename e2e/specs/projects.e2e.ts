@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { archiveTask, clickByText, clickMenuItemUntil, clickWhenVisible, dismissOverlays, pointerDrag, requireTermicApi, keysIn, snap, waitForAppShell, waitForText, waitGone, waitVisible } from "../helpers";
@@ -45,6 +45,63 @@ describe("project add/remove", () => {
         ),
       { timeout: 8_000, timeoutMsg: "added project never appeared" },
     );
+  });
+
+  // The dialog's own path field: Enter adds, same as clicking Add. Typed
+  // paths are the manual half of this dialog (the discovered list covers the
+  // rest), and stopping to reach for the mouse to commit one is the kind of
+  // friction nobody reports twice.
+  it("adds the typed repository root when Enter is pressed", async () => {
+    // realpath: the app stores the canonical root, and macOS tmpdir is a
+    // symlink (/var -> /private/var), so the raw mkdtemp path never matches.
+    const dir2 = realpathSync(mkdtempSync(path.join(os.tmpdir(), "e2e-proj-enter-")));
+    execSync(
+      `git -C "${dir2}" init -q && git -C "${dir2}" -c user.email=e2e@termic.dev -c user.name=e2e commit -q --allow-empty -m init`,
+    );
+    let addedId: string | null = null;
+    try {
+      await browser.execute(() => window.__termic!.useUI.getState().openNewProject());
+      await waitVisible('[data-testid="new-project-path"]');
+      // Set the value through React's own input event, then send a REAL
+      // Enter to the focused field: the handler under test is onKeyDown.
+      await browser.execute((value) => {
+        const input = document.querySelector(
+          '[data-testid="new-project-path"]',
+        ) as HTMLInputElement;
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, "value",
+        )!.set!;
+        setter.call(input, value);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }, dir2);
+      await keysIn('[data-testid="new-project-path"]', "Enter");
+
+      await browser.waitUntil(
+        async () => {
+          const p = (await browser.execute(
+            (d) => window.__termic!.useApp.getState()
+              .projects.find((x: any) => x.root_path === d) ?? null,
+            dir2,
+          )) as any;
+          if (!p) return false;
+          addedId = p.id;
+          return true;
+        },
+        { timeout: 10_000, timeoutMsg: "Enter in the repository root field added nothing" },
+      );
+      // A successful add closes the dialog, exactly as the button does.
+      await waitGone('[data-testid="new-project-path"]');
+    } finally {
+      if (addedId) {
+        await browser.execute(async (id) => {
+          await window.__termic!.ipc.projectRemove(id);
+          await window.__termic!.useApp.getState().loadAll();
+        }, addedId);
+      } else {
+        await browser.execute(() => window.__termic!.useUI.getState().closeNewProject());
+      }
+      rmSync(dir2, { recursive: true, force: true });
+    }
   });
 
   // The dashed "New task" placeholder stands in for the task rows an empty

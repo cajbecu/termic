@@ -164,6 +164,25 @@ export function NewProjectDialog() {
     await add(path, ng);
   }
 
+  /** What the multi-repo Add button needs: a name and at least one member.
+   *  Shared with the Enter handlers so the key and the button can never
+   *  disagree about when the dialog is ready. */
+  const canAddMulti = !!multiName.trim() && memberRows.length > 0 && !busy;
+
+  /** Enter in a text field runs the dialog's primary action, the same as
+   *  clicking Add. Guarded by the same condition that enables the button, so
+   *  Enter is inert exactly when the button is disabled (and `busy` keeps a
+   *  held key from firing a second add while the first is in flight). The
+   *  member picker's "Add repo from disk" field already worked this way; the
+   *  fields that create the project itself did not. */
+  function submitOnEnter(enabled: boolean, run: () => void) {
+    return (e: React.KeyboardEvent) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      if (enabled) run();
+    };
+  }
+
   async function addMulti(asNonGit: boolean) {
     setBusy(true); setErr(null);
     try {
@@ -309,6 +328,7 @@ export function NewProjectDialog() {
             <Input
               value={multiName}
               onChange={e => setMultiName(e.target.value)}
+              onKeyDown={submitOnEnter(canAddMulti, handleAddMulti)}
               placeholder="team-knowledge"
               className="mt-1.5"
               autoFocus
@@ -323,7 +343,12 @@ export function NewProjectDialog() {
           <label className="mt-4 block text-[13.5px]">
             Host repository <span className="text-[var(--color-fg-faint)]">(optional)</span>
             <div className="mt-1.5 flex gap-2">
-              <Input value={path} onChange={e => { setPath(e.target.value); setNonGit(false); }} placeholder="~/Notes/team-knowledge" />
+              <Input
+                value={path}
+                onChange={e => { setPath(e.target.value); setNonGit(false); }}
+                onKeyDown={submitOnEnter(canAddMulti, handleAddMulti)}
+                placeholder="~/Notes/team-knowledge"
+              />
               <Button variant="secondary" size="lg" onClick={browse}>Browse…</Button>
             </div>
             <span className="mt-1 block text-[11.5px] text-[var(--color-fg-faint)]">
@@ -415,7 +440,7 @@ export function NewProjectDialog() {
             <Button variant="ghost" onClick={close}>Cancel</Button>
             <Button
               variant="primary"
-              disabled={!multiName.trim() || memberRows.length === 0 || busy}
+              disabled={!canAddMulti}
               onClick={handleAddMulti}
             >
               <Layers className="h-4 w-4" /> Add multi-repo
@@ -539,7 +564,13 @@ export function NewProjectDialog() {
       <label className="block text-[13.5px]">
         {nonGit ? "Folder" : "Repository root"}
         <div className="mt-1.5 flex gap-2">
-          <Input value={path} onChange={e => { setPath(e.target.value); setNonGit(false); }} placeholder="/path/to/repo" />
+          <Input
+            data-testid="new-project-path"
+            value={path}
+            onChange={e => { setPath(e.target.value); setNonGit(false); }}
+            onKeyDown={submitOnEnter(!!path.trim() && !busy, handleAdd)}
+            placeholder="/path/to/repo"
+          />
           <Button variant="secondary" size="lg" onClick={browse}>Browse…</Button>
         </div>
         {/* Issue #4: a plain folder (e.g. a parent dir of several repos)
