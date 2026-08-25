@@ -229,7 +229,11 @@ export function parseDeepLink(url: string, projects: Project[], tasks: Task[] = 
       };
     }
   }
-  if (mode === "worktree" && project.non_git) {
+  // Same rule the dialog and the + menu use: a plain-folder SINGLE repo has
+  // nothing to branch, while a multi-repo project whose host is a plain folder
+  // still worktrees its git members under a wrapper dir.
+  if (mode === "worktree" && project.non_git
+      && (project.type ?? "single") !== "multi") {
     return {
       ok: false,
       error: `Project "${project.name}" is a plain folder (non-git); worktree tasks need git.`,

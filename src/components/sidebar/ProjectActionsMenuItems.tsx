@@ -91,6 +91,13 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
   // in is the main checkout (agent at the folder root). Force that mode and
   // drop the toggle.
   const isNonGit = !!project?.non_git;
+  // "No git here" and "no worktrees here" are the same thing for ONE repo and
+  // not for a multi-repo project: its members are their own git repos and get
+  // their own worktrees, while the plain-folder host just becomes the wrapper
+  // dir (`task_create_multi` builds it and symlinks the shared CLAUDE.md /
+  // .claude in). What a non-git host really loses is the host-level "Branch
+  // from" pin below, which needs host branches; that one stays on `isNonGit`.
+  const canWorktree = !isNonGit || isMulti;
   const visibleClis = visibleCliIds(agents.map(a => a.id), agents, detectedClis);
   // The launcher rows: every offered agent plus Terminal, with THIS project's
   // default CLI hoisted to the top. It is the pick behind most opens of this
@@ -160,18 +167,19 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
       .catch(err => console.error("project_update failed:", err));
   };
 
-  // App-wide remembered mode (same key the New Task dialog uses). Non-git
-  // can't worktree, so it's pinned to the main checkout.
-  const [mode, setModeState] = useState<NewTaskMode>(() => (isNonGit ? "repo_root" : readNewTaskMode()));
+  // App-wide remembered mode (same key the New Task dialog uses). A project
+  // that can't worktree is pinned to the main checkout.
+  const [mode, setModeState] = useState<NewTaskMode>(() => (canWorktree ? readNewTaskMode() : "repo_root"));
   const setMode = (m: NewTaskMode) => { setModeState(m); writeNewTaskMode(m); };
 
   // Open the full New Task modal in the current mode. Fallback when there's
   // no inline host (dashboard) and the path for multi-repo worktrees, which
   // need per-member config the inline row can't provide. Don't persist the
-  // mode for non-git projects: their mode is force-pinned to repo_root, so
-  // writing it would clobber the user's real app-wide preference.
+  // mode for a project that can't worktree: its mode is force-pinned to
+  // repo_root, so writing it would clobber the user's real app-wide
+  // preference.
   const openAdvanced = () => {
-    if (!isNonGit) writeNewTaskMode(mode);
+    if (canWorktree) writeNewTaskMode(mode);
     requestAnimationFrame(() => openNewTask(projectId));
   };
 
@@ -185,7 +193,7 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
 
   return (
     <>
-      {isNonGit ? (
+      {!canWorktree ? (
         <SectionHeader title="RUN IN FOLDER" hint="Launch the agent at the folder root (no git)." />
       ) : (
         <div className="px-2 pb-1.5 pt-1.5">
@@ -236,8 +244,10 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
               origin/main when the project was added) with nothing on screen
               saying so. Worktree mode only, since the main checkout has no
               base to branch from. The choice is per project, in projects.json,
-              because each repo has its own convention. */}
-          {mode === "worktree" && (
+              because each repo has its own convention. A plain-folder multi
+              host has no branches of its own to pin (its members carry their
+              own), so it gets the toggle above but not this row. */}
+          {mode === "worktree" && !isNonGit && (
             <DropdownSub>
               <DropdownSubTrigger className="mt-1.5 w-full justify-between gap-2">
                 <span className="flex shrink-0 items-center gap-1.5 text-[12.5px] text-[var(--color-fg-dim)]">
@@ -346,7 +356,7 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
 
       <DropdownSeparator />
 
-      {isNonGit ? (
+      {!canWorktree ? (
         // Keep the worktree option VISIBLE but disabled + explained rather
         // than silently absent, so the user knows why it's missing.
         <DropdownItem disabled>
@@ -354,9 +364,7 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
           <div className="flex min-w-0 flex-col">
             <span className="truncate">Worktrees unavailable</span>
             <span className="text-[11.5px] text-[var(--color-fg-faint)]">
-              {isMulti
-                ? "This multi-repo host is a plain folder, not a git repo."
-                : "This folder isn't a git repo."} Point the project at a git
+              This folder isn't a git repo. Point the project at a git
               repo (or git-init this folder) to enable worktrees.
             </span>
           </div>

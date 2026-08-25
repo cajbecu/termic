@@ -55,6 +55,24 @@ than being pinned to the tail.
 Rows carry `data-launcher-cli="<id>"` so tests can assert the order by id
 instead of by display name.
 
+## Task type on a plain-folder project
+
+"Worktree" needs branches, so a project pointing at a plain folder can only
+run in its main checkout. That is a **single-repo** rule, and the three
+surfaces that enforce it (the New Task dialog's Task type toggle, the sidebar
+`+` menu, and `parseDeepLink`) all draw the line at
+`non_git && type !== "multi"`.
+
+A multi-repo project is different: the members are the git repos, and the host
+is only where the shared `CLAUDE.md` / `.claude` live. `task_create_multi`
+already handles a plain-folder host by creating the wrapper directory itself
+and symlinking those shared files in, then worktreeing each git member under
+it exactly as it would under a git host. Clamping such a project to the main
+checkout takes its whole per-member list away, which is what happened when the
+dialog started gating the member rows on the task type. What a plain-folder
+host really loses is the HOST-level "Branch from" pin (there are no host
+branches to pin); the members keep their own, in the dialog's member list.
+
 ## Window chrome / drag
 
 macOS overlay title bar, hidden title, 84px reserved left for traffic lights. Three drag mechanisms (each fails differently):

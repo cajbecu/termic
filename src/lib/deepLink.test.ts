@@ -173,6 +173,15 @@ describe("parseDeepLink — rejected shapes", () => {
     expect(err("termic://new?project=notes&worktree=1")).toMatch(/non-git/);
   });
 
+  it("allows a worktree ask on a multi-repo project with a plain-folder host", () => {
+    // The host is only a wrapper dir there; the MEMBERS are git repos and get
+    // the worktrees, so the single-repo "no git, no branches" rule does not
+    // apply. Kept in step with the dialog and the + menu, which offer the
+    // Worktree shape for exactly this project.
+    const multi = [project({ id: "p-team", name: "team", non_git: true, type: "multi" })];
+    expect(okNew("termic://new?project=team&mode=worktree", multi).mode).toBe("worktree");
+  });
+
   it("allows a main-checkout task on a non-git project", () => {
     expect(okNew("termic://new?project=notes&mode=main").mode).toBe("repo_root");
   });

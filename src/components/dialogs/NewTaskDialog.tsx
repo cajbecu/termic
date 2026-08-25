@@ -153,6 +153,15 @@ export function NewTaskDialog() {
     }
   };
   const isMulti = (project?.type ?? "single") === "multi";
+  // A plain-folder project has no branches, so it can only run in place. That
+  // is a SINGLE-repo rule: a multi-repo project whose HOST is a plain folder
+  // still worktrees its members, because `task_create_multi` makes the
+  // wrapper dir itself for a non-git host (symlinking the shared CLAUDE.md /
+  // .claude into it) and each git member is worktreed under it exactly as
+  // under a git host. Clamping those projects to the main checkout took the
+  // whole per-member list away from them.
+  const hostNonGit = !!project?.non_git;
+  const canWorktree = isMulti || !hostNonGit;
   // Sandbox is offered in every shape: the seatbelt + proxy cage the main
   // checkout identically to a worktree (task_open_repo takes sandbox args,
   // for single AND multi hosts), and the multi wrapper carries its own.
@@ -432,7 +441,9 @@ export function NewTaskDialog() {
     // asked for a specific shape. The non-git clamp still wins over both;
     // parseDeepLink rejects `worktree` on a non-git project up front, so
     // this only ever catches a project that lost its git dir since.
-    setMode(p?.non_git ? "repo_root" : (seed?.mode ?? readLastMode() ?? "repo_root"));
+    // Same rule as `canWorktree` above, computed off the effect's own project.
+    const clamped = !!p?.non_git && (p?.type ?? "single") !== "multi";
+    setMode(clamped ? "repo_root" : (seed?.mode ?? readLastMode() ?? "repo_root"));
     if (canImp) loadImportable(projectId);
     setBusy(false);
     submittingRef.current = false;
@@ -830,7 +841,7 @@ export function NewTaskDialog() {
                   type="button"
                   data-testid="task-type-worktree"
                   onClick={() => chooseMode("worktree")}
-                  disabled={!!project?.non_git}
+                  disabled={!canWorktree}
                   className={cn(
                     "flex h-7 items-center gap-1.5 rounded-[5px] px-2.5 text-[12.5px] transition-colors disabled:opacity-40",
                     mode === "worktree"
@@ -882,6 +893,9 @@ export function NewTaskDialog() {
               fall back separately) — too long for FieldInline's one line,
               so it keeps Field's stacked layout. */}
           {isMulti ? (
+            // A plain-folder host has no branches to cut from; the members
+            // still do, and they carry their own defaults in the list below.
+            hostNonGit ? null : (
             <Field label="Host branch from" hint="Blank = host repo default. Members fall back to their own defaults below.">
               <Input
                 value={base}
@@ -889,6 +903,7 @@ export function NewTaskDialog() {
                 placeholder="origin/master"
               />
             </Field>
+            )
           ) : (
             <FieldInline label="Branch from" hint="Blank = repo default.">
               <div className="flex flex-col gap-1">
