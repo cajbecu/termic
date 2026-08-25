@@ -2259,3 +2259,125 @@ describe("copy agent briefing", () => {
     await clearToasts();
   });
 });
+
+// P1: labelling a task by its branch (GH #260). An opt-in pref swaps the title
+// typed at creation for the task's branch wherever a task is named. Both
+// directions matter: turning it on has to actually change the sidebar row and
+// the breadcrumb, and turning it back off has to restore the typed name, which
+// is never overwritten. The pref is app-wide and shared with every later spec,
+// so this restores it whatever happens.
+describe("branch as the task name (GH #260)", () => {
+  const REPO = path.join(process.cwd(), ".e2e", "fixture-repo");
+  const NAME = "e2e-branch-label";
+  const BRANCH = "wt-branch-label";
+  let taskId = "";
+  let original = false;
+
+  /** Visible text of the task's sidebar row, minus the terminal count. */
+  const rowText = (id: string) =>
+    browser.execute(
+      (i) => document.querySelector(`[data-sidebar-task-id="${i}"]`)?.textContent ?? "",
+      id,
+    );
+
+  const setPref = (v: boolean) =>
+    browser.execute((on) => {
+      window.__termic!.usePrefs.getState().setUseBranchAsTaskName(on);
+    }, v);
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    original = await browser.execute(
+      () => window.__termic!.usePrefs.getState().useBranchAsTaskName,
+    );
+    taskId = await browser.execute(async (n, b) => {
+      const t = window.__termic!;
+      const proj = t.useApp.getState().projects.find((p: any) => p.name === "fixture-repo");
+      const task = await t.ipc.taskCreate({
+        project_id: proj.id, name: n, cli: "fakeagent", base_branch: "main", branch: b,
+      });
+      await t.useApp.getState().loadAll();
+      t.useApp.getState().setActiveTask((task as any).id);
+      return (task as any).id as string;
+    }, NAME, BRANCH);
+  });
+
+  after(async () => {
+    await setPref(original);
+    if (taskId) await archiveTask(taskId);
+    try { execSync(`git -C "${REPO}" worktree prune`); } catch { /* nothing to prune */ }
+    try { execSync(`git -C "${REPO}" branch -D ${BRANCH}`, { stdio: "ignore" }); } catch { /* already gone */ }
+  });
+
+  it("shows the typed name while the pref is off", async () => {
+    await setPref(false);
+    await browser.waitUntil(async () => (await rowText(taskId)).includes(NAME), {
+      timeout: 8_000,
+      timeoutMsg: "the task row never showed its typed name",
+    });
+    expect(await rowText(taskId)).not.toContain(BRANCH);
+  });
+
+  it("swaps the row and the breadcrumb to the branch once it is on", async () => {
+    await setPref(true);
+    await browser.waitUntil(async () => (await rowText(taskId)).includes(BRANCH), {
+      timeout: 8_000,
+      timeoutMsg: "the task row never switched to the branch",
+    });
+    // The typed name is replaced, not appended: the point of the setting is
+    // that the branch IS the identifier, and a row showing both is #73.
+    expect(await rowText(taskId)).not.toContain(NAME);
+
+    // Breadcrumb too, and only once: it used to read "<name> on <branch>", so
+    // the branch label has to collapse that clause rather than say it twice.
+    await ensureActiveTask(taskId);
+    const crumb = await browser.execute(
+      () => document.querySelector('[data-testid="task-breadcrumb"]')?.textContent ?? "",
+    );
+    expect(crumb).toContain(BRANCH);
+    expect(crumb).not.toContain(NAME);
+    expect(crumb.split(BRANCH).length - 1).toBe(1);
+    await snap("branch-as-task-name.png");
+  });
+
+  it("leaves a main-checkout task on its typed name", async () => {
+    // "Run in repo" tasks DO carry a branch (task_open_repo re-reads HEAD),
+    // so this is a deliberate exclusion, not a fallback that happens to fire:
+    // that branch is the shared checkout's, identical in every project.
+    const repoRootId = await openTask("e2e-branch-label-repo-root");
+    try {
+      await setPref(true);
+      await browser.waitUntil(
+        async () => (await rowText(repoRootId)).includes("e2e-branch-label-repo-root"),
+        { timeout: 8_000, timeoutMsg: "the repo-root row never showed its typed name" },
+      );
+      // It really does have a branch to have been tempted by.
+      expect(
+        await browser.execute(
+          (i) => window.__termic!.useApp.getState().tasks.find((t: any) => t.id === i)?.branch,
+          repoRootId,
+        ),
+      ).toBeTruthy();
+    } finally {
+      await archiveTask(repoRootId);
+    }
+  });
+
+  it("keeps the typed name, so turning it back off restores the row", async () => {
+    // The record is untouched: the pref is a display choice, and a rename
+    // still edits the name this asserts.
+    expect(
+      await browser.execute(
+        (i) => window.__termic!.useApp.getState().tasks.find((t: any) => t.id === i)?.name,
+        taskId,
+      ),
+    ).toBe(NAME);
+
+    await setPref(false);
+    await browser.waitUntil(async () => (await rowText(taskId)).includes(NAME), {
+      timeout: 8_000,
+      timeoutMsg: "the typed name never came back",
+    });
+  });
+});

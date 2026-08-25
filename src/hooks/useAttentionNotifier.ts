@@ -13,6 +13,7 @@ import { usePrefs } from "@/store/prefs";
 import { notify, onNotifyClick } from "@/lib/ipc";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { TerminalTab } from "@/lib/types";
+import { taskLabel } from "@/lib/taskLabel";
 
 const DEBOUNCE_MS = 8000;
 
@@ -59,9 +60,12 @@ export function useAttentionNotifier() {
             : "is idle";
           // Title = "project · task". The terminal/cli name was
           // noise — the body already says what happened.
+          // The task half is whatever the sidebar calls it, so a banner
+          // and the row it points at agree (GH #260).
+          const wLabel = w ? taskLabel(w, usePrefs.getState().useBranchAsTaskName) : "";
           const title = proj?.name
-            ? `${proj.name} · ${w?.name || "task"}`
-            : (w?.name || "task");
+            ? `${proj.name} · ${wLabel || "task"}`
+            : (wLabel || "task");
           // The agent's own wording when it gave us one ("Claude needs your
           // permission" beats "agent needs your input"). Single path: the
           // terminal used to forward OSC 9 bodies itself AND mark unread,

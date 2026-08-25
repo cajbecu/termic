@@ -42,6 +42,8 @@ export function TasksSection() {
 
   const branchPrefix = usePrefs(s => s.branchPrefix);
   const setBranchPrefix = usePrefs(s => s.setBranchPrefix);
+  const useBranchAsTaskName = usePrefs(s => s.useBranchAsTaskName);
+  const setUseBranchAsTaskName = usePrefs(s => s.setUseBranchAsTaskName);
   const queueMinIntervalMs = usePrefs(s => s.queueMinIntervalMs);
   const setQueueMinIntervalMs = usePrefs(s => s.setQueueMinIntervalMs);
   const confirmBeforeCloseAgentTab = usePrefs(s => s.confirmBeforeCloseAgentTab);
@@ -189,6 +191,18 @@ export function TasksSection() {
         <div className="mt-2 max-w-xs">
           <Input value={branchPrefix} onChange={(e) => setBranchPrefix(e.target.value)} placeholder="feature" className="font-mono" />
         </div>
+      </Block>
+
+      {/* GH #260. Sits next to the branch prefix because both are about what
+          a task ends up called. The typed name is not lost: it stays in the
+          row tooltip and is still what rename edits. */}
+      <Block>
+        <Toggle
+          label="Use the branch name as the task name"
+          hint="Label each worktree task by its branch instead of the title typed when it was created, in the sidebar, the breadcrumb and everywhere else a task is named. Tasks running in a project's main checkout, and tasks in a plain folder, keep their title. The typed name stays in the row tooltip, and renaming a task still edits it."
+          value={useBranchAsTaskName}
+          onChange={setUseBranchAsTaskName}
+        />
       </Block>
 
       <Block>

@@ -36,6 +36,7 @@ import { agentDisplayName } from "@/lib/agents";
 import { effectiveSandboxMode, isSandboxEnforced } from "@/lib/types";
 import { SandboxIcon, SANDBOX_VISUALS } from "@/components/SandboxIcon";
 import { TaskLocationIcon } from "@/components/TaskLocationIcon";
+import { useTaskLabel } from "@/lib/taskLabel";
 
 /** Pick a default name for a freshly-created task (repo-root OR worktree).
  *  Format: "<agent>-N" where N is the next unused index for that CLI among
@@ -1964,9 +1965,10 @@ function TaskRowSlot(props: React.ComponentProps<typeof TaskRow>) {
  *  disappearing the moment the user confirms, which would leave a multi-second
  *  gap where the archive silently might not have worked. */
 function ArchivingTaskRow({ w, compact }: { w: Task; compact: boolean }) {
+  const label = useTaskLabel(w);
   if (compact) {
     return (
-      <Tip content={`Archiving ${w.name}…`} side="right">
+      <Tip content={`Archiving ${label}…`} side="right">
         <div
           data-sidebar-task-id={w.id}
           data-task-archiving="true"
@@ -1987,7 +1989,7 @@ function ArchivingTaskRow({ w, compact }: { w: Task; compact: boolean }) {
       >
         <span className="shrink-0 h-3.5 w-3.5 mx-0.5" />
         <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          <span className="min-w-0 truncate font-medium line-through">{w.name}</span>
+          <span className="min-w-0 truncate font-medium line-through">{label}</span>
         </div>
         <Tip content="Archiving…">
           <span
@@ -2138,6 +2140,11 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
   const clearTabCustomTitle = useApp(s => s.clearTabCustomTitle);
   const settledHighlight = usePrefs(s => s.settledHighlight);
   const workingIndicator = usePrefs(s => s.workingIndicator);
+  // Row label: the typed name, or the branch when the pref is on (GH #260).
+  // The typed name is still what rename edits and what the row tooltip shows,
+  // so switching the pref on never hides which task this is.
+  const label = useTaskLabel(w);
+  const labelIsBranch = label !== w.name;
 
   const project = useApp(s => s.projects.find(p => p.id === w.project_id) ?? null);
   const spotlightTaskId = useApp(s => s.spotlightTaskId[w.project_id] ?? null);
@@ -2283,7 +2290,7 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
   // Compact mode: render a minimal icon-only row (no tree, no children).
   if (compact) {
     return (
-      <Tip content={w.name} side="right">
+      <Tip content={labelIsBranch ? `${label} (${w.name})` : w.name} side="right">
         <div
           onClick={() => setActive(w.id)}
           className={cn(
@@ -2410,7 +2417,21 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
             />
           ) : (
             <>
-              <span className="min-w-0 truncate font-medium">{w.name}</span>
+              {/* Branch-labelled rows keep the typed name reachable: it is the
+                  one thing the pref would otherwise hide, and it is still what
+                  a rename edits. A plain `title`, not a Radix Tip: a tooltip
+                  per row would add a provider each and put its own pointer
+                  handlers between the row and the drag that starts on it.
+                  Mono matches how a branch reads everywhere else. */}
+              <span
+                title={labelIsBranch ? `Task name: ${w.name}` : undefined}
+                className={cn(
+                  "min-w-0 truncate font-medium",
+                  labelIsBranch && "font-mono text-[12px]",
+                )}
+              >
+                {label}
+              </span>
               <TaskLocationIcon isMainCheckout={w.is_main_checkout} size="h-3.5 w-3.5" />
             </>
           )}
@@ -2696,7 +2717,7 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                   className="items-center [&>svg]:mt-0"
                   onSelect={() => {
                     stopTask(w.id);
-                    useUI.getState().pushToast(`Stopped ${w.name}`, "success");
+                    useUI.getState().pushToast(`Stopped ${label}`, "success");
                   }}
                 >
                   <CircleStop className="h-4 w-4" />

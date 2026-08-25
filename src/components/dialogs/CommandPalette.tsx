@@ -32,6 +32,7 @@ import { isCustomId } from "@/lib/customTheme";
 import { effectiveLanguageId, languageLabel } from "@/lib/languages";
 import { effectiveSandboxMode, isSandboxEnforced } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { taskLabel } from "@/lib/taskLabel";
 
 // New-issue page for the project repo. Opened via the OS browser (open_path).
 const ISSUE_URL = "https://github.com/simion/termic/issues/new";
@@ -97,6 +98,7 @@ export function CommandPalette() {
   const customThemes = usePrefs(s => s.customThemes);
   const binds = usePrefs(s => s.shortcuts);
   const inlineBlame = usePrefs(s => s.inlineBlame);
+  const useBranchAsTaskName = usePrefs(s => s.useBranchAsTaskName);
 
   // Built-ins first, then the custom theme files — the submenu's order.
   const themeEntries = useMemo<{ id: ThemeMode; label: string }[]>(
@@ -264,7 +266,7 @@ export function CommandPalette() {
         // Ends every PTY in the task but keeps the task itself (GH #119).
         // Also the only way to release a mounted task's terminals, which is
         // what the idle-cost work made concrete.
-        id: "stop-task", section: "Task", label: `Stop "${task.name}"`,
+        id: "stop-task", section: "Task", label: `Stop "${taskLabel(task, useBranchAsTaskName)}"`,
         suffix: "Ends its agents, keeps the task",
         icon: Square, keywords: "kill terminate close ptys unmount free memory",
         noRecent: true,
@@ -275,7 +277,7 @@ export function CommandPalette() {
         // modal (with the delete-branch checkbox), so the red isn't needed.
         // Once the user has unticked "Show this every time" there, this entry archives
         // on Enter with no prompt; Settings › Tasks is the way back.
-        id: "archive-task", section: "Task", label: `Archive "${task.name}"`,
+        id: "archive-task", section: "Task", label: `Archive "${taskLabel(task, useBranchAsTaskName)}"`,
         icon: Archive, keywords: "delete remove close worktree",
         noRecent: true,
         run: act(() => { void confirmAndArchive(task); }),
@@ -477,7 +479,7 @@ export function CommandPalette() {
     }
 
     return cmds;
-  }, [view, task, proj, themeMode, themeEntries, inlineBlame, activeEditTab]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [view, task, proj, themeMode, themeEntries, inlineBlame, useBranchAsTaskName, activeEditTab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Recents, re-read on every open so an hour spent with the palette closed
   // expires them (the list is only ever consulted at build time). Empty query

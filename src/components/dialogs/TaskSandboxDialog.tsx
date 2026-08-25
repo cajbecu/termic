@@ -12,6 +12,7 @@ import { usePrefs } from "@/store/prefs";
 import { AppDialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/utils";
+import { taskLabel } from "@/lib/taskLabel";
 import { settingsLoad, taskSetSandbox, sandboxAvailable } from "@/lib/ipc";
 import { effectiveSandboxMode, type SandboxMode } from "@/lib/types";
 import { AlertTriangle, Shield, Zap, Save, RotateCw } from "lucide-react";
@@ -30,6 +31,7 @@ export function TaskSandboxDialog() {
   const agent   = useApp(s => task ? s.agents.find(a => a.id === task.cli) ?? null : null);
   const loadAll = useApp(s => s.loadAll);
   const sandboxBypassPermissions = usePrefs(s => s.sandboxBypassPermissions);
+  const useBranchAsTaskName = usePrefs(s => s.useBranchAsTaskName);
 
   // Local edit state, snapshotted from the task whenever the
   // dialog opens for a new id. Saving pushes back via IPC; cancelling
@@ -89,7 +91,7 @@ export function TaskSandboxDialog() {
     // so the dialog text is generic. The user is explicitly asking
     // for this; soft-warning is enough.
     const ok = await useUI.getState().askConfirm({
-      title: `Save sandbox changes for "${task.name}"?`,
+      title: `Save sandbox changes for "${taskLabel(task, useBranchAsTaskName)}"?`,
       message: restart
         ? "Any agent running in this task will be terminated and AUTO-restarted under the new sandbox profile. " +
           "This is by design: the running process holds the OLD profile until it's replaced."
@@ -149,7 +151,7 @@ export function TaskSandboxDialog() {
     <AppDialog
       open={!!taskId}
       onOpenChange={(v) => { if (!v && !busy) close(); }}
-      title={task ? `Sandbox · ${task.name}` : "Sandbox"}
+      title={task ? `Sandbox · ${taskLabel(task, useBranchAsTaskName)}` : "Sandbox"}
       description="Restrict what the agent in this task can read, write, and reach."
       // Wider than the default max-w-md so the textareas don't get
       // squeezed into a column. Cap height to the viewport so the

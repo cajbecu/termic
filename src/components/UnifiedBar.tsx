@@ -19,6 +19,7 @@ import {
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { TaskLocationIcon } from "@/components/TaskLocationIcon";
 import { effectiveSandboxMode } from "@/lib/types";
+import { taskLabel } from "@/lib/taskLabel";
 import { SandboxIcon } from "@/components/SandboxIcon";
 import { UpdaterBanner } from "@/components/UpdaterBanner";
 import { WaitingAgentsPill } from "@/components/WaitingAgentsPill";
@@ -56,6 +57,10 @@ export function UnifiedBar() {
   // side near the window edge. Shared (not local state) so the ⌥⌘P prompt
   // palette's fallback path can open the same dialog.
   const openPromptFire = useUI(s => s.openPromptFire);
+  // Breadcrumb label for the task: its typed name, or its branch when the
+  // "use branch as task name" pref is on (GH #260).
+  const useBranchAsTaskName = usePrefs(s => s.useBranchAsTaskName);
+  const taskCrumb = task ? taskLabel(task, useBranchAsTaskName) : "";
   const themeMode = usePrefs(s => s.themeMode);
   const setThemeMode = usePrefs(s => s.setThemeMode);
   // When the user picked an explicit theme, show that theme's icon.
@@ -147,7 +152,7 @@ export function UnifiedBar() {
       </div>
 
       {/* Breadcrumbs / title — text doesn't select on drag (matches AppKit title bar). */}
-      <div className="ml-2 flex min-w-0 flex-1 select-none items-baseline gap-2 text-[14px]">
+      <div data-testid="task-breadcrumb" className="ml-2 flex min-w-0 flex-1 select-none items-baseline gap-2 text-[14px]">
         {task && proj ? (
           <>
             <span className="text-[var(--color-fg-faint)]">{proj.name}</span>
@@ -162,15 +167,17 @@ export function UnifiedBar() {
             {/* Task name == branch means the user never renamed it, so
                 "<branch> on <branch>" reads as noise: show just the branch
                 plus the location icon. The icon (main checkout vs worktree)
-                makes the task's checkout kind explicit. */}
-            {task.name === task.branch ? (
+                makes the task's checkout kind explicit. The same collapse
+                applies when the branch IS the label (GH #260) — the "on"
+                clause would then repeat the crumb it follows. */}
+            {taskCrumb === task.branch ? (
               <>
                 <span className="truncate font-mono text-[13px] leading-tight text-[var(--color-fg)]">{task.branch}</span>
                 <TaskLocationIcon isMainCheckout={task.is_main_checkout} className="self-center" />
               </>
             ) : (
               <>
-                <span className="min-w-0 truncate pr-0.5 font-medium leading-tight text-[var(--color-fg)]">{task.name}</span>
+                <span className="min-w-0 truncate pr-0.5 font-medium leading-tight text-[var(--color-fg)]" title={taskCrumb === task.name ? undefined : `Task name: ${task.name}`}>{taskCrumb}</span>
                 <span className="leading-tight text-[var(--color-fg-faint)]">on</span>
                 <span className="truncate font-mono text-[12px] leading-tight text-[var(--color-fg-dim)]">{task.branch}</span>
                 <TaskLocationIcon isMainCheckout={task.is_main_checkout} className="self-center" />
@@ -257,7 +264,7 @@ export function UnifiedBar() {
                 <Button size="sm" variant="ghost" className="gap-1.5"
                   onClick={async () => {
                     const ok = await useUI.getState().askConfirm({
-                      title: `Send "${task.name}" to main?`,
+                      title: `Send "${taskCrumb}" to main?`,
                       message:
                         `Applies all tracked changes (committed + staged + unstaged) and copies untracked files into ${proj.root_path}. ` +
                         `The main checkout must be clean. Commit or stash there first.`,

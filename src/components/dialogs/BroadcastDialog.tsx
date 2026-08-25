@@ -18,6 +18,8 @@ import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { sendMessageToPty } from "@/lib/agentSend";
 import { isTerminalCli } from "@/lib/agents";
 import { cn } from "@/lib/utils";
+import { usePrefs } from "@/store/prefs";
+import { taskLabel } from "@/lib/taskLabel";
 import { Check, Megaphone } from "lucide-react";
 import type { Tab, TerminalTab } from "@/lib/types";
 
@@ -44,6 +46,7 @@ export function BroadcastDialog() {
   // so unrelated tab churn never re-renders this dialog.
   const allTabs = useApp(s => (taskId || projectId) ? s.tabs : EMPTY_TABS);
   const tasks = useApp(s => s.tasks);
+  const useBranchAsTaskName = usePrefs(s => s.useBranchAsTaskName);
   const patchTab = useApp(s => s.patchTab);
 
   const open = !!taskId || !!projectId;
@@ -66,12 +69,12 @@ export function BroadcastDialog() {
           (t): t is TerminalTab => t.type === "terminal" && !!(t as TerminalTab).is_default
             && !(t as TerminalTab).paneId && !(t as TerminalTab).runTab && !!t.ptyId,
         );
-        if (main) out.push({ tab: main, taskId: w.id, label: w.name });
+        if (main) out.push({ tab: main, taskId: w.id, label: taskLabel(w, useBranchAsTaskName) });
       }
       return out;
     }
     return [];
-  }, [taskId, projectId, allTabs, tasks]);
+  }, [taskId, projectId, allTabs, tasks, useBranchAsTaskName]);
 
   const [msg, setMsg] = useState("");
   // Per-tab checkbox OVERRIDES of the default. A tab with no override falls

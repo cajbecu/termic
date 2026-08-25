@@ -8,6 +8,7 @@ import { usePrefs } from "@/store/prefs";
 import { useApp } from "@/store/app";
 import { Block, SectionTitle, Toggle } from "./Controls";
 import { cn } from "@/lib/utils";
+import { taskLabel } from "@/lib/taskLabel";
 import { COMPLETION_SOUND_OPTIONS, COMPLETION_SOUND_SUPPORTED } from "@/lib/notificationSounds";
 
 export function NotificationsSection() {
@@ -77,9 +78,12 @@ export function NotificationsSection() {
                   st.tasks.find(w => w.id === st.activeTaskId && !w.archived) ??
                   st.tasks.find(w => !w.archived);
                 const proj = task && st.projects.find(p => p.id === task.project_id);
+                const label = task
+                  ? taskLabel(task, usePrefs.getState().useBranchAsTaskName)
+                  : "";
                 const title = task && proj?.name
-                  ? `${proj.name} · ${task.name || "task"}`
-                  : (task?.name || "project · task");
+                  ? `${proj.name} · ${label || "task"}`
+                  : (label || "project · task");
                 previewCompletionSound(completionSoundId, { title, body: "agent finished" });
               }}
               title="Play a preview of the selected completion sound"

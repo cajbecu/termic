@@ -58,6 +58,7 @@ const LS_TERMINAL_RENDERER       = "terminalRenderer";
 const LS_TERMINAL_COPY_ON_SELECT = "terminalCopyOnSelect";
 const LS_TASK_EXPAND_MODE = "taskExpandMode";
 const LS_HIDE_INACTIVE_PROJECTS = "hideInactiveProjects";
+const LS_BRANCH_AS_TASK_NAME = "useBranchAsTaskName";
 const LS_MD_VIEW       = "markdownDefaultView";
 const LS_SVG_VIEW      = "svgDefaultView";
 const LS_LOAD_REMOTE_IMAGES = "loadRemoteImages";
@@ -668,6 +669,20 @@ interface PrefsState {
    *  Keeps a long project list (repos you've added but aren't actively
    *  working in) from crowding out the projects that have live agents. */
   hideInactiveProjects: boolean;
+  /** When true (GH #260), a WORKTREE task is labelled by its branch
+   *  everywhere it is named in the UI, instead of by the title typed at
+   *  creation. A week-old task's typed name goes stale; the branch is what
+   *  the PR, `git log` and every conversation about the work call it.
+   *  Everything else keeps its name: a plain-folder task has no branch, and
+   *  a main checkout's branch is the shared checkout's HEAD, not an
+   *  identity. The typed name is never lost: it stays in the row tooltip
+   *  and is what rename edits. Off by default.
+   *
+   *  The branch shown is the one frozen on the task record at creation,
+   *  the same value the breadcrumb reads. Checking out a different
+   *  branch inside the worktree does NOT rewrite it: reading live HEAD
+   *  would mean a git call per sidebar row on every render. */
+  useBranchAsTaskName: boolean;
   /** Last-used view for markdown edit tabs (source / preview / split).
    *  New markdown tabs open in this mode, and toggling a tab's view
    *  updates it — so the app remembers however you last looked at a doc. */
@@ -750,6 +765,7 @@ interface PrefsState {
   setAllowScope: (s: "agent" | "project" | "repo") => void;
   setTaskExpandMode: (m: "chevron" | "click" | "always") => void;
   setHideInactiveProjects: (v: boolean) => void;
+  setUseBranchAsTaskName: (v: boolean) => void;
   setMarkdownDefaultView: (v: MarkdownView) => void;
   setSvgDefaultView: (v: MarkdownView) => void;
   setBranchPrefix: (v: string) => void;
@@ -915,6 +931,7 @@ const initialTaskExpandMode: "chevron" | "click" | "always" = (() => {
   return raw === "click" || raw === "always" ? raw : "chevron";
 })();
 const initialHideInactiveProjects = lsGet(LS_HIDE_INACTIVE_PROJECTS, "") === "1";
+const initialUseBranchAsTaskName = lsGet(LS_BRANCH_AS_TASK_NAME, "") === "1";
 const initialMarkdownView: MarkdownView = (() => {
   const raw = lsGet(LS_MD_VIEW, "source");
   return raw === "preview" || raw === "split" ? raw : "source";
@@ -969,6 +986,7 @@ export const usePrefs = create<PrefsState>(set => ({
   showAllInstalledFonts: initialShowAllFonts,
   taskExpandMode: initialTaskExpandMode,
   hideInactiveProjects: initialHideInactiveProjects,
+  useBranchAsTaskName: initialUseBranchAsTaskName,
   markdownDefaultView: initialMarkdownView,
   svgDefaultView: initialSvgView,
   branchPrefix: initialBranchPrefix,
@@ -1232,6 +1250,10 @@ export const usePrefs = create<PrefsState>(set => ({
   setHideInactiveProjects: (v) => {
     try { localStorage.setItem(LS_HIDE_INACTIVE_PROJECTS, v ? "1" : "0"); } catch {}
     set({ hideInactiveProjects: v });
+  },
+  setUseBranchAsTaskName: (v) => {
+    try { localStorage.setItem(LS_BRANCH_AS_TASK_NAME, v ? "1" : "0"); } catch {}
+    set({ useBranchAsTaskName: v });
   },
   setMarkdownDefaultView: (v) => {
     try { localStorage.setItem(LS_MD_VIEW, v); } catch {}

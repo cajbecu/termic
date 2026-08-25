@@ -4,8 +4,10 @@
 
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
+import { usePrefs } from "@/store/prefs";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { TaskLocationIcon } from "@/components/TaskLocationIcon";
+import { taskLabel } from "@/lib/taskLabel";
 import { TermicBlockmark } from "@/icons/TermicLogo";
 
 // Module-level flag: animate the hero logo ONCE per app launch, not every
@@ -29,6 +31,7 @@ export function Dashboard() {
   const openSettings = useApp(s => s.openSettings);
   const loadAll      = useApp(s => s.loadAll);
   const agents       = useApp(s => s.agents);
+  const useBranchAsTaskName = usePrefs(s => s.useBranchAsTaskName);
   const openNewProject   = useUI(s => s.openNewProject);
   const openNewTask = useUI(s => s.openNewTask);
 
@@ -132,9 +135,18 @@ export function Dashboard() {
                             )}>
                               <CliIcon cli={resolveIconId(w.cli, agents)} className="h-4 w-4" />
                             </span>
-                            <span className="min-w-0 shrink truncate font-medium text-[13px]">{w.name}</span>
-                            <span className="shrink-0 text-[12.5px] text-[var(--color-fg-faint)]">on</span>
-                            <span className="min-w-0 shrink font-mono text-[12px] text-[var(--color-fg-dim)] truncate">{w.branch}</span>
+                            {/* Branch-labelled tasks (GH #260) drop the
+                                "on <branch>" clause: it would just repeat
+                                the label sitting next to it. */}
+                            {taskLabel(w, useBranchAsTaskName) === w.branch ? (
+                              <span className="min-w-0 shrink truncate font-mono text-[12.5px] font-medium">{w.branch}</span>
+                            ) : (
+                              <>
+                                <span className="min-w-0 shrink truncate font-medium text-[13px]" title={taskLabel(w, useBranchAsTaskName) === w.name ? undefined : `Task name: ${w.name}`}>{taskLabel(w, useBranchAsTaskName)}</span>
+                                <span className="shrink-0 text-[12.5px] text-[var(--color-fg-faint)]">on</span>
+                                <span className="min-w-0 shrink font-mono text-[12px] text-[var(--color-fg-dim)] truncate">{w.branch}</span>
+                              </>
+                            )}
                             <TaskLocationIcon isMainCheckout={w.is_main_checkout} className="self-center" />
                           </button>
                         ))}

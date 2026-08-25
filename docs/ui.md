@@ -79,6 +79,47 @@ deferred by a `setTimeout`, not a `requestAnimationFrame`: a just-mounted
 listener has to be attached first, and rAF is frozen on an occluded window (see
 [gotchas.md](gotchas.md)).
 
+## What a task is called (name vs branch)
+
+A task's label is decided in ONE place, `taskLabel()` in
+[src/lib/taskLabel.ts](../src/lib/taskLabel.ts). By default it is the title
+typed at creation. With `useBranchAsTaskName` on (Settings -> Tasks, off by
+default, GH #260) a WORKTREE task is labelled by its branch instead, in the
+sidebar row, the breadcrumb, the command palette, the archive and sandbox
+dialogs, the Dashboard, the race board and the desktop notification title. New
+surfaces that name a task go through the same helper: a place that reads
+`task.name` directly is a place that disagrees with the sidebar.
+
+Three rules the helper encodes, all load-bearing:
+
+- **Only a worktree task is relabelled.** A plain-folder task has no branch
+  (`""`), a detached checkout records the literal `"HEAD"`, and a main-checkout
+  task is excluded even though `task_open_repo` does record a branch for it:
+  that branch is the shared checkout's HEAD, so it reads `main` in every
+  project and moves under the task whenever anyone runs `git checkout` there. A
+  worktree's branch was cut FOR that task, which is the issue's whole premise.
+  All three fall back to the typed name, which is also the guard against
+  rendering an empty row.
+- **The typed name is never overwritten.** It stays on the record, it is what
+  rename edits, and it stays reachable in the row tooltip. The pref is a
+  display choice, not a migration.
+- **The branch is the one frozen on the worktree task's record**, the same
+  value the breadcrumb has always shown. Checking out a different branch in the
+  worktree does not rewrite it (`task_git_checkout` writes git, not the
+  record), so a task whose HEAD has moved still shows the branch it was cut
+  on. Resolving live HEAD instead would mean a git call per sidebar row on
+  every render, which is not a trade this app makes.
+
+Where the label already sat next to the branch, it collapses rather than
+repeats it: the breadcrumb's `<name> on <branch>` and the Dashboard row's
+identical shape both drop the "on" clause when the label IS the branch. That
+is the same collapse `task.name === task.branch` has always triggered for a
+task the user never renamed.
+
+`task.name` is still the right field for anything that is data rather than a
+label: `TERMIC_WORKSPACE_NAME` and the agent env slugs, PTY log filenames, and
+the agent briefing all keep the typed name whatever the pref says.
+
 ## Task type on a plain-folder project
 
 "Worktree" needs branches, so a project pointing at a plain folder can only

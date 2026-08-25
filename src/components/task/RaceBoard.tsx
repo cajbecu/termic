@@ -10,6 +10,8 @@ import { useRace, raceOf } from "@/store/race";
 import { useUI } from "@/store/ui";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { cn } from "@/lib/utils";
+import { usePrefs } from "@/store/prefs";
+import { taskLabel } from "@/lib/taskLabel";
 import { Flag, X, Columns2 } from "lucide-react";
 import { Spinner } from "@/components/ui/Spinner";
 import type { TerminalTab } from "@/lib/types";
@@ -23,6 +25,7 @@ export function RaceBoard() {
   const tabs = useApp(s => s.tabs);
   const activeId = useApp(s => s.activeTaskId);
   const setActiveTask = useApp(s => s.setActiveTask);
+  const useBranchAsTaskName = usePrefs(s => s.useBranchAsTaskName);
   const openCompare = useUI(s => s.openRaceCompare);
 
   const race = useMemo(() => raceOf(races, activeId), [races, activeId]);
@@ -72,7 +75,7 @@ export function RaceBoard() {
             <button
               key={task.id}
               onClick={() => setActiveTask(task.id)}
-              title={task.name}
+              title={taskLabel(task, useBranchAsTaskName) === task.name ? task.name : `${taskLabel(task, useBranchAsTaskName)} (${task.name})`}
               className={cn(
                 "flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-[12px] transition-colors",
                 isActive
@@ -83,7 +86,7 @@ export function RaceBoard() {
               <span className={cn("shrink-0", CLI_BRAND_COLOR[iconId])}>
                 <CliIcon cli={iconId} className="h-3.5 w-3.5" />
               </span>
-              <span className="max-w-[120px] truncate">{task.name}</span>
+              <span className="max-w-[120px] truncate">{taskLabel(task, useBranchAsTaskName)}</span>
               <StateDot state={state} />
             </button>
           );

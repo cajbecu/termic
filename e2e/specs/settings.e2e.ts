@@ -20,6 +20,16 @@ const clickToggleByLabel = (label: string) =>
     sw.click();
   }, label);
 
+/** aria-checked of the switch in the settings row with this exact label. */
+const ariaCheckedFor = (label: string) =>
+  browser.execute((lbl) => {
+    const labelEl = [...document.querySelectorAll("div")].find(
+      (d) => d.textContent?.trim() === lbl,
+    );
+    return labelEl?.closest(".justify-between")
+      ?.querySelector('[role="switch"]')?.getAttribute("aria-checked");
+  }, label);
+
 /** Click a segment of the renderer picker. Keyed off `data-renderer`, whose
  *  values are the pref values themselves, so copy edits to the visible labels
  *  cannot break the test the way matching on label text would. */
@@ -1000,6 +1010,50 @@ describe("archive confirmation settings", () => {
     // rewrite the branch answer the dialog is about to be seeded with.
     await waitForText(BRANCH_LABEL);
     expect(await ariaChecked(BRANCH_LABEL)).toBe(String(branchBefore));
+  });
+});
+
+// P2: the branch-as-task-name toggle (GH #260). What the pref DOES is pinned
+// in task.e2e.ts; what matters here is that Settings -> Tasks can reach it,
+// since it is app-wide and the sidebar offers no other way in.
+describe("task name source setting (GH #260)", () => {
+  const LABEL = "Use the branch name as the task name";
+  let original = false;
+
+  const pref = () =>
+    browser.execute(() => window.__termic!.usePrefs.getState().useBranchAsTaskName);
+
+  after(async () => {
+    // Shared profile: a leaked "on" would relabel every later spec's rows.
+    await browser.execute((v) => {
+      window.__termic!.usePrefs.getState().setUseBranchAsTaskName(v);
+    }, original);
+    await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
+  });
+
+  it("ships off, next to the branch prefix it belongs with", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    original = await pref();
+    await browser.execute((v) => {
+      window.__termic!.usePrefs.getState().setUseBranchAsTaskName(v);
+      window.__termic!.useApp.getState().openSettings("tasks");
+    }, false);
+    await waitForText(LABEL);
+    await waitForText("Branch prefix");
+    expect(await ariaCheckedFor(LABEL)).toBe("false");
+  });
+
+  it("turns on from the toggle and back off again", async () => {
+    await clickToggleByLabel(LABEL);
+    await browser.waitUntil(async () => (await pref()) === true,
+      { timeout: 5_000, timeoutMsg: "useBranchAsTaskName never turned on" });
+    expect(await ariaCheckedFor(LABEL)).toBe("true");
+
+    await clickToggleByLabel(LABEL);
+    await browser.waitUntil(async () => (await pref()) === false,
+      { timeout: 5_000, timeoutMsg: "useBranchAsTaskName never turned back off" });
+    expect(await ariaCheckedFor(LABEL)).toBe("false");
   });
 });
 

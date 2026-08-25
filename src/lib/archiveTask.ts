@@ -16,6 +16,7 @@ import { useArchivingTasks } from "@/store/archivingTasks";
 import { taskArchive } from "@/lib/ipc";
 import type { ConfirmCheckbox } from "@/store/ui";
 import type { Task } from "@/lib/types";
+import { taskLabel } from "@/lib/taskLabel";
 
 /** Archive `taskId`, then ALWAYS refresh the store — even if the IPC rejects on
  *  a best-effort cleanup error, because the task is already persisted as
@@ -88,6 +89,8 @@ function archivePrompt(w: Task, deleteBranchDefault: boolean): { message: string
 export async function confirmAndArchive(w: Task): Promise<void> {
   const ui = useUI.getState();
   const prefs = usePrefs.getState();
+  // Name the task the way the UI the user clicked from names it (GH #260).
+  const label = taskLabel(w, prefs.useBranchAsTaskName);
   const { message, confirmLabel, checkbox } = archivePrompt(w, prefs.archiveDeleteBranch);
 
   // Fast path: confirmation is off, so the Settings toggle IS the answer -
@@ -99,7 +102,7 @@ export async function confirmAndArchive(w: Task): Promise<void> {
     // happened — and the only pointer back to where the task went. Pushed
     // BEFORE awaiting: the archive can take tens of seconds (script +
     // node_modules rmdir) and the confirmation belongs to the click.
-    ui.pushToast(`Archived "${w.name}". It's in History.`, "info", {
+    ui.pushToast(`Archived "${label}". It's in History.`, "info", {
       ttlMs: 6000,
       action: { label: "History", onClick: () => useApp.getState().setView("history") },
     });
@@ -108,7 +111,7 @@ export async function confirmAndArchive(w: Task): Promise<void> {
   }
 
   const ok = await ui.askConfirm({
-    title: `Archive "${w.name}"?`,
+    title: `Archive "${label}"?`,
     message,
     confirmLabel,
     // Not red: archiving is recoverable (History keeps the task, git keeps

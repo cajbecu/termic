@@ -26,6 +26,8 @@ import { AppDialog } from "@/components/ui/Dialog";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { taskDiff, taskSendDiffToMain, taskArchive } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
+import { usePrefs } from "@/store/prefs";
+import { taskLabel } from "@/lib/taskLabel";
 import { Loader2, ArrowUpToLine } from "lucide-react";
 import { StateDot, type WorkDot } from "@/components/task/RaceBoard";
 import type { Task, TerminalTab, TaskDiffSummary } from "@/lib/types";
@@ -79,6 +81,7 @@ export function RaceCompare() {
 }
 
 function RaceColumn({ task, wide, raceId, cohortIds }: { task: Task; wide: boolean; raceId: string; cohortIds: string[] }) {
+  const useBranchAsTaskName = usePrefs(s => s.useBranchAsTaskName);
   const agents = useApp(s => s.agents);
   const tabs = useApp(s => s.tabs);
   const setActiveTask = useApp(s => s.setActiveTask);
@@ -123,7 +126,7 @@ function RaceColumn({ task, wide, raceId, cohortIds }: { task: Task; wide: boole
     // a picked race doesn't strand N-1 dead worktrees in the sidebar. Opt-in
     // (default off): archiving removes real worktrees, so never silently.
     const req = {
-      title: `Adopt "${task.name}"?`,
+      title: `Adopt "${taskLabel(task, useBranchAsTaskName)}"?`,
       message:
         `Applies this agent's changes (committed + staged + unstaged) and copies its untracked files into ${proj?.root_path ?? "the project's main checkout"}. ` +
         `The main checkout must be clean. Commit or stash there first.`,
@@ -187,7 +190,7 @@ function RaceColumn({ task, wide, raceId, cohortIds }: { task: Task; wide: boole
           title="Jump to this agent's terminal"
           className="min-w-0 flex-1 truncate text-left text-[13px] font-medium text-[var(--color-fg)] hover:text-[var(--color-accent)]"
         >
-          {task.name}
+          {taskLabel(task, useBranchAsTaskName)}
         </button>
         <StateDot state={state} />
         {!task.is_main_checkout && (
