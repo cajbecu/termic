@@ -367,7 +367,12 @@ export function AppearanceSection() {
                 {serversOpen
                   ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />
                   : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)]" />}
-                <span className="text-[13px] font-medium">Servers</span>
+                {/* "Language servers", not "Servers": on its own the word
+                    suggests something termic runs for you, and not "plugins"
+                    either, which would imply an extension point that does not
+                    exist. These are separate processes, spawned from the
+                    machine's own toolchain. */}
+                <span className="text-[13px] font-medium">Language servers</span>
                 <span className="text-[12px] text-[var(--color-fg-dim)]">
                   what can run, and what this machine already has
                 </span>

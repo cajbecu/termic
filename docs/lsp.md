@@ -335,7 +335,7 @@ and wrong often enough that somebody has to be able to say so: the Django
 afternoon's real fix was not a setting, it was a different process, and there
 was no way to ask for one.
 
-Settings -> Editor -> Servers puts a radio on each row of a language that has
+Settings -> Editor -> Language servers puts a radio on each row of a language that has
 more than one, plus **Automatic** for termic's order, and a **Custom command**
 field on every language for a binary termic does not ship at all (pylsp,
 pyright-langserver, a wrapper script in the repo). Both exist per machine and
