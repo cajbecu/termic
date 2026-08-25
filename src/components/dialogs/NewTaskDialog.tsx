@@ -94,8 +94,11 @@ export function NewTaskDialog() {
   // the same shape as the sidebar's "Run in repo with <agent>"). Main checkout
   // (repo_root) is the default (most people start there, reach for worktrees
   // later); repo_root hides the branch fields + sandbox panel and creates via
-  // task_open_repo. Multi-repo ignores this (it has its own per-member
-  // toggle); non-git projects force repo_root (no branches).
+  // task_open_repo. Multi-repo honours it at the HOST level: repo_root opens
+  // the host's live checkout with every member linked in (task_open_repo's
+  // multi branch, the same shape the sidebar quick menu creates), while
+  // worktree builds the wrapper + per-member toggles. Non-git projects force
+  // repo_root (no branches).
   const [mode, setMode] = useState<"worktree" | "repo_root">("repo_root");
   // Flipping the toggle writes through to the shared `newTaskLastMode` key
   // right away (not just on submit), so the sidebar quick menu and this modal
@@ -144,11 +147,10 @@ export function NewTaskDialog() {
     }
   };
   const isMulti = (project?.type ?? "single") === "multi";
-  // Sandbox is offered for single-repo tasks in BOTH locations: the seatbelt +
-  // proxy cage the main checkout identically to a worktree (see task_open_repo,
-  // which now takes sandbox args). Multi keeps its own handling (its mode stays
-  // "worktree"), so the repo-root case is gated on !isMulti.
-  const canSandbox = mode === "worktree" || (mode === "repo_root" && !isMulti);
+  // Sandbox is offered in every shape: the seatbelt + proxy cage the main
+  // checkout identically to a worktree (task_open_repo takes sandbox args,
+  // for single AND multi hosts), and the multi wrapper carries its own.
+  const canSandbox = true;
   // Derived: any cage on. Drives the 2-column layout + "send lists" gating.
   const sandbox = sandboxMode !== "off" && canSandbox;
   // Import mode (issue #5): instead of branching a fresh worktree, adopt
@@ -549,10 +551,10 @@ export function NewTaskDialog() {
   }
 
   async function submit() {
-    // Remember how the user works for next time. Task type is a
-    // single-repo concept (multi has its own per-member toggle); sandbox mode
-    // is remembered whenever a worktree/multi create can carry one.
-    if (!isMulti) persistLast(LS_LAST_MODE, mode);
+    // Remember how the user works for next time. The task type is the
+    // host-level shape for multi too (members keep their own per-row memory);
+    // sandbox mode is remembered whenever a create can carry one.
+    persistLast(LS_LAST_MODE, mode);
     // Sandbox can now ride on a single-repo main-checkout create too, so
     // remember the mode whenever a create can carry one (i.e. always here).
     persistLast(LS_LAST_SANDBOX, sandboxMode);
@@ -562,7 +564,11 @@ export function NewTaskDialog() {
     // (the remembered default). Checking repo_root first would silently open
     // the main checkout instead of importing the picked worktree.
     if (importMode) { submitImport(); return; }
-    if (mode === "repo_root" && !isMulti) { submitRepoRoot(); return; }
+    // Main checkout, single or multi: task_open_repo opens the live checkout
+    // (for multi, with every member linked into the host). This is the SAME
+    // task the sidebar quick menu's Main checkout creates, so the two entry
+    // points can't drift into different task shapes.
+    if (mode === "repo_root") { submitRepoRoot(); return; }
     if (!projectId || !name.trim() || !branch.trim()) return;
     if (submittingRef.current) return;
     submittingRef.current = true;
@@ -673,7 +679,7 @@ export function NewTaskDialog() {
       // (worktree/multi creates close the dialog immediately; see submit()).
       open={!!projectId}
       onOpenChange={(v) => { if (!v && !busy) close(); }}
-      title={isMulti ? "New multi-repo task" : importMode ? "Import existing worktree" : mode === "repo_root" ? "New task in the main checkout" : "New task in a worktree"}
+      title={isMulti ? (mode === "repo_root" ? "New multi-repo task in the main checkout" : "New multi-repo task") : importMode ? "Import existing worktree" : mode === "repo_root" ? "New task in the main checkout" : "New task in a worktree"}
       description={undefined}
       // Widen the dialog to fit what's inside. Base width per mode (xl 36rem /
       // 2xl 42rem / 3xl 48rem) sizes the single-column form. Enabling the
@@ -789,11 +795,11 @@ export function NewTaskDialog() {
           </Field>
         )}
 
-        {/* Worktree vs repo-root toggle (single-repo only — multi has its
-            own per-member toggle below). Repo root hides the branch + sandbox
-            fields and creates in the repo's live checkout. Non-git projects
-            can't worktree, so the Worktree button is disabled there. */}
-        {!isMulti && !importMode && (
+        {/* Worktree vs repo-root toggle. Repo root hides the branch fields
+            (and, for multi, the per-member list: every member runs live) and
+            creates in the repo's live checkout. Non-git projects can't
+            worktree, so the Worktree button is disabled there. */}
+        {!importMode && (
           <div className="flex flex-col gap-1.5">
             {/* Label + toggle share one row (not label-above-control like
                 every other Field) — this is the field people re-adjust most
@@ -803,6 +809,7 @@ export function NewTaskDialog() {
               <div className="inline-flex shrink-0 items-stretch rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-[3px]">
                 <button
                   type="button"
+                  data-testid="task-type-main"
                   onClick={() => chooseMode("repo_root")}
                   className={cn(
                     "flex h-7 items-center gap-1.5 rounded-[5px] px-2.5 text-[12.5px] transition-colors",
@@ -815,6 +822,7 @@ export function NewTaskDialog() {
                 </button>
                 <button
                   type="button"
+                  data-testid="task-type-worktree"
                   onClick={() => chooseMode("worktree")}
                   disabled={!!project?.non_git}
                   className={cn(
@@ -830,8 +838,12 @@ export function NewTaskDialog() {
             </div>
             <p className="text-[12px] text-[var(--color-fg-faint)]">
               {mode === "worktree"
-                ? "Isolated branch in its own working directory. Run agents in parallel without touching your main checkout."
-                : "No worktree. The agent runs in the repo's main checkout, on its current branch. Edits land on your real files."}
+                ? (isMulti
+                    ? "Branch every member into its own working directory, run agents in parallel."
+                    : "Isolated branch in its own working directory. Run agents in parallel without touching your main checkout.")
+                : (isMulti
+                    ? "No worktrees, nothing copied. The agent runs in the host's live checkout with every member linked in. Edits land on your real files."
+                    : "No worktree. The agent runs in the repo's main checkout, on its current branch. Edits land on your real files.")}
             </p>
           </div>
         )}
@@ -988,7 +1000,17 @@ export function NewTaskDialog() {
             row renders a small toggle (Worktree | Repo root) and, when
             in Worktree mode, a branch + base override. RepoRoot mode
             collapses to a single warning line. */}
-        {isMulti && (
+        {isMulti && mode === "repo_root" && (
+          <div
+            data-testid="members-live-note"
+            className="rounded-md border border-[var(--color-warn)]/40 bg-[var(--color-warn)]/10 px-3 py-2 text-[12px] text-[var(--color-warn)]"
+          >
+            <AlertTriangle className="mr-1 inline h-3.5 w-3.5" />
+            All {members.length} members run live, linked into the host checkout. The agent
+            can directly modify every repo. No worktree isolation.
+          </div>
+        )}
+        {isMulti && mode === "worktree" && (
           <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between">
               <label className="text-[13px] font-medium text-[var(--color-fg)]">
@@ -1124,8 +1146,7 @@ export function NewTaskDialog() {
             strip of buttons whose purpose isn't obvious). Pinned at
             creation - lists below freeze onto the task and can't be
             edited after (archive + recreate to change). */}
-        {/* Offered for single-repo worktree AND main checkout (see canSandbox);
-            multi has its own per-member handling. */}
+        {/* Offered in every shape (see canSandbox). */}
         {canSandbox && (
         <Field label="Sandbox" hint="Cage the agent's filesystem + network access. Pinned at creation.">
           <SandboxModeSelector value={sandboxMode} onChange={setSandboxMode} osUnavailable={osSandboxOk === false} compact />

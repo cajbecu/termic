@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { clickByText, clickMenuItemUntil, clickWhenVisible, dismissOverlays, pointerDrag, requireTermicApi, keysIn, snap, waitForAppShell, waitForText, waitGone, waitVisible } from "../helpers";
+import { archiveTask, clickByText, clickMenuItemUntil, clickWhenVisible, dismissOverlays, pointerDrag, requireTermicApi, keysIn, snap, waitForAppShell, waitForText, waitGone, waitVisible } from "../helpers";
 
 // P1: adding/removing a project. Cases: a git repo can be added as a project
 // (shows in the store); removing it drops it. Uses a throwaway temp repo and
@@ -1141,7 +1141,13 @@ describe("multi member modes (New Task dialog)", () => {
     projectId = await browser.execute(
       async (host, alpha, beta) => {
         const t = window.__termic!;
-        try { localStorage.removeItem("newTaskMemberModes"); } catch { /* fine */ }
+        try {
+          localStorage.removeItem("newTaskMemberModes");
+          // The member rows only render in the Worktree host shape (the
+          // host-level toggle is remembered app-wide), so pin it here; the
+          // main-checkout describe below restores whatever it finds.
+          localStorage.setItem("newTaskLastMode", "worktree");
+        } catch { /* fine */ }
         // A run that died before teardown leaves the project behind (fresh
         // path, same name) — drop any stale one first.
         for (const p of t.useApp.getState().projects.filter((p: any) => p.name === "e2e-member-modes")) {
@@ -1209,5 +1215,143 @@ describe("multi member modes (New Task dialog)", () => {
     await closeDialog();
     await openDialog();
     expect((await rowModes()).every((r) => r.mode === "worktree")).toBe(true);
+  });
+});
+
+// The host-level Main checkout shape of the multi New Task dialog.
+//
+// Main checkout on a multi project is the SAME task the sidebar quick menu's
+// Main checkout creates (task_open_repo: the live host checkout with every
+// member linked in, no wrapper, no branch), so ⌘N and the `+` menu can't
+// drift into different task shapes. Fixture: two tiny member repos plus a
+// host dir, torn down completely (task archived, project removed, tmp gone).
+describe("multi main checkout (New Task dialog)", () => {
+  let tmp = "";
+  let projectId = "";
+  let taskId = "";
+  /** The app-wide task-type memory this spec drives; restored in teardown. */
+  let savedMode: string | null = null;
+
+  before(() => {
+    tmp = mkdtempSync(path.join(os.tmpdir(), "e2e-multi-main-"));
+    mkdirSync(path.join(tmp, "host"));
+    for (const name of ["alpha", "beta"]) {
+      const p = path.join(tmp, name);
+      mkdirSync(p);
+      execSync(`git init -b main -q "${p}"`);
+      execSync(`git -C "${p}" -c user.email=e2e@termic.dev -c user.name=e2e commit -q --allow-empty -m init`);
+    }
+  });
+
+  after(async () => {
+    await browser.execute(() => window.__termic!.useUI.getState().closeNewTask());
+    if (taskId) await archiveTask(taskId);
+    await browser.execute(async (id, mode) => {
+      try {
+        if (mode === null) localStorage.removeItem("newTaskLastMode");
+        else localStorage.setItem("newTaskLastMode", mode);
+      } catch { /* fine */ }
+      if (id) {
+        await window.__termic!.ipc.projectRemove(id);
+        await window.__termic!.useApp.getState().loadAll();
+      }
+    }, projectId, savedMode);
+    if (tmp) rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("shows the host-level toggle; Main checkout replaces the member rows with a run-live note", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    const created = await browser.execute(
+      async (host, alpha, beta) => {
+        const t = window.__termic!;
+        let saved: string | null = null;
+        try {
+          // Start from Worktree so the member rows are on screen and the
+          // flip below is a real transition, not a no-op.
+          saved = localStorage.getItem("newTaskLastMode");
+          localStorage.setItem("newTaskLastMode", "worktree");
+        } catch { /* fine */ }
+        // A run that died before teardown leaves the project behind (fresh
+        // path, same name) — drop any stale one first.
+        for (const p of t.useApp.getState().projects.filter((p: any) => p.name === "e2e-multi-main")) {
+          try { await t.ipc.projectRemove(p.id); } catch { /* has live tasks */ }
+        }
+        const spec = (root_path: string, name: string) => ({
+          root_path,
+          name,
+          base_branch: "main",
+          setup_script: "",
+          run_script: "",
+          archive_script: "",
+        });
+        const proj = await t.ipc.projectAddMulti(
+          host,
+          "e2e-multi-main",
+          [spec(alpha, "alpha"), spec(beta, "beta")],
+          true, // non-git wrapper host
+        );
+        await t.useApp.getState().loadAll();
+        t.useUI.getState().openNewTask(proj.id);
+        return { id: proj.id as string, saved };
+      },
+      path.join(tmp, "host"),
+      path.join(tmp, "alpha"),
+      path.join(tmp, "beta"),
+    );
+    projectId = created.id;
+    savedMode = created.saved;
+
+    // Worktree shape: one row per member, host toggle present.
+    await waitVisible('[data-testid="task-type-main"]');
+    await waitForText("Members (2)");
+
+    await clickWhenVisible('[data-testid="task-type-main"]');
+    await waitVisible('[data-testid="members-live-note"]');
+    await waitForText("All 2 members run live");
+    const rows = await browser.execute(() => document.body.textContent?.includes("Members (2)"));
+    expect(rows).toBe(false);
+  });
+
+  it("Create opens the live host checkout with every member linked in, no wrapper", async () => {
+    await browser.execute(() => {
+      const input = document.querySelector(
+        '[role="dialog"] input[placeholder="fix login bug"]',
+      ) as HTMLInputElement;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(input, "e2e-mm-live");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    // Terminal (shell) is token-free; both clicks scoped to THIS dialog.
+    for (const label of ["Terminal", "Create"]) {
+      await browser.execute((l) => {
+        const dlg = [...document.querySelectorAll('[role="dialog"]')].find((d) =>
+          d.textContent?.includes("New multi-repo task in the main checkout"),
+        )!;
+        const btn = [...dlg.querySelectorAll("button")].find((b) => b.textContent?.trim() === l) as HTMLButtonElement;
+        btn.click();
+      }, label);
+    }
+
+    const task = await browser.waitUntil(
+      async () => {
+        const t = await browser.execute(() =>
+          window.__termic!.useApp.getState().tasks.find((w: any) => w.name === "e2e-mm-live"),
+        );
+        return t ?? false;
+      },
+      { timeout: 15_000, timeoutMsg: "the main-checkout multi task never appeared" },
+    ) as any;
+    taskId = task.id;
+    const hostRoot = await browser.execute(
+      (id) => window.__termic!.useApp.getState().projects.find((p: any) => p.id === id).root_path,
+      projectId,
+    );
+    expect(task.is_main_checkout).toBe(true);
+    expect(task.path).toBe(hostRoot);
+    expect(task.composition.map((m: any) => [m.dir_name, m.mode])).toEqual([
+      ["alpha", "repo_root"],
+      ["beta", "repo_root"],
+    ]);
   });
 });

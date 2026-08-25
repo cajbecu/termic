@@ -58,7 +58,7 @@ termic://open?project=web&task=fix-login
 | `name` | task name (max 200 chars) |
 | `prompt` / `p` | first message, pre-filled into the dialog (max 8000 chars) |
 | `agent` / `cli` | agent id to pre-select; ignored if this install doesn't offer it |
-| `mode` | `worktree` or `main`. `worktree=1` is the shorthand. |
+| `mode` | `worktree` or `main`. `worktree=1` is the shorthand. On a multi project `main` is the host-level shape: the live host checkout with every member linked in, the same task the sidebar quick menu's Main checkout creates. |
 | `base` | "Branch from" ref |
 
 `open` (selects an existing task):

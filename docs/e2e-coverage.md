@@ -115,6 +115,7 @@ until `make e2e` is green and this file reflects it.
 | ✅ Editor split | Split view shows source + rendered preview together | `editor.e2e.ts` |
 | ✅ Repo config | Save a `.termic.yaml` field and read it back | `projects.e2e.ts` |
 | ✅ Multi member modes | New Task dialog for a multi project: git members seed on Worktree, "Set all" flips every row (and surfaces the live-checkout warning), and each member's last-used mode is remembered across dialog opens (localStorage `newTaskMemberModes`) | `projects.e2e.ts` |
+| ✅ Multi main checkout (dialog) | The multi New Task dialog has the host-level Main checkout / Worktree toggle: Main checkout hides the member list behind a "run live" note and Create opens the host's live checkout (`is_main_checkout`, path = host root, every member linked in), the same task shape the sidebar quick menu creates, so ⌘N and the `+` menu can't drift apart | `projects.e2e.ts` |
 | ✅ Setup script | Configure + launch a Setup tab that spawns | `run.e2e.ts` |
 | ✅ Sidebar layout | Sidebar width setter persists | `tabs-layout.e2e.ts` |
 | ✅ Code editor | Open a .py file → CodeMirror renders with highlight tokens | `editor.e2e.ts` |
