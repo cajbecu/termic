@@ -41,6 +41,16 @@ Performance: `make perf` runs the nightly suite (startup, memory) and the local-
 
 **When you implement or modify ANY functionality that could regress, run the relevant tests before committing and keep them green** — not just UI. Logic/Rust: `npm test` + `cargo test`. Behavior/flows: `make e2e` (rebuilds the `--features e2e` binary + runs the suite). Add or update the spec/test that covers what you changed — a change and its test land in the same commit. The suite is a maintained asset: authoring rules live in the **`e2e` skill**, the coverage map + roadmap in [docs/e2e-coverage.md](docs/e2e-coverage.md). Each spec should cover a feature with several cases (happy path + edge/negative + state transitions), not just one, so it actually catches regressions.
 
+### Green suites are not a manual test, and you cannot run one
+
+**Before you open a PR, ask the user whether they have manually tested the change** — in those words, before opening it, not after. The PR is what the question gates.
+
+`npm test`, `cargo test` and `make e2e` all pass on a change that flickers for a frame, steals focus, repaints one tick late, fires a shortcut twice, or looks wrong. Those are the bugs this project is judged on, and no assertion in the repo catches them. That is the whole reason the question exists: it is the one check you cannot run for the user, however many suites you have green.
+
+If the answer is no or "not yet", stop and let them drive it. If they say open it anyway, that is their call: open it, and say in the PR description that it has not been manually verified, so the maintainer knows what they are reviewing. Either way the PR description carries one line of what was exercised by hand and what was observed. "All tests pass" is not an answer to that question.
+
+Agent-written PRs are welcome in this repo (see [CONTRIBUTING.md](CONTRIBUTING.md#agent-written-prs), and most of Termic is one). This is the one gate they have to pass, and it is the same gate a hand-written PR passes.
+
 ## Scratchpad
 
 `scratchpad/` at the repo root is gitignored and local-only. Put throwaway work there: market/competitor research, GTM notes, half-finished drafts, one-off analysis, anything that shouldn't ship or be reviewed. Nothing in it has to be release-quality. Working docs meant for contributors belong in the tracked `docs/` tree: `docs/ideas/` for anything not yet approved, `docs/plans/` for approved implementation-ready specs. See ## Docs tree.
@@ -94,6 +104,7 @@ No em dashes (—) anywhere in user-visible text: dialogs, tooltips, buttons, `C
 
 ## What NOT to do without asking
 
+- Open a PR without first asking the user whether they manually tested the change (see ## Testing). Every suite in the repo being green is not a substitute, and neither is your own confidence in the diff.
 - Ad-hoc live-drive the app (the automation bridge) proactively for exploration. Default to NOT launching the live app for one-off poking. (This does NOT apply to the written e2e suite: running `make e2e` before committing a UI change is expected, per ## Testing.)
 - Switch editor from CodeMirror 6 (Monaco is slower in WKWebView, verified).
 - Re-enable React StrictMode (async PTY race).

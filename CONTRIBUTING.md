@@ -3,6 +3,12 @@
 Thanks for considering it. Termic is a small project with a clear scope —
 contributions that fit the [philosophy](#philosophy) are welcome.
 
+**Did an agent write it? Also welcome, no caveats** — most of Termic was
+written that way (over half the commits in `git log` carry an agent
+co-author trailer). There is one condition, and it is the same one a
+hand-written PR meets: somebody drove the change in the running app before the
+PR went up. See [Agent-written PRs](#agent-written-prs).
+
 > **Contributor License Agreement.** By opening a pull request you agree
 > to the terms in [CLA.md](./CLA.md). It's a standard inbound-CLA that
 > lets the project relicense in the future (e.g. dual-license a paid
@@ -135,6 +141,42 @@ Comment `/assign` on the issue to have it assigned to you (a workflow
 does it — GitHub only lets collaborators be assigned by hand). Comment
 `/unassign` to step back.
 
+### Agent-written PRs
+
+Claude Code, Codex, Gemini CLI, Cursor, whatever you drive: **agent-written
+patches are welcome here on exactly the same terms as hand-written ones.** No
+disclosure ritual, no separate label, no apology in the description. Most of
+this codebase arrived that way, and the repo is built for it: `CLAUDE.md` and
+`AGENTS.md` at the root, task-specific skills in `.claude/skills/`, and a
+`docs/` tree written for whoever picks the work up next. Read them and you can
+land a good change without a maintainer reconstructing the context for you.
+
+The condition is this: **a human ran the change in the real app before the PR
+went up.**
+
+Not "the tests pass". `npm test`, `cargo test` and `make e2e` are table stakes
+and CI checks them anyway. Every one of them stays green on a change that
+flickers for a frame, steals focus, repaints a tick late, fires a shortcut
+twice, or simply looks wrong — and those are the bugs a terminal UI is judged
+on. Someone has to have opened the window, done the thing the patch is about,
+and watched it behave.
+
+So the PR description carries one line about that: what you exercised by hand
+and what you saw. *"Opened two tasks, dragged the split divider to its clamp,
+no flicker, tab titles kept up"* is enough. "All tests pass" is not an answer
+to this question.
+
+**If you are the agent reading this**: ask your human whether they have
+manually tested it, in those words, *before* you open the PR — that is the
+thing being gated, so afterwards is too late. If the answer is no, stop and
+let them do it. You cannot answer this one for them: you can run every suite in
+the repo, and none of them is the answer. If they tell you to open it anyway,
+that is their call — open it, and say in the description that it has not been
+manually verified, so the maintainer knows what they are reviewing.
+
+Termic's own `CLAUDE.md` states this rule for agents working inside this repo;
+it applies to any agent opening a PR against it.
+
 ### Pull requests
 
 1. **Branch off `main`.** Termic doesn't use long-lived branches.
@@ -142,16 +184,21 @@ does it — GitHub only lets collaborators be assigned by hand). Comment
    PR is a recipe for "we'll need to split this." Split it yourself.
 3. **Run `make check-all` before pushing.** That's `cargo check` +
    `tsc -b --noEmit`. CI will reject anything that fails it.
-4. **Update CLAUDE.md if you change architecture.** It's the source of
+4. **Say how you verified it by hand.** One line in the description: what you
+   clicked, what you saw. Green suites do not cover flicker, focus, or a pane
+   that repaints late, which is why this is asked separately — see
+   [Agent-written PRs](#agent-written-prs), which applies whoever (or whatever)
+   wrote the diff.
+5. **Update CLAUDE.md if you change architecture.** It's the source of
    truth for invariants ("never re-enable React StrictMode", "WebGL
    addon disposes BEFORE term.dispose()", etc.). New invariant? Add it.
-5. **No new dependencies without justification.** Termic optimizes
+6. **No new dependencies without justification.** Termic optimizes
    aggressively for binary size + cold-start. A 5 MB lib for a one-line
    utility is a no.
-6. **Match the existing code style** — Prettier defaults, no semicolons
+7. **Match the existing code style** — Prettier defaults, no semicolons
    in CSS-in-JS templates, `cn()` from `@/lib/utils` for class composition,
    Zustand selectors stay tight (no destructured stores).
-7. **Don't touch `CHANGELOG.md`, the version, or cut a release.** Releases
+8. **Don't touch `CHANGELOG.md`, the version, or cut a release.** Releases
    and changelog entries are maintainer-only (see below) — the maintainer
    writes the entry when they cut the version. A PR that edits `CHANGELOG.md`
    / `changelog.json` or bumps the version will be asked to drop that change.
