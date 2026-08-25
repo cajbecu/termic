@@ -284,12 +284,34 @@ describe("sidebar run stop", () => {
     );
     await snap("sidebar-run-stop.png");
 
-    // A stopped run leaves no control behind: the row's own icon already
-    // says it is a run tab.
+    // Stopped, the row offers the pill's other half instead: Play, which
+    // fronts the run tab and asks its pane to start the command again.
     await browser.execute((id, tab) => {
       window.__termic!.useApp.getState().patchTab(id, tab, { ptyId: null });
+      // The restart travels as a window event to the tab's RunPane; record
+      // it rather than waiting on a PTY spawn, which is rAF-gated (see the
+      // note above) and would make this flaky on an occluded window.
+      (window as any).__runRestarts = [];
+      window.addEventListener("termic-run-tab-restart", (e: any) => {
+        (window as any).__runRestarts.push(e.detail?.tabId);
+      });
     }, taskId, tabId);
     await waitGone(stop);
+
+    const play = `[data-testid="sidebar-run-play-${tabId}"]`;
+    await waitVisible(play);
+    await snap("sidebar-run-play.png");
+    await clickWhenVisible(play);
+    await browser.waitUntil(
+      async () => (await browser.execute(
+        (tab) => ((window as any).__runRestarts ?? []).includes(tab), tabId,
+      )) as boolean,
+      { timeout: 8_000, timeoutMsg: "the sidebar Play never asked the run tab to restart" },
+    );
+    // It also brings the run tab to the front, the way clicking the row does.
+    expect(await browser.execute(
+      (id) => window.__termic!.useApp.getState().activeTab[id], taskId,
+    )).toBe(tabId);
   });
 });
 

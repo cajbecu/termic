@@ -64,9 +64,20 @@ other task, and the only way to end it is to go back into the task that owns
 it.
 
 Both read the same thing, `tab.ptyId`, which TerminalPane clears on process
-exit. The row shows nothing when the run is stopped (its icon already says it
-is a run tab), and no Play: starting a run is a choice with arguments behind it
-(which command, which member) and belongs to the surfaces that offer them.
+exit: red Stop while the run is up, quiet Play once it is not.
+
+Play has a wrinkle Stop does not. The restart travels as a
+`termic-run-tab-restart` window event, and the only listener is the tab's
+`RunPane`, which exists solely under a mounted `TaskView` — so the row brings
+the task up and fronts the run tab first. Whether it then fires the event
+depends on what mounting already did: an already-mounted task needs it (its
+pane is sitting on a finished run, and only the remount respawns), a task that
+was NOT mounted spawns the run as `RunPane` mounts and firing as well would
+kill that spawn to redo it, and the exception is a tab restored `idle`, whose
+pane shows a play placeholder and waits for exactly this event. The dispatch is
+deferred by a `setTimeout`, not a `requestAnimationFrame`: a just-mounted
+listener has to be attached first, and rAF is frozen on an occluded window (see
+[gotchas.md](gotchas.md)).
 
 ## Task type on a plain-folder project
 

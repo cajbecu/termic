@@ -8,7 +8,7 @@ import { usePrefs } from "@/store/prefs";
 import { Button } from "@/components/ui/Button";
 import { Tip } from "@/components/ui/Tooltip";
 import { Spinner } from "@/components/ui/Spinner";
-import { LayoutGrid, History, FolderPlus, Settings, Plus, Archive, Layers, Moon, Cog, MoreVertical, GitBranch, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Bell, Bug, Mail, Zap, X, Pencil, Copy, ChevronsDownUp, ChevronsUpDown, Check, AudioWaveform, Radio, SquareChevronRight, CircleStop, Trash2, Folder, FolderMinus, FolderOpen, Megaphone, Keyboard, Activity, Waypoints, Square } from "lucide-react";
+import { LayoutGrid, History, FolderPlus, Settings, Plus, Archive, Layers, Moon, Cog, MoreVertical, GitBranch, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Bell, Bug, Mail, Zap, X, Pencil, Copy, ChevronsDownUp, ChevronsUpDown, Check, AudioWaveform, Radio, SquareChevronRight, CircleStop, Trash2, Folder, FolderMinus, FolderOpen, Megaphone, Keyboard, Activity, Waypoints, Square, Play } from "lucide-react";
 import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownSeparator, DropdownLabel, DropdownSub, DropdownSubTrigger, DropdownSubContent } from "@/components/ui/Dropdown";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuLabel, ContextMenuSub, ContextMenuSubTrigger, ContextMenuSubContent } from "@/components/ui/ContextMenu";
 import { ProjectActionsMenuItems } from "./ProjectActionsMenuItems";
@@ -2782,15 +2782,12 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
             ) : (
               <span className="min-w-0 flex-1 truncate">{title}</span>
             )}
-            {/* Run tabs (GH #54): a live run is worth seeing without opening
-                the task, and the row is the only place you can see it from
-                another task. Same red filled square as the tab pill's Stop,
-                and it IS that Stop: an indicator you can act on beats an
-                indicator you then have to go find the button for. `ptyId`
-                cleared on exit is what "running" means here, exactly as in
-                TabBar. Nothing renders when the run is stopped: the row's own
-                icon already says it is a run tab. */}
-            {!isTabRenaming && tab.runTab && tab.ptyId && (
+            {/* Run tabs (GH #54): the same two controls the tab pill carries,
+                because a run is otherwise invisible (and unstoppable) from
+                anywhere but the task that owns it. `ptyId`, cleared on process
+                exit, is what "running" means in both places: red Stop while it
+                is up, quiet Play once it is not. */}
+            {!isTabRenaming && tab.runTab && (tab.ptyId ? (
               <button
                 data-no-drag
                 data-testid={`sidebar-run-stop-${tab.id}`}
@@ -2804,7 +2801,41 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
               >
                 <Square className="h-2.5 w-2.5" fill="currentColor" />
               </button>
-            )}
+            ) : (
+              <button
+                data-no-drag
+                data-testid={`sidebar-run-play-${tab.id}`}
+                title={`Run ${title}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  // RunPane owns the restart and only exists under a mounted
+                  // TaskView, so bring the task up first and put the run tab
+                  // in front, exactly as clicking the row would.
+                  const wasMounted = isMounted;
+                  setActive(w.id);
+                  setActiveTabId(w.id, tab.id);
+                  // An already-mounted task needs the event: its RunPane is
+                  // sitting on a finished run and only a remount respawns it.
+                  // A task that was NOT mounted spawns the run as RunPane
+                  // mounts, so firing as well would kill that spawn and redo
+                  // it. The exception is a tab restored idle, whose pane shows
+                  // a play placeholder and waits for exactly this event.
+                  // Deferred to a macrotask so a just-mounted listener is
+                  // attached first, and a timer rather than rAF because rAF is
+                  // frozen on an occluded window (docs/gotchas.md).
+                  if (wasMounted || tab.runTab?.idle) {
+                    window.setTimeout(() => {
+                      window.dispatchEvent(new CustomEvent(
+                        "termic-run-tab-restart", { detail: { tabId: tab.id } },
+                      ));
+                    }, 0);
+                  }
+                }}
+                className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--color-fg-faint)] hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)]"
+              >
+                <Play className="h-2.5 w-2.5" />
+              </button>
+            ))}
             {/* Trailing slot — status badge by default. Close × only
                 appears when hovering the badge itself, not the whole
                 row — row hover keeps the badge visible. */}
