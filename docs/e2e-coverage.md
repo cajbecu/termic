@@ -114,6 +114,7 @@ until `make e2e` is green and this file reflects it.
 | ✅ Project rename | Rename a project (add covered too) | `projects.e2e.ts` |
 | ✅ Editor split | Split view shows source + rendered preview together | `editor.e2e.ts` |
 | ✅ Repo config | Save a `.termic.yaml` field and read it back | `projects.e2e.ts` |
+| ✅ Multi member modes | New Task dialog for a multi project: git members seed on Worktree, "Set all" flips every row (and surfaces the live-checkout warning), and each member's last-used mode is remembered across dialog opens (localStorage `newTaskMemberModes`) | `projects.e2e.ts` |
 | ✅ Setup script | Configure + launch a Setup tab that spawns | `run.e2e.ts` |
 | ✅ Sidebar layout | Sidebar width setter persists | `tabs-layout.e2e.ts` |
 | ✅ Code editor | Open a .py file → CodeMirror renders with highlight tokens | `editor.e2e.ts` |

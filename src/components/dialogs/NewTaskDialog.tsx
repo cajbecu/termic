@@ -23,6 +23,7 @@ import { Check, Loader2, AlertTriangle, GitBranch, Link2, FolderGit2, Plus, Hist
 import { SandboxModeSelector } from "@/components/SandboxModeSelector";
 import { SANDBOX_PRESETS } from "@/lib/sandboxPresets";
 import type { MemberMode, ImportableWorktree, SandboxMode } from "@/lib/types";
+import { readMemberModes, persistMemberMode, seedMemberMode } from "@/components/dialogs/memberModes";
 
 const CLIS = ["claude", "codex", "agy", "grok", "opencode"] as const;
 
@@ -133,6 +134,15 @@ export function NewTaskDialog() {
     base_branch: string;
   };
   const [members, setMembers] = useState<MemberSpec[]>([]);
+  // Bulk flip for compositions with many members. Non-git members are pinned
+  // to repo_root (no branches, no worktree), so "all worktree" skips them.
+  // Persists each git member's new mode, same write-through as the row toggle.
+  const setAllMemberModes = (mode: MemberMode) => {
+    setMembers(prev => prev.map(m => ({ ...m, mode: m.non_git ? "repo_root" : mode })));
+    for (const m of members) {
+      if (!m.non_git) persistMemberMode(m.root_path, mode);
+    }
+  };
   const isMulti = (project?.type ?? "single") === "multi";
   // Sandbox is offered for single-repo tasks in BOTH locations: the seatbelt +
   // proxy cage the main checkout identically to a worktree (see task_open_repo,
@@ -342,18 +352,18 @@ export function NewTaskDialog() {
     // merge global defaults on top (dedupe-preserving order).
     setSbRw((p?.sandbox_rw_paths ?? []).join("\n"));
     setSbHosts((p?.sandbox_allowed_hosts ?? []).join("\n"));
-    // Seed the per-member spec (multi-repo only). Each member starts
-    // in Worktree mode on its own default branch — the simplest +
-    // safest default. User can flip per-member to Repo root or change
-    // branches before submit.
+    // Seed the per-member spec (multi-repo only). Each git member starts
+    // on its last-used mode (remembered per root_path, like the single-repo
+    // dialog remembers its toggle) and falls back to Worktree — the simplest
+    // + safest default. Non-git members can't be worktreed (no branches), so
+    // they force repo_root, same rule as a non-git single project / host.
     if ((p?.type ?? "single") === "multi") {
+      const remembered = readMemberModes();
       const seeded: MemberSpec[] = (p?.members ?? []).map(pm => ({
         root_path: pm.root_path,
         name: pm.name,
         non_git: !!pm.non_git,
-        // Non-git members can't be worktreed (no branches) → force
-        // repo_root, same rule as a non-git single project / host.
-        mode: (pm.non_git ? "repo_root" : "worktree") as MemberMode,
+        mode: seedMemberMode(!!pm.non_git, remembered, pm.root_path) as MemberMode,
         branch: "",
         base_branch: pm.base_branch || "",
       }));
@@ -984,17 +994,54 @@ export function NewTaskDialog() {
               <label className="text-[13px] font-medium text-[var(--color-fg)]">
                 Members ({members.length})
               </label>
-              <span className="text-[11.5px] text-[var(--color-fg-faint)]">
-                Per-repo mode + branch
-              </span>
+              {members.length > 1 ? (
+                // Bulk flip, for compositions with many members. Same wording
+                // and order as the per-row toggle (main left, worktree right).
+                // Non-git members stay on repo_root: the constraint outranks
+                // the bulk ask, exactly like their disabled per-row button.
+                <div className="flex items-center gap-1 text-[11.5px]">
+                  <span className="text-[var(--color-fg-faint)]">Set all:</span>
+                  <button
+                    type="button"
+                    data-testid="members-all-main"
+                    onClick={() => setAllMemberModes("repo_root")}
+                    className="rounded-[4px] border border-[var(--color-border)] px-2 py-[2px] text-[var(--color-fg-dim)] transition-colors hover:text-[var(--color-fg)]"
+                  >
+                    Main checkout
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="members-all-worktree"
+                    onClick={() => setAllMemberModes("worktree")}
+                    className="rounded-[4px] border border-[var(--color-border)] px-2 py-[2px] text-[var(--color-fg-dim)] transition-colors hover:text-[var(--color-fg)]"
+                  >
+                    Worktree
+                  </button>
+                </div>
+              ) : (
+                <span className="text-[11.5px] text-[var(--color-fg-faint)]">
+                  Per-repo mode + branch
+                </span>
+              )}
             </div>
             <div className="flex flex-col gap-2">
               {members.map((m, idx) => {
                 const update = (patch: Partial<MemberSpec>) =>
                   setMembers(prev => prev.map((x, i) => (i === idx ? { ...x, ...patch } : x)));
+                // Write the flip through to storage right away (not on
+                // submit), mirroring chooseMode above: a cancelled dialog
+                // still teaches the next open. Non-git rows never persist —
+                // their repo_root is a constraint, not a choice.
+                const chooseMemberMode = (mode: MemberMode) => {
+                  update({ mode });
+                  if (!m.non_git) persistMemberMode(m.root_path, mode);
+                };
                 return (
                   <div
                     key={m.root_path}
+                    data-testid="member-mode-row"
+                    data-member-name={m.name}
+                    data-member-mode={m.mode}
                     className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2"
                   >
                     <div className="flex items-center justify-between gap-3">
@@ -1008,7 +1055,7 @@ export function NewTaskDialog() {
                             worktree everywhere). */}
                         <button
                           type="button"
-                          onClick={() => update({ mode: "repo_root" })}
+                          onClick={() => chooseMemberMode("repo_root")}
                           className={cn(
                             "flex h-6 items-center gap-1 rounded-[4px] px-2 transition-colors",
                             m.mode === "repo_root"
@@ -1025,7 +1072,7 @@ export function NewTaskDialog() {
                           // single project.
                           disabled={m.non_git}
                           title={m.non_git ? "Not a git repository, runs in the main checkout only" : undefined}
-                          onClick={() => update({ mode: "worktree" })}
+                          onClick={() => chooseMemberMode("worktree")}
                           className={cn(
                             "flex h-6 items-center gap-1 rounded-[4px] px-2 transition-colors",
                             m.mode === "worktree"

@@ -1060,3 +1060,154 @@ describe("dashboard empty state", () => {
     await waitGone(CARD);
   });
 });
+
+// Per-member mode memory + bulk flip in the multi-repo New Task dialog.
+//
+// Each git member row remembers its last-used mode (localStorage
+// `newTaskMemberModes`, keyed by member root_path) across dialog opens, and a
+// "Set all" pair in the Members header flips every row at once. Dialog-only
+// coverage: no task is ever created here, so the fixture is two tiny member
+// repos plus a host dir, torn down completely.
+describe("multi member modes (New Task dialog)", () => {
+  let tmp = "";
+  let projectId = "";
+
+  /** Member rows as `{ name, mode }`, from the row's own state attributes. */
+  const rowModes = () =>
+    browser.execute(() =>
+      [...document.querySelectorAll('[data-testid="member-mode-row"]')].map((e) => ({
+        name: e.getAttribute("data-member-name"),
+        mode: e.getAttribute("data-member-mode"),
+      })),
+    ) as Promise<Array<{ name: string | null; mode: string | null }>>;
+
+  const openDialog = async () => {
+    await browser.execute((id) => window.__termic!.useUI.getState().openNewTask(id), projectId);
+    // Seeding runs in the dialog's reset effect; wait for both rows to exist.
+    await browser.waitUntil(async () => (await rowModes()).length === 2, {
+      timeout: 10_000,
+      timeoutMsg: "the member rows never rendered",
+    });
+  };
+
+  const closeDialog = async () => {
+    await browser.execute(() => window.__termic!.useUI.getState().closeNewTask());
+    // Wait out the dialog's unmount: a lingering row would let the reopen's
+    // row-count wait pass BEFORE the reset effect reseeds, and the memory
+    // assertions would then read stale state instead of the seeded one.
+    await waitGone('[data-testid="member-mode-row"]');
+  };
+
+  /** Click one row's Main checkout / Worktree toggle by member name. */
+  const clickRowMode = (name: string, label: "Main checkout" | "Worktree") =>
+    browser.execute(
+      (n, l) => {
+        const row = document.querySelector(`[data-testid="member-mode-row"][data-member-name="${n}"]`)!;
+        const btn = [...row.querySelectorAll("button")].find(
+          (b) => b.textContent?.trim() === l,
+        ) as HTMLButtonElement;
+        btn.click();
+      },
+      name,
+      label,
+    );
+
+  before(() => {
+    tmp = mkdtempSync(path.join(os.tmpdir(), "e2e-member-modes-"));
+    mkdirSync(path.join(tmp, "host"));
+    for (const name of ["alpha", "beta"]) {
+      const p = path.join(tmp, name);
+      mkdirSync(p);
+      execSync(`git init -b main -q "${p}"`);
+      execSync(`git -C "${p}" -c user.email=e2e@termic.dev -c user.name=e2e commit -q --allow-empty -m init`);
+    }
+  });
+
+  after(async () => {
+    await closeDialog();
+    await browser.execute(async (id) => {
+      try { localStorage.removeItem("newTaskMemberModes"); } catch { /* fine */ }
+      if (id) {
+        await window.__termic!.ipc.projectRemove(id);
+        await window.__termic!.useApp.getState().loadAll();
+      }
+    }, projectId);
+    if (tmp) rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("seeds every git member row on Worktree when nothing is remembered", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    projectId = await browser.execute(
+      async (host, alpha, beta) => {
+        const t = window.__termic!;
+        try { localStorage.removeItem("newTaskMemberModes"); } catch { /* fine */ }
+        // A run that died before teardown leaves the project behind (fresh
+        // path, same name) — drop any stale one first.
+        for (const p of t.useApp.getState().projects.filter((p: any) => p.name === "e2e-member-modes")) {
+          try { await t.ipc.projectRemove(p.id); } catch { /* has live tasks */ }
+        }
+        const spec = (root_path: string, name: string) => ({
+          root_path,
+          name,
+          base_branch: "main",
+          setup_script: "",
+          run_script: "",
+          archive_script: "",
+        });
+        const proj = await t.ipc.projectAddMulti(
+          host,
+          "e2e-member-modes",
+          [spec(alpha, "alpha"), spec(beta, "beta")],
+          true, // non-git wrapper host
+        );
+        await t.useApp.getState().loadAll();
+        return proj.id as string;
+      },
+      path.join(tmp, "host"),
+      path.join(tmp, "alpha"),
+      path.join(tmp, "beta"),
+    );
+    await openDialog();
+    expect(await rowModes()).toEqual([
+      { name: "alpha", mode: "worktree" },
+      { name: "beta", mode: "worktree" },
+    ]);
+  });
+
+  it("Set all: Main checkout flips every row and surfaces the live-checkout warning", async () => {
+    await clickWhenVisible('[data-testid="members-all-main"]');
+    await browser.waitUntil(
+      async () => (await rowModes()).every((r) => r.mode === "repo_root"),
+      { timeout: 5_000, timeoutMsg: "Set all: Main checkout did not flip every member row" },
+    );
+    // The warning is the user-facing consequence of running on live checkouts.
+    await waitForText("One or more members are linked to live checkouts.");
+  });
+
+  it("remembers each member's mode across dialog opens", async () => {
+    // Split the modes so memory is per member, not one shared flag.
+    await clickRowMode("alpha", "Worktree");
+    await browser.waitUntil(
+      async () => (await rowModes()).find((r) => r.name === "alpha")?.mode === "worktree",
+      { timeout: 5_000, timeoutMsg: "the alpha row never flipped back to worktree" },
+    );
+    await closeDialog();
+    await openDialog();
+    expect(await rowModes()).toEqual([
+      { name: "alpha", mode: "worktree" },
+      { name: "beta", mode: "repo_root" },
+    ]);
+  });
+
+  it("Set all: Worktree restores every row and persists too", async () => {
+    await clickWhenVisible('[data-testid="members-all-worktree"]');
+    await browser.waitUntil(
+      async () => (await rowModes()).every((r) => r.mode === "worktree"),
+      { timeout: 5_000, timeoutMsg: "Set all: Worktree did not flip every member row" },
+    );
+    await closeDialog();
+    await openDialog();
+    expect((await rowModes()).every((r) => r.mode === "worktree")).toBe(true);
+  });
+});
