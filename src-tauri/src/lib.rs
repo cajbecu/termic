@@ -1035,6 +1035,25 @@ fn expand_tilde(path: &str) -> String {
         .unwrap_or_else(|| trimmed.to_string())
 }
 
+/// Expand a leading `~` in an env VALUE the user typed in Settings → Agents.
+///
+/// A PTY child is exec'd DIRECTLY, with no shell in between, so a `~` in
+/// `CLAUDE_CONFIG_DIR=~/.next-claude` reaches the agent verbatim and the agent
+/// happily creates a directory literally named `~` in its cwd, i.e. inside the
+/// task worktree, where it shows up as untracked junk. Nothing about the field
+/// tells the user that; every other path field in the app takes a `~`.
+///
+/// Only a value that IS `~` or starts with `~/` is touched, and unlike
+/// `expand_tilde` this does not trim: an env value's surrounding whitespace is
+/// the caller's business, not ours.
+fn expand_tilde_env(value: &str) -> String {
+    if value == "~" || value.starts_with("~/") {
+        expand_tilde(value)
+    } else {
+        value.to_string()
+    }
+}
+
 /// Normalize an inbound inline member: expand + canonicalize its path,
 /// detect git, fill name / base_branch defaults. The frontend may send a
 /// bare path; Rust is the source of truth for the stored fields.
@@ -2706,7 +2725,7 @@ fn pty_spawn(
         }
     }
     for (k, v) in &args.env {
-        cmd.env(k, v);
+        cmd.env(k, expand_tilde_env(v));
     }
     // INVARIANT: everything `cmd.env`'d from here down is applied AFTER
     // the caller's overlay above, so it silently overrides any extra
@@ -17988,6 +18007,28 @@ filename f.rs
 
     // `~` counts as absolute (it names a fixed place), and is expanded rather
     // than left for the shell — nothing downstream runs these through one.
+    /// A `~` in a per-agent env value has to be expanded by US: the PTY child
+    /// is exec'd with no shell, so a literal tilde makes the agent create a
+    /// directory named `~` inside the task worktree (seen with
+    /// CLAUDE_CONFIG_DIR=~/.next-claude).
+    #[test]
+    fn env_values_expand_a_leading_tilde_only() {
+        let home = dirs::home_dir().expect("test host has a home dir");
+        assert_eq!(
+            expand_tilde_env("~/.next-claude"),
+            home.join(".next-claude").to_string_lossy(),
+        );
+        assert_eq!(expand_tilde_env("~"), home.to_string_lossy());
+        // Not a home we can resolve, and not ours to guess at.
+        assert_eq!(expand_tilde_env("~work/notes"), "~work/notes");
+        // Anything that is not a tilde path survives byte-for-byte, trailing
+        // whitespace included: an env value is not a path field.
+        assert_eq!(expand_tilde_env("/abs/path"), "/abs/path");
+        assert_eq!(expand_tilde_env("1"), "1");
+        assert_eq!(expand_tilde_env(" spaced "), " spaced ");
+        assert_eq!(expand_tilde_env("a~/b"), "a~/b");
+    }
+
     #[test]
     fn tilde_location_is_absolute_and_expanded() {
         let p = proj("/Users/x/code/web", "");

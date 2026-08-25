@@ -821,7 +821,7 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
         </>}
         <Field
           label="Environment"
-          hint="One KEY=VALUE per line. Merged into the spawn env on top of inherited parent env. Lines starting with # are ignored. Preserved across Reset."
+          hint="One KEY=VALUE per line. Merged into the spawn env on top of inherited parent env. A value starting with ~/ expands to your home dir (there is no shell in the spawn, so it would otherwise stay literal). Lines starting with # are ignored. Preserved across Reset."
         >
           <EnvTextarea
             value={agent.env ?? {}}
