@@ -645,6 +645,163 @@ fn rm_by_filter(filter: &str) {
     }
 }
 
+// ────────────────────── Activity monitor integration ──────────────────────
+//
+// The host pid tree procmon.rs walks is close to meaningless for a
+// Docker-sandboxed agent: the pid it finds is the `docker run` client, which
+// sits nearly idle no matter how busy the agent is, because the real work
+// happens inside the daemon's VM, a process table the host cannot see into.
+// So `merge_stats` runs AFTER a normal sample, replacing every row whose
+// root carried a `docker_container` name with numbers from `docker stats`
+// instead — one batched invocation for however many Docker tasks are live,
+// not one per row.
+
+use crate::procmon::{ProcRow, Snapshot};
+use parking_lot::Mutex;
+use std::collections::HashMap;
+
+/// One container's live usage, as `docker stats --no-stream` reports it.
+struct ContainerStats {
+    cpu_pct: f64,
+    mem_bytes: u64,
+    pids: u32,
+}
+
+/// cpu_pct history per row key, kept here because by the time `merge_stats`
+/// sees a snapshot, procmon.rs's own sampler already built (and baked into
+/// the row) a history using the wrong host-based numbers — this is the only
+/// place that ever computes the right ones. Mirrors procmon.rs's `hist` but
+/// scoped to Docker rows only. Cleared by `reset_history`, which lib.rs
+/// calls alongside every `procmon::start`/`stop`/`stop_all`, so it costs
+/// nothing while the Activity window is closed (same rule procmon.rs's
+/// module doc holds itself to).
+static HISTORY: std::sync::LazyLock<Mutex<HashMap<String, Vec<f64>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Matches procmon.rs's own `HISTORY_LEN`; the sparklines are drawn from the
+/// same session length regardless of which rows are Docker rows.
+const HISTORY_LEN: usize = 90;
+
+/// Forget every row's sparkline history. Call whenever a procmon session
+/// starts or ends, so a closed-then-reopened Activity window (or a
+/// long-since-exited Docker task) cannot leave rows behind forever.
+pub fn reset_history() {
+    HISTORY.lock().clear();
+}
+
+/// Overwrite every Docker row in `snap` with a fresh `docker stats` query.
+/// `containers` maps a `Snapshot` row's `key` to its container `--name`,
+/// built by lib.rs from the same `PtySlot`s the row itself came from.
+/// Rows with no entry in `containers` (every non-Docker row) pass through
+/// untouched. Blocking (shells out to `docker`) — callers MUST run this off
+/// the IPC thread, same discipline as any other Docker command.
+pub fn merge_stats(mut snap: Snapshot, containers: &HashMap<String, String>) -> Snapshot {
+    if containers.is_empty() {
+        return snap;
+    }
+    let names: Vec<String> = containers.values().cloned().collect();
+    let stats = query_stats(&names);
+    let mut hist = HISTORY.lock();
+    for row in &mut snap.rows {
+        let Some(name) = containers.get(&row.key) else { continue };
+        apply(row, stats.get(name), &mut hist, HISTORY_LEN);
+    }
+    // Drop history for rows this snapshot no longer carries (task closed,
+    // agent exited) — otherwise a long session accumulates one entry per
+    // Docker PTY that ever existed.
+    let live: std::collections::HashSet<&String> = containers.keys().collect();
+    hist.retain(|k, _| live.contains(k));
+    snap
+}
+
+fn apply(
+    row: &mut ProcRow,
+    stats: Option<&ContainerStats>,
+    hist: &mut HashMap<String, Vec<f64>>,
+    cap: usize,
+) {
+    row.is_docker = true;
+    // A container's real process tree lives in the daemon's VM; the host
+    // children we sampled are just the `docker` CLI itself, so showing them
+    // would read as "the agent spawned nothing" every time.
+    row.children.clear();
+    let Some(s) = stats else {
+        // Transient miss (container starting up, or `docker stats` failed) —
+        // keep last known numbers rather than flashing the row to zero.
+        return;
+    };
+    row.cpu_pct = Some(s.cpu_pct);
+    row.mem_bytes = s.mem_bytes;
+    row.rss_bytes = s.mem_bytes;
+    row.proc_count = s.pids;
+    row.alive = true;
+    let h = hist.entry(row.key.clone()).or_default();
+    h.push(s.cpu_pct);
+    if h.len() > cap {
+        let drop = h.len() - cap;
+        h.drain(0..drop);
+    }
+    row.cpu_history = h.clone();
+}
+
+/// One `docker stats` invocation for every named container. Missing/gone
+/// containers are silently absent from the result — an agent that exited
+/// between the PTY snapshot and this call is not an error for the others.
+fn query_stats(names: &[String]) -> HashMap<String, ContainerStats> {
+    if names.is_empty() {
+        return HashMap::new();
+    }
+    let out = Command::new("docker")
+        .arg("stats")
+        .arg("--no-stream")
+        .arg("--format")
+        .arg("{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.PIDs}}")
+        .args(names)
+        .output();
+    let Ok(out) = out else { return HashMap::new() };
+    if !out.status.success() {
+        return HashMap::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(parse_stats_line)
+        .collect()
+}
+
+fn parse_stats_line(line: &str) -> Option<(String, ContainerStats)> {
+    let mut cols = line.split('\t');
+    let name = cols.next()?.trim().to_string();
+    let cpu_pct = cols.next()?.trim().trim_end_matches('%').parse::<f64>().ok()?;
+    let mem_bytes = parse_mem_usage(cols.next()?.trim())?;
+    let pids = cols.next()?.trim().parse::<u32>().unwrap_or(0);
+    Some((name, ContainerStats { cpu_pct, mem_bytes, pids }))
+}
+
+/// `docker stats`' MemUsage column reads like "12.3MiB / 1.943GiB" — the
+/// used half, before the slash, is what we want; the limit half is dropped
+/// since the row already has its own "of what" context in the UI.
+fn parse_mem_usage(s: &str) -> Option<u64> {
+    parse_byte_size(s.split('/').next()?.trim())
+}
+
+fn parse_byte_size(s: &str) -> Option<u64> {
+    let split = s.find(|c: char| !c.is_ascii_digit() && c != '.')?;
+    let (num, unit) = s.split_at(split);
+    let n: f64 = num.parse().ok()?;
+    let mult = match unit.trim() {
+        "B" => 1.0,
+        "KiB" => 1024.0,
+        "MiB" => 1024.0 * 1024.0,
+        "GiB" => 1024.0 * 1024.0 * 1024.0,
+        "TiB" => 1024.0_f64.powi(4),
+        "KB" => 1_000.0,
+        "MB" => 1_000_000.0,
+        "GB" => 1_000_000_000.0,
+        "TB" => 1_000_000_000_000.0,
+        _ => return None,
+    };
+    Some((n * mult) as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,5 +892,119 @@ mod tests {
         let spec = build_spec(&task, "claude", "img", &task.path, vec![], &spawn_env);
         let term_values: Vec<&str> = spec.env.iter().filter(|(k, _)| k == "TERM").map(|(_, v)| v.as_str()).collect();
         assert_eq!(term_values, vec!["xterm-256color", "dumb"]);
+    }
+
+    // ── Activity monitor integration ──────────────────────────────────
+
+    #[test]
+    fn byte_size_parses_binary_and_decimal_units() {
+        assert_eq!(parse_byte_size("12.3MiB"), Some((12.3 * 1024.0 * 1024.0) as u64));
+        assert_eq!(parse_byte_size("1.943GiB"), Some((1.943 * 1024.0 * 1024.0 * 1024.0) as u64));
+        assert_eq!(parse_byte_size("500B"), Some(500));
+        assert_eq!(parse_byte_size("2GB"), Some(2_000_000_000));
+        assert_eq!(parse_byte_size("garbage"), None);
+    }
+
+    #[test]
+    fn mem_usage_takes_the_used_half_before_the_slash() {
+        assert_eq!(parse_mem_usage("10MiB / 1.9GiB"), parse_byte_size("10MiB"));
+    }
+
+    #[test]
+    fn stats_line_parses_dockers_actual_column_order() {
+        let (name, s) = parse_stats_line("termic-abc123\t3.14%\t10MiB / 1.9GiB\t7")
+            .expect("valid line");
+        assert_eq!(name, "termic-abc123");
+        assert!((s.cpu_pct - 3.14).abs() < 1e-9);
+        assert_eq!(s.mem_bytes, parse_byte_size("10MiB").unwrap());
+        assert_eq!(s.pids, 7);
+    }
+
+    #[test]
+    fn stats_line_rejects_a_short_row() {
+        assert!(parse_stats_line("termic-abc123\t3.14%").is_none());
+    }
+
+    fn stub_row(key: &str) -> ProcRow {
+        ProcRow {
+            key: key.to_string(),
+            kind: "claude".into(),
+            pty_id: Some(key.to_string()),
+            task_id: None,
+            tab_id: None,
+            pid: 4242,
+            label: "docker".into(),
+            cpu_pct: Some(0.0),
+            mem_bytes: 1234,
+            rss_bytes: 1234,
+            proc_count: 1,
+            threads: 1,
+            cpu_ms: 0,
+            uptime_ms: 0,
+            out_bps: None,
+            alive: true,
+            cpu_history: vec![],
+            children: vec![crate::procmon::ChildRow {
+                pid: 4242,
+                label: "docker".into(),
+                cpu_pct: Some(0.0),
+                mem_bytes: 1234,
+            }],
+            is_docker: false,
+        }
+    }
+
+    #[test]
+    fn merge_stats_is_a_noop_with_no_docker_rows() {
+        let snap = Snapshot {
+            session: 1,
+            unix_ms: 0.0,
+            rows: vec![stub_row("pty:1")],
+            sample_ms: 0.0,
+            webkit_unavailable: false,
+        };
+        let out = merge_stats(snap, &HashMap::new());
+        assert!(!out.rows[0].is_docker);
+        assert_eq!(out.rows[0].mem_bytes, 1234);
+    }
+
+    #[test]
+    fn apply_overwrites_row_and_clears_the_host_children() {
+        let mut row = stub_row("pty:1");
+        let mut hist = HashMap::new();
+        let stats = ContainerStats { cpu_pct: 42.0, mem_bytes: 999, pids: 3 };
+        apply(&mut row, Some(&stats), &mut hist, 90);
+        assert!(row.is_docker);
+        assert!(row.children.is_empty());
+        assert_eq!(row.cpu_pct, Some(42.0));
+        assert_eq!(row.mem_bytes, 999);
+        assert_eq!(row.rss_bytes, 999);
+        assert_eq!(row.proc_count, 3);
+        assert_eq!(row.cpu_history, vec![42.0]);
+    }
+
+    #[test]
+    fn apply_keeps_last_known_numbers_on_a_transient_miss() {
+        let mut row = stub_row("pty:1");
+        row.mem_bytes = 555;
+        let mut hist = HashMap::new();
+        apply(&mut row, None, &mut hist, 90);
+        // Still marked as a Docker row (children cleared) even though this
+        // particular tick could not reach the daemon.
+        assert!(row.is_docker);
+        assert!(row.children.is_empty());
+        assert_eq!(row.mem_bytes, 555);
+        assert!(row.cpu_history.is_empty());
+    }
+
+    #[test]
+    fn apply_caps_history_at_the_configured_length() {
+        let mut row = stub_row("pty:1");
+        let mut hist = HashMap::new();
+        for i in 0..5 {
+            let stats = ContainerStats { cpu_pct: i as f64, mem_bytes: 1, pids: 1 };
+            apply(&mut row, Some(&stats), &mut hist, 3);
+        }
+        assert_eq!(row.cpu_history, vec![2.0, 3.0, 4.0]);
     }
 }

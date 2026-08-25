@@ -762,6 +762,13 @@ export interface ProcRow {
   alive: boolean;
   cpuHistory: number[];
   children: ProcChild[];
+  /** True once the Rust side overwrote this row with a `docker stats`
+   *  query — the host pid it also tracks (the `docker run` client) sits
+   *  nearly idle regardless of what the agent inside the container is
+   *  doing, so these numbers come from the daemon instead. `children` is
+   *  always empty for these rows: the container's real process tree lives
+   *  in the daemon's VM, not under the host pid sampled. */
+  isDocker: boolean;
 }
 
 export interface ProcSnapshot {

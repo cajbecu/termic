@@ -342,6 +342,7 @@ pub fn sample(session: u64, roots: Vec<Root>) -> Result<Snapshot, String> {
             alive,
             cpu_history: h.clone(),
             children: kids,
+            is_docker: false,
         });
     }
 
@@ -464,6 +465,7 @@ mod tests {
                 tab_id: None,
                 pid: std::process::id(),
                 out_bytes: None,
+                docker_container: None,
             }]
         }
         let _guard = SESSION_TEST.lock();
@@ -503,6 +505,7 @@ mod tests {
             tab_id: None,
             pid: std::process::id(),
             out_bytes: None,
+            docker_container: None,
         }]);
         assert!(is_running());
         assert_eq!(snap.rows.len(), 1);
@@ -518,6 +521,7 @@ mod tests {
             tab_id: None,
             pid: std::process::id(),
             out_bytes: None,
+            docker_container: None,
         }])
         .expect("second sample");
         assert!(second.rows[0].cpu_pct.is_some(), "second sample must have a delta");

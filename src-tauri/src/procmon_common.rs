@@ -24,6 +24,13 @@ pub struct Root {
     /// Cumulative PTY output bytes, used for the bytes/sec column. `None`
     /// for rows that are not a PTY.
     pub out_bytes: Option<u64>,
+    /// `--name` of the Docker container this row's PTY is attached to, if
+    /// it is a Docker-sandboxed agent. The host pid walk every platform's
+    /// `sample()` does is close to meaningless for these rows (the real
+    /// work happens inside the daemon's VM, invisible to the host process
+    /// table), so `docker::merge_stats` uses this to overwrite the row
+    /// with a `docker stats` query instead. `None` for every other row.
+    pub docker_container: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -63,6 +70,11 @@ pub struct ProcRow {
     pub cpu_history: Vec<f64>,
     /// The subtree's own processes, heaviest first, capped.
     pub children: Vec<ChildRow>,
+    /// True once `docker::merge_stats` has overwritten this row's numbers
+    /// with a `docker stats` query. The frontend uses it to badge the row
+    /// and to explain why `children` is empty: a container's real process
+    /// tree lives in the daemon's VM, not under the host pid we sampled.
+    pub is_docker: bool,
 }
 
 #[derive(Clone, Serialize)]

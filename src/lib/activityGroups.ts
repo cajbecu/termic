@@ -355,6 +355,15 @@ export function groupRows(
  *  answer when an agent has forked a build, so it lives here instead. */
 export function childSummary(row: ProcRow): string {
   const head = `${row.label} · pid ${row.pid}`;
+  // The container's real process tree lives in the daemon's VM: `children`
+  // is always empty for these rows (see procmon.rs's docker::apply), so the
+  // usual "+N more" (which means "more than we chose to show") would be
+  // misleading here — it is "we can't see any of them", not "we truncated".
+  if (row.isDocker) {
+    return row.procCount > 0
+      ? [head, `${row.procCount} process${row.procCount === 1 ? "" : "es"} in the container (breakdown unavailable)`].join("\n")
+      : head;
+  }
   const kids = row.children
     .filter(c => c.pid !== row.pid)
     .map(c => `${c.label} ${c.pid} · ${formatPct(c.cpu_pct)} · ${formatBytes(c.mem_bytes)}`);

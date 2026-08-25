@@ -2122,6 +2122,12 @@ struct PtySlot {
     /// can be set on a plain shell or a run-script tab just to label it.
     /// NOTHING may branch on this field except reporting.
     owner: Option<PtyOwner>,
+    /// `--name` of the Docker container this PTY's `docker run` is
+    /// attached to, if this is a Docker-sandboxed spawn. `None` for every
+    /// other PTY. Read only by the Activity monitor (`procmon_roots`) to
+    /// know which rows need a `docker stats` query instead of a host pid
+    /// walk; NOTHING else may branch on it (same rule as `owner`).
+    docker_container: Option<String>,
     /// Total bytes this PTY has ever written, bumped by the reader thread.
     /// Backs the monitor's output-rate column, which is the cheapest way to
     /// spot a TUI repainting itself to death (docs/performance.md). Two
@@ -2848,7 +2854,12 @@ fn pty_spawn(
     let docker_task = spawn_task
         .clone()
         .filter(|t| t.docker_sandbox_enabled && docker_globally_enabled);
-    let docker_argv: Option<Vec<String>> = if let Some(task) = docker_task {
+    // Carries the container's `--name` alongside its argv: the Activity
+    // monitor cannot see inside the container via the host pid tree (the
+    // `docker` CLI client it samples sits nearly idle while the real work
+    // happens in the daemon's VM), so `procmon_roots` needs this name to
+    // ask `docker stats` instead. See procmon.rs's docker_stats module.
+    let docker_argv: Option<(Vec<String>, String)> = if let Some(task) = docker_task {
         let agent = args.agent_id.clone().unwrap_or_else(|| task.cli.clone());
         let image = docker::spawn_image_tag().ok_or_else(|| {
             "Docker image not built. Open Settings → Docker Sandbox and build it first.".to_string()
@@ -2859,10 +2870,11 @@ fn pty_spawn(
         let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone(), &args.env);
         let argv = docker::render_argv(&spec, &args.cmd, &args.args);
         dlog(&format!("[pty_spawn] docker task={} agent={} image={} argv={argv:?}", task.id, agent, image));
-        Some(argv)
+        Some((argv, spec.container_name))
     } else {
         None
     };
+    let docker_container = docker_argv.as_ref().map(|(_, name)| name.clone());
     let is_docker = docker_argv.is_some();
 
     // ── Sandbox wrap, if applicable ────────────────────────────────
@@ -2872,7 +2884,7 @@ fn pty_spawn(
     // Drop impl SIGKILLs the proxy when the PTY closes.
     // Docker mode short-circuits this: the container IS the cage, so the
     // program becomes `docker` with the rendered run-argv, no seatbelt bundle.
-    let (effective_cmd, effective_args, sandbox_bundle) = if let Some(argv) = docker_argv {
+    let (effective_cmd, effective_args, sandbox_bundle) = if let Some((argv, _)) = docker_argv {
         ("docker".to_string(), argv, None)
     } else { match args
         .task_id
@@ -3253,6 +3265,7 @@ fn pty_spawn(
             role: args.role.clone(),
             feed,
             owner: args.owner.clone(),
+            docker_container,
             out_bytes,
             seq: next_pty_seq(),
             attached,
@@ -6053,6 +6066,7 @@ fn procmon_roots(manager: &PtyManager) -> Vec<procmon::Root> {
                         .or_else(|| role.and_then(|r| r.tab_id.clone())),
                     pid,
                     out_bytes: Some(slot.out_bytes.load(Ordering::Relaxed)),
+                    docker_container: slot.docker_container.clone(),
                 })
             })
             .collect()
@@ -6094,26 +6108,59 @@ fn procmon_roots(manager: &PtyManager) -> Vec<procmon::Root> {
         tab_id: None,
         pid: std::process::id(),
         out_bytes: None,
+        docker_container: None,
     });
     roots
 }
 
+/// `row key -> Docker container --name`, for whichever roots are
+/// Docker-sandboxed. `docker::merge_stats` uses this after a normal sample
+/// to know which rows need their host-based numbers replaced with a
+/// `docker stats` query.
+fn docker_containers(roots: &[procmon::Root]) -> HashMap<String, String> {
+    roots
+        .iter()
+        .filter_map(|r| r.docker_container.clone().map(|c| (r.key.clone(), c)))
+        .collect()
+}
+
+// Async + spawn_blocking (docs/ipc.md discipline): `docker::merge_stats`
+// shells out to `docker stats`, which is real IO (a round trip to the
+// daemon) and would freeze the webview if run on the IPC thread. `roots`
+// carries every syscall input the platform sampler needs as owned data, so
+// the spawned closure never touches `state` itself.
 #[tauri::command]
-fn procmon_start(state: State<'_, PtyManager>) -> procmon::Snapshot {
-    procmon::start(procmon_roots(&state))
+async fn procmon_start(state: State<'_, PtyManager>) -> Result<procmon::Snapshot, String> {
+    let roots = procmon_roots(&state);
+    let containers = docker_containers(&roots);
+    docker::reset_history();
+    tauri::async_runtime::spawn_blocking(move || {
+        let snap = procmon::start(roots);
+        docker::merge_stats(snap, &containers)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn procmon_sample(
+async fn procmon_sample(
     state: State<'_, PtyManager>,
     session: u64,
 ) -> Result<procmon::Snapshot, String> {
-    procmon::sample(session, procmon_roots(&state))
+    let roots = procmon_roots(&state);
+    let containers = docker_containers(&roots);
+    tauri::async_runtime::spawn_blocking(move || {
+        let snap = procmon::sample(session, roots)?;
+        Ok(docker::merge_stats(snap, &containers))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 fn procmon_stop(session: u64) {
     procmon::stop(session);
+    docker::reset_history();
 }
 
 /// Signal one process the monitor is showing. `procmon::signal` re-derives
@@ -6160,6 +6207,7 @@ fn procmon_open_window(app: AppHandle) -> Result<(), String> {
     win.on_window_event(|event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
             procmon::stop_all();
+            docker::reset_history();
         }
     });
     let _ = win.set_focus();
