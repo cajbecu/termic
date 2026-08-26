@@ -81,7 +81,9 @@ stop, so `RunTabControl` renders in whichever of the two places is on screen
   task expands to reach them, which is what the tab strip makes it do anyway.
 - **An instant `Tip`, not a native `title`.** On a collapsed row the button is
   the only thing naming the process it kills, and a tooltip that arrives a
-  second later is no use to a cursor already on its way to the click.
+  second later is no use to a cursor already on its way to the click. It holds
+  the tab's name alone: a verb in front reads "Run Run" on the tab that is
+  actually called Run, and the icon already says stop from start.
 
 Play has a wrinkle Stop does not. The restart travels as a
 `termic-run-tab-restart` window event, and the only listener is the tab's

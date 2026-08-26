@@ -2071,7 +2071,11 @@ function RunTabControl({ taskId, tab, title, isMounted }: {
       // button is the ONLY thing naming the process it kills, and a tooltip
       // that arrives a second later is no use to a cursor already on its way
       // to the click. `delay` defaults to 0, hence no wait.
-      <Tip content={`Stop ${title}`} side="right">
+      //
+      // The tab's name and nothing else. A verb in front reads "Run Run" on
+      // the tab that is actually called Run, and the icon (red square vs
+      // triangle) already says which of the two this is.
+      <Tip content={title} side="right">
         <button
           data-no-drag
           data-testid={`sidebar-run-stop-${tab.id}`}
@@ -2088,7 +2092,7 @@ function RunTabControl({ taskId, tab, title, isMounted }: {
     );
   }
   return (
-    <Tip content={`Run ${title}`} side="right">
+    <Tip content={title} side="right">
     <button
       data-no-drag
       data-testid={`sidebar-run-play-${tab.id}`}
