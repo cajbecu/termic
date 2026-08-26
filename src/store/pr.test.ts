@@ -23,14 +23,17 @@ vi.mock("@/lib/agents", () => ({
   agentDisplayName: vi.fn((cli: string) => cli),
   workDoneCapable: vi.fn(() => true),
 }));
-vi.mock("@/lib/archiveTask", () => ({ archiveAndRefresh: vi.fn().mockResolvedValue(undefined) }));
+vi.mock("@/lib/archiveTask", () => ({
+  archiveAndRefresh: vi.fn().mockResolvedValue(undefined),
+  confirmAndArchive: vi.fn().mockResolvedValue(undefined),
+}));
 
 import { usePr, newCommentsSince, commentPromptFor, watchTickNow, openPrArchiveWarning } from "@/store/pr";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import { usePrefs } from "@/store/prefs";
 import * as ipc from "@/lib/ipc";
-import { archiveAndRefresh } from "@/lib/archiveTask";
+import { archiveAndRefresh, confirmAndArchive } from "@/lib/archiveTask";
 import type { PrLookup, Task, Project } from "@/lib/types";
 
 const lookupWith = (state: "open" | "merged" | "closed" | "draft" | null): PrLookup => ({
@@ -103,10 +106,12 @@ describe("merged-PR lifecycle (issue #21)", () => {
     // and it commonly lands on a task that isn't the one on screen - it
     // must not expire before anyone gets to read it.
     expect(toasts[0].sticky).toBe(true);
-    expect(archiveAndRefresh).not.toHaveBeenCalled();
-    // The action wires through to the archive flow.
+    expect(confirmAndArchive).not.toHaveBeenCalled();
+    // The action goes through the SAME confirm dialog as every other
+    // archive entry point (branch-delete checkbox and all), not a bare
+    // archiveAndRefresh - "ask" mode means the user gets a real say.
     toasts[0].action!.onClick();
-    expect(archiveAndRefresh).toHaveBeenCalledWith("ws1", true);
+    expect(confirmAndArchive).toHaveBeenCalledWith(expect.objectContaining({ id: "ws1" }));
   });
 
   it("fires a desktop notification alongside the toast, gated on the pref", async () => {
@@ -139,13 +144,16 @@ describe("merged-PR lifecycle (issue #21)", () => {
     expect(useUI.getState().toasts).toHaveLength(1);
   });
 
-  it("auto: archives immediately", async () => {
+  it("auto: archives immediately, WITHOUT deleting the branch", async () => {
     seedApp("auto", { id: "ws-auto" });
     vi.mocked(ipc.taskPrStatus).mockResolvedValue(lookupWith("open"));
     await usePr.getState().refresh("ws-auto", true);
     vi.mocked(ipc.taskPrStatus).mockResolvedValue(lookupWith("merged"));
     await usePr.getState().refresh("ws-auto", true);
-    expect(archiveAndRefresh).toHaveBeenCalledWith("ws-auto", true);
+    // Unattended, no confirmation - the branch-delete decision belongs to
+    // the "ask" flow's explicit checkbox, not something done on the user's
+    // behalf in the background.
+    expect(archiveAndRefresh).toHaveBeenCalledWith("ws-auto", false);
   });
 
   it("auto: also notifies (desktop) when the pref is on", async () => {

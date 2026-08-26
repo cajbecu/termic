@@ -32,7 +32,7 @@ import { workDoneCapable } from "@/lib/agents";
 import { useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import { usePrefs } from "@/store/prefs";
-import { archiveAndRefresh } from "@/lib/archiveTask";
+import { archiveAndRefresh, confirmAndArchive } from "@/lib/archiveTask";
 import { taskLabel } from "@/lib/taskLabel";
 
 export interface PrEntry {
@@ -428,17 +428,28 @@ function maybeHandleMerged(taskId: string, prev: PrLookup | null | undefined, ne
   if (mode === "auto") {
     useUI.getState().pushToast(`${label} merged. Archiving "${task.name}"`, "success");
     notifyMerge(`${label} merged, archiving`);
-    void archiveAndRefresh(taskId, true);
+    // Worktree + task entry only, NOT the branch: this runs unattended with
+    // no confirmation, so it must be the reversible half of archiving. The
+    // branch (and the task in History) survive - deleting it too is a
+    // one-way door that deserves the "ask" flow's explicit checkbox, not a
+    // background decision made on the user's behalf.
+    void archiveAndRefresh(taskId, false);
     return;
   }
   // "ask" (default): non-destructive nudge with a one-click archive.
   // Sticky (no auto-dismiss timer) - a merge notice is asking the user to
   // decide something, and a bottom-right toast that expires in seconds is
   // easy to miss entirely for a task that isn't the one on screen, which
-  // is the common case here.
-  useUI.getState().pushToast(`${label} merged. Archive "${task.name}"?`, "success", {
+  // is the common case here. "warning", not "success" - it's a decision to
+  // make, not a completed positive action (that's the "auto" toast above).
+  // Goes through the SAME confirm flow as every other archive entry point
+  // (sidebar row menu, unified bar button, command palette) - branch-delete
+  // checkbox and all - not a bare archiveAndRefresh. This is "ask" mode:
+  // the whole point is the user gets a real say, not just a single
+  // one-click button skipping the branch-delete decision everywhere else.
+  useUI.getState().pushToast(`${label} merged. Archive "${task.name}"?`, "warning", {
     sticky: true,
-    action: { label: "Archive", onClick: () => { void archiveAndRefresh(taskId, true); } },
+    action: { label: "Archive", onClick: () => { void confirmAndArchive(task); } },
   });
   notifyMerge(`${label} merged. Archive "${task.name}"?`);
 }

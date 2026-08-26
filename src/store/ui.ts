@@ -355,7 +355,7 @@ interface UIState {
   dismissToast: (id: string) => void;
 }
 
-export type ToastKind = "success" | "info" | "error";
+export type ToastKind = "success" | "info" | "warning" | "error";
 export interface ToastAction { label: string; onClick: () => void; }
 export interface Toast {
   id: string;
