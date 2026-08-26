@@ -180,6 +180,22 @@ describe("my feature", () => {
 });
 ```
 
+### The e2e build never takes focus (and must not)
+
+Each spec file launches its own instance, so a run launches seventeen. Under
+`--features e2e` the app therefore sets `ActivationPolicy::Accessory` before
+showing its window and skips the `set_focus()` a normal launch does
+(`lib.rs`). On macOS `set_focus()` activates the app, and activating yanks the
+user to whichever Space the window opened on: seventeen Space switches through
+a four-minute run, on the machine of whoever is running the suite.
+
+Nothing in the suite needed that focus. Specs drive the webview through
+synthetic events, store writes and IPC, none of which care which app is
+frontmost, and the window was already occluded anyway (see below). Do not add a
+`set_focus()`, a `.show()` that activates, or an Accessory-to-Regular flip on
+this path to make a spec pass: the spec is reaching for OS focus it should not
+need, and the cost is the user's attention every time the suite runs.
+
 ### The window is hidden, so nothing animates
 
 `document.hidden` is `true` for the whole run: the harness never brings the

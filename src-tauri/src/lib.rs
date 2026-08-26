@@ -16398,6 +16398,13 @@ pub fn run() {
                 dlog("[windowless] booting --headless (no window, no dock icon)");
                 enter_windowless(app.handle());
             } else {
+                // Accessory BEFORE show, e2e only: a Regular app showing its
+                // first window is what macOS treats as a launch to switch to.
+                // Accessory has no Dock icon and never becomes frontmost, so
+                // the window appears on the current Space and stays behind
+                // whatever the user is actually working in.
+                #[cfg(all(target_os = "macos", feature = "e2e"))]
+                let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
                 let _ = win.show();
                 SHOWN_ONCE.store(true, Ordering::SeqCst);
             }
@@ -16473,6 +16480,14 @@ pub fn run() {
             // token). See cli_server.rs + docs/plans/cli.md.
             cli_server::start(app.handle().clone());
             mcp_server::start_if_enabled(app.handle().clone());
+            // E2E: show the window, never take focus. `set_focus()` on macOS
+            // ACTIVATES the app, which yanks the user to whichever Space the
+            // window opened on — seventeen times a suite run, since each spec
+            // file launches its own instance. The suite drives the webview
+            // through synthetic events and IPC, so it never needed OS focus;
+            // it already runs occluded (rAF frozen, visibilityState hidden),
+            // which is exactly the state this leaves it in.
+            #[cfg(not(feature = "e2e"))]
             if !headless {
                 let _ = win.set_focus();
             }
