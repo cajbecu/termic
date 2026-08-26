@@ -17,10 +17,9 @@ import {
   settingsLoad, taskSetSandbox, sandboxAvailable, taskSetDocker, dockerImageStatus, dockerCommandPreview,
   type DockerImageStatus, type DockerCommandPreview,
 } from "@/lib/ipc";
-import { effectiveSandboxMode, type SandboxMode, type Settings } from "@/lib/types";
+import { effectiveSandboxMode, type SandboxMode, type SandboxSelection, type Settings } from "@/lib/types";
 import { AlertTriangle, Shield, Zap, Save, RotateCw } from "lucide-react";
-import { SandboxModeSelector } from "@/components/SandboxModeSelector";
-import { SandboxEngineSelector, DockerEngineNote, type SandboxEngine } from "@/components/SandboxEngineSelector";
+import { SandboxPicker, DockerEngineNote } from "@/components/SandboxPicker";
 import { SANDBOX_PRESETS } from "@/lib/sandboxPresets";
 
 export function TaskSandboxDialog() {
@@ -80,12 +79,12 @@ export function TaskSandboxDialog() {
   // straight off the two independent underlying fields (dockerOn from the
   // saved task, mode from the Seatbelt draft), so the unified selector
   // never needs its own source of truth to fall out of sync with either.
-  const engine: SandboxEngine = dockerOn ? "docker" : (mode !== "off" ? "seatbelt" : "off");
+  const selection: SandboxSelection = dockerOn ? "docker" : mode;
   // `enabled` = the SEATBELT cage specifically is on. Most of the form
-  // (lists, presets, Save buttons) shows only when engine is seatbelt -
-  // Docker being on must never leave a stale non-off `mode` draft (from
-  // before switching engines) accidentally re-showing this section too.
-  const enabled = engine === "seatbelt" && mode !== "off";
+  // (lists, presets, Save buttons) shows only when NOT Docker - Docker
+  // being on must never leave a stale non-off `mode` draft (from before
+  // switching selections) accidentally re-showing this section too.
+  const enabled = !dockerOn && mode !== "off";
   // ENFORCING (FS): filesystem cage with the network sandbox OFF. The
   // host allow-list + any network-only copy are irrelevant, so they're
   // hidden in this mode.
@@ -230,19 +229,19 @@ export function TaskSandboxDialog() {
     }
   }
 
-  // The unified selector's click handler. Docker on/off still commits
+  // The unified picker's click handler. Docker on/off still commits
   // IMMEDIATELY through its own confirm (toggleDocker, unchanged) rather
   // than joining the Seatbelt draft-then-Save flow below - the two engines
   // keep their existing, already-shipped commit semantics; this just picks
-  // which one a click should drive.
-  async function chooseEngine(next: SandboxEngine) {
+  // which one a click should drive. Unlike the old two-tier selector, a
+  // Seatbelt card click here IS the final mode (no separate submode grid).
+  async function choose(next: SandboxSelection) {
     if (next === "docker") {
       if (!dockerOn) await toggleDocker(true);
       return;
     }
     if (dockerOn) await toggleDocker(false);
-    if (next === "off") setMode("off");
-    else chooseMode(mode === "off" ? "enforce" : mode);
+    chooseMode(next);
   }
 
   return (
@@ -271,22 +270,19 @@ export function TaskSandboxDialog() {
             saw the box checked and assumed the cage was ON. State now
             reads from the color band (green = caged, red = open) and
             the verb on the action button ("Disable" vs "Enable"). */}
-        {/* Unified engine selector: OFF / macOS Seatbelt / Docker Container.
-            Docker still commits immediately through its own confirm
-            (chooseEngine -> toggleDocker, unchanged mechanics) while
+        {/* Unified picker: OFF / Seatbelt's 3 modes / Docker Container, five
+            peer cards. Docker still commits immediately through its own
+            confirm (choose -> toggleDocker, unchanged mechanics) while
             Seatbelt stays a draft the Save button below commits - this is
             just what makes the two read as ONE choice instead of Docker
             being a separate control bolted on beneath the mode grid. */}
-        <SandboxEngineSelector
-          engine={engine}
-          onChange={chooseEngine}
-          osUnavailable={osSandboxOk === false}
+        <SandboxPicker
+          value={selection}
+          onChange={choose}
+          seatbeltUnavailable={osSandboxOk === false}
           dockerOffered={dockerOffered}
         />
-        {engine === "seatbelt" && (
-          <SandboxModeSelector value={mode} onChange={chooseMode} hideOff osUnavailable={osSandboxOk === false} />
-        )}
-        {mode === "monitor" && engine === "seatbelt" && (
+        {mode === "monitor" && !dockerOn && (
           <div className="flex items-start gap-2 rounded-md border border-[var(--color-warn)]/30 bg-[var(--color-warn)]/10 px-3 py-2 text-[13px] text-[var(--color-fg-dim)]">
             <Shield className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-warn)]" />
             <span>
@@ -311,7 +307,7 @@ export function TaskSandboxDialog() {
           </div>
         )}
 
-        {engine === "docker" && (
+        {dockerOn && (
           <>
             <DockerEngineNote />
             <div>

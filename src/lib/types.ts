@@ -30,6 +30,22 @@ export function isSandboxEnforced(mode: SandboxMode): boolean {
   return mode === "enforce" || mode === "enforce-fs";
 }
 
+/** The user-facing sandbox CHOICE: Seatbelt's four modes plus Docker as a
+ *  fifth, peer option. NOT a new backend field - a flat view over the two
+ *  independent underlying ones (`sandbox_mode` / `docker_sandbox_enabled`),
+ *  which stay mutually exclusive at the data level (see docs/sandbox.md).
+ *  Docker never gets its own "monitor" - there's nothing at the container
+ *  level equivalent to Seatbelt's proxy/FS-op watcher to log. */
+export type SandboxSelection = SandboxMode | "docker";
+
+export function selectionFor(mode: SandboxMode, dockerEnabled: boolean): SandboxSelection {
+  return dockerEnabled ? "docker" : mode;
+}
+
+export function selectionToFields(sel: SandboxSelection): { mode: SandboxMode; docker: boolean } {
+  return sel === "docker" ? { mode: "off", docker: true } : { mode: sel, docker: false };
+}
+
 export interface Project {
   id: string;
   name: string;
