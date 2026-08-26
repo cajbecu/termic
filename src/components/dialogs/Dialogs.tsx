@@ -21,6 +21,7 @@ import { TaskSandboxDialog } from "./TaskSandboxDialog";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { CloseDialog } from "./CloseDialog";
 import { TerminalDropDialog } from "./TerminalDropDialog";
+import { DockerRebuildPromptDialog } from "./DockerRebuildPromptDialog";
 import { FileFinderDialog } from "./FileFinderDialog";
 import { FindInFilesDialog } from "./FindInFilesDialog";
 import { ProjectPickerDialog } from "./ProjectPickerDialog";
@@ -61,6 +62,7 @@ export function Dialogs() {
       <ConfirmDialog />
       <CloseDialog />
       <TerminalDropDialog />
+      <DockerRebuildPromptDialog />
       <FileFinderDialog />
       <FindInFilesDialog />
       <ProjectPickerDialog />

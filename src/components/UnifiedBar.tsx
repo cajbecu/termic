@@ -20,7 +20,7 @@ import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { TaskLocationIcon } from "@/components/TaskLocationIcon";
 import { effectiveSandboxMode } from "@/lib/types";
 import { taskLabel } from "@/lib/taskLabel";
-import { SandboxIcon } from "@/components/SandboxIcon";
+import { SandboxIcon, DockerSandboxIcon } from "@/components/SandboxIcon";
 import { UpdaterBanner } from "@/components/UpdaterBanner";
 import { WaitingAgentsPill } from "@/components/WaitingAgentsPill";
 import { openPath, themesDir, taskSendDiffToMain } from "@/lib/ipc";
@@ -297,6 +297,17 @@ export function UnifiedBar() {
               </Tip>
             )}
             {(() => {
+              if (task.docker_sandbox_enabled) {
+                return (
+                  <Tip content="Sandbox: Docker container (filesystem cage, network open)" side="bottom">
+                    <Button size="icon" variant="icon"
+                      onClick={() => useUI.getState().openSandbox(task.id)}
+                    >
+                      <DockerSandboxIcon className="h-4 w-4" />
+                    </Button>
+                  </Tip>
+                );
+              }
               const sbMode = effectiveSandboxMode(task);
               const tip = sbMode === "enforce" ? "Sandbox: Enforcing"
                 : sbMode === "enforce-fs" ? "Sandbox: Enforcing filesystem (network open)"

@@ -223,6 +223,13 @@ interface UIState {
    *  file, so the close flow can tell "saved, now close the tab" from
    *  "backed out, keep it". null = closed. */
   scratchSave: { taskId: string; tabId: string; resolve: (saved: boolean) => void } | null;
+  /** Active Docker sandbox rebuild-nudge prompt, if any. Fired from
+   *  `maybeRebuildDockerImageForLaunch` right before a Docker-mode task's
+   *  agent spawns. The resolve callback fires with the user's choice
+   *  ("rebuild" awaits a fresh --no-cache build; "skip" launches
+   *  immediately on whatever image already exists) when the modal closes;
+   *  DockerRebuildPromptDialog reads this and renders. */
+  dockerRebuildPrompt: { taskName: string; lastBuiltDate: string | null; resolve: (choice: "rebuild" | "skip") => void } | null;
   /** Tasks whose PTYs are about to be SIGKILL'd because the user
    *  explicitly hit "Save & restart" on a config dialog (Sandbox or
    *  Resume override). The next pty-exit for any PTY belonging to one of
@@ -339,6 +346,10 @@ interface UIState {
    *  false on cancel/dismiss. */
   askScratchSave: (taskId: string, tabId: string) => Promise<boolean>;
   resolveScratchSave: (saved: boolean) => void;
+  /** Open the Docker sandbox rebuild-nudge prompt. Resolves "rebuild" or
+   *  "skip" once the user answers (DockerRebuildPromptDialog). */
+  askDockerRebuild: (taskName: string, lastBuiltDate: string | null) => Promise<"rebuild" | "skip">;
+  resolveDockerRebuildPrompt: (choice: "rebuild" | "skip") => void;
   /** Mark a task for auto-restart on the next PTY exit. Called by
    *  dialogs that change spawn-time config and then kill the live agent so
    *  it relaunches with the new settings (the Sandbox dialog before
@@ -423,6 +434,7 @@ export const useUI = create<UIState>(set => ({
   terminalDrop: null,
   scratchClose: null,
   scratchSave: null,
+  dockerRebuildPrompt: null,
   pendingPtyRestarts: new Set<string>(),
   toasts: [],
 
@@ -556,6 +568,13 @@ export const useUI = create<UIState>(set => ({
     const d = useUI.getState().scratchSave;
     d?.resolve(saved);
     set({ scratchSave: null });
+  },
+  askDockerRebuild: (taskName, lastBuiltDate) =>
+    new Promise(resolve => set({ dockerRebuildPrompt: { taskName, lastBuiltDate, resolve } })),
+  resolveDockerRebuildPrompt: (choice) => {
+    const p = useUI.getState().dockerRebuildPrompt;
+    p?.resolve(choice);
+    set({ dockerRebuildPrompt: null });
   },
   markPendingPtyRestart: (taskId) => set(s => {
     const next = new Set(s.pendingPtyRestarts);

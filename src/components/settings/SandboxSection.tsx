@@ -4,11 +4,12 @@
 // files" in General. See docs/sandbox.md for what the cage actually does.
 
 import { useEffect, useRef, useState } from "react";
-import { settingsSave } from "@/lib/ipc";
+import { settingsSave, sandboxAvailable, dockerImageStatus, type DockerImageStatus } from "@/lib/ipc";
 import type { Settings } from "@/lib/types";
 import { Button } from "@/components/ui/Button";
 import { usePrefs } from "@/store/prefs";
 import { Block, ListField, SectionTitle, Toggle, useBackendSettings } from "./Controls";
+import { SandboxPicker, DockerEngineNote } from "@/components/SandboxPicker";
 import { cleanLines } from "@/lib/utils";
 
 export function SandboxSection() {
@@ -21,10 +22,20 @@ export function SandboxSection() {
   const [sbHosts, setSbHosts] = useState("");
   const [sbOriginal, setSbOriginal] = useState({ rw: "", hosts: "" });
 
-  const globalDefaultSandbox = usePrefs(s => s.globalDefaultSandbox);
-  const setGlobalDefaultSandbox = usePrefs(s => s.setGlobalDefaultSandbox);
+  const globalDefaultSandboxKind = usePrefs(s => s.globalDefaultSandboxKind);
+  const setGlobalDefaultSandboxKind = usePrefs(s => s.setGlobalDefaultSandboxKind);
   const sandboxBypassPermissions = usePrefs(s => s.sandboxBypassPermissions);
   const setSandboxBypassPermissions = usePrefs(s => s.setSandboxBypassPermissions);
+
+  // Same two gates the picker needs everywhere else it appears: Seatbelt
+  // is macOS-only, Docker needs the global switch on AND an image built.
+  const [osSandboxOk, setOsSandboxOk] = useState<boolean | null>(null);
+  const [dockerImage, setDockerImage] = useState<DockerImageStatus | null>(null);
+  useEffect(() => {
+    sandboxAvailable().then(setOsSandboxOk).catch(() => setOsSandboxOk(false));
+    dockerImageStatus().then(setDockerImage).catch(() => {});
+  }, []);
+  const dockerOffered = !!settings?.docker_sandbox_enabled && !!dockerImage?.available;
 
   const hydrated = useRef(false);
   useEffect(() => {
@@ -57,17 +68,33 @@ export function SandboxSection() {
     <div className="flex flex-col gap-7">
       <SectionTitle title="Sandbox" />
 
-      {/* Global sandbox default. The New task dialog defaults its
-          Sandbox toggle to this OR the project's own `default_sandbox`
-          (whichever is true). One switch to start sandboxing across
-          every project without per-project bookkeeping. */}
+      {/* Global sandbox default. The New task dialog's picker starts here
+          whenever neither the user's own last-used habit nor the
+          project's own default_sandbox_mode is in effect - one app-wide
+          pick (including Docker) instead of per-project bookkeeping.
+          Already-created tasks aren't affected: the pin is captured at
+          creation. */}
       <Block first>
-        <Toggle
-          label="Sandbox new tasks by default"
-          hint="When on, the New task dialog pre-checks its Sandbox toggle for every project. Individual projects can still opt out (Settings → Projects). Already-created tasks aren't affected, their sandbox pin is captured at creation."
-          value={globalDefaultSandbox}
-          onChange={setGlobalDefaultSandbox}
-        />
+        <div className="text-[14px] font-medium">Sandbox new tasks by default</div>
+        <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+          The New task dialog's sandbox picker starts here for every project, unless the project sets its own
+          default or you've already picked something for a previous task (that habit wins). Individual projects
+          can still override (Settings → Repositories).
+        </div>
+        <div className="mt-3">
+          <SandboxPicker
+            value={globalDefaultSandboxKind}
+            onChange={setGlobalDefaultSandboxKind}
+            seatbeltUnavailable={osSandboxOk === false}
+            dockerOffered={dockerOffered}
+            dockerUnavailableReason="Enable Docker sandbox and build the image in Settings → Docker Sandbox first."
+          />
+          {globalDefaultSandboxKind === "docker" && (
+            <div className="mt-2">
+              <DockerEngineNote />
+            </div>
+          )}
+        </div>
       </Block>
 
       {/* Bypass-permissions default for sandboxed agents. When on, a

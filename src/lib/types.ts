@@ -25,9 +25,48 @@ export function effectiveSandboxMode(
  *  outside the allow-list). Covers both `enforce` and `enforce-fs` — they
  *  share the exact FS profile, so anything keyed off "the cage is the real
  *  boundary" (YOLO auto-on, drag-drop staging, etc.) must treat them alike.
- *  `enforce-fs` only differs in that the NETWORK sandbox is off. */
+ *  `enforce-fs` only differs in that the NETWORK sandbox is off.
+ *
+ *  Seatbelt-only. Docker mode is a real filesystem boundary too (same
+ *  structural shape as `enforce-fs`: cage the filesystem, leave network
+ *  open) but ALWAYS stores `sandbox_mode` as `off` (mutually exclusive with
+ *  Seatbelt) — a Docker-sandboxed task reads as `false` here on purpose,
+ *  since the drag-drop TMPDIR-staging workaround this also gates is
+ *  Seatbelt-specific plumbing with no Docker equivalent. For "is this task
+ *  caged AT ALL, whichever mechanism" (YOLO auto-on, etc.), use
+ *  `isTaskCaged` instead. */
 export function isSandboxEnforced(mode: SandboxMode): boolean {
   return mode === "enforce" || mode === "enforce-fs";
+}
+
+/** True when EITHER cage mechanism is actively enforcing the agent's
+ *  filesystem access — Seatbelt's `enforce`/`enforce-fs`, or Docker mode.
+ *  Both are "the agent's own permission prompts are just friction, the
+ *  real boundary is the cage" situations, so YOLO auto-on (and anything
+ *  else reasoning about "is this task caged, whichever way") must treat
+ *  them alike. Docker never reaches here via `isSandboxEnforced` (see its
+ *  doc comment) since `sandbox_mode` is always `off` while Docker is on. */
+export function isTaskCaged(
+  task: { sandbox_mode?: SandboxMode; sandbox_enabled?: boolean; docker_sandbox_enabled?: boolean } | null | undefined,
+): boolean {
+  if (!task) return false;
+  return isSandboxEnforced(effectiveSandboxMode(task)) || !!task.docker_sandbox_enabled;
+}
+
+/** The user-facing sandbox CHOICE: Seatbelt's four modes plus Docker as a
+ *  fifth, peer option. NOT a new backend field - a flat view over the two
+ *  independent underlying ones (`sandbox_mode` / `docker_sandbox_enabled`),
+ *  which stay mutually exclusive at the data level (see docs/sandbox.md).
+ *  Docker never gets its own "monitor" - there's nothing at the container
+ *  level equivalent to Seatbelt's proxy/FS-op watcher to log. */
+export type SandboxSelection = SandboxMode | "docker";
+
+export function selectionFor(mode: SandboxMode, dockerEnabled: boolean): SandboxSelection {
+  return dockerEnabled ? "docker" : mode;
+}
+
+export function selectionToFields(sel: SandboxSelection): { mode: SandboxMode; docker: boolean } {
+  return sel === "docker" ? { mode: "off", docker: true } : { mode: sel, docker: false };
 }
 
 export interface Project {
@@ -281,6 +320,21 @@ export interface Task {
    *  tasks - matches the immutability promise of sandbox_enabled. */
   sandbox_rw_paths?: string[];
   sandbox_allowed_hosts?: string[];
+  /** Docker sandbox: PINNED at creation like `sandbox_enabled`, editable
+   *  post-create via `taskSetDocker` (mirrors the mode edit path). When
+   *  true AND the global `Settings.docker_sandbox_enabled` master switch
+   *  is also on and an image is built, the agent PTY runs inside
+   *  `docker run` instead of the Seatbelt path. See docs/plans/docker-sandbox. */
+  docker_sandbox_enabled?: boolean;
+  /** User-appended `docker run` args for this task (e.g. `--memory 4g`). */
+  docker_extra_args?: string[];
+  /** Extra bind mounts for this task's container, one per entry as
+   *  `host_path:container_path` (Docker's own `-v` shape). A dedicated
+   *  field, NOT part of `sandbox_rw_paths`/"Allowed paths": that list is
+   *  shared with Seatbelt and has no concept of a container path. Mainly
+   *  for persisting something a fresh container otherwise loses on
+   *  restart that the per-agent config dir mount doesn't cover. */
+  docker_extra_mounts?: string[];
   /** Multi-repo composition. Empty for single-repo tasks. */
   composition?: TaskMember[];
   /** Extra named ports (GH #196), frozen at creation and topped up at
@@ -373,6 +427,12 @@ export interface CreateMultiArgs {
   sandbox_mode?: SandboxMode;
   sandbox_rw_paths?: string[];
   sandbox_allowed_hosts?: string[];
+  /** Run this task's agent in Docker instead of Seatbelt. Mutually
+   *  exclusive with sandbox_mode/sandbox_enabled - when true, Rust stores
+   *  those as off regardless of what else was sent. */
+  docker_sandbox_enabled?: boolean;
+  /** See `CreateTaskArgs.docker_extra_mounts`. */
+  docker_extra_mounts?: string[];
   /** Resume-args override for the host task, applied from the first spawn.
    *  Same field as the task menu's "Resume override". */
   resume_override?: string;
@@ -401,6 +461,17 @@ export interface CreateTaskArgs {
    *  Rust falls back to the project's defaults verbatim. */
   sandbox_rw_paths?: string[];
   sandbox_allowed_hosts?: string[];
+  /** Run this task's agent in Docker instead of Seatbelt. Mutually
+   *  exclusive with sandbox_mode/sandbox_enabled - when true, Rust stores
+   *  those as off regardless of what else was sent. */
+  docker_sandbox_enabled?: boolean;
+  /** Override for the task's Docker extra mounts (`host_path:
+   *  container_path`). The New task dialog seeds this from
+   *  `Settings.docker_default_extra_mounts` and lets the user edit before
+   *  Create, same convention as `sandbox_rw_paths`. Unset falls back to
+   *  `Settings.docker_default_extra_mounts` verbatim (only meaningful with
+   *  `docker_sandbox_enabled`). */
+  docker_extra_mounts?: string[];
   /** Pre-set launch command for a `cli === "custom"` worktree task (quick
    *  "Custom command" in worktree mode). The default tab runs this through a
    *  login shell instead of an agent binary. Null/undefined for agent/shell. */
@@ -541,6 +612,41 @@ export interface Settings {
    *  Edit Sandbox dialog when the user enables the cage from scratch. */
   sandbox_default_rw_paths?: string[];
   sandbox_default_allowed_hosts?: string[];
+  /** Master switch for Docker sandbox mode (Settings → Docker Sandbox). While off,
+   *  no Docker UI appears anywhere and Docker is never invoked, even if a
+   *  task has `docker_sandbox_enabled` set. */
+  docker_sandbox_enabled?: boolean;
+  /** How often to nudge a Docker sandbox image rebuild before a Docker-mode
+   *  task's agent launches, so it doesn't keep running an indefinitely
+   *  stale agent CLI baked into an old image. `"off"` is the opt-out.
+   *  Defaults to `"daily"` when absent (both the Rust struct's derived
+   *  Default AND its serde fallback agree - see `DockerRebuildFrequency`). */
+  docker_rebuild_frequency?: "off" | "daily" | "weekly";
+  /** Per-agent EXTRA directories mounted into that agent's Docker config
+   *  dir, on top of the confirmed built-in list (Settings → Docker
+   *  Sandbox). Keyed by agent id; each entry is a path relative to the
+   *  agent's home (e.g. `.mytool`, `.config/mytool`) - sanitized on the
+   *  Rust side before it can become a mount, so a stray `..` or absolute
+   *  path here is inert rather than escaping the container's `/root`. */
+  docker_agent_extra_dirs?: Record<string, string[]>;
+  /** Opt-in switch (keyed by agent id) for mounting `docker_agent_extra_dirs`
+   *  at all for an agent OUTSIDE the small known-safe built-in set
+   *  (claude/codex/copilot/agy/opencode). Off by default, including for a
+   *  newly-added custom agent: guessing a config dir for an unknown agent
+   *  risks silently shadowing a binary the image baked in at that same
+   *  path. Meaningless for a built-in agent - it's always mounted. */
+  docker_agent_persist_enabled?: Record<string, boolean>;
+  /** Default `Task.docker_extra_mounts` entries (same `host_path:
+   *  container_path` shape, Settings → Docker Sandbox), unioned into a new
+   *  Docker-sandboxed task's mounts at creation time - the New Task
+   *  dialog seeds its own "Extra mounts" field from this, same convention
+   *  as `sandbox_default_rw_paths` seeding a project's allow-list. Editing
+   *  this later only affects NEW tasks; an existing task's own
+   *  `docker_extra_mounts` is frozen at creation and edited from then on
+   *  via `taskSetDocker`. Global, not per-agent: unlike
+   *  `docker_agent_extra_dirs`, an extra mount's use case isn't tied to
+   *  which agent is running. */
+  docker_default_extra_mounts?: string[];
   /** Personal (this-machine) glob patterns hidden from the "All files"
    *  tree across every project. Unioned with each project's committed
    *  `.termic.yaml` `exclude`. `.git` is always hidden regardless. */

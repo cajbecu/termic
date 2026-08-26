@@ -1,0 +1,85 @@
+name: Docker sandbox image (nightly)
+
+# Nightly + workflow_dispatch, NOT on pull_request/push, same reasoning as
+# perf.yml: docs/perf-ci.md's rule is PRs gate only on counts/static facts,
+# everything with external nondeterminism (a vendor's install server having
+# a bad day, here - six of them) stays nightly and ungated, so a flaky
+# upstream download never blocks someone's unrelated PR.
+#
+# What this job checks: does `src-tauri/assets/Dockerfile.default` (the
+# shipped default, see docs/sandbox.md "Docker sandbox") still build, and
+# does every agent CLI it installs actually run afterward. This is the real
+# maintenance risk of that file: nothing pins agent versions on purpose (see
+# the Dockerfile's own header), so a routine CLI release needs no change
+# here - the risk is a vendor changing HOW you install it (new package name,
+# new installer URL, a moved binary). That already happened once mid-port
+# (Claude Code dropped npm for a native installer) and was only caught by
+# hand. This job exists so the next one is caught by a red run within 24h
+# instead of a user's failed build.
+#
+# Deliberately no fallback / soft-fail on an install line: a broken
+# installer must fail loudly, not get silently skipped - see the "let it
+# fail" discussion that led to this workflow. `docker build` already fails
+# atomically on any RUN erroring; the version-check step below is the same
+# way (no `|| true` anywhere).
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Ref to check out (defaults to the workflow ref)
+        required: false
+        type: string
+  schedule:
+    # 04:15 UTC - staggered from perf.yml's 03:30 so they don't contend for
+    # runners.
+    - cron: '15 4 * * *'
+
+concurrency:
+  group: docker-sandbox-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke-test:
+    name: build image + verify every agent CLI
+
+    # Cron is upstream-only, so forks stop getting nightly failure mail.
+    # Manual dispatch stays open everywhere.
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'simion/termic'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      # ubuntu-latest ships Docker already; nothing to install.
+      - name: Build the shipped default Dockerfile
+        run: |
+          docker build \
+            --progress=plain \
+            -f src-tauri/assets/Dockerfile.default \
+            -t termic-sandbox-ci \
+            src-tauri/assets
+
+      - name: Verify every agent CLI actually runs
+        run: |
+          set -euo pipefail
+          # One command per agent in Dockerfile.default, in source order.
+          # Each MUST exit 0 and print something - a broken installer can
+          # leave a binary that exists but is missing its runtime deps, so
+          # `which` alone would pass on a genuinely dead CLI.
+          docker run --rm termic-sandbox-ci bash -lc '
+            set -euo pipefail
+            check() {
+              name="$1"; shift
+              echo "── $name ──"
+              "$@"
+            }
+            check claude   claude   --version
+            check codex    codex    --version
+            check copilot  copilot  --version
+            check opencode opencode --version
+            check grok     grok     --version
+            check agy      agy      --version
+          '

@@ -56,7 +56,7 @@ export function RaceDialog() {
     const p = useApp.getState().projects.find(p => p.id === projectId);
     setSandbox(p?.default_sandbox_mode
       ? isSandboxEnforced(p.default_sandbox_mode)
-      : (!!p?.default_sandbox || usePrefs.getState().globalDefaultSandbox));
+      : (!!p?.default_sandbox || usePrefs.getState().globalDefaultSandboxKind !== "off"));
     setYolo(false);
     setErr(null); setBusy(false); setProgress(null);
   }, [projectId, open]);

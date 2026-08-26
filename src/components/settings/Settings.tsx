@@ -5,7 +5,7 @@
 import { useEffect, useState } from "react";
 import { useApp } from "@/store/app";
 import { Button } from "@/components/ui/Button";
-import { X, Palette, FolderGit2, Settings as SettingsIcon, Keyboard, Terminal, Layers, Library, ListTodo, Bell, ShieldCheck, SquareTerminal } from "lucide-react";
+import { X, Palette, FolderGit2, Settings as SettingsIcon, Keyboard, Terminal, Layers, Library, ListTodo, Bell, ShieldCheck, SquareTerminal, Container } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AppearanceSection } from "./AppearanceSection";
 import { RepositorySection } from "./RepositorySection";
@@ -18,6 +18,7 @@ import { McpSection } from "./McpSection";
 import { ShortcutsSection } from "./ShortcutsSection";
 import { AgentsSection } from "./AgentsSection";
 import { PromptLibrarySection } from "./PromptLibrarySection";
+import { DockerSection } from "./DockerSection";
 
 export function Settings() {
   const view = useApp(s => s.view);
@@ -100,6 +101,8 @@ export function Settings() {
             discoverability than the label is worth. See docs/ui.md. */}
         <RailItem icon={<ShieldCheck className="h-4 w-4" />} label="Sandbox" tabId="sandbox"
           active={tab === "sandbox"} onClick={() => openSettings("sandbox")} />
+        <RailItem icon={<Container className="h-4 w-4" />} label="Docker Sandbox" badge="Exp" tabId="docker"
+          active={tab === "docker"} onClick={() => openSettings("docker")} />
         <RailItem icon={<SquareTerminal className="h-4 w-4" />} label="CLI & MCP" tabId="cli"
           active={tab === "cli"} onClick={() => openSettings("cli")} />
 
@@ -135,6 +138,7 @@ export function Settings() {
           {tab === "tasks"       && <TasksSection />}
           {tab === "notifications" && <NotificationsSection />}
           {tab === "sandbox"     && <SandboxSection />}
+          {tab === "docker"      && <DockerSection />}
           {/* MCP shares the CLI page: one "control plane" surface, two
               presentations of the same verbs (docs/plans/mcp.md). */}
           {tab === "cli"         && <><CliSection /><div className="mt-10"><McpSection /></div></>}

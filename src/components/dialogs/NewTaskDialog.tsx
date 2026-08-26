@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
 import { defaultCliFirst, visibleCliIds, isTerminalCli, agentDisplayName } from "@/lib/agents";
-import { taskCreate, taskCreateMulti, settingsLoad, taskImportableWorktrees, taskImportWorktree, sandboxAvailable, taskOpenRepo, projectGitBranches, projectBranchContext } from "@/lib/ipc";
+import { taskCreate, taskCreateMulti, settingsLoad, taskImportableWorktrees, taskImportWorktree, sandboxAvailable, taskOpenRepo, projectGitBranches, projectBranchContext, dockerImageStatus, type DockerImageStatus } from "@/lib/ipc";
 import { launchSetupTab } from "@/lib/runTabs";
 import { seedPromptWhenReady, SETUP_SPAWN_DEADLINE_MS } from "@/lib/seedPrompt";
 import { MAX_PROMPT_CHARS } from "@/lib/deepLink";
@@ -21,9 +21,10 @@ import { usePendingTasks } from "@/store/pendingTasks";
 import { uniqueBranch, derivedBranch } from "@/lib/quickTask";
 import { cn } from "@/lib/utils";
 import { Check, Loader2, AlertTriangle, GitBranch, Link2, FolderGit2, Plus, CircleDot, History } from "lucide-react";
-import { SandboxModeSelector } from "@/components/SandboxModeSelector";
+import { SandboxPicker, DockerEngineNote } from "@/components/SandboxPicker";
+import { ListField } from "@/components/settings/Controls";
 import { SANDBOX_PRESETS } from "@/lib/sandboxPresets";
-import type { MemberMode, ImportableWorktree, SandboxMode, ForgeIssue, IssueLookup } from "@/lib/types";
+import { selectionToFields, type MemberMode, type ImportableWorktree, type SandboxSelection, type ForgeIssue, type IssueLookup } from "@/lib/types";
 import { projectForgeIssues } from "@/lib/ipc";
 import { buildIssuePrompt, issueBranch, issueTaskName } from "@/lib/issuePrompt";
 import { readMemberModes, persistMemberMode, seedMemberMode } from "@/components/dialogs/memberModes";
@@ -41,8 +42,11 @@ const LS_LAST_SANDBOX = "newTaskLastSandboxMode";
 function readLastMode(): "worktree" | "repo_root" | null {
   try { const v = localStorage.getItem(LS_LAST_MODE); return v === "worktree" || v === "repo_root" ? v : null; } catch { return null; }
 }
-function readLastSandbox(): SandboxMode | null {
-  try { const v = localStorage.getItem(LS_LAST_SANDBOX); return v === "off" || v === "monitor" || v === "enforce" || v === "enforce-fs" ? v : null; } catch { return null; }
+function readLastSandbox(): SandboxSelection | null {
+  try {
+    const v = localStorage.getItem(LS_LAST_SANDBOX);
+    return v === "off" || v === "monitor" || v === "enforce" || v === "enforce-fs" || v === "docker" ? v : null;
+  } catch { return null; }
 }
 function persistLast(key: string, val: string) { try { localStorage.setItem(key, val); } catch {} }
 // Branch names auto-fill as `<prefix>/<name>` where the prefix comes from
@@ -115,16 +119,32 @@ export function NewTaskDialog() {
   // setMode) must NOT persist, so that path uses setMode directly.
   const chooseMode = (m: "worktree" | "repo_root") => { setMode(m); persistLast(LS_LAST_MODE, m); };
   // Sandbox pin captured at creation. Defaults from project, can be
-  // overridden for this one task, then is permanent post-create.
-  const [sandboxMode, setSandboxMode] = useState<SandboxMode>("off");
-  // Sandbox is macOS-only. On unsupported platforms, disable monitor/
-  // enforce in the selector and force the pin to "off" so we never save
-  // an unsupported mode that would only fail later at spawn.
+  // overridden for this one task, then is permanent post-create. One flat
+  // SandboxSelection (off / Seatbelt's 3 modes / docker) rather than a
+  // separate mode + engine - see SandboxPicker.tsx.
+  const [selection, setSelection] = useState<SandboxSelection>("off");
+  // Sandbox is macOS-only. On unsupported platforms, disable every
+  // Seatbelt card except Off so we never save a mode that would only fail
+  // later at spawn.
   const [osSandboxOk, setOsSandboxOk] = useState<boolean | null>(null);
   useEffect(() => { sandboxAvailable().then(setOsSandboxOk).catch(() => setOsSandboxOk(false)); }, []);
   useEffect(() => {
-    if (osSandboxOk === false && sandboxMode !== "off") setSandboxMode("off");
-  }, [osSandboxOk, sandboxMode]);
+    if (osSandboxOk === false && selection !== "off" && selection !== "docker") setSelection("off");
+  }, [osSandboxOk, selection]);
+  const [dockerSettingsForNew, setDockerSettingsForNew] = useState<{ docker_sandbox_enabled?: boolean } | null>(null);
+  const [dockerImageForNew, setDockerImageForNew] = useState<DockerImageStatus | null>(null);
+  useEffect(() => {
+    settingsLoad().then(setDockerSettingsForNew).catch(() => {});
+    dockerImageStatus().then(setDockerImageForNew).catch(() => {});
+  }, []);
+  const dockerOffered = !!dockerSettingsForNew?.docker_sandbox_enabled && !!dockerImageForNew?.available;
+  // Docker became unavailable (image rebuilt away, global switch flipped
+  // off) while it was the picked selection - fall back rather than
+  // silently creating a task pinned to a cage that can't actually launch.
+  useEffect(() => {
+    if (selection === "docker" && !dockerOffered) setSelection("off");
+  }, [dockerOffered, selection]);
+  const { mode: sandboxMode, docker: dockerWanted } = selectionToFields(selection);
   // The sandbox lists. Initialized from the
   // project's defaults whenever projectId changes; the user edits
   // freely until Create. Stored as multi-line text - we convert to
@@ -132,6 +152,11 @@ export function NewTaskDialog() {
   // behave normally (blank lines while typing don't fight the split).
   const [sbRw,    setSbRw]    = useState("");
   const [sbHosts, setSbHosts] = useState("");
+  // Docker's own per-task extra mounts (host_path:container_path). Seeded
+  // from Settings.docker_default_extra_mounts, same lifecycle as sbRw/
+  // sbHosts above; no per-project default exists for this one (Docker has
+  // no project-level sandbox config the way Seatbelt does).
+  const [dockerMounts, setDockerMounts] = useState("");
   // Multi-repo: per-member spec, keyed by member root_path. Seeded when
   // the dialog opens for a multi project from project.members (which are
   // self-contained — no project lookup). Scripts are not per-task —
@@ -169,8 +194,9 @@ export function NewTaskDialog() {
   // checkout identically to a worktree (task_open_repo takes sandbox args,
   // for single AND multi hosts), and the multi wrapper carries its own.
   const canSandbox = true;
-  // Derived: any cage on. Drives the 2-column layout + "send lists" gating.
-  const sandbox = sandboxMode !== "off" && canSandbox;
+  // Derived: Seatbelt cage on (Docker is its own separate flag below).
+  // Drives the 2-column layout + "send lists" gating.
+  const sandbox = !dockerWanted && sandboxMode !== "off" && canSandbox;
   // Import mode (issue #5): instead of branching a fresh worktree, adopt
   // one that already exists on disk. Only offered for single-repo git
   // projects (multi composition / non-git folders don't apply). When on,
@@ -374,16 +400,18 @@ export function NewTaskDialog() {
     // three lists are seeded from the project's defaults; user
     // edits in this dialog land on the task ONLY, never on
     // the project.
-    // Last-used sandbox mode wins (the user's habit); fall back to the
-    // project / global default only before they've ever picked one.
-    const globalDefault = usePrefs.getState().globalDefaultSandbox;
-    setSandboxMode(readLastSandbox()
-      ?? p?.default_sandbox_mode
-      ?? ((!!p?.default_sandbox || globalDefault) ? "enforce" : "off"));
+    // Last-used SELECTION wins (the user's habit, now including Docker);
+    // fall back to the project's Seatbelt-only default, then the app-wide
+    // default (Settings → Sandbox), only before they've ever picked one.
+    const projectDefaultSandbox: SandboxSelection | null =
+      p?.default_sandbox_mode ?? (p?.default_sandbox ? "enforce" : null);
+    const globalDefault = usePrefs.getState().globalDefaultSandboxKind;
+    setSelection(readLastSandbox() ?? projectDefaultSandbox ?? globalDefault);
     // Seed with project's lists immediately; once Settings loads,
     // merge global defaults on top (dedupe-preserving order).
     setSbRw((p?.sandbox_rw_paths ?? []).join("\n"));
     setSbHosts((p?.sandbox_allowed_hosts ?? []).join("\n"));
+    setDockerMounts("");
     // Seed the per-member spec (multi-repo only). Each git member starts
     // on its last-used mode (remembered per root_path, like the single-repo
     // dialog remembers its toggle) and falls back to Worktree — the simplest
@@ -432,6 +460,7 @@ export function NewTaskDialog() {
         setSbRw(merge(s.sandbox_default_rw_paths,      p?.sandbox_rw_paths));
         setSbHosts(merge(s.sandbox_default_allowed_hosts, p?.sandbox_allowed_hosts));
       }
+      setDockerMounts(merge(s.docker_default_extra_mounts));
     }).catch(() => {});
     // Import mode: off by default. We eager-load the project's existing
     // unopened worktrees so the "Import an existing worktree instead"
@@ -603,7 +632,10 @@ export function NewTaskDialog() {
       const splitLines = (s: string) => s.split("\n").map(l => l.trim()).filter(Boolean);
       const w = await withCreateLock(() => taskImportWorktree(
         projectId, importSelected, name.trim(), cli,
-        { enabled: sandbox, mode: sandboxMode, rwPaths: splitLines(sbRw), allowedHosts: splitLines(sbHosts) },
+        {
+          enabled: sandbox, mode: sandboxMode, rwPaths: splitLines(sbRw), allowedHosts: splitLines(sbHosts),
+          docker: dockerWanted, dockerExtraMounts: dockerWanted ? splitLines(dockerMounts) : undefined,
+        },
         undefined, // no externally-started session id from this dialog
         // Gated on capability, not just field state: the input hides when
         // the agent switches to one with nothing to resume, but the typed
@@ -637,7 +669,10 @@ export function NewTaskDialog() {
       // other create path (createLock.ts).
       const w = await withCreateLock(() => taskOpenRepo(
         projectId, cli, name.trim(),
-        { enabled: sandbox, mode: sandboxMode, rwPaths: splitLines(sbRw), allowedHosts: splitLines(sbHosts) },
+        {
+          enabled: sandbox, mode: sandboxMode, rwPaths: splitLines(sbRw), allowedHosts: splitLines(sbHosts),
+          docker: dockerWanted, dockerExtraMounts: dockerWanted ? splitLines(dockerMounts) : undefined,
+        },
         undefined,
         undefined, // no externally-started session id from this dialog
         resumeOverrideArg(),
@@ -662,7 +697,7 @@ export function NewTaskDialog() {
     persistLast(LS_LAST_MODE, mode);
     // Sandbox can now ride on a single-repo main-checkout create too, so
     // remember the mode whenever a create can carry one (i.e. always here).
-    persistLast(LS_LAST_SANDBOX, sandboxMode);
+    persistLast(LS_LAST_SANDBOX, selection);
     // Import wins over the task-type mode: adopting a worktree is orthogonal
     // to worktree-vs-main-checkout, and the dialog can now open straight into
     // import mode from the launcher menu while `mode` is still repo_root
@@ -733,6 +768,8 @@ export function NewTaskDialog() {
           sandbox_mode: sandboxMode,
           sandbox_rw_paths:       sandbox ? splitLines(sbRw)    : undefined,
           sandbox_allowed_hosts:  sandbox ? splitLines(sbHosts) : undefined,
+          docker_sandbox_enabled: dockerWanted,
+          docker_extra_mounts:    dockerWanted ? splitLines(dockerMounts) : undefined,
           resume_override: resumeOverrideArg(),
         }));
       } else {
@@ -752,6 +789,8 @@ export function NewTaskDialog() {
           // for unsandboxed tasks (they don't need these saved).
           sandbox_rw_paths:       sandbox ? splitLines(sbRw)    : undefined,
           sandbox_allowed_hosts:  sandbox ? splitLines(sbHosts) : undefined,
+          docker_sandbox_enabled: dockerWanted,
+          docker_extra_mounts:    dockerWanted ? splitLines(dockerMounts) : undefined,
         }));
       }
       await loadAll();
@@ -1387,7 +1426,24 @@ export function NewTaskDialog() {
         {/* Offered in every shape (see canSandbox). */}
         {canSandbox && (
         <Field label="Sandbox" hint="Cage the agent's filesystem + network access. Pinned at creation.">
-          <SandboxModeSelector value={sandboxMode} onChange={setSandboxMode} osUnavailable={osSandboxOk === false} compact />
+          <SandboxPicker
+            value={selection}
+            onChange={setSelection}
+            seatbeltUnavailable={osSandboxOk === false}
+            dockerOffered={dockerOffered}
+            compact
+          />
+          {selection === "docker" && (
+            <div className="mt-2 flex flex-col gap-2">
+              <DockerEngineNote compact />
+              <ListField
+                label="Extra mounts"
+                placeholder={"$HOME/mcp-data:/data/mcp"}
+                value={dockerMounts}
+                onChange={setDockerMounts}
+              />
+            </div>
+          )}
         </Field>
         )}
       </div>

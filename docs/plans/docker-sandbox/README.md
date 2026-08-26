@@ -2,7 +2,18 @@
 
 Self-contained design + research for an opt-in Docker sandboxing mode: run
 the agent CLI inside a container instead of macOS Seatbelt, so it can only
-touch the paths we mount. Status: **approved, implementation underway.**
+touch the paths we mount. Status: **implemented** (`src-tauri/src/docker.rs`,
+`src/components/settings/DockerSection.tsx`, `task_set_docker`). See
+`docs/sandbox.md` for the shipped Docker section.
+
+Since this bundle's research (2026-06-25), the agent roster changed: Gemini
+CLI retired (replaced by opencode), and Claude Code's npm install was
+deprecated in favor of a native installer (`curl -fsSL
+https://claude.ai/install.sh | bash`, binary lands in `~/.local/bin`). The
+shipped [Dockerfile](Dockerfile) and `agent_config()` in `docker.rs` reflect
+the current roster; `findings.md` and `design.md` below are left as the
+original research record and are not updated line-by-line for every agent
+CLI release.
 
 Contents:
 

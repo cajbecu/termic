@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   groupRows, rowTitle, tabTitleMap, isSelfRow, nextSort, smoothedCpu, DEFAULT_SORT,
-  formatBytes, formatPct, formatRate, formatDuration,
+  formatBytes, formatPct, formatRate, formatDuration, childSummary,
   type Sort,
 } from "@/lib/activityGroups";
 import type { ProcRow } from "@/lib/ipc";
@@ -27,6 +27,7 @@ function row(over: Partial<ProcRow> = {}): ProcRow {
     alive: true,
     cpuHistory: [],
     children: [],
+    isDocker: false,
     ...over,
   };
 }
@@ -428,5 +429,39 @@ describe("formatters", () => {
     expect(formatDuration(125_000)).toBe("2m 5s");
     expect(formatDuration(3_725_000)).toBe("1h 2m");
     expect(formatDuration(90_000_000)).toBe("1d 1h");
+  });
+});
+
+describe("childSummary", () => {
+  it("lists the heaviest children for a normal row", () => {
+    const r = row({
+      label: "claude", pid: 100, procCount: 1,
+      children: [{ pid: 200, label: "rg", cpu_pct: 12.3, mem_bytes: 1024 * 1024 }],
+    });
+    expect(childSummary(r)).toBe("claude · pid 100\nrg 200 · 12% · 1.0 MB");
+  });
+
+  it("says how many are hidden past the cap", () => {
+    const r = row({
+      label: "claude", pid: 100, procCount: 9,
+      children: [{ pid: 200, label: "rg", cpu_pct: 1, mem_bytes: 0 }],
+    });
+    expect(childSummary(r)).toContain("+8 more");
+  });
+
+  // A Docker row's `children` is always empty (procmon.rs's docker::apply
+  // clears it: the container's real process tree lives in the daemon's VM,
+  // not under the host pid sampled) — "+N more" would misread as truncation
+  // rather than "we cannot see any of them".
+  it("explains an empty breakdown for a docker row instead of claiming more were hidden", () => {
+    const r = row({ label: "claude", pid: 100, procCount: 3, isDocker: true, children: [] });
+    const summary = childSummary(r);
+    expect(summary).toContain("3 processes in the container");
+    expect(summary).not.toContain("more");
+  });
+
+  it("shows just the head for a docker row with no known process count", () => {
+    const r = row({ label: "claude", pid: 100, procCount: 0, isDocker: true, children: [] });
+    expect(childSummary(r)).toBe("claude · pid 100");
   });
 });

@@ -3,6 +3,7 @@
 // font, but built for future things (themes, terminal opacity, etc.).
 
 import { create } from "zustand";
+import type { SandboxSelection } from "@/lib/types";
 import { setDiagnosticsEnabled } from "@/lib/lsp/diagnosticsPref";
 import { setChosenServers, setChosenCommands } from "@/lib/lsp/serverChoice";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -53,6 +54,7 @@ const LS_CONFIRM_ARCHIVE_TASK = "confirmBeforeArchiveTask";
 const LS_ARCHIVE_DELETE_BRANCH = "archiveDeleteBranch";
 const LS_WORKING_INDICATOR = "workingIndicator";
 const LS_DEFAULT_SANDBOX = "globalDefaultSandbox";
+const LS_DEFAULT_SANDBOX_KIND = "globalDefaultSandboxKind";
 const LS_SANDBOX_BYPASS  = "sandboxBypassPermissions";
 const LS_ALLOW_SCOPE     = "sandboxAllowScope";
 const LS_TERMINAL_LETTERSPACING = "terminalLetterSpacing";
@@ -521,11 +523,12 @@ interface PrefsState {
   /** Find in files matches the query's case. OFF by default, which is the
    *  case-insensitive search the dialog has always done. */
   findInFilesMatchCase: boolean;
-  /** Default for the NewTaskDialog's Sandbox toggle when neither
-   *  the project's `default_sandbox` nor an explicit user pick is in
-   *  effect. Lets a single-keystroke toggle apply across all projects
-   *  without per-project bookkeeping. */
-  globalDefaultSandbox: boolean;
+  /** Default SandboxSelection for the NewTaskDialog's picker when neither
+   *  the project's `default_sandbox_mode`/`default_sandbox` nor the user's
+   *  own last-used habit (`newTaskLastSandboxMode`) is in effect. One
+   *  app-wide pick (including Docker) instead of per-project bookkeeping.
+   *  Edited from Settings -> Sandbox. */
+  globalDefaultSandboxKind: SandboxSelection;
   /** When a task is sandboxed, auto-pass the agent's "bypass
    *  permissions" (YOLO) flag at spawn even if the YOLO toggle is off.
    *  ON by default: the seatbelt cage is the real security boundary, so
@@ -784,7 +787,7 @@ interface PrefsState {
   setLoadRemoteImages: (v: boolean) => void;
   setFindInFilesRegex: (v: boolean) => void;
   setFindInFilesMatchCase: (v: boolean) => void;
-  setGlobalDefaultSandbox: (v: boolean) => void;
+  setGlobalDefaultSandboxKind: (v: SandboxSelection) => void;
   setSandboxBypassPermissions: (v: boolean) => void;
   setAllowScope: (s: "agent" | "project" | "repo") => void;
   setTaskExpandMode: (m: "chevron" | "click" | "always") => void;
@@ -943,7 +946,18 @@ const initialWorkingIndicator = lsGetBool(LS_WORKING_INDICATOR, true);
 const initialLoadRemoteImages = lsGetBool(LS_LOAD_REMOTE_IMAGES, false);
 const initialFindInFilesRegex = lsGetBool(LS_FIND_IN_FILES_REGEX, false);
 const initialFindInFilesMatchCase = lsGetBool(LS_FIND_IN_FILES_MATCH_CASE, false);
-const initialDefaultSandbox = lsGetBool(LS_DEFAULT_SANDBOX, false);
+// Migrated from the old boolean LS_DEFAULT_SANDBOX (on = "enforce", off =
+// "off") the first time this reads - the new key wins once it exists, so
+// the migration only ever applies once per browser profile. No Rust side
+// to migrate: this was always a local-only pref, never persisted settings.
+function readInitialDefaultSandboxKind(): SandboxSelection {
+  const stored = lsGet(LS_DEFAULT_SANDBOX_KIND, "");
+  if (stored === "off" || stored === "monitor" || stored === "enforce" || stored === "enforce-fs" || stored === "docker") {
+    return stored;
+  }
+  return lsGetBool(LS_DEFAULT_SANDBOX, false) ? "enforce" : "off";
+}
+const initialDefaultSandboxKind = readInitialDefaultSandboxKind();
 // ON by default — sandboxed agents bypass their own permission prompts
 // because the seatbelt is the real boundary. Users can opt out.
 const initialSandboxBypass = lsGetBool(LS_SANDBOX_BYPASS, true);
@@ -990,7 +1004,7 @@ export const usePrefs = create<PrefsState>(set => ({
   loadRemoteImages: initialLoadRemoteImages,
   findInFilesRegex: initialFindInFilesRegex,
   findInFilesMatchCase: initialFindInFilesMatchCase,
-  globalDefaultSandbox: initialDefaultSandbox,
+  globalDefaultSandboxKind: initialDefaultSandboxKind,
   sandboxBypassPermissions: initialSandboxBypass,
   allowScope: initialAllowScope,
   editorFontId: initialEditorFont,
@@ -1262,9 +1276,9 @@ export const usePrefs = create<PrefsState>(set => ({
     try { localStorage.setItem(LS_FIND_IN_FILES_MATCH_CASE, v ? "1" : "0"); } catch {}
     set({ findInFilesMatchCase: v });
   },
-  setGlobalDefaultSandbox: (v) => {
-    try { localStorage.setItem(LS_DEFAULT_SANDBOX, v ? "1" : "0"); } catch {}
-    set({ globalDefaultSandbox: v });
+  setGlobalDefaultSandboxKind: (v) => {
+    try { localStorage.setItem(LS_DEFAULT_SANDBOX_KIND, v); } catch {}
+    set({ globalDefaultSandboxKind: v });
   },
   setSandboxBypassPermissions: (v) => {
     try { localStorage.setItem(LS_SANDBOX_BYPASS, v ? "1" : "0"); } catch {}

@@ -34,8 +34,8 @@ import { startSpotlight, stopSpotlight } from "@/lib/spotlight";
 import { ResizeHandle } from "@/components/ui/ResizeHandle";
 import type { Tab, Task, TerminalTab } from "@/lib/types";
 import { agentDisplayName } from "@/lib/agents";
-import { effectiveSandboxMode, isSandboxEnforced } from "@/lib/types";
-import { SandboxIcon, SANDBOX_VISUALS } from "@/components/SandboxIcon";
+import { effectiveSandboxMode, isSandboxEnforced, isTaskCaged } from "@/lib/types";
+import { SandboxIcon, SANDBOX_VISUALS, DockerSandboxIcon } from "@/components/SandboxIcon";
 import { TaskLocationIcon } from "@/components/TaskLocationIcon";
 import { useTaskLabel } from "@/lib/taskLabel";
 
@@ -2604,7 +2604,7 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                   // the button visible; unless the collapsed attention/done
                   // badge is active — it lives in the same slot and the
                   // status icon would cover it.
-                  (w.sandbox_enabled || (!!w.yolo && !isSandboxEnforced(effectiveSandboxMode(w)))) && !(collapsed && (hasAttention || hasDone || hasWorking))
+                  (w.sandbox_enabled || w.docker_sandbox_enabled || (!!w.yolo && !isSandboxEnforced(effectiveSandboxMode(w)))) && !(collapsed && (hasAttention || hasDone || hasWorking))
                     ? "opacity-100 pointer-events-auto"
                     : "opacity-0 group-hover/wsrow:opacity-100 pointer-events-none group-hover/wsrow:pointer-events-auto",
                   taskRenaming !== null && "pointer-events-none",
@@ -2612,18 +2612,36 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
               >
                 {/* Idle badge, hidden on row hover so the cog shows through.
                     Precedence: dangerous YOLO (red, no cage) → sandbox mode.
-                    Running state is shown via OPACITY (dim when idle, solid
-                    when an agent is running), so the icon's FILL is free to
-                    encode the MODE — full enforce = filled shield, FS-only /
-                    monitor = outline. That keeps the two enforce modes
-                    distinguishable even when no agent is running. */}
+                    Running state is shown via COLOR (gray when idle, the
+                    mode's real color once an agent is running) - a same-
+                    color-just-dimmer badge read as "caged" even for a task
+                    that wasn't actually running anything. The icon's FILL
+                    still encodes the MODE regardless of state - full
+                    enforce = filled shield, FS-only / monitor = outline -
+                    so the two enforce modes stay distinguishable even gray. */}
                 {(() => {
                   const wMode = effectiveSandboxMode(w);
-                  const stateOpacity = terminalTabs.length > 0 ? "opacity-100" : "opacity-40";
+                  const isLaunched = terminalTabs.length > 0;
+                  // Docker mode always stores sandbox_mode as off (the two
+                  // cages are mutually exclusive), so it has to be checked
+                  // FIRST or a Docker-sandboxed task would show no badge at
+                  // all - "off" reads as "no cage" everywhere else, but here
+                  // it can mean "caged a different way".
+                  if (w.docker_sandbox_enabled) {
+                    return (
+                      <DockerSandboxIcon
+                        active={isLaunched}
+                        className="absolute h-3.5 w-3.5 transition-opacity group-hover/wsrow:opacity-0"
+                      />
+                    );
+                  }
                   if (!!w.yolo && !isSandboxEnforced(wMode)) {
                     return (
                       <Zap
-                        className={cn("absolute h-3.5 w-3.5 text-[var(--color-err)] transition-opacity group-hover/wsrow:opacity-0", stateOpacity)}
+                        className={cn(
+                          "absolute h-3.5 w-3.5 text-[var(--color-err)] transition-opacity group-hover/wsrow:opacity-0",
+                          isLaunched ? "opacity-100" : "opacity-40",
+                        )}
                         fill="currentColor"
                       />
                     );
@@ -2632,7 +2650,8 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                     return (
                       <SandboxIcon
                         mode={wMode}
-                        className={cn("absolute h-3.5 w-3.5 transition-opacity group-hover/wsrow:opacity-0", stateOpacity)}
+                        active={isLaunched}
+                        className="absolute h-3.5 w-3.5 transition-opacity group-hover/wsrow:opacity-0"
                       />
                     );
                   }
@@ -2645,7 +2664,7 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                 <MoreVertical
                   className={cn(
                     "h-3.5 w-3.5 text-[var(--color-fg-faint)] transition-opacity",
-                    (w.sandbox_enabled || (!!w.yolo && !isSandboxEnforced(effectiveSandboxMode(w)))) && "opacity-0 group-hover/wsrow:opacity-100",
+                    (w.sandbox_enabled || w.docker_sandbox_enabled || (!!w.yolo && !isSandboxEnforced(effectiveSandboxMode(w)))) && "opacity-0 group-hover/wsrow:opacity-100",
                   )}
                 />
               </button>
@@ -2731,17 +2750,24 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                 className="items-center [&>svg]:mt-0"
                 onSelect={() => useUI.getState().openSandbox(w.id)}
               >
-                <SandboxIcon mode={effectiveSandboxMode(w)} className="h-4 w-4" />
-                <span>{effectiveSandboxMode(w) === "off" ? "Sandbox settings" : SANDBOX_VISUALS[effectiveSandboxMode(w)].shortLabel}</span>
+                {w.docker_sandbox_enabled
+                  ? <DockerSandboxIcon className="h-4 w-4" />
+                  : <SandboxIcon mode={effectiveSandboxMode(w)} className="h-4 w-4" />}
+                <span>
+                  {w.docker_sandbox_enabled ? "Docker Container"
+                    : effectiveSandboxMode(w) === "off" ? "Sandbox settings"
+                    : SANDBOX_VISUALS[effectiveSandboxMode(w)].shortLabel}
+                </span>
               </DropdownItem>
-              {/* Per-task YOLO toggle. Disabled (auto-on) under
-                  Enforcing — the seatbelt is the boundary there. Red when
-                  on without a cage (dangerous). */}
+              {/* Per-task YOLO toggle. Disabled (auto-on) under Enforcing
+                  OR Docker mode - whichever cage mechanism, it's the real
+                  boundary there. Red when on without EITHER cage
+                  (dangerous). */}
               <DropdownItem
                 className="items-center [&>svg]:mt-0"
-                disabled={isSandboxEnforced(effectiveSandboxMode(w))}
+                disabled={isTaskCaged(w)}
                 onSelect={() => {
-                  if (isSandboxEnforced(effectiveSandboxMode(w))) return;
+                  if (isTaskCaged(w)) return;
                   const next = !w.yolo;
                   setTaskYolo(w.id, next);
                   void taskSetYolo(w.id, next);
@@ -2750,14 +2776,17 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                 <Zap
                   className={cn(
                     "h-4 w-4 text-[var(--color-fg-faint)]",
-                    (!!w.yolo && !isSandboxEnforced(effectiveSandboxMode(w))) && "text-[var(--color-err)]",
+                    (!!w.yolo && !isTaskCaged(w)) && "text-[var(--color-err)]",
                     effectiveSandboxMode(w) === "enforce" && "text-[var(--color-ok)]",
                     effectiveSandboxMode(w) === "enforce-fs" && "text-[var(--color-ok)]",
+                    w.docker_sandbox_enabled && "text-[var(--color-ok)]",
                   )}
-                  fill={(isSandboxEnforced(effectiveSandboxMode(w)) || !!w.yolo) ? "currentColor" : "none"}
+                  fill={(isTaskCaged(w) || !!w.yolo) ? "currentColor" : "none"}
                 />
                 <span>
-                  {effectiveSandboxMode(w) === "enforce"
+                  {w.docker_sandbox_enabled
+                    ? "YOLO: auto-on (Docker)"
+                    : effectiveSandboxMode(w) === "enforce"
                     ? "YOLO: auto-on (Enforcing)"
                     : effectiveSandboxMode(w) === "enforce-fs"
                     ? "YOLO: auto-on (Enforcing FS)"

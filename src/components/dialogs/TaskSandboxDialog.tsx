@@ -13,10 +13,13 @@ import { AppDialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/utils";
 import { taskLabel } from "@/lib/taskLabel";
-import { settingsLoad, taskSetSandbox, sandboxAvailable } from "@/lib/ipc";
-import { effectiveSandboxMode, type SandboxMode } from "@/lib/types";
+import {
+  settingsLoad, taskSetSandbox, sandboxAvailable, taskSetDocker, dockerImageStatus, dockerCommandPreview,
+  type DockerImageStatus, type DockerCommandPreview,
+} from "@/lib/ipc";
+import { effectiveSandboxMode, type SandboxMode, type SandboxSelection, type Settings } from "@/lib/types";
 import { AlertTriangle, Shield, Zap, Save, RotateCw } from "lucide-react";
-import { SandboxModeSelector } from "@/components/SandboxModeSelector";
+import { SandboxPicker, DockerEngineNote } from "@/components/SandboxPicker";
 import { SANDBOX_PRESETS } from "@/lib/sandboxPresets";
 
 export function TaskSandboxDialog() {
@@ -38,14 +41,6 @@ export function TaskSandboxDialog() {
   // discards. Stored as text so blank lines while typing don't fight
   // the array split.
   const [mode, setMode] = useState<SandboxMode>("off");
-  // `enabled` = there's a cage of some kind (monitor or enforce). Most
-  // of the form (lists, presets) shows whenever the cage is on; a few
-  // bits are enforce-only (self-test, YOLO note).
-  const enabled = mode !== "off";
-  // ENFORCING (FS): filesystem cage with the network sandbox OFF. The
-  // host allow-list + any network-only copy are irrelevant, so they're
-  // hidden in this mode.
-  const fsOnly = mode === "enforce-fs";
   const [rwText,    setRwText]    = useState("");
   const [hostsText, setHostsText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -57,6 +52,135 @@ export function TaskSandboxDialog() {
   useEffect(() => {
     sandboxAvailable().then(setOsSandboxOk).catch(() => setOsSandboxOk(false));
   }, []);
+
+  // Docker sandbox: independent cage, mutually exclusive with Seatbelt
+  // (pty_spawn checks it first). Only offered once Settings → Docker Sandbox has
+  // the master switch on AND an image is built - otherwise there's
+  // nothing for the toggle to do. `taskSetDocker` SIGKILLs + saves
+  // immediately, decoupled from the Seatbelt Save button above, so it
+  // doesn't get tangled in this dialog's "dirty" tracking.
+  const [dockerSettings, setDockerSettings] = useState<Settings | null>(null);
+  const [dockerImage, setDockerImage] = useState<DockerImageStatus | null>(null);
+  const [dockerBusy, setDockerBusy] = useState(false);
+  // Re-fetch every time the dialog opens for a task, not just once at app
+  // boot - the global Docker switch (Settings) or the image build can both
+  // change while the app stays open, and this dialog instance never
+  // unmounts (it renders null when taskId is falsy rather than being
+  // removed), so a mount-only effect would go stale for the rest of the
+  // session.
+  useEffect(() => {
+    if (!taskId) return;
+    settingsLoad().then(setDockerSettings).catch(() => {});
+    dockerImageStatus().then(setDockerImage).catch(() => {});
+  }, [taskId]);
+  const dockerOffered = !!dockerSettings?.docker_sandbox_enabled && !!dockerImage?.available;
+  const dockerOn = !!task?.docker_sandbox_enabled;
+  // Derived, not separate state: which cage MECHANISM is active reads
+  // straight off the two independent underlying fields (dockerOn from the
+  // saved task, mode from the Seatbelt draft), so the unified selector
+  // never needs its own source of truth to fall out of sync with either.
+  const selection: SandboxSelection = dockerOn ? "docker" : mode;
+  // `enabled` = the SEATBELT cage specifically is on. Most of the form
+  // (lists, presets, Save buttons) shows only when NOT Docker - Docker
+  // being on must never leave a stale non-off `mode` draft (from before
+  // switching selections) accidentally re-showing this section too.
+  const enabled = !dockerOn && mode !== "off";
+  // ENFORCING (FS): filesystem cage with the network sandbox OFF. The
+  // host allow-list + any network-only copy are irrelevant, so they're
+  // hidden in this mode.
+  const fsOnly = mode === "enforce-fs";
+
+  // Command preview: the exact `docker run ...` a launch would build right
+  // now (docker_command_preview -> the SAME build_spec/render_argv the real
+  // spawn path uses), fetched on demand rather than whenever the dialog
+  // opens - it is not needed to decide the toggle, only to double-check it.
+  const [showDockerPreview, setShowDockerPreview] = useState(false);
+  const [dockerPreview, setDockerPreview] = useState<DockerCommandPreview | null>(null);
+  const [dockerPreviewErr, setDockerPreviewErr] = useState<string | null>(null);
+  const [dockerPreviewLoading, setDockerPreviewLoading] = useState(false);
+  async function toggleDockerPreview() {
+    if (!task) return;
+    const next = !showDockerPreview;
+    setShowDockerPreview(next);
+    if (!next || dockerPreview) return;
+    setDockerPreviewLoading(true);
+    setDockerPreviewErr(null);
+    try {
+      setDockerPreview(await dockerCommandPreview(task.id));
+    } catch (e) {
+      setDockerPreviewErr(String(e));
+    } finally {
+      setDockerPreviewLoading(false);
+    }
+  }
+  // Re-fetch on the task's own SIGKILL-and-relaunch triggers (toggling
+  // Docker on/off, editing extra-args/extra-mounts) so a stale preview
+  // never survives the thing it was showing changing under it.
+  useEffect(() => {
+    setDockerPreview(null);
+  }, [task?.docker_sandbox_enabled, task?.docker_extra_args, task?.docker_extra_mounts]);
+
+  // Extra mounts: a dedicated per-task list (`host_path:container_path`,
+  // Docker's own -v shape), NOT "Allowed paths" - that list is shared with
+  // Seatbelt via live_sandbox_lists and has no concept of a container path.
+  // Mainly for persisting something a fresh container otherwise loses on
+  // every restart (an MCP server's own data dir, say) that the built-in
+  // per-agent config dir mount doesn't cover. Commits immediately through
+  // taskSetDocker, same as the toggle above, rather than joining the
+  // Seatbelt draft-then-Save flow.
+  const splitMountLines = (s: string) => s.split("\n").map(l => l.trim()).filter(Boolean);
+  const mountArrEq = (a: string[], b: string[]) => a.length === b.length && a.every((v, i) => v === b[i]);
+  const [mountsText, setMountsText] = useState("");
+  const [mountsBusy, setMountsBusy] = useState(false);
+  const [mountsErr, setMountsErr] = useState<string | null>(null);
+  useEffect(() => {
+    setMountsText((task?.docker_extra_mounts ?? []).join("\n"));
+    setMountsErr(null);
+  }, [task?.id, task?.docker_extra_mounts]);
+  const mountsDirty = task
+    ? !mountArrEq(splitMountLines(mountsText), task.docker_extra_mounts ?? [])
+    : false;
+  async function saveDockerMounts() {
+    if (!task || mountsBusy) return;
+    setMountsBusy(true);
+    setMountsErr(null);
+    try {
+      useUI.getState().markPendingPtyRestart(task.id);
+      await taskSetDocker(task.id, true, task.docker_extra_args ?? [], splitMountLines(mountsText));
+      await loadAll();
+    } catch (e) {
+      setMountsErr(String(e));
+    } finally {
+      setMountsBusy(false);
+    }
+  }
+
+  async function toggleDocker(next: boolean) {
+    if (!task || dockerBusy) return;
+    const ok = await useUI.getState().askConfirm({
+      title: next ? `Run "${task.name}" in Docker?` : `Stop running "${task.name}" in Docker?`,
+      message: next
+        ? "The agent will run inside a Docker container instead of the Seatbelt cage. Any agent currently running in this task will be terminated and relaunched inside the container."
+        : "Any agent currently running in this task will be terminated and relaunched outside the container.",
+      confirmLabel: next ? "Run in Docker" : "Stop using Docker",
+    });
+    if (!ok) return;
+    setDockerBusy(true);
+    try {
+      useUI.getState().markPendingPtyRestart(task.id);
+      await taskSetDocker(task.id, next, task.docker_extra_args ?? []);
+      await loadAll();
+      // The confirm dialog just above IS the save step for Docker (unlike
+      // Seatbelt's separate draft-then-Save flow) - closing here so the
+      // dialog doesn't linger open over the terminal it just restarted,
+      // looking like the choice didn't take or more input is still needed.
+      close();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setDockerBusy(false);
+    }
+  }
 
   useEffect(() => {
     if (!task) return;
@@ -147,6 +271,21 @@ export function TaskSandboxDialog() {
     }
   }
 
+  // The unified picker's click handler. Docker on/off still commits
+  // IMMEDIATELY through its own confirm (toggleDocker, unchanged) rather
+  // than joining the Seatbelt draft-then-Save flow below - the two engines
+  // keep their existing, already-shipped commit semantics; this just picks
+  // which one a click should drive. Unlike the old two-tier selector, a
+  // Seatbelt card click here IS the final mode (no separate submode grid).
+  async function choose(next: SandboxSelection) {
+    if (next === "docker") {
+      if (!dockerOn) await toggleDocker(true);
+      return;
+    }
+    if (dockerOn) await toggleDocker(false);
+    chooseMode(next);
+  }
+
   return (
     <AppDialog
       open={!!taskId}
@@ -173,13 +312,19 @@ export function TaskSandboxDialog() {
             saw the box checked and assumed the cage was ON. State now
             reads from the color band (green = caged, red = open) and
             the verb on the action button ("Disable" vs "Enable"). */}
-        {/* Three-way mode selector: OFF / MONITORING / ENFORCING.
-            Monitoring is the middle ground — the agent runs unrestricted
-            but every file + network access is logged (and flagged
-            would-block) so you can see exactly what it touches before
-            committing to the real cage. */}
-        <SandboxModeSelector value={mode} onChange={chooseMode} osUnavailable={osSandboxOk === false} />
-        {mode === "monitor" && (
+        {/* Unified picker: OFF / Seatbelt's 3 modes / Docker Container, five
+            peer cards. Docker still commits immediately through its own
+            confirm (choose -> toggleDocker, unchanged mechanics) while
+            Seatbelt stays a draft the Save button below commits - this is
+            just what makes the two read as ONE choice instead of Docker
+            being a separate control bolted on beneath the mode grid. */}
+        <SandboxPicker
+          value={selection}
+          onChange={choose}
+          seatbeltUnavailable={osSandboxOk === false}
+          dockerOffered={dockerOffered}
+        />
+        {mode === "monitor" && !dockerOn && (
           <div className="flex items-start gap-2 rounded-md border border-[var(--color-warn)]/30 bg-[var(--color-warn)]/10 px-3 py-2 text-[13px] text-[var(--color-fg-dim)]">
             <Shield className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-warn)]" />
             <span>
@@ -202,6 +347,64 @@ export function TaskSandboxDialog() {
               CLI agent still work, just without the filesystem cage.
             </span>
           </div>
+        )}
+
+        {dockerOn && (
+          <>
+            <DockerEngineNote />
+            <div>
+              <Button variant="ghost" onClick={toggleDockerPreview} disabled={!task}>
+                {showDockerPreview ? "Hide command preview" : "Preview command"}
+              </Button>
+              {showDockerPreview && (
+                <div className="mt-2 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-3 text-[12px]">
+                  {dockerPreviewLoading && (
+                    <div className="text-[var(--color-fg-faint)]">Loading…</div>
+                  )}
+                  {dockerPreviewErr && (
+                    <div className="text-[var(--color-err)]">{dockerPreviewErr}</div>
+                  )}
+                  {dockerPreview && (
+                    <>
+                      <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-dim)]">
+                        {dockerPreview.argv.map((a, i) => (i === 0 ? a : `  ${a}`)).join(" \\\n")}
+                      </pre>
+                      <div className="mt-3 flex flex-col gap-1.5 border-t border-[var(--color-border-soft)] pt-2.5">
+                        {dockerPreview.spec.mounts.map((m, i) => (
+                          <div key={i} className="flex flex-col gap-0.5">
+                            <div className="font-mono text-[11px] text-[var(--color-fg)]">
+                              {m.host} <span className="text-[var(--color-fg-faint)]">→</span> {m.container}
+                              <span className="ml-1.5 text-[var(--color-fg-faint)]">{m.read_only ? "(read-only)" : "(read/write)"}</span>
+                            </div>
+                            <div className="text-[11px] text-[var(--color-fg-faint)]">{m.why}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+            <Field
+              label="Extra mounts"
+              hint={'Bind-mount extra host directories into the container for this task, one per line as host_path:container_path (Docker\'s own -v shape). For persisting something a fresh container otherwise loses on restart, like a custom MCP server\'s own data dir - the per-agent config dir above already covers logins/sessions. ~, $HOME, and $WORKSPACE expand on the host side.'}
+            >
+              <AutoGrowTextarea
+                value={mountsText}
+                onChange={e => setMountsText(e.target.value)}
+                rows={3}
+                placeholder={"$HOME/mcp-data:/data/mcp"}
+                className="box-border w-full resize-none overflow-y-auto rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2 font-mono text-[13px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
+                disabled={mountsBusy}
+              />
+              <div className="mt-2 flex items-center gap-2">
+                <Button variant="secondary" onClick={saveDockerMounts} disabled={!mountsDirty || mountsBusy}>
+                  {mountsBusy ? "Saving…" : "Save mounts & restart"}
+                </Button>
+                {mountsErr && <span className="text-[12px] text-[var(--color-err)]">{mountsErr}</span>}
+              </div>
+            </Field>
+          </>
         )}
 
         {/* YOLO trade-off note. Sandboxed agents auto-skip their own

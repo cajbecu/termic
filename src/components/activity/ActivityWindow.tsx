@@ -22,7 +22,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity, Cpu, Folder, MemoryStick, Layers,
-  Bot, TerminalSquare, Play, Wrench, Skull, Pause, PlayCircle,
+  Bot, TerminalSquare, Play, Wrench, Skull, Pause, PlayCircle, Container,
 } from "lucide-react";
 import * as ipc from "@/lib/ipc";
 import type { ProcSnapshot, ProcRow } from "@/lib/ipc";
@@ -193,7 +193,7 @@ export function ActivityWindow() {
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         {error && (
-          <div className="m-3 rounded-md border border-[var(--color-danger)] bg-[var(--color-danger)]/10 px-3 py-2 text-[12.5px]">
+          <div className="m-3 rounded-md border border-[var(--color-err)] bg-[var(--color-err)]/10 px-3 py-2 text-[12.5px]">
             {error}
           </div>
         )}
@@ -420,6 +420,15 @@ function Row({ row }: { row: ActivityRow }) {
           <span className="truncate text-[12.5px]" title={childSummary(row)}>
             {row.title}
           </span>
+          {row.isDocker && (
+            <span
+              className="flex shrink-0 items-center gap-0.5 rounded bg-[var(--color-bg-3)] px-1 py-px text-[10px] uppercase tracking-wider text-[var(--color-fg-faint)]"
+              title="Docker sandbox: CPU and memory come from `docker stats`, not the host process table"
+            >
+              <Container className="h-2.5 w-2.5" />
+              Docker
+            </span>
+          )}
           {!row.alive && (
             <span className="shrink-0 text-[11px] text-[var(--color-fg-faint)]">exited</span>
           )}

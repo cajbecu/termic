@@ -57,7 +57,12 @@ export const taskOpenRepo = (
   projectId: string,
   cli?: string,
   name?: string,
-  sandbox?: { enabled: boolean; mode?: SandboxMode; rwPaths: string[]; allowedHosts: string[] },
+  sandbox?: {
+    enabled: boolean; mode?: SandboxMode; rwPaths: string[]; allowedHosts: string[]; docker?: boolean;
+    /** `Task.docker_extra_mounts` override; unset falls back to
+     *  `Settings.docker_default_extra_mounts` (only meaningful with `docker`). */
+    dockerExtraMounts?: string[];
+  },
   command?: string,
   /** Externally-started session the agent resumes on first spawn (GH #169). */
   resumeSessionId?: string,
@@ -71,6 +76,8 @@ export const taskOpenRepo = (
     sandboxMode: sandbox?.mode,
     sandboxRwPaths: sandbox?.rwPaths,
     sandboxAllowedHosts: sandbox?.allowedHosts,
+    dockerSandboxEnabled: sandbox?.docker,
+    dockerExtraMounts: sandbox?.dockerExtraMounts,
     resumeSessionId, resumeOverride,
   });
 /** List a project's git worktrees not yet open as tasks (issue #5). */
@@ -84,7 +91,10 @@ export const taskImportWorktree = (
   path: string,
   name?: string,
   cli?: string,
-  sandbox?: { enabled: boolean; mode?: SandboxMode; rwPaths: string[]; allowedHosts: string[] },
+  sandbox?: {
+    enabled: boolean; mode?: SandboxMode; rwPaths: string[]; allowedHosts: string[]; docker?: boolean;
+    dockerExtraMounts?: string[];
+  },
   /** Externally-started session the agent resumes on first spawn (GH #169). */
   resumeSessionId?: string,
   /** Resume-args override, applied from the first spawn. Same field as the
@@ -98,6 +108,8 @@ export const taskImportWorktree = (
     sandboxMode: sandbox?.mode,
     sandboxRwPaths: sandbox?.rwPaths,
     sandboxAllowedHosts: sandbox?.allowedHosts,
+    dockerSandboxEnabled: sandbox?.docker,
+    dockerExtraMounts: sandbox?.dockerExtraMounts,
     resumeSessionId, resumeOverride, yolo,
   });
 export const taskArchive  = (id: string, deleteBranch?: boolean) => invoke<void>("task_archive", { id, deleteBranch });
@@ -290,6 +302,113 @@ export const agentSandboxAddAllowedPath = (agentId: string, path: string) =>
   invoke<void>("agent_sandbox_add_allowed_path", { agentId, path });
 export const agentSandboxAddAllowedHost = (agentId: string, host: string) =>
   invoke<void>("agent_sandbox_add_allowed_host", { agentId, host });
+
+// ───────────────────────────── docker sandbox ─────────────────────────
+// Stronger opt-in cage: the agent runs inside `docker run` instead of
+// Seatbelt. Global (image-level) config lives in Settings → Docker Sandbox;
+// per-task enablement is `taskSetDocker` below. See docs/plans/docker-sandbox.
+
+export interface DockerStatus {
+  binary: boolean;
+  daemon: boolean;
+  version: string | null;
+}
+export interface DockerImageStatus {
+  current_tag: string;
+  current_built: boolean;
+  last_built_tag: string | null;
+  last_built_exists: boolean;
+  stale: boolean;
+  is_default: boolean;
+  available: boolean;
+  /** LOCAL calendar date (`YYYY-MM-DD`) of the last successful build, if
+   *  any. Drives the rebuild-frequency nudge before an agent launch. */
+  last_built_date: string | null;
+}
+
+/** Probe for the `docker` binary + a running daemon. Cheap; no build. */
+export const dockerCheck = () => invoke<DockerStatus>("docker_check");
+/** Current image state: built / stale / available for the task dropdown. */
+export const dockerImageStatus = () => invoke<DockerImageStatus>("docker_image_status");
+/** Read the user-editable Dockerfile (seeded from the shipped default on
+ *  first run). */
+export const dockerGetDockerfile = () => invoke<string>("docker_get_dockerfile");
+/** The shipped default Dockerfile, for the "Reset to default" action. */
+export const dockerDefaultDockerfile = () => invoke<string>("docker_default_dockerfile");
+/** Persist an edited Dockerfile. Does not build - the image only updates
+ *  on an explicit "Build image" / "Update agents" action. */
+export const dockerSetDockerfile = (contents: string) => invoke<void>("docker_set_dockerfile", { contents });
+/** Kick off `docker build` on a background thread. Progress streams via
+ *  `onDockerBuildLog` / `onDockerBuildDone`; never call this on a hot path -
+ *  a multi-GB image build would freeze the webview if it were synchronous. */
+export const dockerBuildImage = (noCache: boolean) => invoke<void>("docker_build_image", { noCache });
+export function onDockerBuildLog(cb: (line: string) => void): Promise<UnlistenFn> {
+  return listen<{ line: string }>("docker-build://log", ev => cb(ev.payload.line));
+}
+export function onDockerBuildDone(cb: (d: { success: boolean; tag: string; error?: string }) => void): Promise<UnlistenFn> {
+  return listen<{ success: boolean; tag: string; error?: string }>("docker-build://done", ev => cb(ev.payload));
+}
+/** Toggle Docker sandboxing for one task + set its `docker run` extra args.
+ *  Mirrors `taskSetSandbox`: pinned per task, SIGKILLs live PTYs so they
+ *  relaunch under (or out of) the container. */
+export const taskSetDocker = (id: string, enabled: boolean, extraArgs: string[], extraMounts: string[] = []) =>
+  invoke<number>("task_set_docker", { id, enabled, extraArgs, extraMounts });
+
+/** One registered agent's Docker config-dir mounts: the confirmed built-in
+ *  list (read-only, only non-empty for `is_builtin`) plus whatever extras
+ *  the user added. Both `extra` and `persist_enabled` are edited by
+ *  patching `Settings.docker_agent_extra_dirs` / `docker_agent_persist_enabled`
+ *  directly (settingsSave), no separate write command. */
+export interface DockerAgentDirs {
+  agent_id: string;
+  display_name: string;
+  builtin: string[];
+  extra: string[];
+  /** True for the small set (claude/codex/copilot/agy/opencode) mounted
+   *  unconditionally - `persist_enabled` is meaningless for these. */
+  is_builtin: boolean;
+  /** False only for grok, which can never persist config in Docker mode
+   *  regardless of `persist_enabled` (its binary lives inside its own
+   *  config dir, so an opt-in mount would shadow it). Hide the toggle
+   *  entirely rather than offer one that can't do anything. */
+  persist_offerable: boolean;
+  /** Opt-in switch for mounting `extra` at all, for anything outside the
+   *  known-safe built-in set. Off by default, including for a newly-added
+   *  custom agent - see docker.rs's `agent_config` for why. */
+  persist_enabled: boolean;
+}
+export const dockerAgentDirs = () => invoke<DockerAgentDirs[]>("docker_agent_dirs");
+
+/** One bind mount in a Docker command preview: host -> container, with the
+ *  plain-language reason it exists. */
+export interface DockerMount {
+  host: string;
+  container: string;
+  read_only: boolean;
+  provenance: "implicit" | "user";
+  why: string;
+  load_bearing: boolean;
+}
+export interface DockerSpec {
+  container_name: string;
+  label: string;
+  image: string;
+  mounts: DockerMount[];
+  workdir: string;
+  env: [string, string][];
+  extra_args: string[];
+}
+export interface DockerCommandPreview {
+  spec: DockerSpec;
+  argv: string[];
+}
+/** Exactly what `docker run ...` this task's Docker-mode agent launch
+ *  would build right now, WITHOUT spawning anything - the same
+ *  `build_spec`/`render_argv` the real spawn path uses, so it can't drift
+ *  from what actually runs. Works even before the image is built. Omit
+ *  `agentId` to preview the task's own `cli`. */
+export const dockerCommandPreview = (taskId: string, agentId?: string) =>
+  invoke<DockerCommandPreview>("docker_command_preview", { taskId, agentId: agentId ?? null });
 
 /** "Allow for this repo" — append a host to the repo's committed
  *  `.termic.yaml` (shared with the team, read by the termic CLI).
@@ -711,6 +830,13 @@ export interface ProcRow {
   alive: boolean;
   cpuHistory: number[];
   children: ProcChild[];
+  /** True once the Rust side overwrote this row with a `docker stats`
+   *  query — the host pid it also tracks (the `docker run` client) sits
+   *  nearly idle regardless of what the agent inside the container is
+   *  doing, so these numbers come from the daemon instead. `children` is
+   *  always empty for these rows: the container's real process tree lives
+   *  in the daemon's VM, not under the host pid sampled. */
+  isDocker: boolean;
 }
 
 export interface ProcSnapshot {
