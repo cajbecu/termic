@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
 import { defaultCliFirst, visibleCliIds, isTerminalCli, agentDisplayName } from "@/lib/agents";
-import { taskCreate, taskCreateMulti, settingsLoad, taskImportableWorktrees, taskImportWorktree, sandboxAvailable, taskOpenRepo, projectGitBranches, projectBranchContext } from "@/lib/ipc";
+import { taskCreate, taskCreateMulti, settingsLoad, taskImportableWorktrees, taskImportWorktree, sandboxAvailable, taskOpenRepo, projectGitBranches, projectBranchContext, dockerImageStatus, type DockerImageStatus } from "@/lib/ipc";
 import { launchSetupTab } from "@/lib/runTabs";
 import { seedPromptWhenReady, SETUP_SPAWN_DEADLINE_MS } from "@/lib/seedPrompt";
 import { MAX_PROMPT_CHARS } from "@/lib/deepLink";
@@ -22,6 +22,7 @@ import { uniqueBranch, derivedBranch } from "@/lib/quickTask";
 import { cn } from "@/lib/utils";
 import { Check, Loader2, AlertTriangle, GitBranch, Link2, FolderGit2, Plus, CircleDot, History } from "lucide-react";
 import { SandboxModeSelector } from "@/components/SandboxModeSelector";
+import { SandboxEngineSelector, DockerEngineNote, type SandboxEngine } from "@/components/SandboxEngineSelector";
 import { SANDBOX_PRESETS } from "@/lib/sandboxPresets";
 import type { MemberMode, ImportableWorktree, SandboxMode, ForgeIssue, IssueLookup } from "@/lib/types";
 import { projectForgeIssues } from "@/lib/ipc";
@@ -125,6 +126,25 @@ export function NewTaskDialog() {
   useEffect(() => {
     if (osSandboxOk === false && sandboxMode !== "off") setSandboxMode("off");
   }, [osSandboxOk, sandboxMode]);
+  // Which cage MECHANISM: off / macOS Seatbelt / Docker container. A
+  // separate axis from `sandboxMode` (Seatbelt's own off/monitor/enforce
+  // sub-choice, unaffected here) - Docker was previously only reachable
+  // from the edit-sandbox dialog after a task already existed; this is
+  // what makes it a real choice at creation time too.
+  const [engine, setEngine] = useState<SandboxEngine>("off");
+  const [dockerSettingsForNew, setDockerSettingsForNew] = useState<{ docker_sandbox_enabled?: boolean } | null>(null);
+  const [dockerImageForNew, setDockerImageForNew] = useState<DockerImageStatus | null>(null);
+  useEffect(() => {
+    settingsLoad().then(setDockerSettingsForNew).catch(() => {});
+    dockerImageStatus().then(setDockerImageForNew).catch(() => {});
+  }, []);
+  const dockerOffered = !!dockerSettingsForNew?.docker_sandbox_enabled && !!dockerImageForNew?.available;
+  // Docker became unavailable (image rebuilt away, global switch flipped
+  // off) while it was the picked engine - fall back rather than silently
+  // creating a task pinned to a cage that can't actually launch.
+  useEffect(() => {
+    if (engine === "docker" && !dockerOffered) setEngine("off");
+  }, [dockerOffered, engine]);
   // The sandbox lists. Initialized from the
   // project's defaults whenever projectId changes; the user edits
   // freely until Create. Stored as multi-line text - we convert to
@@ -169,8 +189,9 @@ export function NewTaskDialog() {
   // checkout identically to a worktree (task_open_repo takes sandbox args,
   // for single AND multi hosts), and the multi wrapper carries its own.
   const canSandbox = true;
-  // Derived: any cage on. Drives the 2-column layout + "send lists" gating.
-  const sandbox = sandboxMode !== "off" && canSandbox;
+  // Derived: Seatbelt cage on (Docker is its own separate flag below).
+  // Drives the 2-column layout + "send lists" gating.
+  const sandbox = engine === "seatbelt" && sandboxMode !== "off" && canSandbox;
   // Import mode (issue #5): instead of branching a fresh worktree, adopt
   // one that already exists on disk. Only offered for single-repo git
   // projects (multi composition / non-git folders don't apply). When on,
@@ -377,9 +398,14 @@ export function NewTaskDialog() {
     // Last-used sandbox mode wins (the user's habit); fall back to the
     // project / global default only before they've ever picked one.
     const globalDefault = usePrefs.getState().globalDefaultSandbox;
-    setSandboxMode(readLastSandbox()
+    const initialMode = readLastSandbox()
       ?? p?.default_sandbox_mode
-      ?? ((!!p?.default_sandbox || globalDefault) ? "enforce" : "off"));
+      ?? ((!!p?.default_sandbox || globalDefault) ? "enforce" : "off");
+    setSandboxMode(initialMode);
+    // Docker's own choice isn't remembered across opens (no equivalent
+    // "last used" habit tracked yet) - always starts from the Seatbelt
+    // habit above, off only defaulting to off.
+    setEngine(initialMode === "off" ? "off" : "seatbelt");
     // Seed with project's lists immediately; once Settings loads,
     // merge global defaults on top (dedupe-preserving order).
     setSbRw((p?.sandbox_rw_paths ?? []).join("\n"));
@@ -603,7 +629,7 @@ export function NewTaskDialog() {
       const splitLines = (s: string) => s.split("\n").map(l => l.trim()).filter(Boolean);
       const w = await withCreateLock(() => taskImportWorktree(
         projectId, importSelected, name.trim(), cli,
-        { enabled: sandbox, mode: sandboxMode, rwPaths: splitLines(sbRw), allowedHosts: splitLines(sbHosts) },
+        { enabled: sandbox, mode: sandboxMode, rwPaths: splitLines(sbRw), allowedHosts: splitLines(sbHosts), docker: engine === "docker" },
         undefined, // no externally-started session id from this dialog
         // Gated on capability, not just field state: the input hides when
         // the agent switches to one with nothing to resume, but the typed
@@ -637,7 +663,7 @@ export function NewTaskDialog() {
       // other create path (createLock.ts).
       const w = await withCreateLock(() => taskOpenRepo(
         projectId, cli, name.trim(),
-        { enabled: sandbox, mode: sandboxMode, rwPaths: splitLines(sbRw), allowedHosts: splitLines(sbHosts) },
+        { enabled: sandbox, mode: sandboxMode, rwPaths: splitLines(sbRw), allowedHosts: splitLines(sbHosts), docker: engine === "docker" },
         undefined,
         undefined, // no externally-started session id from this dialog
         resumeOverrideArg(),
@@ -733,6 +759,7 @@ export function NewTaskDialog() {
           sandbox_mode: sandboxMode,
           sandbox_rw_paths:       sandbox ? splitLines(sbRw)    : undefined,
           sandbox_allowed_hosts:  sandbox ? splitLines(sbHosts) : undefined,
+          docker_sandbox_enabled: engine === "docker",
           resume_override: resumeOverrideArg(),
         }));
       } else {
@@ -752,6 +779,7 @@ export function NewTaskDialog() {
           // for unsandboxed tasks (they don't need these saved).
           sandbox_rw_paths:       sandbox ? splitLines(sbRw)    : undefined,
           sandbox_allowed_hosts:  sandbox ? splitLines(sbHosts) : undefined,
+          docker_sandbox_enabled: engine === "docker",
         }));
       }
       await loadAll();
@@ -1387,7 +1415,23 @@ export function NewTaskDialog() {
         {/* Offered in every shape (see canSandbox). */}
         {canSandbox && (
         <Field label="Sandbox" hint="Cage the agent's filesystem + network access. Pinned at creation.">
-          <SandboxModeSelector value={sandboxMode} onChange={setSandboxMode} osUnavailable={osSandboxOk === false} compact />
+          <SandboxEngineSelector
+            engine={engine}
+            onChange={setEngine}
+            osUnavailable={osSandboxOk === false}
+            dockerOffered={dockerOffered}
+            compact
+          />
+          {engine === "seatbelt" && (
+            <div className="mt-2">
+              <SandboxModeSelector value={sandboxMode} onChange={setSandboxMode} hideOff compact />
+            </div>
+          )}
+          {engine === "docker" && (
+            <div className="mt-2">
+              <DockerEngineNote compact />
+            </div>
+          )}
         </Field>
         )}
       </div>

@@ -18,8 +18,9 @@ import {
   type DockerImageStatus, type DockerCommandPreview,
 } from "@/lib/ipc";
 import { effectiveSandboxMode, type SandboxMode, type Settings } from "@/lib/types";
-import { AlertTriangle, Shield, Zap, Save, RotateCw, Container } from "lucide-react";
+import { AlertTriangle, Shield, Zap, Save, RotateCw } from "lucide-react";
 import { SandboxModeSelector } from "@/components/SandboxModeSelector";
+import { SandboxEngineSelector, DockerEngineNote, type SandboxEngine } from "@/components/SandboxEngineSelector";
 import { SANDBOX_PRESETS } from "@/lib/sandboxPresets";
 
 export function TaskSandboxDialog() {
@@ -41,14 +42,6 @@ export function TaskSandboxDialog() {
   // discards. Stored as text so blank lines while typing don't fight
   // the array split.
   const [mode, setMode] = useState<SandboxMode>("off");
-  // `enabled` = there's a cage of some kind (monitor or enforce). Most
-  // of the form (lists, presets) shows whenever the cage is on; a few
-  // bits are enforce-only (self-test, YOLO note).
-  const enabled = mode !== "off";
-  // ENFORCING (FS): filesystem cage with the network sandbox OFF. The
-  // host allow-list + any network-only copy are irrelevant, so they're
-  // hidden in this mode.
-  const fsOnly = mode === "enforce-fs";
   const [rwText,    setRwText]    = useState("");
   const [hostsText, setHostsText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -83,6 +76,20 @@ export function TaskSandboxDialog() {
   }, [taskId]);
   const dockerOffered = !!dockerSettings?.docker_sandbox_enabled && !!dockerImage?.available;
   const dockerOn = !!task?.docker_sandbox_enabled;
+  // Derived, not separate state: which cage MECHANISM is active reads
+  // straight off the two independent underlying fields (dockerOn from the
+  // saved task, mode from the Seatbelt draft), so the unified selector
+  // never needs its own source of truth to fall out of sync with either.
+  const engine: SandboxEngine = dockerOn ? "docker" : (mode !== "off" ? "seatbelt" : "off");
+  // `enabled` = the SEATBELT cage specifically is on. Most of the form
+  // (lists, presets, Save buttons) shows only when engine is seatbelt -
+  // Docker being on must never leave a stale non-off `mode` draft (from
+  // before switching engines) accidentally re-showing this section too.
+  const enabled = engine === "seatbelt" && mode !== "off";
+  // ENFORCING (FS): filesystem cage with the network sandbox OFF. The
+  // host allow-list + any network-only copy are irrelevant, so they're
+  // hidden in this mode.
+  const fsOnly = mode === "enforce-fs";
 
   // Command preview: the exact `docker run ...` a launch would build right
   // now (docker_command_preview -> the SAME build_spec/render_argv the real
@@ -223,6 +230,21 @@ export function TaskSandboxDialog() {
     }
   }
 
+  // The unified selector's click handler. Docker on/off still commits
+  // IMMEDIATELY through its own confirm (toggleDocker, unchanged) rather
+  // than joining the Seatbelt draft-then-Save flow below - the two engines
+  // keep their existing, already-shipped commit semantics; this just picks
+  // which one a click should drive.
+  async function chooseEngine(next: SandboxEngine) {
+    if (next === "docker") {
+      if (!dockerOn) await toggleDocker(true);
+      return;
+    }
+    if (dockerOn) await toggleDocker(false);
+    if (next === "off") setMode("off");
+    else chooseMode(mode === "off" ? "enforce" : mode);
+  }
+
   return (
     <AppDialog
       open={!!taskId}
@@ -249,13 +271,22 @@ export function TaskSandboxDialog() {
             saw the box checked and assumed the cage was ON. State now
             reads from the color band (green = caged, red = open) and
             the verb on the action button ("Disable" vs "Enable"). */}
-        {/* Three-way mode selector: OFF / MONITORING / ENFORCING.
-            Monitoring is the middle ground — the agent runs unrestricted
-            but every file + network access is logged (and flagged
-            would-block) so you can see exactly what it touches before
-            committing to the real cage. */}
-        <SandboxModeSelector value={mode} onChange={chooseMode} osUnavailable={osSandboxOk === false} />
-        {mode === "monitor" && (
+        {/* Unified engine selector: OFF / macOS Seatbelt / Docker Container.
+            Docker still commits immediately through its own confirm
+            (chooseEngine -> toggleDocker, unchanged mechanics) while
+            Seatbelt stays a draft the Save button below commits - this is
+            just what makes the two read as ONE choice instead of Docker
+            being a separate control bolted on beneath the mode grid. */}
+        <SandboxEngineSelector
+          engine={engine}
+          onChange={chooseEngine}
+          osUnavailable={osSandboxOk === false}
+          dockerOffered={dockerOffered}
+        />
+        {engine === "seatbelt" && (
+          <SandboxModeSelector value={mode} onChange={chooseMode} hideOff osUnavailable={osSandboxOk === false} />
+        )}
+        {mode === "monitor" && engine === "seatbelt" && (
           <div className="flex items-start gap-2 rounded-md border border-[var(--color-warn)]/30 bg-[var(--color-warn)]/10 px-3 py-2 text-[13px] text-[var(--color-fg-dim)]">
             <Shield className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-warn)]" />
             <span>
@@ -280,73 +311,43 @@ export function TaskSandboxDialog() {
           </div>
         )}
 
-        {/* Docker sandbox: alternate cage, offered only when Settings →
-            Docker is on and an image is built. Separate from the mode
-            selector above (mutually exclusive with Seatbelt, not a
-            fourth mode card) since it toggles + saves independently. */}
-        {dockerOffered && (
-          <label className={cn(
-            "flex items-start gap-3 rounded-md border px-3 py-2.5",
-            dockerOn ? "border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10" : "border-[var(--color-border-soft)]",
-          )}>
-            <input
-              type="checkbox"
-              className="mt-0.5"
-              checked={dockerOn}
-              disabled={dockerBusy}
-              onChange={e => toggleDocker(e.target.checked)}
-            />
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5 text-[14px] font-medium">
-                <Container className="h-3.5 w-3.5 text-[var(--color-accent)]" />
-                Run in Docker
-                <span className="rounded bg-[var(--color-bg-2)] px-1.5 py-0.5 text-[11px] font-normal text-[var(--color-fg-dim)]">experimental</span>
-              </div>
-              <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
-                Filesystem isolation: the agent runs inside a Docker container and can only touch the worktree +
-                its persistent config dir. <u>Network is unrestricted for now</u>, unlike Seatbelt's host
-                allowlist (a network allow-list for Docker mode is planned once this is stable). Overrides the
-                mode above - a task can be sandboxed with Docker or Seatbelt, not both. Manage the image in
-                Settings → Docker Sandbox.
-              </div>
-            </div>
-          </label>
-        )}
-
-        {dockerOffered && (
-          <div>
-            <Button variant="ghost" onClick={toggleDockerPreview} disabled={!task}>
-              {showDockerPreview ? "Hide command preview" : "Preview command"}
-            </Button>
-            {showDockerPreview && (
-              <div className="mt-2 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-3 text-[12px]">
-                {dockerPreviewLoading && (
-                  <div className="text-[var(--color-fg-faint)]">Loading…</div>
-                )}
-                {dockerPreviewErr && (
-                  <div className="text-[var(--color-danger)]">{dockerPreviewErr}</div>
-                )}
-                {dockerPreview && (
-                  <>
-                    <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-dim)]">
-                      {dockerPreview.argv.map((a, i) => (i === 0 ? a : `  ${a}`)).join(" \\\n")}
-                    </pre>
-                    <div className="mt-3 flex flex-col gap-1.5 border-t border-[var(--color-border-soft)] pt-2.5">
-                      {dockerPreview.spec.mounts.map((m, i) => (
-                        <div key={i} className="flex flex-col gap-0.5">
-                          <div className="font-mono text-[11px] text-[var(--color-fg)]">
-                            {m.host} <span className="text-[var(--color-fg-faint)]">→</span> {m.container}
-                            <span className="ml-1.5 text-[var(--color-fg-faint)]">{m.read_only ? "(read-only)" : "(read/write)"}</span>
+        {engine === "docker" && (
+          <>
+            <DockerEngineNote />
+            <div>
+              <Button variant="ghost" onClick={toggleDockerPreview} disabled={!task}>
+                {showDockerPreview ? "Hide command preview" : "Preview command"}
+              </Button>
+              {showDockerPreview && (
+                <div className="mt-2 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-3 text-[12px]">
+                  {dockerPreviewLoading && (
+                    <div className="text-[var(--color-fg-faint)]">Loading…</div>
+                  )}
+                  {dockerPreviewErr && (
+                    <div className="text-[var(--color-danger)]">{dockerPreviewErr}</div>
+                  )}
+                  {dockerPreview && (
+                    <>
+                      <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-dim)]">
+                        {dockerPreview.argv.map((a, i) => (i === 0 ? a : `  ${a}`)).join(" \\\n")}
+                      </pre>
+                      <div className="mt-3 flex flex-col gap-1.5 border-t border-[var(--color-border-soft)] pt-2.5">
+                        {dockerPreview.spec.mounts.map((m, i) => (
+                          <div key={i} className="flex flex-col gap-0.5">
+                            <div className="font-mono text-[11px] text-[var(--color-fg)]">
+                              {m.host} <span className="text-[var(--color-fg-faint)]">→</span> {m.container}
+                              <span className="ml-1.5 text-[var(--color-fg-faint)]">{m.read_only ? "(read-only)" : "(read/write)"}</span>
+                            </div>
+                            <div className="text-[11px] text-[var(--color-fg-faint)]">{m.why}</div>
                           </div>
-                          <div className="text-[11px] text-[var(--color-fg-faint)]">{m.why}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          </>
         )}
 
         {/* YOLO trade-off note. Sandboxed agents auto-skip their own

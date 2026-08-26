@@ -6,17 +6,21 @@ import { cn } from "@/lib/utils";
 import type { SandboxMode } from "@/lib/types";
 import { SANDBOX_VISUALS, SANDBOX_PICKER_ORDER, sandboxPickerLabel, SandboxIcon } from "@/components/SandboxIcon";
 
-export function SandboxModeSelector({ value, onChange, osUnavailable = false, compact = false }: {
+export function SandboxModeSelector({ value, onChange, osUnavailable = false, compact = false, hideOff = false }: {
   value: SandboxMode;
   onChange: (m: SandboxMode) => void;
   /** Disable monitor/enforce (sandbox is macOS-only). OFF stays available. */
   osUnavailable?: boolean;
   /** Tighter padding/type (New Task dialog's narrower column). */
   compact?: boolean;
+  /** Drop the OFF card - for use under SandboxEngineSelector, whose own
+   *  "Off" card already covers turning the cage off entirely. */
+  hideOff?: boolean;
 }) {
+  const order = hideOff ? SANDBOX_PICKER_ORDER.filter(id => id !== "off") : SANDBOX_PICKER_ORDER;
   return (
-    <div className="grid grid-cols-2 gap-2">
-      {SANDBOX_PICKER_ORDER.map(id => {
+    <div className={cn("grid gap-2", hideOff ? "grid-cols-3" : "grid-cols-2")}>
+      {order.map(id => {
         const v = SANDBOX_VISUALS[id];
         const active = value === id;
         const unsupported = osUnavailable && id !== "off";
