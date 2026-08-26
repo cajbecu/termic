@@ -182,14 +182,43 @@ export function DockerSection() {
       <p className="text-[12.5px] text-[var(--color-fg-dim)]">
         This isn't a separate set of agents. It's a containerized way of running the SAME agents you configure
         in Settings → Agents &amp; Terminals: an alternative to the Seatbelt sandbox, where the agent runs inside
-        a Docker container instead of under macOS sandbox-exec.
+        a Docker container instead of under macOS sandbox-exec. One image is shared by every Docker task; pick
+        Docker per task from its sandbox dialog.
       </p>
-      <p className="text-[12.5px] text-[var(--color-fg-dim)]">
-        A filesystem cage: the agent can only touch the folders termic mounts (the worktree and its git
-        metadata). Everything else on your Mac is invisible to it. <u>Network access is unrestricted for now</u>,
-        unlike Seatbelt's host allowlist (a network allow-list for Docker mode is planned once this is stable).
-        One image is shared by every Docker task; pick Docker per task from its sandbox dialog.
-      </p>
+
+      {/* Always-visible FAQ block, not a <details>: the sandbox dialog tried
+          collapsing similar material once and users missed what was already
+          answered, leading them to re-litigate it in the "Extra" fields (see
+          the comment on the removed <details> in TaskSandboxDialog.tsx). The
+          two questions people actually ask - "is my login shared?" and "why
+          did my agent revert after it updated itself?" - are answered here
+          in full rather than hinted at. */}
+      <div className="flex flex-col gap-2.5 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-3.5 py-3 text-[12.5px] text-[var(--color-fg-dim)]">
+        <div>
+          <b className="text-[var(--color-fg)]">Filesystem: </b>
+          the agent can only touch what termic mounts (the worktree and its git metadata). Everything else on
+          your Mac is invisible to it.
+        </div>
+        <div>
+          <b className="text-[var(--color-fg)]"><u>Network: unrestricted for now</u></b>, unlike Seatbelt's host
+          allowlist (a network allow-list for Docker mode is planned once this is stable).
+        </div>
+        <div>
+          <b className="text-[var(--color-fg)]">Logins: </b>
+          each agent gets one folder that termic manages on your Mac, reused by every Docker task running that
+          agent - log in once and it carries over to your next Docker task with that same agent. Different
+          agents don't share a folder with each other, and none of this is your real <code className="font-mono">~/.claude</code>
+          etc: it's a separate, Docker-only copy.
+        </div>
+        <div>
+          <b className="text-[var(--color-fg)]">Agent updates: </b>
+          agent binaries live in the image, not in that mounted folder. If an agent updates itself mid-session,
+          the update lives only in that container's own throwaway filesystem - the container is destroyed as
+          soon as its terminal closes, so the next launch starts fresh from the image and the self-update is
+          gone. Rebuilding the image (below) is what actually picks up newer agent versions; "Nudge me to
+          rebuild" controls how often termic offers to do that for you before a launch.
+        </div>
+      </div>
 
       {/* Master toggle */}
       <Block first>
@@ -210,8 +239,9 @@ export function DockerSection() {
             <div className="text-[14px] font-medium">Nudge me to rebuild</div>
             <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
               Before a Docker-mode task's agent launches, if the image hasn't been rebuilt on this schedule,
-              termic asks whether to rebuild first (skip is always one click away). Agent CLIs baked into the
-              image update constantly; without this an old image can run a stale binary indefinitely.
+              termic asks whether to rebuild first (skip is always one click away). This is how agent CLIs
+              baked into the image actually get updated (see "Agent updates" above); without it, an old image
+              can run a stale binary indefinitely.
             </div>
             <div className="mt-2 max-w-xs">
               <DockerRebuildFrequencyPicker
