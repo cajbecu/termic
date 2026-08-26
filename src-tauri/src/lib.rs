@@ -15883,17 +15883,27 @@ fn agents_defaults() -> Vec<Agent> { default_agents() }
 
 // ─────────────────────────── Docker sandbox ────────────────────────────
 
-/// Probe for the `docker` binary + a running daemon. Cheap; no build.
+/// Probe for the `docker` binary + a running daemon. No build, but it DOES
+/// shell out (`docker --version`, then `docker info`), and `docker info`
+/// routinely takes 0.3-2s - far longer while Docker Desktop is starting or
+/// wedged. Off-thread for the reason CLAUDE.md gives: a synchronous command
+/// doing IO blocks the WKWebView event loop, and this one is called on every
+/// Settings -> Docker visit and every sandbox / New Task dialog open.
 #[tauri::command]
-fn docker_check() -> docker::DockerStatus {
-    docker::check()
+async fn docker_check() -> docker::DockerStatus {
+    tauri::async_runtime::spawn_blocking(docker::check)
+        .await
+        .unwrap_or_else(|_| docker::DockerStatus { binary: false, daemon: false, version: None })
 }
 
 /// Current image build state (current/last-built tags, stale flag,
 /// dropdown availability). Drives the Settings section + cage dropdown.
+/// Off-thread: it runs `docker image inspect`. Same rule as `docker_check`.
 #[tauri::command]
-fn docker_image_status() -> docker::DockerImageStatus {
-    docker::image_status()
+async fn docker_image_status() -> Result<docker::DockerImageStatus, String> {
+    tauri::async_runtime::spawn_blocking(docker::image_status)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// The editable Dockerfile (falls back to the shipped default on first run).
@@ -16097,8 +16107,16 @@ fn docker_env_for(
 /// showing the user a different random suffix every time.
 const PREVIEW_PTY_ID: &str = "preview";
 
+/// Off-thread: `spawn_image_tag` shells out to resolve the built image, and
+/// this is called from a dialog open. Same rule as `docker_check`.
 #[tauri::command]
-fn docker_command_preview(task_id: Option<String>, agent_id: Option<String>) -> Result<DockerCommandPreview, String> {
+async fn docker_command_preview(task_id: Option<String>, agent_id: Option<String>) -> Result<DockerCommandPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || docker_command_preview_sync(task_id, agent_id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn docker_command_preview_sync(task_id: Option<String>, agent_id: Option<String>) -> Result<DockerCommandPreview, String> {
     // No task id = the settings-level preview (no task selected yet).
     let task = match task_id {
         Some(id) => load_tasks()

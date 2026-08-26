@@ -95,6 +95,11 @@ export async function maybeRebuildDockerImageForLaunch(task: Task): Promise<void
   return inFlight;
 }
 
+/** How long to wait for `docker-build://done` before giving up on it. Long
+ *  enough that a real no-cache build of a multi-GB image finishes first;
+ *  short enough that a lost event does not strand the launch. */
+const REBUILD_EVENT_TIMEOUT_MS = 15 * 60 * 1000;
+
 async function promptAndRebuild(task: Task, lastBuiltDate: string | null): Promise<void> {
   const choice = await useUI.getState().askDockerRebuild(task.name, lastBuiltDate);
   if (choice === "skip") return;
@@ -104,21 +109,37 @@ async function promptAndRebuild(task: Task, lastBuiltDate: string | null): Promi
     "info",
     { ttlMs: 15000 },
   );
-  const success = await new Promise<boolean>(resolve => {
-    let unlisten: (() => void) | undefined;
-    let settled = false;
-    const finish = (ok: boolean) => {
-      if (settled) return;
-      settled = true;
-      unlisten?.();
-      resolve(ok);
-    };
-    onDockerBuildDone(({ success }) => finish(success)).then(u => { unlisten = u; });
+  // Register the listener BEFORE starting the build, and await the
+  // registration. Three things were wrong with doing it the other way:
+  // `unlisten` was assigned inside a `.then()`, so a build that rejected
+  // immediately called finish() before it existed and leaked the listener
+  // for the rest of the session; a build that FAILED fast (bad Dockerfile,
+  // daemon stopped since the check) could emit `done` before any listener
+  // was attached; and there was no timeout at all, so a lost event blocked
+  // the agent launch that awaits this, forever, with no way out.
+  let settle!: (ok: boolean) => void;
+  const done = new Promise<boolean>(resolve => { settle = resolve; });
+  const unlisten = await onDockerBuildDone(({ success }) => settle(success));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let success: boolean;
+  try {
     // WITHOUT cache: a cached build would just replay the old `RUN npm
     // install -g ...` layers unchanged and accomplish nothing (same as
     // the manual "Update agents" button - see Dockerfile.default).
-    dockerBuildImage(true).catch(() => finish(false));
-  });
+    dockerBuildImage(true).catch(() => settle(false));
+    success = await Promise.race([
+      done,
+      // A backstop, not a deadline: a no-cache build of a multi-GB image is
+      // legitimately slow, so this only catches a `done` that never arrives.
+      // Timing out reports failure, and the documented fallback for a failed
+      // rebuild is to launch with the existing image - which beats an agent
+      // that never starts.
+      new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), REBUILD_EVENT_TIMEOUT_MS); }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    unlisten();
+  }
   if (success) {
     useUI.getState().pushToast("Docker sandbox image rebuilt.", "success", { ttlMs: 4000 });
   } else {

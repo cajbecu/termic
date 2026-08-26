@@ -165,18 +165,18 @@ export function DockerSection() {
   }, [themeId, fontSize, appIsLight]);
 
   // ── Build log streaming ───────────────────────────────────────────
-  useEffect(() => {
-    if (!building) return;
-    let unlistenLog: (() => void) | undefined;
-    let unlistenDone: (() => void) | undefined;
-    onDockerBuildLog(line => setBuildLog(l => [...l, line])).then(u => (unlistenLog = u));
-    onDockerBuildDone(({ success }) => {
-      setBuilding(false);
-      setBuildLog(l => [...l, success ? "✓ Build finished." : "✗ Build failed."]);
-      refresh();
-    }).then(u => (unlistenDone = u));
-    return () => { unlistenLog?.(); unlistenDone?.(); };
-  }, [building]);
+  // Owned by `build()`, which registers these BEFORE invoking the build.
+  // This used to be a `[building]` effect, so the listeners only attached
+  // after React committed `building: true` and then resolved a promise - a
+  // build that failed fast (Dockerfile syntax error, or the daemon stopping
+  // between the status probe and the click) emitted `done` before anything
+  // was listening, and the button sat on "Building…" over an empty log with
+  // no way back. Cleaned up here on unmount.
+  const buildUnlistenRef = useRef<Array<() => void>>([]);
+  useEffect(() => () => {
+    for (const u of buildUnlistenRef.current) u();
+    buildUnlistenRef.current = [];
+  }, []);
 
   // NOT scrollIntoView: it walks every scrollable ancestor to bring the
   // target into view, including the Settings pane itself, so the whole
@@ -237,7 +237,31 @@ export function DockerSection() {
     setBuildLog([]);
     setShowLog(true);
     setBuilding(true);
-    await dockerBuildImage(noCache);
+    // Drop any handles from a previous build, then attach and AWAIT the
+    // registration before the build can emit anything.
+    for (const u of buildUnlistenRef.current) u();
+    buildUnlistenRef.current = [];
+    const stop = () => {
+      for (const u of buildUnlistenRef.current) u();
+      buildUnlistenRef.current = [];
+    };
+    const unlistenLog = await onDockerBuildLog(line => setBuildLog(l => [...l, line]));
+    const unlistenDone = await onDockerBuildDone(({ success }) => {
+      setBuilding(false);
+      setBuildLog(l => [...l, success ? "✓ Build finished." : "✗ Build failed."]);
+      refresh();
+      stop();
+    });
+    buildUnlistenRef.current = [unlistenLog, unlistenDone];
+    try {
+      await dockerBuildImage(noCache);
+    } catch (e) {
+      // The invoke itself failed, so no `done` event is coming and nothing
+      // would ever clear the spinner.
+      setBuilding(false);
+      setBuildLog(l => [...l, `✗ ${String(e)}`]);
+      stop();
+    }
   }
 
   if (!settings) {
