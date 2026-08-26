@@ -281,6 +281,14 @@ pub struct ProjectMember {
     pub setup_script: String,
     pub run_script: String,
     pub archive_script: String,
+    /// Per-member `files_to_copy` globs (GH #264), copied from THIS
+    /// member's repo root into its worktree at create / restore. Which
+    /// gitignored files a repo needs is a property of that repo, so the
+    /// list lives beside the member's own scripts rather than on the
+    /// host. Empty = fall back to the member repo's committed
+    /// `.termic.yaml` list, exactly like the scripts above.
+    #[serde(default)]
+    pub files_to_copy: Vec<String>,
     /// Sandbox lists unioned into the task's frozen sandbox at create.
     #[serde(default)]
     pub sandbox_rw_paths: Vec<String>,
@@ -670,6 +678,13 @@ pub struct TaskMember {
     pub setup_script: String,
     pub run_script: String,
     pub archive_script: String,
+    /// Per-member `files_to_copy` override (GH #264), frozen at creation
+    /// from the multi-repo project's member entry. Empty = resolve the
+    /// member repo's own committed `.termic.yaml` list instead. Read on
+    /// restore so an unarchived member gets the same gitignored files
+    /// creation copied in.
+    #[serde(default)]
+    pub files_to_copy: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -1179,6 +1194,14 @@ fn normalize_member(mut m: ProjectMember) -> Result<ProjectMember, String> {
         m.base_branch = format!("{remote}/{base}");
     }
     m.project_id = String::new();
+    // Trim + drop blank globs (the members editor is a textarea, so a
+    // trailing newline arrives as an empty entry). Persisting one would
+    // also suppress the member repo's own `.termic.yaml` fallback, since
+    // "has an override" is a non-empty check.
+    m.files_to_copy = m.files_to_copy.iter()
+        .map(|g| g.trim().to_string())
+        .filter(|g| !g.is_empty())
+        .collect();
     Ok(m)
 }
 fn save_projects(list: &[Project]) -> Result<()> {
@@ -2668,6 +2691,21 @@ fn effective_files_to_copy_from(cfg: &repo_config::RepoConfig, proj: &Project) -
     cfg.scripts.files_to_copy.clone()
 }
 
+/// Effective `files_to_copy` globs for a multi-repo composition member
+/// (GH #264): the per-member override (`ProjectMember.files_to_copy`,
+/// frozen onto `TaskMember`) when non-empty, otherwise the member repo's
+/// OWN committed `.termic.yaml` list. Mirrors `member_effective_script`
+/// so a member whose config lives in `.termic.yaml` gets its `.env` /
+/// keystore copied without anyone restating the globs on the host.
+///
+/// `repo` is the member's SOURCE repo (copy origin), never its worktree.
+fn member_effective_files_to_copy(repo: &str, override_val: &[String]) -> Vec<String> {
+    if !override_val.is_empty() {
+        return override_val.to_vec();
+    }
+    repo_config::load_or_default(Path::new(repo)).scripts.files_to_copy
+}
+
 /// Env var names an extra named port may NOT use (GH #196): termic's
 /// own vars (incl. every var pty_spawn injects after the env overlay:
 /// COLORTERM, TERM_PROGRAM, ...), the preview-URL tokens ($PORT), and
@@ -3741,6 +3779,9 @@ fn task_open_repo(
                 setup_script:   pm.setup_script.clone(),
                 run_script:     pm.run_script.clone(),
                 archive_script: pm.archive_script.clone(),
+                // Frozen, not applied: repo mode symlinks the live checkout,
+                // which already holds its own gitignored files.
+                files_to_copy:  pm.files_to_copy.clone(),
             });
             dir_names.push(dir_name);
         }
@@ -4615,6 +4656,22 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         emit_create_progress(&app, &task_id, "Host worktree added.");
     }
 
+    // Copy the HOST project's files_to_copy globs into the wrapper
+    // (GH #264). The wrapper IS the host's worktree, so its gitignored
+    // files (.env, keystores, service-account keys) never came across
+    // the `worktree add` — same gap the single-repo create closes right
+    // after its own checkout. Members carry their own lists below.
+    let host_copy_patterns = effective_files_to_copy(&host);
+    if !host_copy_patterns.is_empty() {
+        emit_create_progress(&app, &task_id, format!(
+            "Copying {} file pattern(s) into the task root: {}",
+            host_copy_patterns.len(), host_copy_patterns.join(", "),
+        ));
+        for pat in &host_copy_patterns {
+            copy_matching(&host_repo, &wrapper, pat);
+        }
+    }
+
     // Helper that tears down everything we've created so far on
     // failure. Order: members first (so the host worktree git still
     // knows about them), then the host. Best-effort.
@@ -4672,6 +4729,11 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
                 // Scripts come from the inline member's own per-project
                 // spec (the multi-repo project's member entry), the
                 // "different commands per multi-repo project" model.
+                // No files_to_copy pass here: repo-root mode IS the live
+                // checkout, so the gitignored files are already sitting in
+                // it. Copying onto itself would be a no-op at best and could
+                // clobber a file with its own stale copy at worst. The list
+                // is still frozen so a later mode change reads the same one.
                 composition.push(TaskMember {
                     project_id: String::new(),
                     repo_path: mp.root_path.clone(),
@@ -4683,6 +4745,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
                     setup_script:   mp.setup_script.clone(),
                     run_script:     mp.run_script.clone(),
                     archive_script: mp.archive_script.clone(),
+                    files_to_copy:  mp.files_to_copy.clone(),
                 });
                 done.push((mp.clone(), spec, dir_name, MemberMode::RepoRoot, target.to_string_lossy().into_owned()));
             }
@@ -4721,6 +4784,20 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
                     return Err(format!("member {dir_name} worktree add failed: {e}"));
                 }
                 emit_create_progress(&app, &task_id, format!("Member '{dir_name}' worktree added."));
+                // Copy this member's own files_to_copy globs from its source
+                // repo into the fresh worktree (GH #264). Resolved per member
+                // — the override on the multi-repo project's member entry,
+                // else the member repo's committed `.termic.yaml` list.
+                let mcopy = member_effective_files_to_copy(&mp.root_path, &mp.files_to_copy);
+                if !mcopy.is_empty() {
+                    emit_create_progress(&app, &task_id, format!(
+                        "Copying {} file pattern(s) into '{dir_name}': {}",
+                        mcopy.len(), mcopy.join(", "),
+                    ));
+                    for pat in &mcopy {
+                        copy_matching(&mrepo, &target, pat);
+                    }
+                }
                 composition.push(TaskMember {
                     project_id: String::new(),
                     repo_path: mp.root_path.clone(),
@@ -4732,6 +4809,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
                     setup_script:   mp.setup_script.clone(),
                     run_script:     mp.run_script.clone(),
                     archive_script: mp.archive_script.clone(),
+                    files_to_copy:  mp.files_to_copy.clone(),
                 });
                 done.push((mp.clone(), spec, dir_name, MemberMode::Worktree, target.to_string_lossy().into_owned()));
             }
@@ -6600,6 +6678,13 @@ fn task_restore_sync(app: AppHandle, id: String) -> Result<Task, String> {
             }
         }
 
+        // Copy the host project's files_to_copy globs back in, same as the
+        // multi create does (GH #264). Archive removed the wrapper, so the
+        // gitignored files went with it.
+        for pat in &effective_files_to_copy(&proj) {
+            copy_matching(&repo, &wt_path, pat);
+        }
+
         // Recreate each member (best-effort — errors don't abort the restore).
         let all_projects = load_projects();
         let composition = list[idx].composition.clone();
@@ -6630,6 +6715,12 @@ fn task_restore_sync(app: AppHandle, id: String) -> Result<Task, String> {
                             let _ = git(&["branch", "--no-track", &m.branch, &mbase_ref], &mr_path);
                         }
                         let _ = git(&["worktree", "add", &m.path, &m.branch], &mr_path);
+                        // Same per-member copy creation does. Legacy records
+                        // (frozen before GH #264) carry an empty override and
+                        // fall back to the member repo's `.termic.yaml`.
+                        for pat in &member_effective_files_to_copy(&mr, &m.files_to_copy) {
+                            copy_matching(&mr_path, Path::new(&m.path), pat);
+                        }
                     }
                 }
             }
@@ -10517,6 +10608,13 @@ fn copy_file_or_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 fn copy_matching(repo: &Path, dst: &Path, pat: &str) {
+    // A blank pattern is NOT "the repo root". The textareas that feed these
+    // lists split on newlines, so a trailing blank line arrives as `""` —
+    // and `repo.join("")` is the repo itself, which exists, which would
+    // recursively copy the whole checkout (`.git` included) into the
+    // worktree. Drop it here rather than in each of the callers.
+    let pat = pat.trim();
+    if pat.is_empty() { return; }
     // Very simple glob: '*' wildcard in the basename only.
     let pat_path = repo.join(pat);
     if pat_path.exists() {
@@ -21922,5 +22020,148 @@ filename f.rs
             .filter(|n| n.contains(".tmp."))
             .collect();
         assert!(strays.is_empty(), "failed write left staging files: {strays:?}");
+    }
+
+    // ── files_to_copy for multi-repo members (GH #264) ──────────────
+
+    /// Write a `.termic.yaml` at `root` declaring `files_to_copy`.
+    fn write_files_to_copy_yaml(root: &Path, globs: &[&str]) {
+        let list = globs.iter().map(|g| format!("    - \"{g}\"\n")).collect::<String>();
+        fs::write(
+            root.join(".termic.yaml"),
+            format!("version: 1\nscripts:\n  files_to_copy:\n{list}"),
+        ).unwrap();
+    }
+
+    #[test]
+    fn member_files_to_copy_falls_back_to_the_member_repos_own_yaml() {
+        // The whole point of the fallback: a member repo that already
+        // declares its `.env` in `.termic.yaml` needs nothing restated on
+        // the multi-repo project.
+        let member = tempdir().unwrap();
+        write_files_to_copy_yaml(member.path(), &[".env*", "keystore.jks"]);
+        let resolved = member_effective_files_to_copy(
+            &member.path().to_string_lossy(),
+            &[],
+        );
+        assert_eq!(resolved, vec![".env*".to_string(), "keystore.jks".to_string()]);
+    }
+
+    #[test]
+    fn member_files_to_copy_override_wins_over_the_yaml() {
+        let member = tempdir().unwrap();
+        write_files_to_copy_yaml(member.path(), &[".env*"]);
+        let resolved = member_effective_files_to_copy(
+            &member.path().to_string_lossy(),
+            &["service-account.json".to_string()],
+        );
+        assert_eq!(resolved, vec!["service-account.json".to_string()],
+            "the per-member override replaces the repo list, it does not merge");
+    }
+
+    #[test]
+    fn member_files_to_copy_is_empty_when_neither_side_declares_anything() {
+        let member = tempdir().unwrap();
+        assert!(member_effective_files_to_copy(&member.path().to_string_lossy(), &[]).is_empty());
+        // A missing repo path must not panic — a member can be unmounted.
+        assert!(member_effective_files_to_copy("/nope/does/not/exist", &[]).is_empty());
+    }
+
+    #[test]
+    fn member_files_to_copy_resolves_and_copies_into_the_worktree() {
+        // End-to-end over the exact pair the multi create runs: resolve the
+        // member's list, then copy each glob from the member's SOURCE repo
+        // into its fresh worktree. This is the gap GH #264 reported.
+        let member = tempdir().unwrap();
+        write_files_to_copy_yaml(member.path(), &[".env*", "secrets"]);
+        fs::write(member.path().join(".env"), "TOKEN=1").unwrap();
+        fs::write(member.path().join(".env.local"), "TOKEN=2").unwrap();
+        fs::write(member.path().join("README.md"), "not copied").unwrap();
+        fs::create_dir(member.path().join("secrets")).unwrap();
+        fs::write(member.path().join("secrets/key.pem"), "PRIVATE").unwrap();
+
+        let worktree = tempdir().unwrap();
+        for pat in &member_effective_files_to_copy(&member.path().to_string_lossy(), &[]) {
+            copy_matching(member.path(), worktree.path(), pat);
+        }
+
+        assert_eq!(fs::read_to_string(worktree.path().join(".env")).unwrap(), "TOKEN=1");
+        assert_eq!(fs::read_to_string(worktree.path().join(".env.local")).unwrap(), "TOKEN=2");
+        assert_eq!(fs::read_to_string(worktree.path().join("secrets/key.pem")).unwrap(), "PRIVATE",
+            "directory globs come across whole, not just files");
+        assert!(!worktree.path().join("README.md").exists(),
+            "only the declared globs are copied");
+    }
+
+    #[test]
+    fn task_member_files_to_copy_round_trips_and_defaults_on_legacy_records() {
+        // Legacy composition records (frozen before GH #264) have no
+        // `files_to_copy` key; restore must read them as "no override" and
+        // fall back to the member repo's yaml rather than failing to parse.
+        let legacy: TaskMember = serde_json::from_str(
+            r#"{"dir_name":"api","mode":"worktree","branch":"b","path":"/w/api",
+                "setup_script":"","run_script":"","archive_script":""}"#,
+        ).unwrap();
+        assert!(legacy.files_to_copy.is_empty());
+
+        let fresh = TaskMember {
+            dir_name: "api".into(),
+            files_to_copy: vec![".env".into()],
+            ..Default::default()
+        };
+        let back: TaskMember = serde_json::from_str(&serde_json::to_string(&fresh).unwrap()).unwrap();
+        assert_eq!(back.files_to_copy, vec![".env".to_string()]);
+    }
+
+    #[test]
+    fn copy_matching_ignores_a_blank_pattern_instead_of_copying_the_whole_repo() {
+        // `repo.join("")` IS the repo, and it exists — so without the guard a
+        // trailing newline in the Files-to-copy textarea copies the entire
+        // checkout (`.git` and all) into every new worktree.
+        let repo = tempdir().unwrap();
+        fs::write(repo.path().join("Cargo.toml"), "[package]").unwrap();
+        fs::create_dir(repo.path().join(".git")).unwrap();
+        fs::write(repo.path().join(".git/HEAD"), "ref: refs/heads/main").unwrap();
+
+        let wt = tempdir().unwrap();
+        for pat in ["", "   ", "\t"] {
+            copy_matching(repo.path(), wt.path(), pat);
+        }
+        let landed: Vec<String> = fs::read_dir(wt.path()).unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(landed.is_empty(), "a blank glob copied {landed:?}");
+    }
+
+    #[test]
+    fn normalize_member_drops_blank_files_to_copy_globs() {
+        let dir = tempdir().unwrap();
+        let m = ProjectMember {
+            root_path: dir.path().to_string_lossy().into_owned(),
+            name: "api".into(),
+            files_to_copy: vec!["".into(), "  .env  ".into(), "\n".into(), "secrets".into()],
+            ..Default::default()
+        };
+        let out = normalize_member(m).unwrap();
+        assert_eq!(out.files_to_copy, vec![".env".to_string(), "secrets".to_string()],
+            "blank lines must not survive: a blank entry also suppresses the \
+             member repo's own .termic.yaml fallback");
+    }
+
+    #[test]
+    fn project_member_files_to_copy_round_trips_and_defaults_on_legacy_records() {
+        let legacy: ProjectMember = serde_json::from_str(
+            r#"{"root_path":"/repos/api","name":"api","non_git":false,"base_branch":"main",
+                "setup_script":"","run_script":"","archive_script":""}"#,
+        ).unwrap();
+        assert!(legacy.files_to_copy.is_empty());
+
+        let fresh = ProjectMember {
+            root_path: "/repos/api".into(),
+            files_to_copy: vec!["app/google-services.json".into()],
+            ..Default::default()
+        };
+        let back: ProjectMember = serde_json::from_str(&serde_json::to_string(&fresh).unwrap()).unwrap();
+        assert_eq!(back.files_to_copy, vec!["app/google-services.json".to_string()]);
     }
 }

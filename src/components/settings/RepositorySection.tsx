@@ -698,11 +698,15 @@ export function RepositorySection({ projectId }: { projectId: string }) {
             </div>
           )}
 
-          {/* Files to copy */}
+          {/* Files to copy. For a multi-repo project this list covers the
+              HOST repo only (the task's root dir); each member carries its
+              own list in the Members & scripts editor above (GH #264). */}
           <div>
             <div className="text-[14px] font-medium">Files to copy</div>
             <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
-              Copied from the repo root into each new task. One per line, glob patterns OK (e.g. <code className="font-mono">.env*</code>).
+              {isMulti
+                ? <>Copied from this project's own repo root into the root of each new task. One per line, glob patterns OK (e.g. <code className="font-mono">.env*</code>). Members get their own list, in Members &amp; scripts above.</>
+                : <>Copied from the repo root into each new task. One per line, glob patterns OK (e.g. <code className="font-mono">.env*</code>).</>}
             </div>
             <textarea
               value={filesText}
@@ -1308,6 +1312,7 @@ function MultiMembersEditor({ project, onSaved }: {
       setup_script:   p.setup_script   ?? "",
       run_script:     p.run_script     ?? "",
       archive_script: p.archive_script ?? "",
+      files_to_copy:  p.files_to_copy  ?? [],
       sandbox_rw_paths:      p.sandbox_rw_paths,
       sandbox_allowed_hosts: p.sandbox_allowed_hosts,
     }]);
@@ -1319,6 +1324,7 @@ function MultiMembersEditor({ project, onSaved }: {
     setRows(prev => prev.some(r => r.root_path === path) ? prev : [...prev, {
       root_path: path, name, non_git: nonGit,
       base_branch: "", setup_script: "", run_script: "", archive_script: "",
+      files_to_copy: [],
     }]);
   }
   function remove(rootPath: string) {
@@ -1345,10 +1351,14 @@ function MultiMembersEditor({ project, onSaved }: {
       </div>
       <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
         Repos to mount inside every task under this multi-repo project,
-        and the <b>Setup / Run / Archive</b> commands to use for each. These
-        scripts live on the multi-repo project (independent of the member
-        project's own scripts). Edits apply to <b>future</b> tasks;
-        existing ones freeze at creation.
+        the <b>Setup / Run / Archive</b> commands to use for each, and the
+        <b> Files</b> each one needs copied from its repo root into its worktree
+        (gitignored things a build needs: <code className="font-mono">.env</code>,
+        keystores, service-account keys). These live on the multi-repo project,
+        independent of the member project's own scripts; leave Files empty and
+        that repo's own committed <code className="font-mono">.termic.yaml</code>
+        list applies instead. Edits apply to <b>future</b> tasks; existing ones
+        freeze at creation.
       </div>
       {/* Cross-member port discovery: every member's scripts +
           agent PTYs see a TERMIC_PORT_<DIR> var for each sibling,
@@ -1408,6 +1418,11 @@ function MultiMembersEditor({ project, onSaved }: {
                 <MemberScriptRow label="Setup"   value={row.setup_script}   placeholder="docker compose up -d"        onChange={v => update(row.root_path, { setup_script: v })} />
                 <MemberScriptRow label="Run"     value={row.run_script}     placeholder="PORT=$TERMIC_PORT npm run dev" onChange={v => update(row.root_path, { run_script: v })} />
                 <MemberScriptRow label="Archive" value={row.archive_script} placeholder="docker compose down"            onChange={v => update(row.root_path, { archive_script: v })} />
+                <MemberFilesRow
+                  value={row.files_to_copy ?? []}
+                  onChange={v => update(row.root_path, { files_to_copy: v })}
+                  repoName={row.name}
+                />
               </div>
             </div>
           ))}
@@ -1450,6 +1465,35 @@ function MemberScriptRow({ label, value, onChange, placeholder }: {
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
+        autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+        className="min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg-1)] px-2 py-1 font-mono text-[12px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
+      />
+    </div>
+  );
+}
+
+/** Per-member "Files to copy" globs (GH #264). One glob per line,
+ *  resolved against the MEMBER's repo root and copied into that member's
+ *  worktree at task create. Left empty, the member repo's own committed
+ *  `.termic.yaml` list applies instead, so a repo that already declares
+ *  its `.env` needs nothing restated here. */
+function MemberFilesRow({ value, onChange, repoName }: {
+  value: string[];
+  onChange: (v: string[]) => void;
+  repoName?: string;
+}) {
+  return (
+    <div className="flex items-start gap-2">
+      <label className="w-16 shrink-0 pt-1 text-[11.5px] uppercase tracking-wider text-[var(--color-fg-faint)]">
+        Files
+      </label>
+      <textarea
+        value={value.join("\n")}
+        onChange={(e) => onChange(e.target.value.split("\n"))}
+        rows={2}
+        placeholder=".env*&#10;app/google-services.json"
+        title="Globs copied from this repo's root into its worktree, one per line. Empty falls back to the repo's own .termic.yaml list."
+        data-testid={`member-files-to-copy-${repoName ?? ""}`}
         autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
         className="min-w-0 flex-1 rounded border border-[var(--color-border)] bg-[var(--color-bg-1)] px-2 py-1 font-mono text-[12px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
       />

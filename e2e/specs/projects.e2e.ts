@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { archiveTask, clickByText, clickMenuItemUntil, clickWhenVisible, dismissOverlays, pointerDrag, requireTermicApi, keysIn, snap, waitForAppShell, waitForText, waitGone, waitVisible } from "../helpers";
@@ -1492,5 +1492,216 @@ describe("new task menu puts the project default first", () => {
     await openMenu();
     expect((await cliRows())[0]).toBe("shell");
     await browser.keys("Escape");
+  });
+});
+
+// files_to_copy on a multi-repo project (GH #264).
+//
+// Multi-repo tasks used to get member worktrees with none of their gitignored
+// files: `effective_files_to_copy` had two call sites and both were single-repo,
+// so keystores / service-account keys / `.env` had to be hand-copied before a
+// build would run. The list now resolves at three levels, and this spec pins
+// all three because each resolves differently:
+//
+//   host   → the multi-repo project's own `files_to_copy`, into the task root
+//   member → the per-member override on the project's member entry
+//   member → that member repo's OWN committed `.termic.yaml`, when no override
+//
+// Assertions are on-disk (a file copy has no DOM surface): the spec reads the
+// paths the create IPC hands back. The fixture lives under a realpath'd temp
+// dir because Rust canonicalizes every member path on add, and
+// `task_create_multi` matches the per-task member specs against those
+// canonical strings — a raw `/var/...` would come back "member not found".
+describe("multi files to copy (GH #264)", () => {
+  const PROJECT_NAME = "e2e-multi-copy";
+  let tmp = "";
+  let taskId = "";
+
+  /** A tiny git repo with one commit, plus whatever extra files. */
+  const seedRepo = (root: string, files: Record<string, string>) => {
+    mkdirSync(root, { recursive: true });
+    execSync(`git init -b main -q "${root}"`);
+    execSync(`git -C "${root}" -c user.email=e2e@termic.dev -c user.name=e2e commit -q --allow-empty -m init`);
+    for (const [rel, body] of Object.entries(files)) {
+      const target = path.join(root, rel);
+      mkdirSync(path.dirname(target), { recursive: true });
+      writeFileSync(target, body);
+    }
+  };
+
+  /** Drop every project this spec owns, tasks and all. Swept by NAME, not by
+   *  a captured id: a body that throws between the add and the assertions
+   *  never gets to report one, and the leftover then poisons the next run
+   *  with "a project at this path is already added". */
+  const sweepProjects = () => browser.execute(async (name) => {
+    const t = window.__termic!;
+    for (const p of t.useApp.getState().projects.filter((p: any) => p.name === name)) {
+      try { await t.ipc.projectRemove(p.id); } catch { /* best effort */ }
+    }
+    await t.useApp.getState().loadAll();
+  }, PROJECT_NAME);
+
+  before(() => {
+    tmp = realpathSync(mkdtempSync(path.join(os.tmpdir(), "e2e-multi-copy-")));
+    // Host: gitignored secrets only the project's own list names.
+    seedRepo(path.join(tmp, "host"), {
+      ".env": "HOST=1",
+      "host-only.txt": "host",
+      "README.md": "not copied",
+    });
+    // alpha declares its own globs in `.termic.yaml` — no override needed.
+    seedRepo(path.join(tmp, "alpha"), {
+      ".termic.yaml": "version: 1\nscripts:\n  files_to_copy:\n    - \".env*\"\n    - \"secrets\"\n",
+      ".env": "ALPHA=1",
+      ".env.local": "ALPHA=2",
+      "secrets/key.pem": "PRIVATE",
+      "README.md": "not copied",
+    });
+    // beta declares nothing; the multi-repo project overrides for it.
+    seedRepo(path.join(tmp, "beta"), {
+      "config/local.json": "{\"beta\":true}",
+      "README.md": "not copied",
+    });
+  });
+
+  after(async () => {
+    // The window is reused by later spec files, so leave Settings closed.
+    await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
+    if (taskId) await archiveTask(taskId);
+    await sweepProjects();
+    if (tmp) rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("copies the host list into the task root and each member's own list into its worktree", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    await sweepProjects();
+
+    const created = await browser.execute(
+      async (name, host, alpha, beta) => {
+        const t = window.__termic!;
+        const member = (root_path: string, files_to_copy: string[]) => ({
+          root_path,
+          name: root_path.split("/").pop()!,
+          base_branch: "main",
+          setup_script: "", run_script: "", archive_script: "",
+          files_to_copy,
+        });
+        const proj = await t.ipc.projectAddMulti(host, name, [
+          member(alpha, []),                       // falls back to alpha's .termic.yaml
+          member(beta, ["config/local.json"]),     // per-member override
+        ], false) as any;
+        // The multi-repo project's OWN list — the box that had no reader.
+        await t.ipc.projectUpdate({ ...proj, files_to_copy: [".env", "host-only.txt"] });
+        // Members are matched by the CANONICAL path Rust stored, not the one
+        // passed in above.
+        const task = await t.ipc.taskCreateMulti({
+          project_id: proj.id,
+          name: "e2e-copy-task",
+          cli: "shell",
+          members: proj.members.map((m: any) => ({ root_path: m.root_path, mode: "worktree" })),
+        } as any);
+        await t.useApp.getState().loadAll();
+        return {
+          taskId: task.id as string,
+          root: task.path as string,
+          members: Object.fromEntries(
+            (task.composition ?? []).map((m: any) => [m.dir_name, m.path as string]),
+          ) as Record<string, string>,
+        };
+      },
+      PROJECT_NAME,
+      path.join(tmp, "host"),
+      path.join(tmp, "alpha"),
+      path.join(tmp, "beta"),
+    );
+    taskId = created.taskId;
+
+    // Host list → the task root (which IS the host's worktree).
+    expect(readFileSync(path.join(created.root, ".env"), "utf8")).toBe("HOST=1");
+    expect(readFileSync(path.join(created.root, "host-only.txt"), "utf8")).toBe("host");
+
+    // alpha: resolved from its own committed .termic.yaml, directories included.
+    const alphaWt = created.members.alpha;
+    expect(readFileSync(path.join(alphaWt, ".env"), "utf8")).toBe("ALPHA=1");
+    expect(readFileSync(path.join(alphaWt, ".env.local"), "utf8")).toBe("ALPHA=2");
+    expect(readFileSync(path.join(alphaWt, "secrets/key.pem"), "utf8")).toBe("PRIVATE");
+
+    // beta: the per-member override on the multi-repo project.
+    const betaWt = created.members.beta;
+    expect(readFileSync(path.join(betaWt, "config/local.json"), "utf8")).toBe("{\"beta\":true}");
+
+    // Each list stays in its own lane: the host's globs must not rain down on
+    // the members, alpha's must not reach beta, and nothing undeclared travels.
+    expect(existsSync(path.join(alphaWt, "host-only.txt"))).toBe(false);
+    expect(existsSync(path.join(betaWt, ".env"))).toBe(false);
+    expect(existsSync(path.join(betaWt, "host-only.txt"))).toBe(false);
+    expect(existsSync(path.join(alphaWt, "README.md"))).toBe(false);
+  });
+
+  it("restores the same files when the task is unarchived", async () => {
+    // Archive tears the worktrees down and the copies go with them. Restore
+    // has to re-run the copy or the task comes back unbuildable.
+    const restored = await browser.execute(async (id) => {
+      const t = window.__termic!;
+      await t.ipc.taskArchive(id);
+      const task = await t.ipc.taskRestore(id);
+      await t.useApp.getState().loadAll();
+      return {
+        root: task.path as string,
+        members: Object.fromEntries(
+          (task.composition ?? []).map((m: any) => [m.dir_name, m.path as string]),
+        ) as Record<string, string>,
+      };
+    }, taskId);
+
+    expect(readFileSync(path.join(restored.root, ".env"), "utf8")).toBe("HOST=1");
+    expect(readFileSync(path.join(restored.members.alpha, ".env.local"), "utf8")).toBe("ALPHA=2");
+    expect(readFileSync(path.join(restored.members.beta, "config/local.json"), "utf8")).toBe("{\"beta\":true}");
+  });
+
+  it("edits a member's Files list from Members & scripts and drops blank lines", async () => {
+    // The settings field is the only way a user reaches the per-member list,
+    // and blank lines matter: an empty glob would both suppress the member
+    // repo's `.termic.yaml` fallback and resolve to the repo root itself.
+    const projectId = await browser.execute((name) =>
+      window.__termic!.useApp.getState().projects.find((p: any) => p.name === name)!.id as string,
+      PROJECT_NAME,
+    );
+    await browser.execute((id) =>
+      window.__termic!.useApp.getState().openSettings("repositories", id), projectId);
+    await waitVisible('[data-testid="member-files-to-copy-beta"]');
+
+    await browser.execute(() => {
+      const box = document.querySelector(
+        '[data-testid="member-files-to-copy-beta"]',
+      ) as HTMLTextAreaElement;
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype, "value",
+      )!.set!;
+      setter.call(box, "config/local.json\n\n  gradle.properties  \n");
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    // The Save button only enables once the edit lands in React state, so
+    // wait for that rather than clicking a disabled button into the void.
+    await browser.waitUntil(async () => browser.execute(() => {
+      const btn = [...document.querySelectorAll("button")].find(
+        (b) => b.textContent?.trim() === "Save members & scripts (2)",
+      ) as HTMLButtonElement | undefined;
+      if (!btn || btn.disabled) return false;
+      btn.click();
+      return true;
+    }), { timeoutMsg: "the members Save button never enabled" });
+
+    const saved = await browser.waitUntil(async () => {
+      const list = await browser.execute((id) =>
+        window.__termic!.useApp.getState().projects
+          .find((p: any) => p.id === id)?.members
+          ?.find((m: any) => m.name === "beta")?.files_to_copy ?? null,
+        projectId) as string[] | null;
+      return list && list.length === 2 ? list : false;
+    }, { timeoutMsg: "the member's files_to_copy never came back from projects.json" }) as string[];
+
+    expect(saved).toEqual(["config/local.json", "gradle.properties"]);
   });
 });

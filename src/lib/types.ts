@@ -171,6 +171,10 @@ export interface ProjectMember {
   setup_script: string;
   run_script: string;
   archive_script: string;
+  /** Per-member `files_to_copy` globs (GH #264), copied from this member's
+   *  repo root into its worktree at create/restore. Empty = fall back to
+   *  the member repo's own committed `.termic.yaml` list. */
+  files_to_copy?: string[];
   /** Sandbox lists unioned into the task sandbox at create. Only
    *  populated when a member is seeded from an existing project; not
    *  edited in the member dialogs. */
@@ -205,6 +209,10 @@ export interface TaskMember {
   setup_script?: string;
   run_script?: string;
   archive_script?: string;
+  /** Per-member `files_to_copy` override (GH #264), frozen at creation.
+   *  Empty = the member repo's own `.termic.yaml` list is resolved on
+   *  restore instead. */
+  files_to_copy?: string[];
 }
 
 /** One frozen extra named port (GH #196): configured env var name +
