@@ -273,11 +273,26 @@ pub fn detect() -> Vec<ForgeCliStatus> {
                         .to_string();
                 }
                 if let Ok(o) = run(&path, &["auth", "status"], None) {
-                    authed = o.status.success();
                     // gh:   "✓ Logged in to github.com account simion (keyring)"
                     // glab: "✓ Logged in to gitlab.com as simion (...)"
                     let text = auth_text(&o);
                     hosts = parse_auth_hosts(&text);
+                    // NOT the exit code alone. `glab auth status` exits
+                    // non-zero when ANY configured instance fails to
+                    // authenticate, even while others are perfectly signed
+                    // in - and a stale, tokenless `gitlab.com` entry sitting
+                    // beside a working self-hosted instance is the normal
+                    // shape for anyone whose GitLab is at work. Reporting
+                    // "Installed, not signed in" there contradicts this
+                    // panel's own promise that self-hosted works "as long as
+                    // the CLI is signed in to that host", and hides an
+                    // instance termic had already parsed and could use.
+                    //
+                    // `hosts` holds ONLY the successfully-logged-in hosts
+                    // (see parse_auth_hosts), so one entry means one usable
+                    // instance. The exit code stays as a fallback for output
+                    // shapes the parser does not recognise.
+                    authed = o.status.success() || !hosts.is_empty();
                     for line in text.lines() {
                         if let Some(rest) = line.split(" account ").nth(1) {
                             account = rest.split_whitespace().next().unwrap_or("").to_string();
@@ -1053,6 +1068,30 @@ mod tests {
         // Prose without a hostname must not be mistaken for one.
         assert!(parse_auth_hosts("You are not logged in to any hosts\n").is_empty());
         assert!(parse_auth_hosts("").is_empty());
+    }
+
+    #[test]
+    fn a_failing_instance_beside_a_working_one_still_yields_a_usable_host() {
+        // Verbatim `glab auth status` for the common shape: a stale,
+        // tokenless gitlab.com entry beside a signed-in self-hosted
+        // instance. glab exits NON-ZERO for this, which is why `authed`
+        // cannot be the exit code alone - the panel reported "Installed,
+        // not signed in" to a user who was signed in to the only instance
+        // they use.
+        let glab = "gitlab.com\n  x gitlab.com: API call failed: GET \
+https://gitlab.com/api/v4/user: 401 {message: 401 Unauthorized}\n  \
+\u{2713} Git operations for gitlab.com configured to use ssh protocol.\n  \
+\u{2713} API calls for gitlab.com are made over https protocol.\n  \
+! No token found (checked config file, keyring, and environment variables).\n\
+code.siemens-energy.com\n  \u{2713} Logged in to code.siemens-energy.com as \
+simion.agavriloaei.ext (keyring)\n  \u{2713} Git operations for \
+code.siemens-energy.com configured to use ssh protocol.\n";
+        let hosts = parse_auth_hosts(glab);
+        // The signed-OUT instance must not be offered as usable, and the
+        // signed-in one must be, so `!hosts.is_empty()` is a sound stand-in
+        // for "this CLI can answer for at least one host".
+        assert_eq!(hosts, vec!["code.siemens-energy.com"]);
+        assert!(!hosts.iter().any(|h| h == "gitlab.com"));
     }
 
     #[test]
