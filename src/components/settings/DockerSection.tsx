@@ -44,7 +44,7 @@ export function DockerSection() {
   const [building, setBuilding] = useState(false);
   const [buildLog, setBuildLog] = useState<string[]>([]);
   const [showLog, setShowLog] = useState(false);
-  const logEndRef = useRef<HTMLDivElement>(null);
+  const logRef = useRef<HTMLPreElement>(null);
 
   const themeMode = usePrefs(s => s.themeMode);
   const appIsLight = resolveTheme(themeMode) === "light";
@@ -133,7 +133,15 @@ export function DockerSection() {
     return () => { unlistenLog?.(); unlistenDone?.(); };
   }, [building]);
 
-  useEffect(() => { logEndRef.current?.scrollIntoView({ block: "end" }); }, [buildLog]);
+  // NOT scrollIntoView: it walks every scrollable ancestor to bring the
+  // target into view, including the Settings pane itself, so the whole
+  // page jittered up and down on every log line (build output streams in
+  // several times a second). Scrolling only the log's own container keeps
+  // the nudge local to the thing that's actually scrolling.
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [buildLog]);
 
   // ── Actions ───────────────────────────────────────────────────────
   async function saveDockerfile() {
@@ -309,9 +317,11 @@ export function DockerSection() {
               )}
             </div>
             {showLog && buildLog.length > 0 && (
-              <pre className="mt-3 max-h-64 overflow-auto rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-3 font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-dim)]">
+              <pre
+                ref={logRef}
+                className="mt-3 max-h-64 overflow-auto rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-3 font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-dim)]"
+              >
                 {buildLog.join("\n")}
-                <div ref={logEndRef} />
               </pre>
             )}
           </Block>
