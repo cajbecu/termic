@@ -368,7 +368,7 @@ export function DockerSection() {
             {showLog && buildLog.length > 0 && (
               <pre
                 ref={logRef}
-                className="mt-3 max-h-64 overflow-auto rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-3 font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-dim)]"
+                className="mt-3 max-h-64 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-3 font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-dim)]"
               >
                 {buildLog.join("\n")}
               </pre>
