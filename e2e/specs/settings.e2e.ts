@@ -1735,10 +1735,26 @@ describe("double-Shift mode", () => {
       (document.querySelector(sel) as HTMLSelectElement).value, SELECT)).toBe("left");
   });
 
-  it("offers exactly the four modes", async () => {
+  it("offers exactly the four modes, each naming the whole gesture", async () => {
     const opts = await browser.execute((sel) =>
-      [...(document.querySelector(sel) as HTMLSelectElement).options].map(o => o.value), SELECT);
-    expect(opts).toEqual(["off", "left", "outside-terminal", "any"]);
+      [...(document.querySelector(sel) as HTMLSelectElement).options]
+        .map(o => ({ value: o.value, label: o.textContent ?? "" })), SELECT);
+    expect(opts.map(o => o.value)).toEqual(["off", "left", "outside-terminal", "any"]);
+    // Every label except Off says which keys: the row prints no gesture of its
+    // own beside the select, so an option reading "Left Shift only" would
+    // leave "only what?" unanswered.
+    expect(opts.map(o => o.label)).toEqual([
+      "Off", "Double left Shift", "Double Shift, not in a terminal", "Double Shift",
+    ]);
+  });
+
+  it("prints no second name for the gesture beside the select", async () => {
+    // It used to read "Double tap, left" next to a select saying "Left Shift
+    // only": the same gesture, named twice, in two vocabularies.
+    const row = await browser.execute((sel) =>
+      (document.querySelector(sel)?.closest('[data-testid="fixed-shortcut-row"]') as HTMLElement)
+        ?.innerText ?? "", SELECT);
+    expect(row).not.toContain("Double tap");
   });
 
   it("writes each choice to the pref", async () => {

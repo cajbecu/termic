@@ -140,9 +140,12 @@ describe("keyboard shortcuts sheet", () => {
       const el = document.querySelector('[data-shortcut-id="search-everywhere"]') as HTMLElement;
       return { text: el?.innerText ?? "", keys: el?.querySelectorAll("kbd").length ?? 0 };
     }) as { text: string; keys: number };
-    // Two keycaps, both Shift, and the word that explains the missing button.
+    // Two keycaps, both Shift, and the words that explain the missing button.
+    // That text is the chosen MODE's label (default: the left Shift), not a
+    // fixed "Double tap": the gesture is a setting, and this sheet prints what
+    // it currently is.
     expect(row.keys).toBe(2);
-    expect(row.text).toContain("Double tap");
+    expect(row.text).toContain("Double left Shift");
   });
 
   it("follows the double-Shift mode, and drops the row when it is off", async () => {
@@ -163,18 +166,20 @@ describe("keyboard shortcuts sheet", () => {
       expect(await browser.execute(() =>
         !!document.querySelector('[data-shortcut-id="search-everywhere"]'))).toBe(false);
 
+      // Each mode's own label, the same string the Shortcuts page offers.
       await setMode("any");
       expect(await sheetText()).toContain("Search everywhere");
+      expect(await rowText()).toContain("Double Shift");
       expect(await rowText()).not.toContain("left");
 
       await setMode("outside-terminal");
       await sheetText();
-      expect(await rowText()).toContain("outside a terminal");
+      expect(await rowText()).toContain("not in a terminal");
     } finally {
       await setMode("left");
     }
     await sheetText();
-    expect(await rowText()).toContain("left");
+    expect(await rowText()).toContain("Double left Shift");
   });
 
   it("gives the code-navigation keys a section of their own", async () => {

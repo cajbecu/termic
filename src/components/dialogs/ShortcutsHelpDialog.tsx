@@ -5,7 +5,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
-import { usePrefs, type DoubleShiftMode } from "@/store/prefs";
+import { usePrefs } from "@/store/prefs";
 import { AppDialog } from "@/components/ui/Dialog";
 import { Command, Search, X, Pencil } from "lucide-react";
 import {
@@ -13,21 +13,12 @@ import {
   FIXED_SHORTCUTS,
   GROUP_ORDER,
   bindingGlyphs,
+  doubleShiftLabel,
   IS_MAC,
   type ShortcutGroup,
   type ShortcutId,
 } from "@/lib/shortcuts";
 import { codeIntelName } from "@/lib/lsp/featureName";
-
-/** What the double-Shift row says instead of a recorder, per mode. The word
- *  has to follow the setting: a sheet reading "Double tap, left" to somebody
- *  who chose either Shift is describing a restriction they turned off. */
-const DOUBLE_SHIFT_REASON: Record<DoubleShiftMode, string> = {
-  off: "Off",
-  left: "Double tap, left",
-  any: "Double tap",
-  "outside-terminal": "Double tap, outside a terminal",
-};
 
 /** One printed line: a label, the keys, and (for the fixed ones) why there is
  *  no recorder next to it. */
@@ -96,8 +87,11 @@ export function ShortcutsHelpDialog() {
             id: f.id,
             label: f.label,
             glyphs: f.glyphs,
+            // The chosen mode's own label, which is the same string the
+            // Shortcuts page offers: this sheet cannot be rebound from, so it
+            // prints what the gesture currently IS.
             fixed: f.id === "search-everywhere"
-              ? DOUBLE_SHIFT_REASON[doubleShiftMode]
+              ? doubleShiftLabel(doubleShiftMode)
               : f.fixedReason,
           })),
       ];

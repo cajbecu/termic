@@ -272,14 +272,49 @@ export const FIXED_SHORTCUTS: FixedShortcut[] = [
     id: "search-everywhere",
     group: "Code navigation",
     label: "Search everywhere",
-    hint: "Tap the LEFT Shift twice. Files always; classes and functions too, once a checkout has code navigation on.",
+    // Says nothing about WHICH Shift: that is the setting's to say, and a
+    // hint hardcoding "left" is wrong the moment somebody picks either.
+    hint: "Files always; classes and functions too, once a checkout has code navigation on.",
     glyphs: ["⇧", "⇧"],
-    // Says which Shift, in the one word there is room for. The right-hand
-    // Shift is deliberately inert: it is the one held for left-hand capitals,
-    // and it is where the accidental fires came from.
-    fixedReason: "Double tap, left",
+    fixedReason: "Double tap",
   },
 ];
+
+/** When the double-Shift gesture opens Search everywhere.
+ *
+ *    off              never.
+ *    left             two taps of the LEFT Shift (the default). The right one
+ *                     is what a touch typist holds for left-hand capitals,
+ *                     which is where the accidental opens come from.
+ *    outside-terminal either Shift, but never while a terminal has focus.
+ *    any              either Shift, JetBrains' own behaviour.
+ *
+ *  Declared HERE rather than in the prefs store: prefs already imports this
+ *  module for the bindings, so the other direction would be a cycle. */
+export type DoubleShiftMode = "off" | "left" | "outside-terminal" | "any";
+
+/** When double-Shift opens Search everywhere, as the user picks it.
+ *
+ *  Each label names the WHOLE gesture, because it is the only thing that
+ *  does: the row used to print "Double tap, left" beside a select reading
+ *  "Left Shift only", so the same gesture was named twice in two different
+ *  vocabularies and neither half made sense alone. Off is off, and every
+ *  other option says which keys, in the words the reader would use.
+ *
+ *  Ordered off-to-most-permissive, so the list reads as a dial. Shared by the
+ *  Shortcuts page (the select) and the command sheet (which prints the
+ *  current one where a recorder would be), so those two cannot disagree. */
+export const DOUBLE_SHIFT_MODES: { id: DoubleShiftMode; label: string }[] = [
+  { id: "off",              label: "Off" },
+  { id: "left",             label: "Double left Shift" },
+  { id: "outside-terminal", label: "Double Shift, not in a terminal" },
+  { id: "any",              label: "Double Shift" },
+];
+
+/** The label for one mode, for a surface that has only the value. */
+export function doubleShiftLabel(mode: DoubleShiftMode): string {
+  return DOUBLE_SHIFT_MODES.find(m => m.id === mode)?.label ?? mode;
+}
 
 /** Groups of rebindable commands that intentionally share a binding and can
  *  NEVER fire at the same time, so the Shortcuts settings page must not flag

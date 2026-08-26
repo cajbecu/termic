@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import {
   SHORTCUT_DEFS,
   FIXED_SHORTCUTS,
+  DOUBLE_SHIFT_MODES,
   GROUP_ORDER,
   NON_CONFLICTING_GROUPS,
   DEFAULT_BINDINGS,
@@ -34,16 +35,6 @@ import type { DoubleShiftMode } from "@/store/prefs";
 const HIDDEN_ON_MAC: Set<ShortcutId> = IS_MAC
   ? new Set<ShortcutId>(["terminal-copy", "terminal-paste"])
   : new Set<ShortcutId>();
-
-/** The four answers to "when does double-Shift open Search everywhere".
- *  Ordered off-to-most-permissive so the list reads as a dial rather than a
- *  set of unrelated switches. */
-const DOUBLE_SHIFT_OPTIONS: { id: DoubleShiftMode; label: string }[] = [
-  { id: "off",              label: "Off" },
-  { id: "left",             label: "Left Shift only" },
-  { id: "outside-terminal", label: "Either Shift, not in a terminal" },
-  { id: "any",              label: "Either Shift" },
-];
 
 export function ShortcutsSection() {
   const shortcuts = usePrefs(s => s.shortcuts);
@@ -210,8 +201,14 @@ export function ShortcutsSection() {
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     {/* No recorder, and a word saying why. An empty slot where
-                        every other row has a button reads as a bug. */}
-                    <span className="text-[11.5px] text-[var(--color-fg-faint)]">{f.fixedReason}</span>
+                        every other row has a button reads as a bug. Suppressed
+                        for the row that carries a select: that select names
+                        the gesture in full, and printing "Double tap" beside
+                        "Double left Shift" said the same thing twice, in two
+                        different vocabularies. */}
+                    {f.id !== "search-everywhere" && (
+                      <span className="text-[11.5px] text-[var(--color-fg-faint)]">{f.fixedReason}</span>
+                    )}
                     <div className={cn(
                       "flex min-h-[28px] min-w-[80px] items-center justify-center gap-1 px-2 py-1",
                       // Keys still shown while off, greyed: the row is also
@@ -234,7 +231,7 @@ export function ShortcutsSection() {
                         onChange={(e) => setDoubleShiftMode(e.target.value as DoubleShiftMode)}
                         className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-2)] px-2 py-1 text-[12.5px] text-[var(--color-fg)]"
                       >
-                        {DOUBLE_SHIFT_OPTIONS.map(o => (
+                        {DOUBLE_SHIFT_MODES.map(o => (
                           <option key={o.id} value={o.id}>{o.label}</option>
                         ))}
                       </select>

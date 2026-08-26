@@ -15,8 +15,13 @@ import {
   DEFAULT_BINDINGS,
   type Binding,
   type BindingMap,
+  type DoubleShiftMode,
   type ShortcutId,
 } from "@/lib/shortcuts";
+
+// Re-exported so a component reading the pref can take its type from the same
+// import, rather than knowing which of the two modules declared it.
+export type { DoubleShiftMode };
 import {
   DEFAULT_COMPLETION_SOUND_ID,
   LS_COMPLETION_SOUND,
@@ -80,10 +85,6 @@ const UI_SCALE_MAX = 200;
 const UI_SCALE_STEP = 10;
 const clampUiScale = (pct: number): number =>
   Math.max(UI_SCALE_MIN, Math.min(UI_SCALE_MAX, Math.round(pct)));
-
-/** When the double-Shift gesture opens Search Everywhere. See the field's
- *  own comment in PrefsState for what each one means. */
-export type DoubleShiftMode = "off" | "left" | "any" | "outside-terminal";
 
 /** Markdown edit-tab view: source editor, rendered preview, or both. */
 export type MarkdownView = "source" | "preview" | "split";

@@ -53,12 +53,19 @@ Double-Shift (Search everywhere) is the only entry today; it is handled in
 **It cannot be rebound, so what Settings offers instead is WHEN it applies**
 (`prefs.doubleShiftMode`, a select on that same read-only row):
 
-| mode | |
-| --- | --- |
-| `off` | never |
-| `left` | two taps of the LEFT Shift. **The default.** |
-| `outside-terminal` | either Shift, but not while a terminal has focus |
-| `any` | either Shift, JetBrains' own behaviour |
+| mode | label the reader sees | |
+| --- | --- | --- |
+| `off` | Off | never |
+| `left` | Double left Shift | **the default** |
+| `outside-terminal` | Double Shift, not in a terminal | never while a terminal has focus |
+| `any` | Double Shift | JetBrains' own behaviour |
+
+Every label names the WHOLE gesture, and the row prints nothing else beside
+the select. It first shipped reading "Double tap, left" next to a select
+saying "Left Shift only": the same gesture named twice, in two vocabularies,
+neither half meaning anything alone. `DOUBLE_SHIFT_MODES` is the one list, and
+the command sheet prints the current mode's label from it where a recorder
+would be, so the two surfaces cannot word it differently.
 
 The reason it needs a setting at all: this is two taps of the key that starts
 every capital letter, and there is no other key to move it to. The right-hand
@@ -69,9 +76,9 @@ ignored (left-right-left inside the window is typing, not a request).
 
 The location test is written as "not the right-hand one", never
 `location === 1`: a synthetic event carries location 0, and a rule demanding 1
-would turn the gesture off wherever the location is not reported. Both surfaces
-follow the mode: the ⌘/ sheet drops the row entirely when it is off, and the
-word where the recorder would be says which double tap ("Double tap, left").
+would turn the gesture off wherever the location is not reported. The ⌘/ sheet drops the row
+entirely when the mode is off, since a sheet printing a gesture that does
+nothing is an instruction to press an inert key.
 
 They are deliberately NOT in `SHORTCUT_DEFS`: everything there has a `Binding`,
 and the bindings map, the conflict check, the Settings recorder and the
