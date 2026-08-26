@@ -570,6 +570,12 @@ export interface Agent {
    *  for things like `CLAUDE_CODE_NO_FLICKER=1` without wrapping the CLI
    *  in a shell script. UI parses `KEY=VAL` lines and round-trips them. */
   env?: Record<string, string>;
+  /** Environment used INSTEAD of `env` when this agent runs in a Docker
+   *  container; ignored otherwise. Empty = use `env`. Exists because a value
+   *  that is right on the host (a config dir under /Users/...) names a path
+   *  that is not mounted in the container, and termic cannot infer which
+   *  variables those are for a cloned agent. */
+  docker_env?: Record<string, string>;
   /** Paths joined into every sandbox built for a task using this
    *  agent. Cannot be removed per-task — to drop one, edit the
    *  agent in Settings → Agents (affects every task using it).

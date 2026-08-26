@@ -29,6 +29,9 @@ export function AgentsSection() {
   const terminalCopyOnSelect = usePrefs(s => s.terminalCopyOnSelect);
   const setTerminalCopyOnSelect = usePrefs(s => s.setTerminalCopyOnSelect);
   const [agents, setAgents] = useState<Agent[]>([]);
+  // Drives whether the Docker-only environment field is offered at all.
+  // Read from the same settings load the agent list comes from.
+  const [dockerSandboxOn, setDockerSandboxOn] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [err, setErr] = useState<string | null>(null);
@@ -52,7 +55,10 @@ export function AgentsSection() {
   const [defaults, setDefaults] = useState<Agent[]>([]);
 
   useEffect(() => {
-    settingsLoad().then(s => setAgents(s.agents || [])).catch(e => setErr(String(e)));
+    settingsLoad().then(s => {
+      setDockerSandboxOn(!!s.docker_sandbox_enabled);
+      return s;
+    }).then(s => setAgents(s.agents || [])).catch(e => setErr(String(e)));
     agentsDefaults().then(setDefaults).catch(() => {});
     // Re-probe install status each time this tab opens — the chosen
     // "startup + Settings open" detection cadence.
@@ -300,6 +306,7 @@ export function AgentsSection() {
         defaults={defaults}
         isModified={isModified}
         patchAgent={patchAgent}
+        dockerSandboxOn={dockerSandboxOn}
         onCommitId={commitAgentId}
         patchCaps={patchCaps}
         requestRemoveAgent={requestRemoveAgent}
@@ -377,7 +384,10 @@ export function AgentsSection() {
 function AgentsTabs({
   agents, activeId, setActiveId, autoFocusId, defaults, isModified,
   patchAgent, onCommitId, patchCaps, requestRemoveAgent, resetAgent, cloneAgent, reorderAgent, onAutoFocusConsumed,
+  dockerSandboxOn,
 }: {
+  /** App-wide Docker sandbox switch; gates the Docker-only env field. */
+  dockerSandboxOn?: boolean;
   agents: Agent[];
   activeId: string | null;
   setActiveId: (id: string | null) => void;
@@ -566,6 +576,7 @@ function AgentsTabs({
           agent={active}
           detected={detectedClis[active.id]}
           onPatch={(p) => patchAgent(active.id, p)}
+          dockerSandboxOn={dockerSandboxOn}
           onCommitId={(newDisplayName) => onCommitId(active.id, newDisplayName)}
           onPatchCaps={(p) => patchCaps(active.id, p)}
           onRemove={() => requestRemoveAgent(active.id)}
@@ -581,8 +592,11 @@ function AgentsTabs({
   );
 }
 
-function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove, onClone, extendsName, autoFocus, onAutoFocusConsumed, modified, onReset }: {
+function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove, onClone, extendsName, autoFocus, onAutoFocusConsumed, modified, onReset, dockerSandboxOn }: {
   agent: Agent;
+  /** Whether Docker sandboxing is enabled app-wide; gates the Docker-only
+   *  environment field, which does nothing while it is off. */
+  dockerSandboxOn?: boolean;
   /** PATH-detection result for this agent, once `refreshClis` has run.
    *  undefined = not probed yet → no badge. */
   detected?: CliInfo;
@@ -828,6 +842,20 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
             onChange={(env) => onPatch({ env })}
           />
         </Field>
+        {/* Docker-only environment. Hidden entirely while Docker sandboxing
+            is off, because it would be a box that provably does nothing:
+            the field is read on the Docker spawn path and nowhere else. */}
+        {dockerSandboxOn && (
+          <Field
+            label="Environment (Docker)"
+            hint="Used INSTEAD of the Environment above when this agent runs in a Docker container. Leave empty to use the same one. Worth setting when a value names a path on your Mac: inside the container that path is not mounted, so the agent writes to a throwaway filesystem and the login is gone next launch. Cloned agents already get their own config folder in Docker, so a config-dir variable is usually not needed here at all."
+          >
+            <EnvTextarea
+              value={agent.docker_env ?? {}}
+              onChange={(docker_env) => onPatch({ docker_env })}
+            />
+          </Field>
+        )}
         <Field
           label="Sandbox allowed paths"
           hint="One path per line. $HOME and ~ expand. Joined into every task sandbox that uses this agent; tasks cannot remove them. Reset to defaults restores the shipped list."

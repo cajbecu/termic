@@ -2917,7 +2917,9 @@ fn pty_spawn(
         // so switching a task between Seatbelt and Docker doesn't lose
         // whatever extra directories were configured for it.
         let (docker_allowed_paths, _) = live_sandbox_lists(&task);
-        let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone(), &args.env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts, &id);
+        // Docker-specific env when this agent declares one (see Agent.docker_env).
+        let docker_env = docker_env_for(&docker_settings.agents, &agent, &args.env);
+        let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone(), &docker_env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts, &id);
         let argv = docker::render_argv(&spec, &args.cmd, &args.args);
         dlog(&format!("[pty_spawn] docker task={} agent={} image={} argv={argv:?}", task.id, agent, image));
         Some((argv, spec.container_name))
@@ -15242,6 +15244,20 @@ pub struct Agent {
     /// the UI parses `KEY=VAL` lines and round-trips them through this map.
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+    /// Per-agent environment used INSTEAD of `env` when this agent runs in a
+    /// Docker container, and ignored entirely otherwise. Empty = use `env`,
+    /// which is the behaviour every existing install already has.
+    ///
+    /// The two cannot be one list because a value that is meaningful on the
+    /// host is often meaningless inside the container: a config-dir
+    /// relocation var pointing at `/Users/you/.next-claude` names a path
+    /// that is not mounted there, so the agent silently writes to the
+    /// container's throwaway filesystem and the login is gone on the next
+    /// launch. Termic cannot infer which variables those are, because a
+    /// CLONED agent has no declared relocation var to recognise, so the user
+    /// says it rather than termic guessing.
+    #[serde(default)]
+    pub docker_env: std::collections::HashMap<String, String>,
     /// Paths joined into the task sandbox allow-list whenever this
     /// agent's CLI is launched. The sandbox is allowlist-only (default-deny
     /// reads + writes outside this set); per-agent paths cover the dirs the
@@ -15400,6 +15416,8 @@ fn default_agents() -> Vec<Agent> {
                 match_output: false,
             },
             env: std::collections::HashMap::new(),
+            // Empty = a Docker spawn uses `env` above, unchanged.
+            docker_env: std::collections::HashMap::new(),
             sandbox_allowed_paths: vec![
                 // Covers $HOME/.claude/, $HOME/.claude.json,
                 // $HOME/.claude.lock, $HOME/.claude.json.lock, and
@@ -15450,6 +15468,8 @@ fn default_agents() -> Vec<Agent> {
                 match_output: false,
             },
             env: std::collections::HashMap::new(),
+            // Empty = a Docker spawn uses `env` above, unchanged.
+            docker_env: std::collections::HashMap::new(),
             sandbox_allowed_paths: vec![
                 "$HOME/.codex".into(),
                 "$HOME/.config/codex".into(),
@@ -15495,6 +15515,8 @@ fn default_agents() -> Vec<Agent> {
                 match_output: false,
             },
             env: std::collections::HashMap::new(),
+            // Empty = a Docker spawn uses `env` above, unchanged.
+            docker_env: std::collections::HashMap::new(),
             // Antigravity is a Gemini-family CLI and actually keeps its
             // per-project state under ~/.gemini (the `.antigravitycli/`
             // dir it drops in a repo just symlinks into
@@ -15547,6 +15569,8 @@ fn default_agents() -> Vec<Agent> {
                 match_output: false,
             },
             env: std::collections::HashMap::new(),
+            // Empty = a Docker spawn uses `env` above, unchanged.
+            docker_env: std::collections::HashMap::new(),
             sandbox_allowed_paths: vec![
                 "$HOME/.copilot".into(),
                 "$HOME/.config/copilot".into(),
@@ -15588,6 +15612,8 @@ fn default_agents() -> Vec<Agent> {
                 match_output: false,
             },
             env: std::collections::HashMap::new(),
+            // Empty = a Docker spawn uses `env` above, unchanged.
+            docker_env: std::collections::HashMap::new(),
             sandbox_allowed_paths: vec![
                 "$HOME/.grok".into(),
                 "$HOME/.config/grok".into(),
@@ -15630,6 +15656,8 @@ fn default_agents() -> Vec<Agent> {
                 match_output: false,
             },
             env: std::collections::HashMap::new(),
+            // Empty = a Docker spawn uses `env` above, unchanged.
+            docker_env: std::collections::HashMap::new(),
             sandbox_allowed_paths: vec![
                 "$HOME/.config/opencode".into(),
                 "$HOME/.local/share/opencode".into(),
@@ -15999,6 +16027,22 @@ fn sample_preview_task() -> Task {
     }
 }
 
+/// The env a Docker spawn should carry for `agent_id`: the agent's
+/// `docker_env` when it has one, otherwise `fallback` (its ordinary `env`,
+/// already merged by the caller). ONE resolver on purpose - the real spawn
+/// and `docker_command_preview` both route through it, so the preview cannot
+/// promise an environment the launch does not deliver.
+fn docker_env_for(
+    agents: &[Agent],
+    agent_id: &str,
+    fallback: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    match agents.iter().find(|a| a.id == agent_id) {
+        Some(a) if !a.docker_env.is_empty() => a.docker_env.clone(),
+        _ => fallback.clone(),
+    }
+}
+
 /// Stand-in pty id for the command PREVIEW. A preview belongs to no tab,
 /// and the only thing the id feeds is the container's `--name` suffix, so a
 /// fixed marker keeps the rendered name stable between openings instead of
@@ -16037,7 +16081,8 @@ fn docker_command_preview(task_id: Option<String>, agent_id: Option<String>) -> 
     let agent_extra_dirs = settings.docker_agent_extra_dirs.get(&agent_id).cloned().unwrap_or_default();
     let agent_persist_enabled = settings.docker_agent_persist_enabled.get(&agent_id).copied().unwrap_or(false);
     let (docker_allowed_paths, _) = live_sandbox_lists(&task);
-    let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &agent.env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts, PREVIEW_PTY_ID);
+    let preview_env = docker_env_for(&settings.agents, &agent_id, &agent.env);
+    let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &preview_env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts, PREVIEW_PTY_ID);
     let argv = docker::render_argv(&spec, &agent.command, &agent.args);
     Ok(DockerCommandPreview { spec, argv })
 }
@@ -22603,6 +22648,49 @@ filename f.rs
             .filter(|n| n.contains(".tmp."))
             .collect();
         assert!(strays.is_empty(), "failed write left staging files: {strays:?}");
+    }
+
+    #[test]
+    fn docker_env_replaces_the_host_env_only_when_the_agent_declares_one() {
+        // The case this exists for: a cloned agent whose HOST env points its
+        // config dir at a path on the Mac. In the container that path is not
+        // mounted, so the agent writes to the throwaway filesystem and the
+        // login is gone next launch. Termic cannot infer which variable that
+        // is (a clone declares no relocation var), so the user names the
+        // Docker environment instead.
+        let template = default_agents().into_iter().next().unwrap();
+        let mut host_env = std::collections::HashMap::new();
+        host_env.insert("CLAUDE_CONFIG_DIR".to_string(), "/Users/me/.next-claude".to_string());
+        host_env.insert("SHARED".to_string(), "1".to_string());
+
+        let mut docker_env = std::collections::HashMap::new();
+        docker_env.insert("CLAUDE_CONFIG_DIR".to_string(), "/root/.claude".to_string());
+
+        let with_override = Agent {
+            id: "next-claude".into(),
+            env: host_env.clone(),
+            docker_env: docker_env.clone(),
+            ..template.clone()
+        };
+        let without = Agent {
+            id: "plain".into(),
+            env: host_env.clone(),
+            docker_env: Default::default(),
+            ..template.clone()
+        };
+        let agents = vec![with_override, without];
+
+        // Declared: REPLACES, so the host path cannot leak in behind it.
+        let resolved = docker_env_for(&agents, "next-claude", &host_env);
+        assert_eq!(resolved, docker_env);
+        assert!(!resolved.contains_key("SHARED"),
+            "replace, not merge: a half-applied env is harder to reason about \
+             than one the user wrote out");
+
+        // Not declared: unchanged, so no existing install changes behaviour.
+        assert_eq!(docker_env_for(&agents, "plain", &host_env), host_env);
+        // Unknown agent falls back too rather than dropping the env.
+        assert_eq!(docker_env_for(&agents, "nobody", &host_env), host_env);
     }
 
     #[test]
