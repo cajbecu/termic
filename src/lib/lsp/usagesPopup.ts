@@ -312,7 +312,15 @@ const usagesTheme = EditorView.theme({
   ".cm-lsp-usages-file": {
     color: "var(--color-fg)",
     fontWeight: "500",
-    flexShrink: 0,
+    // A label is short by construction (bare name, or an elided path when two
+    // files clash), but a deeply nested clash can still be long. Capped and
+    // shrinkable rather than fixed, so a long one gives way to the code column
+    // instead of pushing it off the row.
+    flexShrink: 1,
+    maxWidth: "26ch",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
   },
   ".cm-lsp-usages-line": {
     color: "var(--color-fg-dim)",

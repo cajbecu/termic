@@ -148,6 +148,11 @@ describe("code intelligence", () => {
     copyFileSync(fakeServer, path.join(bin, "tsgo"));
     chmodSync(path.join(bin, "tsgo"), 0o755);
     writeFileSync(path.join(root, "navme.ts"), "export const answer = 42;\n");
+    // A SECOND file with the same basename, which the fixture reports one
+    // usage in: two files called navme.ts is what makes the popup's row
+    // labels have something to disambiguate.
+    mkdirSync(path.join(root, "nested"), { recursive: true });
+    writeFileSync(path.join(root, "nested", "navme.ts"), "export const answer = 7;\n");
     rmSync(path.join(root, ".fake-lsp.json"), { force: true });
     // Most cases below read a diagnostic to prove the pipe is live, and type
     // checking ships OFF (navigation is the feature; a checker's opinion about
@@ -178,6 +183,7 @@ describe("code intelligence", () => {
     ]) {
       rmSync(path.join(root, rel), { force: true });
     }
+    rmSync(path.join(root, "nested"), { recursive: true, force: true });
     rmSync(path.join(root, "node_modules"), { recursive: true, force: true });
     // Never hand the next spec file a standing confirm: one is on screen at a
     // time, and an unanswered one blocks the whole window.
@@ -587,6 +593,20 @@ describe("code intelligence", () => {
     const rows = await browser.execute((id) =>
       document.querySelectorAll(`[data-task-id="${id}"] .cm-lsp-usages-row`).length, taskId) as number;
     expect(rows).toBeGreaterThan(0);
+
+    // The fixture reports the first location TWICE, the way a real server does
+    // when a reference comes from both the open document and the index. Three
+    // usages, three rows: the popup used to list four, so four usages read as
+    // eight with the same line numbers twice over.
+    expect(rows).toBe(3);
+
+    // And each row says WHICH file. Two files here are called navme.ts, so
+    // every row pays for a path; with one file they would all stay on the bare
+    // name (`lib/lsp/usageLabels.ts` decides, and is unit-tested).
+    const labels = await browser.execute((id) =>
+      [...document.querySelectorAll(`[data-task-id="${id}"] .cm-lsp-usages-file`)]
+        .map(el => (el as HTMLElement).textContent), taskId) as string[];
+    expect(labels).toEqual(["navme.ts", "navme.ts", "nested/navme.ts"]);
 
     // Clicking somewhere that is NOT the definition jumps there instead of
     // opening the panel again.

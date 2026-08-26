@@ -428,6 +428,22 @@ The gap worth knowing about: the chip lives on the editor path bar, so while you
 
 **Python environments are named, not inferred.** The host answers `workspace/configuration` per section: `python` gets `pythonPath` (pyright and basedpyright find their interpreter THERE and ignore `VIRTUAL_ENV`), `ty` gets `environment.python`, and every other section gets `null`, which is what the rest expect. Without this, a project whose packages live in `.venv` gets analysed against some other Python and fills with errors about imports that are installed. Termic also warns when a checkout has Django but no `django-stubs`: Django adds `Model.objects` at runtime, so a checker is right to call it missing, and the fix is a package rather than a setting (measured: ty reports that error without the stubs and zero diagnostics with them).
 
+**A usages row says which file, but only when it has to.** Row labels come
+from `usageLabels()` (`lib/lsp/usageLabels.ts`), which is PyCharm's rule: a
+basename that appears once is shown bare, and only a clash pays for a path,
+elided in the middle when long (`projects/…/views.py`). What it replaced named
+every row by whatever was left after stripping the directory all rows share,
+which collapsed to the bare basename exactly when it mattered: nine usages
+spread over a Django repo's three `views.py` read as nine usages in one file.
+Two files that would still elide to the same label get their full relative
+paths instead, since an ambiguous label is the whole problem being solved. The
+footer keeps the selected row's absolute path.
+
+Locations are **deduplicated on (uri, line, character) before anything counts
+them**: a server reporting one reference from both the open document and its
+index is normal, and the popup listed each twice, so four usages read as eight
+with the same line numbers repeated.
+
 **⌘-click does what IntelliJ's does**, which is two things depending on where you are: on a usage it jumps to the definition, and **on the definition it lists the usages** (`lib/lsp/modClick.ts`). That second half is the one people miss when they leave JetBrains, and it costs one comparison: ask for the definition, and when the answer is the place you clicked, ask for references instead. It is a mousedown handler rather than a click one, so the editor never starts a text selection first. While the modifier is held the editor shows a pointer, reusing the same `termic-mod-held` class as the terminal's link affordance, scoped to `.cm-lsp-navigable` so an editor with no server keeps a text caret.
 
 Keys come from the client's own keymaps, mounted only while a checkout is armed: **F12** jumps to definition, **Shift-F12** finds references (the client ships the panel it renders into). They are CodeMirror bindings, not entries in termic's rebindable shortcut system (docs/shortcuts.md), because they exist only inside an editor that has a server attached.

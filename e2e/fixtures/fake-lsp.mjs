@@ -173,14 +173,26 @@ function handle(msg) {
       send({ jsonrpc: "2.0", id: msg.id, result: [] });
       return;
     }
+    // Four locations, three usages: the first is deliberately reported TWICE,
+    // which is what a real server does when a reference comes from both the
+    // open document and the index, and the popup used to list both. The last
+    // sits in a DIFFERENT directory under the same basename, so the row labels
+    // have a clash to disambiguate (`lib/lsp/usageLabels.ts`); every other row
+    // stays on its bare name.
+    const here = msg.params.textDocument.uri;
+    const twin = here.replace(/\/([^/]+)$/, "/nested/$1");
     send({
       jsonrpc: "2.0",
       id: msg.id,
       result: [
-        { uri: msg.params.textDocument.uri,
+        { uri: here,
           range: { start: { line: 0, character: 13 }, end: { line: 0, character: 19 } } },
-        { uri: msg.params.textDocument.uri,
+        { uri: here,
+          range: { start: { line: 0, character: 13 }, end: { line: 0, character: 19 } } },
+        { uri: here,
           range: { start: { line: 2, character: 0 }, end: { line: 2, character: 6 } } },
+        { uri: twin,
+          range: { start: { line: 0, character: 0 }, end: { line: 0, character: 6 } } },
       ],
     });
     return;

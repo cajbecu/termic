@@ -20,6 +20,7 @@ import { LSPPlugin } from "@codemirror/lsp-client";
 import { setUsages, type UsageRow } from "./usagesPopup";
 import { uriToPath, pathToUri, readAnyFile } from "./workspace";
 import { currentPoint, navigateTo, pointFor, taskForPath } from "./navigate";
+import { usageLabels } from "./usageLabels";
 import { isDeclarationOnly, sourceCandidates, findSymbolLine } from "./declarationSource";
 
 interface LspRange {
@@ -253,13 +254,26 @@ export async function showUsages(view: EditorView, pos: number): Promise<void> {
   }
   if (!locations?.length) { sayNone(); return; }
 
-  // Shortest path that still identifies the file: the checkout root is the
-  // same for every row, so showing it on all of them is noise.
-  const paths = locations.map(l => uriToPath(l.uri) ?? l.uri);
-  const prefix = commonDirPrefix(paths);
+  // Servers repeat themselves: a reference reported once per open document and
+  // once from the index arrives twice, and the popup listed both, so four
+  // usages read as eight with the same line numbers twice over. Deduped on
+  // what makes a usage the same usage, before anything else counts them.
+  const seenLoc = new Set<string>();
+  const unique = locations.filter((l) => {
+    const key = `${l.uri}:${l.range.start.line}:${l.range.start.character}`;
+    if (seenLoc.has(key)) return false;
+    seenLoc.add(key);
+    return true;
+  });
+
+  // A name per row: bare where it is unambiguous, a path only where two files
+  // share a basename (`lib/lsp/usageLabels.ts`). Relative to each file's own
+  // checkout, since a usage can land outside this one.
+  const paths = unique.map(l => uriToPath(l.uri) ?? l.uri);
+  const labels = usageLabels(paths.map(p => ({ path: p, root: taskForPath(p)?.path ?? null })));
 
   const rows: UsageRow[] = [];
-  for (const [i, loc] of locations.entries()) {
+  for (const [i, loc] of unique.entries()) {
     const abs = paths[i];
     const file = await client.workspace.requestFile(loc.uri);
     if (!file) continue;
@@ -272,7 +286,7 @@ export async function showUsages(view: EditorView, pos: number): Promise<void> {
     rows.push({
       uri: loc.uri,
       path: abs,
-      file: abs.startsWith(prefix) ? abs.slice(prefix.length) : abs,
+      file: labels[i],
       line: lineNo,
       text: trimmed.slice(0, 200),
       from: Math.max(0, loc.range.start.character - shift),
@@ -283,14 +297,3 @@ export async function showUsages(view: EditorView, pos: number): Promise<void> {
   view.dispatch({ effects: setUsages.of({ pos, symbol, symbolOffset, rows }) });
 }
 
-/** The directory every path shares, so rows show what differs. */
-function commonDirPrefix(paths: string[]): string {
-  if (paths.length === 0) return "";
-  let prefix = paths[0].slice(0, paths[0].lastIndexOf("/") + 1);
-  for (const p of paths) {
-    while (prefix && !p.startsWith(prefix)) {
-      prefix = prefix.slice(0, prefix.lastIndexOf("/", prefix.length - 2) + 1);
-    }
-  }
-  return prefix;
-}
