@@ -273,9 +273,10 @@ export function TaskSandboxDialog() {
               </div>
               <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
                 Filesystem isolation: the agent runs inside a Docker container and can only touch the worktree +
-                its persistent config dir. Network is unrestricted inside the container, unlike Seatbelt's
-                host allowlist. Overrides the mode above - a task can be sandboxed with Docker or Seatbelt,
-                not both. Manage the image in Settings → Docker Sandbox.
+                its persistent config dir. <u>Network is unrestricted for now</u>, unlike Seatbelt's host
+                allowlist (a network allow-list for Docker mode is planned once this is stable). Overrides the
+                mode above - a task can be sandboxed with Docker or Seatbelt, not both. Manage the image in
+                Settings → Docker Sandbox.
               </div>
             </div>
           </label>

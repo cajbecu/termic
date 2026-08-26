@@ -186,9 +186,9 @@ export function DockerSection() {
       </p>
       <p className="text-[12.5px] text-[var(--color-fg-dim)]">
         A filesystem cage: the agent can only touch the folders termic mounts (the worktree and its git
-        metadata). Everything else on your Mac is invisible to it. Network access inside the container is
-        unrestricted, unlike Seatbelt's host allowlist. One image is shared by every Docker task; pick Docker
-        per task from its sandbox dialog.
+        metadata). Everything else on your Mac is invisible to it. <u>Network access is unrestricted for now</u>,
+        unlike Seatbelt's host allowlist (a network allow-list for Docker mode is planned once this is stable).
+        One image is shared by every Docker task; pick Docker per task from its sandbox dialog.
       </p>
 
       {/* Master toggle */}
