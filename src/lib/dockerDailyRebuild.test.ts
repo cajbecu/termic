@@ -204,3 +204,33 @@ describe("maybeRebuildDockerImageForLaunch", () => {
     expect(mockedBuildImage).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("describeLastBuildDate at a realistic time of day", () => {
+  // The original bug hid behind a midnight `now`: measuring from the current
+  // TIME and rounding, an image built today read as "yesterday" from about
+  // midday. Every case here uses an afternoon clock on purpose.
+  it("calls an image built today 'earlier today' in the afternoon", () => {
+    expect(describeLastBuildDate("2026-08-26", new Date(2026, 7, 26, 15, 30)))
+      .toBe("It was last built earlier today.");
+  });
+
+  it("calls yesterday 'yesterday', not '2 days ago', after 36 hours", () => {
+    expect(describeLastBuildDate("2026-08-25", new Date(2026, 7, 26, 15, 30)))
+      .toBe("It was last built yesterday.");
+  });
+
+  it("counts whole calendar days beyond that", () => {
+    expect(describeLastBuildDate("2026-08-22", new Date(2026, 7, 26, 15, 30)))
+      .toBe("It was last built 4 days ago.");
+  });
+
+  it("agrees with isRebuildDue about what day it is", () => {
+    // The two disagreeing is the actual defect: the prompt claimed the image
+    // was a day older than the check that decided whether to offer a rebuild.
+    const now = new Date(2026, 7, 26, 15, 30);
+    expect(describeLastBuildDate("2026-08-26", now)).toBe("It was last built earlier today.");
+    expect(isRebuildDue("daily", "2026-08-26", now)).toBe(false);
+    expect(describeLastBuildDate("2026-08-25", now)).toBe("It was last built yesterday.");
+    expect(isRebuildDue("daily", "2026-08-25", now)).toBe(true);
+  });
+});

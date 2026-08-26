@@ -21,12 +21,24 @@ export type DockerRebuildFrequency = "off" | "daily" | "weekly";
  *  IPC. `null` (never built) is always due - callers gate on image
  *  availability separately, since "never built" also means "nothing to
  *  launch with" and is handled upstream of this check. */
+/** Whole CALENDAR days between two local dates.
+ *
+ *  Not a millisecond subtraction: the stored value is a date with no time,
+ *  so the only meaningful unit is days-on-the-calendar. Normalising each
+ *  side to a UTC midnight makes the difference exact across a DST boundary,
+ *  where a local day is 23 or 25 hours and dividing by 86_400_000 rounds to
+ *  the wrong day. */
+function calendarDaysBetween(from: Date, to: Date): number {
+  const dayIndex = (d: Date) =>
+    Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86_400_000);
+  return dayIndex(to) - dayIndex(from);
+}
+
 export function isRebuildDue(frequency: "daily" | "weekly", lastBuiltDateIso: string | null, now: Date = new Date()): boolean {
   if (!lastBuiltDateIso) return true;
   const last = new Date(`${lastBuiltDateIso}T00:00:00`);
   if (Number.isNaN(last.getTime())) return true;
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const daysSince = Math.floor((startOfToday.getTime() - last.getTime()) / 86_400_000);
+  const daysSince = calendarDaysBetween(last, now);
   return frequency === "daily" ? daysSince >= 1 : daysSince >= 7;
 }
 
@@ -36,7 +48,13 @@ export function describeLastBuildDate(lastBuiltDateIso: string | null, now: Date
   if (!lastBuiltDateIso) return "It has never finished a build.";
   const last = new Date(`${lastBuiltDateIso}T00:00:00`);
   if (Number.isNaN(last.getTime())) return "It has never finished a build.";
-  const days = Math.max(0, Math.round((now.getTime() - last.getTime()) / 86_400_000));
+  // Calendar days, like isRebuildDue - NOT `now - last` rounded. Measuring
+  // from the current time meant an image built at 09:00 TODAY read as "last
+  // built yesterday" from about midday onward (0.6 of a day, rounded up),
+  // and one built yesterday became "2 days ago" after ~36 hours. The two
+  // functions disagreeing is the real bug: the prompt said the image was a
+  // day older than the check that decided a rebuild was due.
+  const days = Math.max(0, calendarDaysBetween(last, now));
   if (days <= 0) return "It was last built earlier today.";
   if (days === 1) return "It was last built yesterday.";
   return `It was last built ${days} days ago.`;
