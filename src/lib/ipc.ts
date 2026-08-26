@@ -57,7 +57,7 @@ export const taskOpenRepo = (
   projectId: string,
   cli?: string,
   name?: string,
-  sandbox?: { enabled: boolean; mode?: SandboxMode; rwPaths: string[]; allowedHosts: string[] },
+  sandbox?: { enabled: boolean; mode?: SandboxMode; rwPaths: string[]; allowedHosts: string[]; docker?: boolean },
   command?: string,
   /** Externally-started session the agent resumes on first spawn (GH #169). */
   resumeSessionId?: string,
@@ -71,6 +71,7 @@ export const taskOpenRepo = (
     sandboxMode: sandbox?.mode,
     sandboxRwPaths: sandbox?.rwPaths,
     sandboxAllowedHosts: sandbox?.allowedHosts,
+    dockerSandboxEnabled: sandbox?.docker,
     resumeSessionId, resumeOverride,
   });
 /** List a project's git worktrees not yet open as tasks (issue #5). */
@@ -84,7 +85,7 @@ export const taskImportWorktree = (
   path: string,
   name?: string,
   cli?: string,
-  sandbox?: { enabled: boolean; mode?: SandboxMode; rwPaths: string[]; allowedHosts: string[] },
+  sandbox?: { enabled: boolean; mode?: SandboxMode; rwPaths: string[]; allowedHosts: string[]; docker?: boolean },
   /** Externally-started session the agent resumes on first spawn (GH #169). */
   resumeSessionId?: string,
   /** Resume-args override, applied from the first spawn. Same field as the
@@ -98,6 +99,7 @@ export const taskImportWorktree = (
     sandboxMode: sandbox?.mode,
     sandboxRwPaths: sandbox?.rwPaths,
     sandboxAllowedHosts: sandbox?.allowedHosts,
+    dockerSandboxEnabled: sandbox?.docker,
     resumeSessionId, resumeOverride, yolo,
   });
 export const taskArchive  = (id: string, deleteBranch?: boolean) => invoke<void>("task_archive", { id, deleteBranch });

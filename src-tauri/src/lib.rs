@@ -756,6 +756,13 @@ pub struct CreateTaskArgs {
     pub sandbox_rw_paths: Option<Vec<String>>,
     #[serde(default)]
     pub sandbox_allowed_hosts: Option<Vec<String>>,
+    /// Run this task's agent in Docker instead of Seatbelt. PINNED at
+    /// creation like `sandbox_enabled` above - mutually exclusive with it
+    /// (the frontend's engine selector only ever sends one of the two as
+    /// "on"; when this is true, `sandbox_mode`/`sandbox_enabled` are sent
+    /// as off). Unset/false → Seatbelt (or no cage) as usual.
+    #[serde(default)]
+    pub docker_sandbox_enabled: Option<bool>,
     /// Pre-set launch command for a `cli == "custom"` worktree task. The
     /// default tab runs this through a login shell instead of an agent
     /// binary (e.g. `npm run dev`, `ssh box`). None for agent / shell tasks.
@@ -2871,7 +2878,12 @@ fn pty_spawn(
         let docker_settings = load_settings_inner();
         let agent_extra_dirs = docker_settings.docker_agent_extra_dirs.get(&agent).cloned().unwrap_or_default();
         let agent_persist_enabled = docker_settings.docker_agent_persist_enabled.get(&agent).copied().unwrap_or(false);
-        let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone(), &args.env, &agent_extra_dirs, agent_persist_enabled);
+        // Same live-rendered allow-list Seatbelt uses just below (re-read
+        // on every spawn so a committed .termic.yaml edit is picked up),
+        // so switching a task between Seatbelt and Docker doesn't lose
+        // whatever extra directories were configured for it.
+        let (docker_allowed_paths, _) = live_sandbox_lists(&task);
+        let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone(), &args.env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths);
         let argv = docker::render_argv(&spec, &args.cmd, &args.args);
         dlog(&format!("[pty_spawn] docker task={} agent={} image={} argv={argv:?}", task.id, agent, image));
         Some((argv, spec.container_name))
@@ -3786,6 +3798,7 @@ fn task_open_repo(
     sandbox_mode: Option<SandboxMode>,
     sandbox_rw_paths: Option<Vec<String>>,
     sandbox_allowed_hosts: Option<Vec<String>>,
+    docker_sandbox_enabled: Option<bool>,
     resume_session_id: Option<String>,
     resume_override: Option<String>,
 ) -> Result<Task, String> {
@@ -3934,6 +3947,12 @@ fn task_open_repo(
         .or_else(|| sandbox_enabled.and_then(|e| e.then_some(SandboxMode::Enforce)))
         .unwrap_or(SandboxMode::Off);
     let sandbox_enabled = sandbox_mode != SandboxMode::Off;
+    let docker_sandbox_enabled = docker_sandbox_enabled.unwrap_or(false);
+    let (sandbox_mode, sandbox_enabled) = if docker_sandbox_enabled {
+        (SandboxMode::Off, false)
+    } else {
+        (sandbox_mode, sandbox_enabled)
+    };
     let sandbox_rw_paths = sandbox_rw_paths.unwrap_or_default();
     let sandbox_allowed_hosts = sandbox_allowed_hosts.unwrap_or_default();
     // Externally-started session to attach (GH #169): the natural fit
@@ -3971,7 +3990,7 @@ fn task_open_repo(
         yolo: false,
         sandbox_rw_paths,
         sandbox_allowed_hosts,
-        docker_sandbox_enabled: false,
+        docker_sandbox_enabled,
         docker_extra_args: Vec::new(),
         composition,
         extra_named_ports,
@@ -4083,6 +4102,7 @@ fn task_import_worktree(
     sandbox_mode: Option<SandboxMode>,
     sandbox_rw_paths: Option<Vec<String>>,
     sandbox_allowed_hosts: Option<Vec<String>>,
+    docker_sandbox_enabled: Option<bool>,
     resume_session_id: Option<String>,
     resume_override: Option<String>,
     yolo: Option<bool>,
@@ -4165,6 +4185,12 @@ fn task_import_worktree(
     let sandbox_mode = sandbox_mode.or(proj.default_sandbox_mode)
         .unwrap_or(if sandbox_enabled { SandboxMode::Enforce } else { SandboxMode::Off });
     let sandbox_enabled = sandbox_mode != SandboxMode::Off;
+    let docker_sandbox_enabled = docker_sandbox_enabled.unwrap_or(false);
+    let (sandbox_mode, sandbox_enabled) = if docker_sandbox_enabled {
+        (SandboxMode::Off, false)
+    } else {
+        (sandbox_mode, sandbox_enabled)
+    };
     let sandbox_rw_paths = sandbox_rw_paths
         .unwrap_or_else(|| merge(&globals.sandbox_default_rw_paths, &proj.sandbox_rw_paths));
     let sandbox_allowed_hosts = sandbox_allowed_hosts
@@ -4197,7 +4223,7 @@ fn task_import_worktree(
         yolo: yolo.unwrap_or(false),
         sandbox_rw_paths,
         sandbox_allowed_hosts,
-        docker_sandbox_enabled: false,
+        docker_sandbox_enabled,
         docker_extra_args: Vec::new(),
         composition: Vec::new(),
         extra_named_ports,
@@ -4491,6 +4517,16 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
     let sandbox_mode = args.sandbox_mode.or(proj.default_sandbox_mode)
         .unwrap_or(if sandbox_enabled { SandboxMode::Enforce } else { SandboxMode::Off });
     let sandbox_enabled = sandbox_mode != SandboxMode::Off;
+    let docker_sandbox_enabled = args.docker_sandbox_enabled.unwrap_or(false);
+    // Mutually exclusive with Seatbelt, same as task_set_docker vs
+    // task_set_sandbox at edit time: the engine selector only ever sends
+    // ONE of these as "on", but enforce it here too so a raw/older caller
+    // that sent both can't create a task with two cages pinned at once.
+    let (sandbox_mode, sandbox_enabled) = if docker_sandbox_enabled {
+        (SandboxMode::Off, false)
+    } else {
+        (sandbox_mode, sandbox_enabled)
+    };
     // Sandbox lists are frozen at creation. The dialog seeds them
     // from the project's defaults (the user may have added/removed
     // before clicking Create); whatever it sends is what we store.
@@ -4537,7 +4573,7 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
         yolo: false,
         sandbox_rw_paths,
         sandbox_allowed_hosts,
-        docker_sandbox_enabled: false,
+        docker_sandbox_enabled,
         docker_extra_args: Vec::new(),
         // Single-project tasks leave composition empty. Multi-
         // repo task creation runs through a separate code path
@@ -4604,6 +4640,11 @@ pub struct CreateMultiArgs {
     pub sandbox_rw_paths: Option<Vec<String>>,
     #[serde(default)]
     pub sandbox_allowed_hosts: Option<Vec<String>>,
+    /// Run this task's agent in Docker instead of Seatbelt. See
+    /// `CreateTaskArgs::docker_sandbox_enabled` - same mutual-exclusivity
+    /// enforced in `task_create_multi_sync`.
+    #[serde(default)]
+    pub docker_sandbox_enabled: Option<bool>,
     /// Resume-args override for the host task, set at create so the first
     /// spawn already carries it. Same storage as `task_set_resume_override`.
     #[serde(default)]
@@ -4962,6 +5003,13 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
     let sandbox_mode = args.sandbox_mode.or(host.default_sandbox_mode)
         .unwrap_or(if sandbox_enabled { SandboxMode::Enforce } else { SandboxMode::Off });
     let sandbox_enabled = sandbox_mode != SandboxMode::Off;
+    let docker_sandbox_enabled = args.docker_sandbox_enabled.unwrap_or(false);
+    // Same enforcement as task_create_sync: never store both cages pinned on.
+    let (sandbox_mode, sandbox_enabled) = if docker_sandbox_enabled {
+        (SandboxMode::Off, false)
+    } else {
+        (sandbox_mode, sandbox_enabled)
+    };
     let mut base_rw: Vec<String> = Vec::new();
     let mut base_hosts: Vec<String> = Vec::new();
     let extend_unique = |target: &mut Vec<String>, src: &[String]| {
@@ -5005,7 +5053,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         yolo: false,
         sandbox_rw_paths,
         sandbox_allowed_hosts,
-        docker_sandbox_enabled: false,
+        docker_sandbox_enabled,
         docker_extra_args: Vec::new(),
         composition,
         extra_named_ports,
@@ -15858,7 +15906,8 @@ fn docker_command_preview(task_id: String, agent_id: Option<String>) -> Result<D
     let image = docker::spawn_image_tag().unwrap_or_else(|| "<image not built yet>".to_string());
     let agent_extra_dirs = settings.docker_agent_extra_dirs.get(&agent_id).cloned().unwrap_or_default();
     let agent_persist_enabled = settings.docker_agent_persist_enabled.get(&agent_id).copied().unwrap_or(false);
-    let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &agent.env, &agent_extra_dirs, agent_persist_enabled);
+    let (docker_allowed_paths, _) = live_sandbox_lists(&task);
+    let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &agent.env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths);
     let argv = docker::render_argv(&spec, &agent.command, &agent.args);
     Ok(DockerCommandPreview { spec, argv })
 }

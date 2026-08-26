@@ -381,6 +381,10 @@ export interface CreateMultiArgs {
   sandbox_mode?: SandboxMode;
   sandbox_rw_paths?: string[];
   sandbox_allowed_hosts?: string[];
+  /** Run this task's agent in Docker instead of Seatbelt. Mutually
+   *  exclusive with sandbox_mode/sandbox_enabled - when true, Rust stores
+   *  those as off regardless of what else was sent. */
+  docker_sandbox_enabled?: boolean;
   /** Resume-args override for the host task, applied from the first spawn.
    *  Same field as the task menu's "Resume override". */
   resume_override?: string;
@@ -409,6 +413,10 @@ export interface CreateTaskArgs {
    *  Rust falls back to the project's defaults verbatim. */
   sandbox_rw_paths?: string[];
   sandbox_allowed_hosts?: string[];
+  /** Run this task's agent in Docker instead of Seatbelt. Mutually
+   *  exclusive with sandbox_mode/sandbox_enabled - when true, Rust stores
+   *  those as off regardless of what else was sent. */
+  docker_sandbox_enabled?: boolean;
   /** Pre-set launch command for a `cli === "custom"` worktree task (quick
    *  "Custom command" in worktree mode). The default tab runs this through a
    *  login shell instead of an agent binary. Null/undefined for agent/shell. */

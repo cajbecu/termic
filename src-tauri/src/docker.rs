@@ -13,7 +13,7 @@
 //
 // Design: docs/plans/docker-sandbox/design.md
 
-use crate::sandbox::{canonicalize_or_keep, parent_git_dir_for_worktree};
+use crate::sandbox::{canonicalize_or_keep, parent_git_dir_for_worktree, subst_path};
 use crate::{data_dir, Task};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
@@ -227,6 +227,16 @@ pub fn build_spec(
     spawn_env: &std::collections::HashMap<String, String>,
     agent_extra_dirs: &[String],
     agent_persist_enabled: bool,
+    // The task's LIVE sandbox allow-list (`live_sandbox_lists` in
+    // lib.rs: global Settings defaults + the task's own pinned paths +
+    // the project's `.termic.yaml`, re-read fresh on every spawn) - the
+    // exact same list Seatbelt's `sandbox::provision` reads. Docker mode
+    // used to ignore this entirely, so switching a task from Seatbelt to
+    // Docker silently dropped every extra allowed directory. Mounted rw
+    // at its own resolved absolute path (same convention as the worktree
+    // and composition members). `regex:`-prefixed entries are Seatbelt-
+    // only (no literal path to mount) and are skipped.
+    allowed_paths: &[String],
 ) -> DockerSpec {
     let mut mounts: Vec<Mount> = Vec::new();
 
@@ -281,6 +291,30 @@ pub fn build_spec(
                 true,
             ));
         }
+    }
+
+    // 3.5. The task's live sandbox allow-list - same source Seatbelt uses
+    //    (`live_sandbox_lists`), unified so extra directories configured
+    //    per-task, per-project, or via a repo's committed `.termic.yaml`
+    //    aren't silently lost when a task runs in Docker instead.
+    let home = dirs::home_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    for raw in allowed_paths {
+        let raw = raw.trim();
+        // Seatbelt-only: a regex pattern has no literal path to mount.
+        if raw.is_empty() || raw.starts_with("regex:") {
+            continue;
+        }
+        let p = canonicalize_or_keep(&subst_path(raw, &home, &task_path));
+        if p.is_empty() || mounts.iter().any(|m| m.host == p) {
+            continue;
+        }
+        mounts.push(Mount::implicit(
+            p.clone(),
+            p,
+            false,
+            "extra allowed directory (from your sandbox config / .termic.yaml)",
+            false,
+        ));
     }
 
     // 4. The persistent per-agent config dir (login + sessions + MCP +
@@ -923,7 +957,7 @@ mod tests {
         let task = stub_task("t1", "/tmp/termic-docker-test-does-not-exist");
         let mut spawn_env = std::collections::HashMap::new();
         spawn_env.insert("MY_CUSTOM_VAR".to_string(), "hello".to_string());
-        let spec = build_spec(&task, "claude", "termic-sandbox:abc", &task.path, vec![], &spawn_env, &[], false);
+        let spec = build_spec(&task, "claude", "termic-sandbox:abc", &task.path, vec![], &spawn_env, &[], false, &[]);
         assert!(spec.env.iter().any(|(k, v)| k == "MY_CUSTOM_VAR" && v == "hello"));
         assert!(spec.env.iter().any(|(k, _)| k == "TERM"));
     }
@@ -936,7 +970,7 @@ mod tests {
         let task = stub_task("t2", "/tmp/termic-docker-test-does-not-exist-2");
         let mut spawn_env = std::collections::HashMap::new();
         spawn_env.insert("TERM".to_string(), "dumb".to_string());
-        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &spawn_env, &[], false);
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &spawn_env, &[], false, &[]);
         let term_values: Vec<&str> = spec.env.iter().filter(|(k, _)| k == "TERM").map(|(_, v)| v.as_str()).collect();
         assert_eq!(term_values, vec!["xterm-256color", "dumb"]);
     }
@@ -960,7 +994,7 @@ mod tests {
             ("opencode", "/root/.config/opencode", &["/root/.local/share/opencode"]),
         ];
         for (agent, primary, extras) in cases {
-            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env, &[], false);
+            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env, &[], false, &[]);
             let mounted: Vec<&str> = spec.mounts.iter().map(|m| m.container.as_str()).collect();
             assert!(mounted.contains(primary), "{agent}: expected {primary} in {mounted:?}");
             for e in *extras {
@@ -969,7 +1003,7 @@ mod tests {
         }
         // grok stays unsupported in Docker mode regardless of what
         // agent_dirs lists for Seatbelt's sake.
-        let grok_spec = build_spec(&task, "grok", "img", &task.path, vec![], &env, &[], false);
+        let grok_spec = build_spec(&task, "grok", "img", &task.path, vec![], &env, &[], false, &[]);
         assert!(!grok_spec.mounts.iter().any(|m| m.container.contains("grok")));
     }
 
@@ -978,7 +1012,7 @@ mod tests {
         let task = stub_task("t4", "/tmp/termic-docker-test-does-not-exist-4");
         let env = std::collections::HashMap::new();
         for (agent, var) in [("claude", "CLAUDE_CONFIG_DIR"), ("codex", "CODEX_HOME")] {
-            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env, &[], false);
+            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env, &[], false, &[]);
             let val = spec.env.iter().find(|(k, _)| k == var).map(|(_, v)| v.as_str());
             assert_eq!(val, Some(format!("/root/.{agent}").as_str()));
         }
@@ -1006,7 +1040,7 @@ mod tests {
         let task = stub_task("t5", "/tmp/termic-docker-test-does-not-exist-5");
         let env = std::collections::HashMap::new();
         let extras = vec![".mytool".to_string(), "../escape".to_string(), "/etc".to_string()];
-        let spec = build_spec(&task, "copilot", "img", &task.path, vec![], &env, &extras, false);
+        let spec = build_spec(&task, "copilot", "img", &task.path, vec![], &env, &extras, false, &[]);
         let mounted: Vec<&str> = spec.mounts.iter().map(|m| m.container.as_str()).collect();
         assert!(mounted.contains(&"/root/.copilot"), "{mounted:?}");
         assert!(mounted.contains(&"/root/.mytool"), "{mounted:?}");
@@ -1023,7 +1057,7 @@ mod tests {
         let task = stub_task("t6", "/tmp/termic-docker-test-does-not-exist-6");
         let env = std::collections::HashMap::new();
         let extras = vec![".grok".to_string()];
-        let spec = build_spec(&task, "grok", "img", &task.path, vec![], &env, &extras, true);
+        let spec = build_spec(&task, "grok", "img", &task.path, vec![], &env, &extras, true, &[]);
         assert!(!spec.mounts.iter().any(|m| m.container.contains("grok")));
         assert!(!persist_offerable("grok"));
     }
@@ -1035,13 +1069,13 @@ mod tests {
         let extras = vec![".mytool".to_string()];
         // Off by default: an unrecognized agent id with extras configured
         // but the opt-in switch still off mounts nothing at all.
-        let off = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &extras, false);
+        let off = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &extras, false, &[]);
         assert!(off.mounts.iter().all(|m| !m.container.contains("mytool")));
 
         // Once opted in, the user's own dirs become the mount (there is no
         // confirmed built-in dir to fall back on for an agent this module
         // has never seen).
-        let on = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &extras, true);
+        let on = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &extras, true, &[]);
         let mounted: Vec<&str> = on.mounts.iter().map(|m| m.container.as_str()).collect();
         assert!(mounted.contains(&"/root/.mytool"), "{mounted:?}");
     }
@@ -1050,9 +1084,39 @@ mod tests {
     fn custom_agent_persist_enabled_with_no_dirs_mounts_nothing() {
         let task = stub_task("t8", "/tmp/termic-docker-test-does-not-exist-8");
         let env = std::collections::HashMap::new();
-        let spec = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &[], true);
+        let spec = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &[], true, &[]);
         // Only the always-there worktree/.git mounts - no agent config dir.
         assert!(spec.mounts.iter().all(|m| !m.why.contains("Docker agent")));
+    }
+
+    #[test]
+    fn live_allowed_paths_are_mounted_at_their_own_absolute_path() {
+        // The task's live sandbox allow-list (lib.rs's live_sandbox_lists -
+        // global Settings + task pin + .termic.yaml) used to be completely
+        // invisible to Docker mode. It's now mounted the same way Seatbelt
+        // allows it: at its own resolved path, unified across both engines.
+        let task = stub_task("t9", "/tmp/termic-docker-test-does-not-exist-9");
+        let env = std::collections::HashMap::new();
+        let allowed = vec!["/tmp/some-shared-dir".to_string()];
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &allowed);
+        let mounted: Vec<&str> = spec.mounts.iter().map(|m| m.container.as_str()).collect();
+        assert!(mounted.contains(&"/tmp/some-shared-dir"), "{mounted:?}");
+    }
+
+    #[test]
+    fn live_allowed_paths_skip_regex_entries_and_dedupe_against_implicit_mounts() {
+        let task = stub_task("t10", "/tmp/termic-docker-test-does-not-exist-10");
+        let env = std::collections::HashMap::new();
+        // A regex: entry (Seatbelt-only, no literal path) and the task's own
+        // path (already mounted implicitly as step 1) should both be no-ops.
+        let allowed = vec!["regex:^$HOME/\\.foo$".to_string(), task.path.clone()];
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &allowed);
+        let host_paths: Vec<&str> = spec.mounts.iter().map(|m| m.host.as_str()).collect();
+        // No stray mount was added for either entry - just the one implicit
+        // worktree mount already covering task.path.
+        let task_path_count = host_paths.iter().filter(|p| **p == task.path).count();
+        assert_eq!(task_path_count, 1, "{host_paths:?}");
+        assert!(!host_paths.iter().any(|p| p.contains("regex:") || p.contains("\\.foo")), "{host_paths:?}");
     }
 
     // ── Activity monitor integration ──────────────────────────────────

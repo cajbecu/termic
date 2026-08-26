@@ -883,7 +883,7 @@ fn handle_monitor_line(
 /// Shared by `render_profile` and `compute_monitor_policy` so the two
 /// never disagree on how a configured path resolves (the previous
 /// duplicated closures were a drift risk for the would-block classifier).
-fn subst_path(raw: &str, home: &str, task_path: &str) -> String {
+pub(crate) fn subst_path(raw: &str, home: &str, task_path: &str) -> String {
     let p = raw.trim();
     let mut s = if p == "~" {
         home.to_string()
