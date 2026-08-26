@@ -56,6 +56,7 @@ mod procmon;
 #[path = "procmon_other.rs"]
 mod procmon;
 mod docker;
+mod agent_dirs;
 use sandbox::SandboxBundle;
 
 // ───────────────────────────── data model ─────────────────────────────

@@ -103,55 +103,38 @@ pub struct DockerSpec {
 /// in ~/.local/bin). See findings.md.
 struct AgentConfig {
     /// Container path the config dir is mounted at.
-    container_dir: &'static str,
-    /// `Some((VAR, value))` when the agent supports a config-dir relocation
-    /// env var (claude `CLAUDE_CONFIG_DIR`, codex `CODEX_HOME`).
-    relocation_env: Option<(&'static str, &'static str)>,
+    container_dir: String,
+    /// `Some(VAR)` when the agent supports a config-dir relocation env var
+    /// (claude `CLAUDE_CONFIG_DIR`, codex `CODEX_HOME`) — its value is
+    /// always `container_dir`, so there is nothing else to store.
+    relocation_env: Option<&'static str>,
     /// Extra container dirs to also mount from the same host config dir
     /// (e.g. agy needs `.antigravity` alongside `.gemini`; opencode splits
     /// its XDG config/data dirs).
-    extra_dirs: &'static [&'static str],
+    extra_dirs: Vec<String>,
 }
 
-/// Map an agent id to its config-dir wiring. Returns `None` for agents we
-/// don't yet support in Docker mode (grok is the Phase-1 outlier: binary +
-/// skills + config all live under ~/.grok, no clean relocation env).
+/// Map an agent id to its config-dir wiring, derived from
+/// `agent_dirs::state_dirs` (the confirmed-state-dir list shared with
+/// Seatbelt's default allow-list — see that module's doc comment).
+/// Returns `None` for agents we don't yet support in Docker mode (grok is
+/// the Phase-1 outlier: binary + skills + config all live under ~/.grok,
+/// no clean relocation env — Docker support declined here independently
+/// of whether Seatbelt lists a state dir for it).
 fn agent_config(agent_id: &str) -> Option<AgentConfig> {
-    Some(match agent_id {
-        "claude" => AgentConfig {
-            container_dir: "/root/.claude",
-            relocation_env: Some(("CLAUDE_CONFIG_DIR", "/root/.claude")),
-            extra_dirs: &[],
-        },
-        "codex" => AgentConfig {
-            container_dir: "/root/.codex",
-            relocation_env: Some(("CODEX_HOME", "/root/.codex")),
-            extra_dirs: &[],
-        },
-        "copilot" => AgentConfig {
-            container_dir: "/root/.copilot",
-            relocation_env: None,
-            extra_dirs: &[],
-        },
-        // agy shares the `.gemini` config shape + its own `.antigravity`.
-        // Its binary lives in ~/.local/bin — do NOT mount ~/.local.
-        "agy" | "antigravity" => AgentConfig {
-            container_dir: "/root/.gemini",
-            relocation_env: None,
-            extra_dirs: &["/root/.antigravity"],
-        },
-        // opencode follows XDG: config in ~/.config/opencode, auth +
-        // session DB in ~/.local/share/opencode. No single relocation env,
-        // so mount both dirs from the same host config subtree.
-        "opencode" => AgentConfig {
-            container_dir: "/root/.config/opencode",
-            relocation_env: None,
-            extra_dirs: &["/root/.local/share/opencode"],
-        },
-        // grok deferred from Phase 1 (see design.md "outlier"): binary,
-        // bundled skills, and config all live under ~/.grok with no clean
-        // relocation env.
-        _ => return None,
+    if !matches!(agent_id, "claude" | "codex" | "copilot" | "agy" | "antigravity" | "opencode") {
+        return None;
+    }
+    let (first, rest) = crate::agent_dirs::state_dirs(agent_id).split_first()?;
+    let relocation_env = match agent_id {
+        "claude" => Some("CLAUDE_CONFIG_DIR"),
+        "codex" => Some("CODEX_HOME"),
+        _ => None,
+    };
+    Some(AgentConfig {
+        container_dir: format!("/root/{first}"),
+        relocation_env,
+        extra_dirs: rest.iter().map(|d| format!("/root/{d}")).collect(),
     })
 }
 
@@ -247,12 +230,12 @@ pub fn build_spec(
         let host_cfg = agent_config_host_dir(agent_id).to_string_lossy().into_owned();
         mounts.push(Mount::implicit(
             host_cfg.clone(),
-            cfg.container_dir.to_string(),
+            cfg.container_dir.clone(),
             false,
             "your Docker agent: login, MCP servers, settings, history (shared across all your Docker tasks)",
             false,
         ));
-        for extra in cfg.extra_dirs {
+        for extra in &cfg.extra_dirs {
             // Extra dirs share the same host config dir subtree by name.
             let sub = PathBuf::from(&host_cfg)
                 .join(extra.trim_start_matches("/root/."))
@@ -260,14 +243,14 @@ pub fn build_spec(
                 .into_owned();
             mounts.push(Mount::implicit(
                 sub,
-                extra.to_string(),
+                extra.clone(),
                 false,
                 "additional config dir for this agent",
                 false,
             ));
         }
-        if let Some((var, val)) = cfg.relocation_env {
-            env.push((var.to_string(), val.to_string()));
+        if let Some(var) = cfg.relocation_env {
+            env.push((var.to_string(), cfg.container_dir.clone()));
         }
     }
 
@@ -892,6 +875,49 @@ mod tests {
         let spec = build_spec(&task, "claude", "img", &task.path, vec![], &spawn_env);
         let term_values: Vec<&str> = spec.env.iter().filter(|(k, _)| k == "TERM").map(|(_, v)| v.as_str()).collect();
         assert_eq!(term_values, vec!["xterm-256color", "dumb"]);
+    }
+
+    /// `agent_config()` now derives its mount paths from
+    /// `agent_dirs::state_dirs` instead of its own hardcoded table
+    /// (dedup with Seatbelt's default allow-list, see agent_dirs.rs's
+    /// module doc). Pins the exact container paths + relocation env
+    /// every agent produced before that refactor, so a future edit to
+    /// the shared table can't silently change what actually gets
+    /// mounted into a running container.
+    #[test]
+    fn agent_config_mounts_match_the_pre_dedup_paths() {
+        let task = stub_task("t3", "/tmp/termic-docker-test-does-not-exist-3");
+        let env = std::collections::HashMap::new();
+        let cases: &[(&str, &str, &[&str])] = &[
+            ("claude", "/root/.claude", &[]),
+            ("codex", "/root/.codex", &[]),
+            ("copilot", "/root/.copilot", &[]),
+            ("agy", "/root/.gemini", &["/root/.antigravity"]),
+            ("opencode", "/root/.config/opencode", &["/root/.local/share/opencode"]),
+        ];
+        for (agent, primary, extras) in cases {
+            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env);
+            let mounted: Vec<&str> = spec.mounts.iter().map(|m| m.container.as_str()).collect();
+            assert!(mounted.contains(primary), "{agent}: expected {primary} in {mounted:?}");
+            for e in *extras {
+                assert!(mounted.contains(e), "{agent}: expected {e} in {mounted:?}");
+            }
+        }
+        // grok stays unsupported in Docker mode regardless of what
+        // agent_dirs lists for Seatbelt's sake.
+        let grok_spec = build_spec(&task, "grok", "img", &task.path, vec![], &env);
+        assert!(!grok_spec.mounts.iter().any(|m| m.container.contains("grok")));
+    }
+
+    #[test]
+    fn relocation_env_value_always_matches_the_container_dir() {
+        let task = stub_task("t4", "/tmp/termic-docker-test-does-not-exist-4");
+        let env = std::collections::HashMap::new();
+        for (agent, var) in [("claude", "CLAUDE_CONFIG_DIR"), ("codex", "CODEX_HOME")] {
+            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env);
+            let val = spec.env.iter().find(|(k, _)| k == var).map(|(_, v)| v.as_str());
+            assert_eq!(val, Some(format!("/root/.{agent}").as_str()));
+        }
     }
 
     // ── Activity monitor integration ──────────────────────────────────
