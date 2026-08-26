@@ -50,6 +50,29 @@ half of what they do.
 Double-Shift (Search everywhere) is the only entry today; it is handled in
 `useShortcuts` through `lib/doubleTap.ts`.
 
+**It cannot be rebound, so what Settings offers instead is WHEN it applies**
+(`prefs.doubleShiftMode`, a select on that same read-only row):
+
+| mode | |
+| --- | --- |
+| `off` | never |
+| `left` | two taps of the LEFT Shift. **The default.** |
+| `outside-terminal` | either Shift, but not while a terminal has focus |
+| `any` | either Shift, JetBrains' own behaviour |
+
+The reason it needs a setting at all: this is two taps of the key that starts
+every capital letter, and there is no other key to move it to. The right-hand
+Shift is the one a touch typist holds for left-hand capitals, so excluding it
+keeps the gesture while dropping the hand the accidents come from, and under
+`left` a right-Shift press CANCELS a half-finished tap rather than being
+ignored (left-right-left inside the window is typing, not a request).
+
+The location test is written as "not the right-hand one", never
+`location === 1`: a synthetic event carries location 0, and a rule demanding 1
+would turn the gesture off wherever the location is not reported. Both surfaces
+follow the mode: the ⌘/ sheet drops the row entirely when it is off, and the
+word where the recorder would be says which double tap ("Double tap, left").
+
 They are deliberately NOT in `SHORTCUT_DEFS`: everything there has a `Binding`,
 and the bindings map, the conflict check, the Settings recorder and the
 localStorage migration all assume one. A def without a binding would need a

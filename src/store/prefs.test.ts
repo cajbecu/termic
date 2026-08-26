@@ -58,6 +58,50 @@ describe("prefs: loadRemoteImages", () => {
   });
 });
 
+// A default that is NOT the falsy one, which the other prefs here do not
+// cover: an absent key has to mean the gesture ships on (left Shift), and only
+// a stored mode changes it. Getting that backwards would silently disable
+// double-Shift for everybody on upgrade.
+describe("prefs: doubleShiftMode", () => {
+  const KEY = "doubleShiftMode";
+  beforeEach(() => {
+    vi.stubGlobal("localStorage", fakeLocalStorage());
+    vi.resetModules();
+  });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("defaults to left-Shift-only with nothing in localStorage", async () => {
+    const { usePrefs } = await import("./prefs");
+    expect(usePrefs.getState().doubleShiftMode).toBe("left");
+  });
+
+  it("reads back each stored mode", async () => {
+    for (const mode of ["off", "any", "outside-terminal", "left"] as const) {
+      vi.stubGlobal("localStorage", fakeLocalStorage());
+      vi.resetModules();
+      localStorage.setItem(KEY, mode);
+      const { usePrefs } = await import("./prefs");
+      expect(usePrefs.getState().doubleShiftMode).toBe(mode);
+    }
+  });
+
+  it("falls back to the default for a value it does not recognise", async () => {
+    // A hand-edited profile, or a mode from a later build.
+    localStorage.setItem(KEY, "sometimes");
+    const { usePrefs } = await import("./prefs");
+    expect(usePrefs.getState().doubleShiftMode).toBe("left");
+  });
+
+  it("persists what it is set to", async () => {
+    const { usePrefs } = await import("./prefs");
+    usePrefs.getState().setDoubleShiftMode("off");
+    expect(usePrefs.getState().doubleShiftMode).toBe("off");
+    expect(localStorage.getItem(KEY)).toBe("off");
+    usePrefs.getState().setDoubleShiftMode("outside-terminal");
+    expect(localStorage.getItem(KEY)).toBe("outside-terminal");
+  });
+});
+
 describe("prefs: findInFilesRegex", () => {
   const KEY = "findInFilesRegex";
   beforeEach(() => {

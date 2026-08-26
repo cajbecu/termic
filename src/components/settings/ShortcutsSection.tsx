@@ -27,12 +27,23 @@ import {
   type ShortcutId,
 } from "@/lib/shortcuts";
 import { groupLabel } from "@/components/dialogs/ShortcutsHelpDialog";
+import type { DoubleShiftMode } from "@/store/prefs";
 
 // Terminal copy/paste are native (⌘C / ⌘V) on macOS and only wired/rebindable
 // on Linux/Windows, so hide their rows from the macOS shortcuts list.
 const HIDDEN_ON_MAC: Set<ShortcutId> = IS_MAC
   ? new Set<ShortcutId>(["terminal-copy", "terminal-paste"])
   : new Set<ShortcutId>();
+
+/** The four answers to "when does double-Shift open Search everywhere".
+ *  Ordered off-to-most-permissive so the list reads as a dial rather than a
+ *  set of unrelated switches. */
+const DOUBLE_SHIFT_OPTIONS: { id: DoubleShiftMode; label: string }[] = [
+  { id: "off",              label: "Off" },
+  { id: "left",             label: "Left Shift only" },
+  { id: "outside-terminal", label: "Either Shift, not in a terminal" },
+  { id: "any",              label: "Either Shift" },
+];
 
 export function ShortcutsSection() {
   const shortcuts = usePrefs(s => s.shortcuts);
@@ -42,6 +53,8 @@ export function ShortcutsSection() {
   const setShortcut = usePrefs(s => s.setShortcut);
   const resetShortcut = usePrefs(s => s.resetShortcut);
   const resetAllShortcuts = usePrefs(s => s.resetAllShortcuts);
+  const doubleShiftMode = usePrefs(s => s.doubleShiftMode);
+  const setDoubleShiftMode = usePrefs(s => s.setDoubleShiftMode);
 
   const [recordingId, setRecordingId] = useState<ShortcutId | null>(null);
   const [recordError, setRecordError] = useState<string | null>(null);
@@ -199,9 +212,33 @@ export function ShortcutsSection() {
                     {/* No recorder, and a word saying why. An empty slot where
                         every other row has a button reads as a bug. */}
                     <span className="text-[11.5px] text-[var(--color-fg-faint)]">{f.fixedReason}</span>
-                    <div className="flex min-h-[28px] min-w-[80px] items-center justify-center gap-1 px-2 py-1">
+                    <div className={cn(
+                      "flex min-h-[28px] min-w-[80px] items-center justify-center gap-1 px-2 py-1",
+                      // Keys still shown while off, greyed: the row is also
+                      // the answer to "what was that gesture", and hiding them
+                      // would make turning it back on a guess.
+                      f.id === "search-everywhere" && doubleShiftMode === "off" && "opacity-40",
+                    )}>
                       {f.glyphs.map((g, idx) => <Key key={idx} glyph={g} />)}
                     </div>
+                    {/* A gesture with no chord cannot be rebound, so the choice
+                        is about the gesture itself rather than which key it
+                        sits on. It sits where the recorder does on every other
+                        row, and a select rather than a switch because "off" is
+                        only one of the four answers people want. */}
+                    {f.id === "search-everywhere" && (
+                      <select
+                        data-testid="double-shift-mode"
+                        aria-label="When double-Shift opens Search everywhere"
+                        value={doubleShiftMode}
+                        onChange={(e) => setDoubleShiftMode(e.target.value as DoubleShiftMode)}
+                        className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg-2)] px-2 py-1 text-[12.5px] text-[var(--color-fg)]"
+                      >
+                        {DOUBLE_SHIFT_OPTIONS.map(o => (
+                          <option key={o.id} value={o.id}>{o.label}</option>
+                        ))}
+                      </select>
+                    )}
                   </div>
                 </div>
               ))}

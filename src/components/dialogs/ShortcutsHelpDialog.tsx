@@ -5,7 +5,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
-import { usePrefs } from "@/store/prefs";
+import { usePrefs, type DoubleShiftMode } from "@/store/prefs";
 import { AppDialog } from "@/components/ui/Dialog";
 import { Command, Search, X, Pencil } from "lucide-react";
 import {
@@ -18,6 +18,16 @@ import {
   type ShortcutId,
 } from "@/lib/shortcuts";
 import { codeIntelName } from "@/lib/lsp/featureName";
+
+/** What the double-Shift row says instead of a recorder, per mode. The word
+ *  has to follow the setting: a sheet reading "Double tap, left" to somebody
+ *  who chose either Shift is describing a restriction they turned off. */
+const DOUBLE_SHIFT_REASON: Record<DoubleShiftMode, string> = {
+  off: "Off",
+  left: "Double tap, left",
+  any: "Double tap",
+  "outside-terminal": "Double tap, outside a terminal",
+};
 
 /** One printed line: a label, the keys, and (for the fixed ones) why there is
  *  no recorder next to it. */
@@ -46,6 +56,7 @@ export function ShortcutsHelpDialog() {
   const openSettings = useApp(s => s.openSettings);
   const shortcuts = usePrefs(s => s.shortcuts);
   const typeChecking = usePrefs(s => s.codeIntelDiagnostics);
+  const doubleShiftMode = usePrefs(s => s.doubleShiftMode);
   const [query, setQuery] = useState("");
 
   // Reset the filter each time the sheet opens so it never reopens
@@ -70,14 +81,30 @@ export function ShortcutsHelpDialog() {
           .map(d => ({
             id: d.id, label: d.label, glyphs: bindingGlyphs(shortcuts[d.id]), fixed: null,
           })),
+        // A gesture switched off in Settings is not a shortcut this window
+        // has: printing it would be an instruction that does nothing. It is
+        // dropped rather than greyed, because this sheet is the answer to
+        // "what can I press", and the Shortcuts page is where its state and
+        // the way back on both live.
         ...FIXED_SHORTCUTS
           .filter(f => f.group === group && matches(f.label, f.hint))
-          .map(f => ({ id: f.id, label: f.label, glyphs: f.glyphs, fixed: f.fixedReason })),
+          .filter(f => f.id !== "search-everywhere" || doubleShiftMode !== "off")
+          // The row says WHICH double tap, because the answer is a setting:
+          // printing "Double tap, left" to somebody who chose either Shift
+          // describes a restriction they turned off.
+          .map(f => ({
+            id: f.id,
+            label: f.label,
+            glyphs: f.glyphs,
+            fixed: f.id === "search-everywhere"
+              ? DOUBLE_SHIFT_REASON[doubleShiftMode]
+              : f.fixedReason,
+          })),
       ];
       if (rows.length) out.push({ group, rows });
     }
     return out;
-  }, [query, shortcuts]);
+  }, [query, shortcuts, doubleShiftMode]);
 
   function edit() {
     close();

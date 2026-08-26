@@ -17,6 +17,9 @@ export const DOUBLE_TAP_MS = 350;
 
 export const NO_TAPS: TapState = { lastAt: 0 };
 
+/** `KeyboardEvent.location` for the right-hand copy of a key. */
+export const KEY_LOCATION_RIGHT = 2;
+
 /**
  * Feed every keydown here. Returns the next state, and whether this press
  * completed a double tap.
@@ -24,14 +27,29 @@ export const NO_TAPS: TapState = { lastAt: 0 };
  * `key` is the event's own key. Anything that is not Shift resets the state:
  * that is what stops capitals, and any shortcut involving Shift, from being
  * read as the first half of a double tap.
+ *
+ * With `leftOnly`, the right-hand Shift does not count. It is the Shift a
+ * touch typist holds for left-hand capitals, which is where the accidental
+ * fires come from. The test is "not the right-hand one" rather than
+ * "location === 1" deliberately: a synthetic event carries location 0, and a
+ * rule demanding 1 would turn the gesture off entirely wherever the location
+ * is not reported, which is a much worse failure than firing on an unlocated
+ * key.
  */
 export function trackDoubleShift(
   state: TapState,
   key: string,
   now: number,
-  opts: { repeat?: boolean; otherModifier?: boolean } = {},
+  opts: { repeat?: boolean; otherModifier?: boolean; location?: number; leftOnly?: boolean } = {},
 ): { state: TapState; fired: boolean } {
   if (key !== "Shift") return { state: NO_TAPS, fired: false };
+  // A right Shift under leftOnly is a real keypress that is not this gesture,
+  // so it CANCELS a half-finished one rather than being ignored:
+  // left-then-right-then-left inside the window is somebody typing, not
+  // somebody asking for a dialog.
+  if (opts.leftOnly && opts.location === KEY_LOCATION_RIGHT) {
+    return { state: NO_TAPS, fired: false };
+  }
   // Holding Shift down repeats the keydown; only a real second press counts.
   if (opts.repeat) return { state, fired: false };
   // ⇧⌘P is not the start of anything: a Shift held with another modifier is

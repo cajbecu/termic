@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { trackDoubleShift, NO_TAPS, DOUBLE_TAP_MS } from "./doubleTap";
+import { trackDoubleShift, NO_TAPS, DOUBLE_TAP_MS, KEY_LOCATION_RIGHT } from "./doubleTap";
 
 // The timing is the easy part. What matters is everything that must CANCEL
 // the sequence: without that, typing "Hello World" opens a dialog over what
@@ -36,6 +36,48 @@ describe("double-Shift", () => {
     // The held-down press must not become the first half either, or releasing
     // and pressing once would fire.
     expect(held.state).toEqual(first.state);
+  });
+
+  it("ignores the RIGHT Shift under leftOnly", () => {
+    // The Shift a touch typist holds for left-hand capitals, and where the
+    // accidental fires came from. Two of them are not the gesture.
+    const o = { leftOnly: true, location: KEY_LOCATION_RIGHT };
+    const first = trackDoubleShift(NO_TAPS, "Shift", 1000, o);
+    expect(first.fired).toBe(false);
+    expect(trackDoubleShift(first.state, "Shift", 1100, o).fired).toBe(false);
+  });
+
+  it("fires on two LEFT Shifts under leftOnly", () => {
+    const o = { leftOnly: true, location: 1 };
+    const first = trackDoubleShift(NO_TAPS, "Shift", 1000, o);
+    expect(trackDoubleShift(first.state, "Shift", 1100, o).fired).toBe(true);
+  });
+
+  it("lets the right Shift cancel a half-finished tap under leftOnly", () => {
+    // Left, right, left inside the window is somebody typing, not somebody
+    // asking for a dialog, so the right one resets rather than being ignored.
+    const left = trackDoubleShift(NO_TAPS, "Shift", 1000, { leftOnly: true, location: 1 });
+    const right = trackDoubleShift(left.state, "Shift", 1050, {
+      leftOnly: true, location: KEY_LOCATION_RIGHT,
+    });
+    expect(right.state).toEqual(NO_TAPS);
+    expect(trackDoubleShift(right.state, "Shift", 1100, { leftOnly: true, location: 1 }).fired)
+      .toBe(false);
+  });
+
+  it("takes either Shift when leftOnly is off", () => {
+    // The "any" mode, which is JetBrains' own behaviour.
+    const first = trackDoubleShift(NO_TAPS, "Shift", 1000, { location: KEY_LOCATION_RIGHT });
+    expect(trackDoubleShift(first.state, "Shift", 1100, { location: KEY_LOCATION_RIGHT }).fired)
+      .toBe(true);
+  });
+
+  it("still fires under leftOnly where the location is not reported", () => {
+    // Synthetic events carry location 0. Demanding a left-hand 1 would turn
+    // the gesture off entirely there, which is worse than firing.
+    const o = { leftOnly: true, location: 0 };
+    const first = trackDoubleShift(NO_TAPS, "Shift", 1000, o);
+    expect(trackDoubleShift(first.state, "Shift", 1100, o).fired).toBe(true);
   });
 
   it("ignores a Shift that is part of a chord", () => {

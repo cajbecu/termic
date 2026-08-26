@@ -59,6 +59,7 @@ const LS_TERMINAL_COPY_ON_SELECT = "terminalCopyOnSelect";
 const LS_TASK_EXPAND_MODE = "taskExpandMode";
 const LS_HIDE_INACTIVE_PROJECTS = "hideInactiveProjects";
 const LS_BRANCH_AS_TASK_NAME = "useBranchAsTaskName";
+const LS_DOUBLE_SHIFT_MODE = "doubleShiftMode";
 const LS_MD_VIEW       = "markdownDefaultView";
 const LS_SVG_VIEW      = "svgDefaultView";
 const LS_LOAD_REMOTE_IMAGES = "loadRemoteImages";
@@ -79,6 +80,10 @@ const UI_SCALE_MAX = 200;
 const UI_SCALE_STEP = 10;
 const clampUiScale = (pct: number): number =>
   Math.max(UI_SCALE_MIN, Math.min(UI_SCALE_MAX, Math.round(pct)));
+
+/** When the double-Shift gesture opens Search Everywhere. See the field's
+ *  own comment in PrefsState for what each one means. */
+export type DoubleShiftMode = "off" | "left" | "any" | "outside-terminal";
 
 /** Markdown edit-tab view: source editor, rendered preview, or both. */
 export type MarkdownView = "source" | "preview" | "split";
@@ -683,6 +688,24 @@ interface PrefsState {
    *  branch inside the worktree does NOT rewrite it: reading live HEAD
    *  would mean a git call per sidebar row on every render. */
   useBranchAsTaskName: boolean;
+  /** When double-Shift opens Search Everywhere. The one shortcut with no
+   *  chord, so "give it a different key" is not on offer and the choice is
+   *  about the gesture itself. The reason it needs one is real: it is two taps
+   *  of the key that starts every capital letter, so a fast typist can open a
+   *  dialog over what they are writing.
+   *
+   *    off              never.
+   *    left             two taps of the LEFT Shift (the default). The right
+   *                     one is what a touch typist holds for left-hand
+   *                     capitals, which is where the accidents come from.
+   *                     Cheap to hit on purpose, hard to hit by accident.
+   *    any              either Shift, twice. JetBrains' own behaviour.
+   *    outside-terminal either Shift, but never while a terminal has focus,
+   *                     which is where most typing happens.
+   *
+   *  Lives with the shortcuts rather than with code navigation, because the
+   *  dialog searches FILES first and symbols only where a checkout is armed. */
+  doubleShiftMode: DoubleShiftMode;
   /** Last-used view for markdown edit tabs (source / preview / split).
    *  New markdown tabs open in this mode, and toggling a tab's view
    *  updates it — so the app remembers however you last looked at a doc. */
@@ -766,6 +789,7 @@ interface PrefsState {
   setTaskExpandMode: (m: "chevron" | "click" | "always") => void;
   setHideInactiveProjects: (v: boolean) => void;
   setUseBranchAsTaskName: (v: boolean) => void;
+  setDoubleShiftMode: (v: DoubleShiftMode) => void;
   setMarkdownDefaultView: (v: MarkdownView) => void;
   setSvgDefaultView: (v: MarkdownView) => void;
   setBranchPrefix: (v: string) => void;
@@ -932,6 +956,11 @@ const initialTaskExpandMode: "chevron" | "click" | "always" = (() => {
 })();
 const initialHideInactiveProjects = lsGet(LS_HIDE_INACTIVE_PROJECTS, "") === "1";
 const initialUseBranchAsTaskName = lsGet(LS_BRANCH_AS_TASK_NAME, "") === "1";
+// Absent means never set, and the gesture ships on, left-Shift only.
+const initialDoubleShiftMode: DoubleShiftMode = (() => {
+  const raw = lsGet(LS_DOUBLE_SHIFT_MODE, "left");
+  return raw === "off" || raw === "any" || raw === "outside-terminal" ? raw : "left";
+})();
 const initialMarkdownView: MarkdownView = (() => {
   const raw = lsGet(LS_MD_VIEW, "source");
   return raw === "preview" || raw === "split" ? raw : "source";
@@ -987,6 +1016,7 @@ export const usePrefs = create<PrefsState>(set => ({
   taskExpandMode: initialTaskExpandMode,
   hideInactiveProjects: initialHideInactiveProjects,
   useBranchAsTaskName: initialUseBranchAsTaskName,
+  doubleShiftMode: initialDoubleShiftMode,
   markdownDefaultView: initialMarkdownView,
   svgDefaultView: initialSvgView,
   branchPrefix: initialBranchPrefix,
@@ -1254,6 +1284,10 @@ export const usePrefs = create<PrefsState>(set => ({
   setUseBranchAsTaskName: (v) => {
     try { localStorage.setItem(LS_BRANCH_AS_TASK_NAME, v ? "1" : "0"); } catch {}
     set({ useBranchAsTaskName: v });
+  },
+  setDoubleShiftMode: (v) => {
+    try { localStorage.setItem(LS_DOUBLE_SHIFT_MODE, v); } catch {}
+    set({ doubleShiftMode: v });
   },
   setMarkdownDefaultView: (v) => {
     try { localStorage.setItem(LS_MD_VIEW, v); } catch {}

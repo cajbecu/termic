@@ -272,9 +272,12 @@ export const FIXED_SHORTCUTS: FixedShortcut[] = [
     id: "search-everywhere",
     group: "Code navigation",
     label: "Search everywhere",
-    hint: "Files always; classes and functions too, once a checkout has code navigation on.",
+    hint: "Tap the LEFT Shift twice. Files always; classes and functions too, once a checkout has code navigation on.",
     glyphs: ["⇧", "⇧"],
-    fixedReason: "Double tap",
+    // Says which Shift, in the one word there is room for. The right-hand
+    // Shift is deliberately inert: it is the one held for left-hand capitals,
+    // and it is where the accidental fires came from.
+    fixedReason: "Double tap, left",
   },
 ];
 

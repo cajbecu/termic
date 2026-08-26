@@ -716,14 +716,62 @@ describe("code intelligence", () => {
     });
   };
 
+  // The gesture has no chord to rebind, so someone whose typing keeps opening
+  // it (two taps of the key that starts every capital) needs an off switch,
+  // and off has to mean the keystrokes do nothing rather than the dialog
+  // opening and closing again.
+  it("obeys the double-Shift mode: off, left-only, either", async () => {
+    await ensureActiveTask(taskId);
+    const doubleShift = (location = 1) => browser.execute((loc) => {
+      for (const _ of [0, 1]) {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Shift", location: loc, bubbles: true }));
+      }
+    }, location);
+    const open = () => browser.execute(() =>
+      window.__termic!.useUI.getState().searchEverywhereTaskId !== null);
+
+    const setMode = (m: string) => browser.execute((mode) =>
+      window.__termic!.usePrefs.getState().setDoubleShiftMode(mode as any), m);
+
+    try {
+      // Off: neither Shift does anything. Nothing to wait FOR, so the gesture
+      // is dispatched twice over and the state read after both.
+      await setMode("off");
+      await doubleShift(1);
+      await doubleShift(1);
+      expect(await open()).toBe(false);
+
+      // Left-only (the default): the right Shift stays inert...
+      await setMode("left");
+      await doubleShift(2);
+      await doubleShift(2);
+      expect(await open()).toBe(false);
+      // ...and the left one opens it.
+      await doubleShift(1);
+      await browser.waitUntil(async () => (await open()) as boolean,
+        { timeout: 5_000, timeoutMsg: "the left Shift did not open it" });
+      await closeSearchEverywhere();
+
+      // Either: the right Shift works too, which is JetBrains' own behaviour.
+      await setMode("any");
+      await doubleShift(2);
+      await browser.waitUntil(async () => (await open()) as boolean,
+        { timeout: 5_000, timeoutMsg: "the right Shift did not open it in any mode" });
+      await closeSearchEverywhere();
+    } finally {
+      await setMode("left");
+    }
+  });
+
   it("opens Search Everywhere on double-Shift, files first and symbols when armed", async () => {
     // Most people never turn code intelligence on, so this dialog has to be
     // useful without it: files always, symbols merged in when a checkout is
     // armed. ⌘P is deliberately untouched.
     await ensureActiveTask(taskId);
+    // location 1 = the LEFT Shift, the only one that fires this.
     const doubleShift = () => browser.execute(() => {
       for (const _ of [0, 1]) {
-        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Shift", bubbles: true }));
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Shift", location: 1, bubbles: true }));
       }
     });
 

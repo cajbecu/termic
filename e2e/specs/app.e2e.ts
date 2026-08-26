@@ -145,6 +145,38 @@ describe("keyboard shortcuts sheet", () => {
     expect(row.text).toContain("Double tap");
   });
 
+  it("follows the double-Shift mode, and drops the row when it is off", async () => {
+    // Double-Shift is the one shortcut with no chord to rebind, so what
+    // Settings offers is WHEN it applies. The sheet has to say the same thing:
+    // printing "Double tap, left" to somebody who chose either Shift describes
+    // a restriction they turned off, and printing the row at all when the
+    // gesture is off tells them to press something inert.
+    const setMode = (m: string) => browser.execute((mode) =>
+      window.__termic!.usePrefs.getState().setDoubleShiftMode(mode as any), m);
+    const rowText = () => browser.execute(() =>
+      (document.querySelector('[data-shortcut-id="search-everywhere"]') as HTMLElement)?.innerText ?? "");
+
+    try {
+      await setMode("off");
+      const off = await sheetText();
+      expect(off).not.toContain("Search everywhere");
+      expect(await browser.execute(() =>
+        !!document.querySelector('[data-shortcut-id="search-everywhere"]'))).toBe(false);
+
+      await setMode("any");
+      expect(await sheetText()).toContain("Search everywhere");
+      expect(await rowText()).not.toContain("left");
+
+      await setMode("outside-terminal");
+      await sheetText();
+      expect(await rowText()).toContain("outside a terminal");
+    } finally {
+      await setMode("left");
+    }
+    await sheetText();
+    expect(await rowText()).toContain("left");
+  });
+
   it("gives the code-navigation keys a section of their own", async () => {
     // They were mixed into Navigation with tab and pane movement, which is
     // where a reader stops looking for them.

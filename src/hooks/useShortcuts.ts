@@ -106,10 +106,23 @@ export function useShortcuts() {
       // symbols where a checkout is armed — most people never turn code
       // intelligence on, so a symbols-only dialog would be a dead key for
       // them (see SearchEverywhereDialog).
-      {
+      // Four modes, chosen in Settings -> Shortcuts: this is two taps of the
+      // key that also starts every capital letter, so a fast typist can open a
+      // dialog over what they are writing, and there is no other key to move
+      // it to. Default is the LEFT Shift alone, which keeps the gesture while
+      // dropping the hand most accidents come from.
+      const dsMode = usePrefs.getState().doubleShiftMode;
+      // "outside-terminal" skips the tracking entirely rather than firing and
+      // closing: a terminal is where the typing is, and a gesture that costs a
+      // dialog flash on every fast capital is the thing being turned off.
+      const dsSkip = dsMode === "off"
+        || (dsMode === "outside-terminal" && inTermFocused());
+      if (!dsSkip) {
         const tap = trackDoubleShift(doubleShift.current, e.key, e.timeStamp || Date.now(), {
           repeat: e.repeat,
           otherModifier: e.metaKey || e.ctrlKey || e.altKey,
+          location: e.location,
+          leftOnly: dsMode === "left",
         });
         doubleShift.current = tap.state;
         if (tap.fired) {
