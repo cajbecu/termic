@@ -1214,8 +1214,8 @@ mod tests {
 
         let task = stub_task("t-clone", "/tmp/termic-docker-test-does-not-exist");
         let env = std::collections::HashMap::new();
-        let spec = build_spec(&task, "next-claude", "img", &task.path, vec![], &env, &[], false,
-            &[], &[], "pty-clone0001", "claude");
+        let spec = with_scratch_data_dir(|| build_spec(&task, "next-claude", "img", &task.path,
+            vec![], &env, &[], false, &[], &[], "pty-clone0001", "claude"));
 
         // claude's shape: the config dir is mounted and relocated onto it, so
         // `.claude.json` (which lives at HOME root until relocated) is inside
@@ -1232,6 +1232,28 @@ mod tests {
         assert!(cfg_mount.host.ends_with("docker-agents/next-claude"), "{}", cfg_mount.host);
     }
 
+    /// Point `data_dir()` at a scratch profile for the duration of a test.
+    /// `build_spec` CREATES the agent config dir now, and `data_dir()` in a
+    /// test otherwise resolves to the developer's REAL profile - so without
+    /// this the suite silently made folders in
+    /// `~/Library/Application Support/termic/docker-agents`. Debug-only seam,
+    /// same one automation.rs uses.
+    fn with_scratch_data_dir<T>(f: impl FnOnce() -> T) -> T {
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var("TERMIC_DATA_DIR").ok();
+        // SAFETY: cargo runs tests in threads; these two are the only tests
+        // that touch this var and they are serialized by the mutex below.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var("TERMIC_DATA_DIR", dir.path()) };
+        let out = f();
+        match prev {
+            Some(v) => unsafe { std::env::set_var("TERMIC_DATA_DIR", v) },
+            None => unsafe { std::env::remove_var("TERMIC_DATA_DIR") },
+        }
+        out
+    }
+
     #[test]
     fn the_agent_config_host_dir_exists_before_it_becomes_a_mount() {
         // A missing `-v` source is created by the DAEMON, and its ownership
@@ -1240,13 +1262,15 @@ mod tests {
         // daemon creates it root-owned. The container runs as the host uid,
         // so a root-owned config dir means the agent cannot write its login
         // or its transcripts: EACCES, and a login that never sticks.
-        let task = stub_task("t-mk", "/tmp/termic-docker-test-does-not-exist");
-        let env = std::collections::HashMap::new();
-        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false,
-            &[], &[], "pty-mkdir0001", "claude");
-        let cfg = spec.mounts.iter().find(|m| m.container == "/root/.claude").unwrap();
-        assert!(std::path::Path::new(&cfg.host).is_dir(),
-            "host config dir must exist before docker sees it: {}", cfg.host);
+        with_scratch_data_dir(|| {
+            let task = stub_task("t-mk", "/tmp/termic-docker-test-does-not-exist");
+            let env = std::collections::HashMap::new();
+            let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false,
+                &[], &[], "pty-mkdir0001", "claude");
+            let cfg = spec.mounts.iter().find(|m| m.container == "/root/.claude").unwrap();
+            assert!(std::path::Path::new(&cfg.host).is_dir(),
+                "host config dir must exist before docker sees it: {}", cfg.host);
+        });
     }
 
     #[test]
