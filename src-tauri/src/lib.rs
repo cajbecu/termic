@@ -15966,6 +15966,26 @@ struct DockerCommandPreview {
     argv: Vec<String>,
 }
 
+/// A stand-in task for the SETTINGS-level preview, which is opened before
+/// any particular task is in play (Settings -> Docker Sandbox). Everything
+/// the preview exists to show - the mounts, the env, the hardening flags -
+/// is task-independent; only the worktree path and the container name
+/// suffix differ from a real spawn, and both are rendered as obvious
+/// placeholders rather than a real path the user might mistake for theirs.
+fn sample_preview_task() -> Task {
+    Task {
+        id: "sample".into(),
+        name: "your-task".into(),
+        // Deliberately not a real path on this machine: the mount line is
+        // there to show the SHAPE (worktree mounted rw at its own absolute
+        // path), and a plausible-looking real path invites the reader to
+        // check whether that specific dir is exposed.
+        path: "/path/to/your/task-worktree".into(),
+        docker_sandbox_enabled: true,
+        ..Default::default()
+    }
+}
+
 /// Stand-in pty id for the command PREVIEW. A preview belongs to no tab,
 /// and the only thing the id feeds is the container's `--name` suffix, so a
 /// fixed marker keeps the rendered name stable between openings instead of
@@ -15973,12 +15993,22 @@ struct DockerCommandPreview {
 const PREVIEW_PTY_ID: &str = "preview";
 
 #[tauri::command]
-fn docker_command_preview(task_id: String, agent_id: Option<String>) -> Result<DockerCommandPreview, String> {
-    let task = load_tasks()
-        .into_iter()
-        .find(|t| t.id == task_id)
-        .ok_or_else(|| "task not found".to_string())?;
-    let agent_id = agent_id.unwrap_or_else(|| task.cli.clone());
+fn docker_command_preview(task_id: Option<String>, agent_id: Option<String>) -> Result<DockerCommandPreview, String> {
+    // No task id = the settings-level preview (no task selected yet).
+    let task = match task_id {
+        Some(id) => load_tasks()
+            .into_iter()
+            .find(|t| t.id == id)
+            .ok_or_else(|| "task not found".to_string())?,
+        None => sample_preview_task(),
+    };
+    let agent_id = agent_id
+        .filter(|a| !a.trim().is_empty())
+        .or_else(|| (!task.cli.trim().is_empty()).then(|| task.cli.clone()))
+        // Settings-level preview with nothing chosen: fall back to the first
+        // enabled agent so the panel always renders something real.
+        .or_else(|| load_settings_inner().agents.iter().find(|a| !a.disabled).map(|a| a.id.clone()))
+        .ok_or_else(|| "no agent available to preview".to_string())?;
     let settings = load_settings_inner();
     let agent = settings
         .agents
@@ -15994,7 +16024,7 @@ fn docker_command_preview(task_id: String, agent_id: Option<String>) -> Result<D
     let agent_extra_dirs = settings.docker_agent_extra_dirs.get(&agent_id).cloned().unwrap_or_default();
     let agent_persist_enabled = settings.docker_agent_persist_enabled.get(&agent_id).copied().unwrap_or(false);
     let (docker_allowed_paths, _) = live_sandbox_lists(&task);
-    let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &agent.env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts, "preview");
+    let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &agent.env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts, PREVIEW_PTY_ID);
     let argv = docker::render_argv(&spec, &agent.command, &agent.args);
     Ok(DockerCommandPreview { spec, argv })
 }

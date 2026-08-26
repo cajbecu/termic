@@ -12,6 +12,7 @@ import { usePrefs } from "@/store/prefs";
 import { AppDialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/utils";
+import { formatDockerArgv } from "@/lib/dockerArgv";
 import { taskLabel } from "@/lib/taskLabel";
 import {
   settingsLoad, taskSetSandbox, sandboxAvailable, taskSetDocker, dockerImageStatus, dockerCommandPreview,
@@ -367,7 +368,7 @@ export function TaskSandboxDialog() {
                   {dockerPreview && (
                     <>
                       <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-dim)]">
-                        {dockerPreview.argv.map((a, i) => (i === 0 ? a : `  ${a}`)).join(" \\\n")}
+                        {formatDockerArgv(dockerPreview.argv)}
                       </pre>
                       <div className="mt-3 flex flex-col gap-1.5 border-t border-[var(--color-border-soft)] pt-2.5">
                         {dockerPreview.spec.mounts.map((m, i) => (

@@ -402,13 +402,21 @@ export interface DockerCommandPreview {
   spec: DockerSpec;
   argv: string[];
 }
-/** Exactly what `docker run ...` this task's Docker-mode agent launch
- *  would build right now, WITHOUT spawning anything - the same
- *  `build_spec`/`render_argv` the real spawn path uses, so it can't drift
- *  from what actually runs. Works even before the image is built. Omit
- *  `agentId` to preview the task's own `cli`. */
-export const dockerCommandPreview = (taskId: string, agentId?: string) =>
-  invoke<DockerCommandPreview>("docker_command_preview", { taskId, agentId: agentId ?? null });
+/** Exactly what `docker run ...` a Docker-mode agent launch would build
+ *  right now, WITHOUT spawning anything - the same `build_spec` /
+ *  `render_argv` the real spawn path uses, so it can't drift from what
+ *  actually runs. Works even before the image is built.
+ *
+ *  Omit `taskId` for the settings-level preview (Settings -> Docker
+ *  Sandbox, where no task is selected): Rust renders it against a
+ *  placeholder task, so the mounts / env / hardening flags are real and
+ *  only the worktree path is a stand-in. Omit `agentId` to preview the
+ *  task's own `cli`, or the first enabled agent when there is no task. */
+export const dockerCommandPreview = (taskId?: string, agentId?: string) =>
+  invoke<DockerCommandPreview>("docker_command_preview", {
+    taskId: taskId ?? null,
+    agentId: agentId ?? null,
+  });
 
 /** "Allow for this repo" — append a host to the repo's committed
  *  `.termic.yaml` (shared with the team, read by the termic CLI).

@@ -19,14 +19,16 @@ import { StreamLanguage } from "@codemirror/language";
 import {
   dockerCheck, dockerImageStatus, dockerGetDockerfile, dockerDefaultDockerfile,
   dockerSetDockerfile, dockerBuildImage, onDockerBuildLog, onDockerBuildDone, dockerAgentDirs,
-  settingsSave,
+  settingsSave, dockerCommandPreview,
   type DockerStatus, type DockerImageStatus, type DockerAgentDirs,
+  type DockerCommandPreview,
 } from "@/lib/ipc";
 import type { Settings } from "@/lib/types";
 import { Block, ListField, SectionTitle, Toggle, useBackendSettings } from "./Controls";
 import { DockerRebuildFrequencyPicker } from "@/components/DockerRebuildFrequencyPicker";
 import { describeLastBuildDate } from "@/lib/dockerDailyRebuild";
 import { cn, cleanLines } from "@/lib/utils";
+import { formatDockerArgv } from "@/lib/dockerArgv";
 import { Loader2, CircleCheck, CircleAlert, ChevronDown, Lock, X } from "lucide-react";
 
 export function DockerSection() {
@@ -35,6 +37,15 @@ export function DockerSection() {
   const [image, setImage] = useState<DockerImageStatus | null>(null);
   const [agentDirs, setAgentDirs] = useState<DockerAgentDirs[]>([]);
   const [showAgentDirs, setShowAgentDirs] = useState(false);
+  // Command preview (collapsed by default, same "look it up" treatment as
+  // the per-agent dirs above). Rendered by Rust through the SAME
+  // build_spec/render_argv the real spawn uses, against a placeholder task,
+  // so it can't drift from what actually runs.
+  const [showPreview, setShowPreview] = useState(false);
+  const [previewAgent, setPreviewAgent] = useState("");
+  const [preview, setPreview] = useState<DockerCommandPreview | null>(null);
+  const [previewErr, setPreviewErr] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   // Default extra mounts: seeded into a new Docker-sandboxed task's own
   // "Extra mounts" field (Sandbox dialog / New task dialog), same
@@ -192,6 +203,21 @@ export function DockerSection() {
     setEditorDoc(def);
     setDockerfile(def);
   }
+
+  // Refetch on open and on agent change. Keyed on the agent id (a string),
+  // never on an array identity, so an unrelated settings reload can't blank
+  // an open panel.
+  useEffect(() => {
+    if (!showPreview) return;
+    let cancelled = false;
+    setPreviewLoading(true);
+    setPreviewErr(null);
+    dockerCommandPreview(undefined, previewAgent || undefined)
+      .then(p => { if (!cancelled) setPreview(p); })
+      .catch(e => { if (!cancelled) { setPreview(null); setPreviewErr(String(e)); } })
+      .finally(() => { if (!cancelled) setPreviewLoading(false); });
+    return () => { cancelled = true; };
+  }, [showPreview, previewAgent]);
 
   function setEditorDoc(text: string) {
     const v = viewRef.current;
@@ -374,6 +400,65 @@ export function DockerSection() {
                 {mountsBusy ? "Saving…" : "Save"}
               </Button>
             </div>
+          </Block>
+
+          {/* Command preview. The task sandbox dialog has one per task; this
+              is the same thing before any task exists, so "what does the cage
+              actually do" is answerable while you are configuring the image
+              rather than only after you have switched a task onto it. The
+              agent's own command is appended by render_argv, so the last line
+              is literally what runs inside the container. */}
+          <Block>
+            <button
+              type="button"
+              onClick={() => setShowPreview(s => !s)}
+              data-testid="docker-preview-toggle"
+              className="flex w-full items-center justify-between gap-3 text-left"
+            >
+              <div>
+                <div className="text-[14px] font-medium">Command preview</div>
+                <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+                  The exact <code className="font-mono">docker run</code> a task launch builds, agent command included.
+                </div>
+              </div>
+              <ChevronDown className={cn("h-4 w-4 shrink-0 text-[var(--color-fg-faint)] transition-transform", showPreview && "rotate-180")} />
+            </button>
+            {showPreview && (
+              <div className="mt-3">
+                <div className="flex items-center gap-2">
+                  <label className="text-[12.5px] text-[var(--color-fg-dim)]">Agent</label>
+                  <select
+                    value={previewAgent}
+                    onChange={(e) => setPreviewAgent(e.target.value)}
+                    data-testid="docker-preview-agent"
+                    className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-[12.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
+                  >
+                    <option value="">First enabled agent</option>
+                    {agentDirs.map(a => (
+                      <option key={a.agent_id} value={a.agent_id}>{a.display_name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="mt-2 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-3">
+                  {previewLoading && <div className="text-[12px] text-[var(--color-fg-faint)]">Loading…</div>}
+                  {previewErr && <div className="text-[12px] text-[var(--color-err)]">{previewErr}</div>}
+                  {preview && !previewLoading && (
+                    <>
+                      <pre
+                        data-testid="docker-preview-argv"
+                        className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-dim)]"
+                      >
+                        {formatDockerArgv(preview.argv)}
+                      </pre>
+                      <div className="mt-2 border-t border-[var(--color-border-soft)] pt-2 text-[11.5px] text-[var(--color-fg-faint)]">
+                        Your task's worktree is mounted in place of the placeholder path above. Everything else,
+                        the mounts, the environment and the hardening flags, is what a real launch uses.
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
           </Block>
 
           {/* Dockerfile editor */}

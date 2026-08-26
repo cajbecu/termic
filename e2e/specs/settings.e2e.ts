@@ -179,6 +179,10 @@ describe("settings rail", () => {
     ["prompts", "Prompts", "Prompts"],
     ["shortcuts", "Shortcuts", "Shortcuts"],
     ["sandbox", "Sandbox", "Global sandbox defaults"],
+    // Marker has to be above the master toggle: everything else on this
+    // page renders only once Docker sandboxing is enabled, and the fixture
+    // profile leaves it off.
+    ["docker", "Docker Sandbox", "Enable Docker sandbox"],
     ["cli", "CLI & MCP", "Enable CLI"],
   ];
 
@@ -876,23 +880,28 @@ describe("preferences", () => {
   after(async () => {
     await browser.execute((o) => {
       const p = window.__termic!.usePrefs.getState();
-      if ("globalDefaultSandbox" in o)
-        p.setGlobalDefaultSandbox(o.globalDefaultSandbox);
+      if ("globalDefaultSandboxKind" in o)
+        p.setGlobalDefaultSandboxKind(o.globalDefaultSandboxKind);
       if ("editorFontId" in o) p.setEditorFontId(o.editorFontId);
       if ("terminalFontId" in o) p.setTerminalFontId(o.terminalFontId);
     }, orig);
   });
 
-  it("toggles the global default sandbox pref", async () => {
+  // Docker sandboxing turned this from a boolean into a three-way choice
+  // (`globalDefaultSandboxKind`: a SandboxMode, or "docker"), so the pref a
+  // new task inherits is now a KIND, not on/off. Flip to a value that is
+  // never the current one so the assertion holds whatever it starts at.
+  it("switches the global default sandbox kind", async () => {
     await waitForAppShell();
     await requireTermicApi();
-    orig.globalDefaultSandbox = await get("globalDefaultSandbox");
+    orig.globalDefaultSandboxKind = await get("globalDefaultSandboxKind");
     await browser.execute(
-      (v) => window.__termic!.usePrefs.getState().setGlobalDefaultSandbox(!v),
-      orig.globalDefaultSandbox,
+      (v) => window.__termic!.usePrefs.getState()
+        .setGlobalDefaultSandboxKind(v === "off" ? "enforce" : "off"),
+      orig.globalDefaultSandboxKind,
     );
     await browser.waitUntil(
-      async () => (await get("globalDefaultSandbox")) !== orig.globalDefaultSandbox,
+      async () => (await get("globalDefaultSandboxKind")) !== orig.globalDefaultSandboxKind,
       { timeout: 5_000, timeoutMsg: "sandbox default never changed" },
     );
   });
@@ -2576,5 +2585,93 @@ describe("preview browser (GH #245)", () => {
     );
     expect(msg).toContain("termic-no-such-browser-xyz");
     await snap("preview-browser-invalid.png");
+  });
+});
+
+// Docker Sandbox → Command preview.
+//
+// The task sandbox dialog has had a per-task preview since Docker mode
+// shipped; this is the same answer while you are still CONFIGURING the image,
+// before any task is on Docker. It matters because it is rendered by Rust
+// through the very `build_spec` / `render_argv` a real spawn uses, against a
+// placeholder task, so it cannot drift into a comforting fiction. The agent's
+// own command is appended, so the tail of the argv is what runs in the
+// container.
+//
+// Needs no Docker daemon: an unbuilt image renders as a placeholder tag and
+// everything else (mounts, env, hardening flags) is computed, not probed.
+describe("docker command preview", () => {
+  let wasEnabled: boolean | null = null;
+
+  const setEnabled = (v: boolean) => browser.execute(async (on) => {
+    const t = window.__termic!;
+    const s = await t.ipc.settingsLoad();
+    await t.ipc.settingsSave({ ...s, docker_sandbox_enabled: on });
+  }, v);
+
+  after(async () => {
+    // Restore the fixture: leaving Docker on would put Docker UI in front of
+    // every later spec that opens a sandbox dialog.
+    if (wasEnabled !== null) await setEnabled(wasEnabled);
+    await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
+  });
+
+  it("renders the real docker run argv, agent command included", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    wasEnabled = await browser.execute(async () =>
+      (await window.__termic!.ipc.settingsLoad()).docker_sandbox_enabled ?? false) as boolean;
+    await setEnabled(true);
+
+    await browser.execute(() => window.__termic!.useApp.getState().openSettings("docker"));
+    await waitForText("Enable Docker sandbox");
+    // By test id, not text: the toggle's textContent carries its hint line
+    // too, so an exact-text match never hits it.
+    await clickWhenVisible('[data-testid="docker-preview-toggle"]');
+
+    const argv = await browser.waitUntil(async () => {
+      const t = await browser.execute(() =>
+        document.querySelector('[data-testid="docker-preview-argv"]')?.textContent ?? "");
+      return t && t.trim() ? t : false;
+    }, { timeoutMsg: "the command preview never rendered" }) as string;
+
+    // The shape a reader is checking for: it is a `docker run`, the container
+    // is hardened, and the agent's own command is on the end. Asserting the
+    // whole argv would pin every flag and break on any unrelated addition.
+    expect(argv).toContain("docker");
+    expect(argv).toContain("run");
+    expect(argv).toContain("--cap-drop");
+    // The placeholder worktree, proving this is the task-less variant rather
+    // than a real task's paths leaking into a settings page.
+    expect(argv).toContain("/path/to/your/task-worktree");
+  });
+
+  it("re-renders for the agent picked, not just the first one", async () => {
+    const agents = await browser.execute(() =>
+      [...document.querySelectorAll('[data-testid="docker-preview-agent"] option')]
+        .map(o => (o as HTMLOptionElement).value)
+        .filter(Boolean));
+    // Nothing to switch between on a profile with a single agent; the
+    // picker's own behaviour is what this case exists for.
+    if (agents.length < 1) return;
+
+    const first = await browser.execute(() =>
+      document.querySelector('[data-testid="docker-preview-argv"]')?.textContent ?? "");
+    await browser.execute((id) => {
+      const sel = document.querySelector('[data-testid="docker-preview-agent"]') as HTMLSelectElement;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value")!.set!;
+      setter.call(sel, id);
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    }, agents[agents.length - 1]);
+
+    // Either the argv changes (different agent command / config mount) or it
+    // legitimately matches; what must NOT happen is the panel going blank.
+    await browser.waitUntil(async () => {
+      const t = await browser.execute(() =>
+        document.querySelector('[data-testid="docker-preview-argv"]')?.textContent ?? "");
+      return !!t && t.trim().length > 0;
+    }, { timeoutMsg: "the preview blanked after switching agent" });
+
+    expect(first.trim().length).toBeGreaterThan(0);
   });
 });
