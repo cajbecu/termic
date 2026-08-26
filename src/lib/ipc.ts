@@ -376,6 +376,13 @@ export interface DockerAgentDirs {
    *  known-safe built-in set. Off by default, including for a newly-added
    *  custom agent - see docker.rs's `agent_config` for why. */
   persist_enabled: boolean;
+  /** Absolute HOST folder backing this agent's Docker config, shared by
+   *  every Docker task running it. Surfaced so Settings can name the real
+   *  path rather than leaving a bare `.claude` chip to be guessed at. */
+  host_dir?: string;
+  /** Container dir the entries mount under (the agent's HOME in the
+   *  container). The other half of "relative to what?". */
+  container_home?: string;
 }
 export const dockerAgentDirs = () => invoke<DockerAgentDirs[]>("docker_agent_dirs");
 

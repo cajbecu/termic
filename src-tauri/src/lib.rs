@@ -15974,6 +15974,14 @@ struct DockerAgentDirs {
     /// mounting `extra` at all when `is_builtin` is false. See
     /// `docker::agent_config`'s doc comment for why this defaults to off.
     persist_enabled: bool,
+    /// Absolute HOST directory this agent's Docker config lives in, shared
+    /// by every Docker task running it. Surfaced so Settings can name the
+    /// real path instead of leaving the reader to guess what a bare
+    /// `.claude` entry is relative to.
+    host_dir: String,
+    /// Container directory the entries are mounted under (the agent's HOME
+    /// inside the container). The other half of the same question.
+    container_home: String,
 }
 
 #[tauri::command]
@@ -15986,11 +15994,23 @@ fn docker_agent_dirs() -> Vec<DockerAgentDirs> {
         .map(|a| DockerAgentDirs {
             agent_id: a.id.clone(),
             display_name: a.display_name.clone(),
-            builtin: agent_dirs::state_dirs(&a.id).iter().map(|s| s.to_string()).collect(),
+            // Only for agents Docker actually mounts unconditionally. This
+            // read `state_dirs` directly, which returns `[".grok"]` for
+            // grok - so Settings rendered a locked ".grok" chip captioned
+            // "confirmed to hold real state, can't be removed" for the one
+            // agent `agent_config` deliberately mounts NOTHING for, right
+            // under a note saying it is unsupported in Docker mode.
+            builtin: if docker::KNOWN_SAFE_AGENTS.contains(&a.id.as_str()) {
+                agent_dirs::state_dirs(&a.id).iter().map(|s| s.to_string()).collect()
+            } else {
+                Vec::new()
+            },
             extra: settings.docker_agent_extra_dirs.get(&a.id).cloned().unwrap_or_default(),
             is_builtin: docker::KNOWN_SAFE_AGENTS.contains(&a.id.as_str()),
             persist_offerable: docker::persist_offerable(&a.id),
             persist_enabled: settings.docker_agent_persist_enabled.get(&a.id).copied().unwrap_or(false),
+            host_dir: docker::agent_config_host_dir(&a.id).to_string_lossy().into_owned(),
+            container_home: "/root".to_string(),
         })
         .collect()
 }
