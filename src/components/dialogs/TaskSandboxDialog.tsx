@@ -114,9 +114,46 @@ export function TaskSandboxDialog() {
     }
   }
   // Re-fetch on the task's own SIGKILL-and-relaunch triggers (toggling
-  // Docker on/off, editing extra-args) so a stale preview never survives
-  // the thing it was showing changing under it.
-  useEffect(() => { setDockerPreview(null); }, [task?.docker_sandbox_enabled, task?.docker_extra_args]);
+  // Docker on/off, editing extra-args/extra-mounts) so a stale preview
+  // never survives the thing it was showing changing under it.
+  useEffect(() => {
+    setDockerPreview(null);
+  }, [task?.docker_sandbox_enabled, task?.docker_extra_args, task?.docker_extra_mounts]);
+
+  // Extra mounts: a dedicated per-task list (`host_path:container_path`,
+  // Docker's own -v shape), NOT "Allowed paths" - that list is shared with
+  // Seatbelt via live_sandbox_lists and has no concept of a container path.
+  // Mainly for persisting something a fresh container otherwise loses on
+  // every restart (an MCP server's own data dir, say) that the built-in
+  // per-agent config dir mount doesn't cover. Commits immediately through
+  // taskSetDocker, same as the toggle above, rather than joining the
+  // Seatbelt draft-then-Save flow.
+  const splitMountLines = (s: string) => s.split("\n").map(l => l.trim()).filter(Boolean);
+  const mountArrEq = (a: string[], b: string[]) => a.length === b.length && a.every((v, i) => v === b[i]);
+  const [mountsText, setMountsText] = useState("");
+  const [mountsBusy, setMountsBusy] = useState(false);
+  const [mountsErr, setMountsErr] = useState<string | null>(null);
+  useEffect(() => {
+    setMountsText((task?.docker_extra_mounts ?? []).join("\n"));
+    setMountsErr(null);
+  }, [task?.id, task?.docker_extra_mounts]);
+  const mountsDirty = task
+    ? !mountArrEq(splitMountLines(mountsText), task.docker_extra_mounts ?? [])
+    : false;
+  async function saveDockerMounts() {
+    if (!task || mountsBusy) return;
+    setMountsBusy(true);
+    setMountsErr(null);
+    try {
+      useUI.getState().markPendingPtyRestart(task.id);
+      await taskSetDocker(task.id, true, task.docker_extra_args ?? [], splitMountLines(mountsText));
+      await loadAll();
+    } catch (e) {
+      setMountsErr(String(e));
+    } finally {
+      setMountsBusy(false);
+    }
+  }
 
   async function toggleDocker(next: boolean) {
     if (!task || dockerBusy) return;
@@ -343,6 +380,25 @@ export function TaskSandboxDialog() {
                 </div>
               )}
             </div>
+            <Field
+              label="Extra mounts"
+              hint={'Bind-mount extra host directories into the container for this task, one per line as host_path:container_path (Docker\'s own -v shape). For persisting something a fresh container otherwise loses on restart, like a custom MCP server\'s own data dir - the per-agent config dir above already covers logins/sessions. ~, $HOME, and $WORKSPACE expand on the host side.'}
+            >
+              <AutoGrowTextarea
+                value={mountsText}
+                onChange={e => setMountsText(e.target.value)}
+                rows={3}
+                placeholder={"$HOME/mcp-data:/data/mcp"}
+                className="box-border w-full resize-none overflow-y-auto rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2 font-mono text-[13px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
+                disabled={mountsBusy}
+              />
+              <div className="mt-2 flex items-center gap-2">
+                <Button variant="secondary" onClick={saveDockerMounts} disabled={!mountsDirty || mountsBusy}>
+                  {mountsBusy ? "Saving…" : "Save mounts & restart"}
+                </Button>
+                {mountsErr && <span className="text-[12px] text-[var(--color-err)]">{mountsErr}</span>}
+              </div>
+            </Field>
           </>
         )}
 

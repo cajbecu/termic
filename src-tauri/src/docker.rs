@@ -200,6 +200,56 @@ fn sanitize_extra_dir(d: &str) -> Option<String> {
     Some(d.trim_start_matches("./").to_string())
 }
 
+/// Container paths a task-level extra mount can never target: everything
+/// under `/root` is already spoken for by the per-agent config dir wiring
+/// (`agent_config`), and the rest are system dirs where an empty (or
+/// unrelated) mount would either shadow something the image needs to boot
+/// or reach for privilege-relevant files. This is a denylist of ROOTS -
+/// checked by prefix, not exact match, so `/root/x` is rejected the same
+/// as `/root` itself.
+const UNSAFE_MOUNT_TARGET_ROOTS: &[&str] = &[
+    "/root", "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/proc", "/sys", "/dev", "/var", "/opt", "/boot",
+];
+
+/// Parse + validate one `host_path:container_path` entry from
+/// `Task.docker_extra_mounts`. Unlike `sanitize_extra_dir` (a name relative
+/// to an agent's own config dir), this is a full user-chosen pair with two
+/// independent halves to check:
+/// - host: `$HOME`/`~`/`$WORKSPACE` expanded, then must resolve to a
+///   non-empty absolute path (relative host paths have no fixed base to
+///   resolve against the way the config-dir helpers do).
+/// - container: absolute, no `..`, and not under `UNSAFE_MOUNT_TARGET_ROOTS`
+///   - the container half is a deliberate user choice (see docker.rs's
+///   `Task.docker_extra_mounts` doc comment for why this isn't forced to
+///   match the host path), so it needs its own real validation rather than
+///   reusing the host half's.
+/// Returns `(host, container)` or `None` for a malformed/unsafe entry -
+/// callers drop those silently rather than surfacing a spawn-time error,
+/// same as every other sandbox list parser in this file.
+fn sanitize_extra_mount(raw: &str, home: &str, task_path: &str) -> Option<(String, String)> {
+    let raw = raw.trim();
+    let (host_raw, container_raw) = raw.split_once(':')?;
+    let host_raw = host_raw.trim();
+    let container_raw = container_raw.trim();
+    if host_raw.is_empty() || container_raw.is_empty() {
+        return None;
+    }
+    let host = canonicalize_or_keep(&subst_path(host_raw, home, task_path));
+    if host.is_empty() || !host.starts_with('/') {
+        return None;
+    }
+    if !container_raw.starts_with('/') || container_raw.contains("..") || container_raw.contains('\0') {
+        return None;
+    }
+    let container = container_raw.trim_end_matches('/');
+    if container.is_empty()
+        || UNSAFE_MOUNT_TARGET_ROOTS.iter().any(|root| container == *root || container.starts_with(&format!("{root}/")))
+    {
+        return None;
+    }
+    Some((host, container.to_string()))
+}
+
 /// Host directory that persists an agent's login + sessions + MCP config
 /// ACROSS every Docker task of that agent. The sameness of this path
 /// IS the cross-task sharing. termic-owned, never the host's real
@@ -237,6 +287,13 @@ pub fn build_spec(
     // and composition members). `regex:`-prefixed entries are Seatbelt-
     // only (no literal path to mount) and are skipped.
     allowed_paths: &[String],
+    // Task-level extra Docker mounts (`Task.docker_extra_mounts`), each
+    // `host_path:container_path` - see that field's doc comment for why
+    // these are a dedicated list rather than reusing `allowed_paths`.
+    // Mainly for persisting something a fresh container otherwise loses on
+    // every restart that `agent_config`'s built-in list doesn't cover (an
+    // MCP server's own data dir, say).
+    extra_mounts: &[String],
 ) -> DockerSpec {
     let mut mounts: Vec<Mount> = Vec::new();
 
@@ -352,6 +409,26 @@ pub fn build_spec(
         }
     }
 
+    // 5. Task-level extra Docker mounts (Settings → Docker Sandbox has the
+    //    per-AGENT equivalent; this is per-TASK, user-chosen host:container
+    //    pairs). Runs LAST among the mount steps so it can dedupe against
+    //    every mount already staged above, including the agent config dir
+    //    step just above - a mount whose CONTAINER path collides with an
+    //    already-claimed one is dropped rather than silently shadowing it.
+    for raw in extra_mounts {
+        let Some((host, container)) = sanitize_extra_mount(raw, &home, &task_path) else { continue };
+        if mounts.iter().any(|m| m.host == host || m.container == container) {
+            continue;
+        }
+        mounts.push(Mount::implicit(
+            host,
+            container,
+            false,
+            "extra mount for this task (persists across container restarts)",
+            false,
+        ));
+    }
+
     // Per-spawn env overlay: TERMIC_* bookkeeping vars, the extra named
     // ports, and (this is the part that used to be silently dropped) the
     // agent's own configured env block from Settings -> Agents & Terminals
@@ -417,6 +494,40 @@ pub fn validate_extra_args(args: &[String]) -> Result<(), String> {
         if UNSAFE_EXTRA_ARG_PREFIXES.iter().any(|p| flag == *p) {
             return Err(format!(
                 "\"{a}\" isn't allowed in Docker extra args: it can widen or disable the container's isolation boundary."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Command-level syntax check for `Task.docker_extra_mounts` entries, run at
+/// save time (`task_set_docker`) so a malformed entry surfaces as an error to
+/// the user instead of being silently dropped at spawn time the way
+/// `sanitize_extra_mount` drops bad entries. Checks the same shape rules
+/// `sanitize_extra_mount` enforces on the container half, without resolving
+/// `$HOME`/`$WORKSPACE`/symlinks on the host half - those are always valid
+/// at save time regardless of which task's path they'll later be resolved
+/// against, so only the fully task-agnostic checks run here.
+pub fn validate_extra_mounts(mounts: &[String]) -> Result<(), String> {
+    for raw in mounts {
+        let raw_t = raw.trim();
+        let Some((host_raw, container_raw)) = raw_t.split_once(':') else {
+            return Err(format!("\"{raw}\" isn't a valid mount: expected host_path:container_path."));
+        };
+        let host_raw = host_raw.trim();
+        let container_raw = container_raw.trim();
+        if host_raw.is_empty() || container_raw.is_empty() {
+            return Err(format!("\"{raw}\" isn't a valid mount: both the host and container path are required."));
+        }
+        if !container_raw.starts_with('/') || container_raw.contains("..") || container_raw.contains('\0') {
+            return Err(format!("\"{raw}\" isn't a valid mount: the container path must be an absolute path with no \"..\"."));
+        }
+        let container = container_raw.trim_end_matches('/');
+        if container.is_empty()
+            || UNSAFE_MOUNT_TARGET_ROOTS.iter().any(|root| container == *root || container.starts_with(&format!("{root}/")))
+        {
+            return Err(format!(
+                "\"{raw}\" isn't allowed: {container} is reserved for the container's own config/system files."
             ));
         }
     }
@@ -957,7 +1068,7 @@ mod tests {
         let task = stub_task("t1", "/tmp/termic-docker-test-does-not-exist");
         let mut spawn_env = std::collections::HashMap::new();
         spawn_env.insert("MY_CUSTOM_VAR".to_string(), "hello".to_string());
-        let spec = build_spec(&task, "claude", "termic-sandbox:abc", &task.path, vec![], &spawn_env, &[], false, &[]);
+        let spec = build_spec(&task, "claude", "termic-sandbox:abc", &task.path, vec![], &spawn_env, &[], false, &[], &[]);
         assert!(spec.env.iter().any(|(k, v)| k == "MY_CUSTOM_VAR" && v == "hello"));
         assert!(spec.env.iter().any(|(k, _)| k == "TERM"));
     }
@@ -970,7 +1081,7 @@ mod tests {
         let task = stub_task("t2", "/tmp/termic-docker-test-does-not-exist-2");
         let mut spawn_env = std::collections::HashMap::new();
         spawn_env.insert("TERM".to_string(), "dumb".to_string());
-        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &spawn_env, &[], false, &[]);
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &spawn_env, &[], false, &[], &[]);
         let term_values: Vec<&str> = spec.env.iter().filter(|(k, _)| k == "TERM").map(|(_, v)| v.as_str()).collect();
         assert_eq!(term_values, vec!["xterm-256color", "dumb"]);
     }
@@ -994,7 +1105,7 @@ mod tests {
             ("opencode", "/root/.config/opencode", &["/root/.local/share/opencode"]),
         ];
         for (agent, primary, extras) in cases {
-            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env, &[], false, &[]);
+            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env, &[], false, &[], &[]);
             let mounted: Vec<&str> = spec.mounts.iter().map(|m| m.container.as_str()).collect();
             assert!(mounted.contains(primary), "{agent}: expected {primary} in {mounted:?}");
             for e in *extras {
@@ -1003,7 +1114,7 @@ mod tests {
         }
         // grok stays unsupported in Docker mode regardless of what
         // agent_dirs lists for Seatbelt's sake.
-        let grok_spec = build_spec(&task, "grok", "img", &task.path, vec![], &env, &[], false, &[]);
+        let grok_spec = build_spec(&task, "grok", "img", &task.path, vec![], &env, &[], false, &[], &[]);
         assert!(!grok_spec.mounts.iter().any(|m| m.container.contains("grok")));
     }
 
@@ -1012,7 +1123,7 @@ mod tests {
         let task = stub_task("t4", "/tmp/termic-docker-test-does-not-exist-4");
         let env = std::collections::HashMap::new();
         for (agent, var) in [("claude", "CLAUDE_CONFIG_DIR"), ("codex", "CODEX_HOME")] {
-            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env, &[], false, &[]);
+            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env, &[], false, &[], &[]);
             let val = spec.env.iter().find(|(k, _)| k == var).map(|(_, v)| v.as_str());
             assert_eq!(val, Some(format!("/root/.{agent}").as_str()));
         }
@@ -1034,13 +1145,86 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_extra_mount_accepts_a_valid_host_container_pair() {
+        let got = sanitize_extra_mount("/tmp/mcp-data:/data/mcp", "/Users/x", "/tmp/task");
+        assert_eq!(got, Some(("/tmp/mcp-data".to_string(), "/data/mcp".to_string())));
+    }
+
+    #[test]
+    fn sanitize_extra_mount_expands_home_and_workspace_on_the_host_half() {
+        let got = sanitize_extra_mount("$HOME/mcp-data:/data/mcp", "/Users/x", "/tmp/task");
+        assert_eq!(got, Some(("/Users/x/mcp-data".to_string(), "/data/mcp".to_string())));
+    }
+
+    #[test]
+    fn sanitize_extra_mount_trims_a_trailing_slash_on_the_container_half() {
+        let got = sanitize_extra_mount("/tmp/mcp-data:/data/mcp/", "/Users/x", "/tmp/task");
+        assert_eq!(got, Some(("/tmp/mcp-data".to_string(), "/data/mcp".to_string())));
+    }
+
+    #[test]
+    fn sanitize_extra_mount_rejects_malformed_entries() {
+        for bad in ["", "no-colon-here", "/only-host:", ":/only-container", "  :  "] {
+            assert_eq!(sanitize_extra_mount(bad, "/Users/x", "/tmp/task"), None, "expected {bad:?} to be rejected");
+        }
+    }
+
+    #[test]
+    fn sanitize_extra_mount_rejects_a_relative_or_traversing_container_half() {
+        for bad in ["/tmp/mcp-data:data/mcp", "/tmp/mcp-data:/data/../etc", "/tmp/mcp-data:/data/mcp\0"] {
+            assert_eq!(sanitize_extra_mount(bad, "/Users/x", "/tmp/task"), None, "expected {bad:?} to be rejected");
+        }
+    }
+
+    #[test]
+    fn sanitize_extra_mount_rejects_denylisted_container_roots() {
+        for root in ["/root", "/root/x", "/etc", "/etc/passwd", "/var", "/dev"] {
+            let raw = format!("/tmp/mcp-data:{root}");
+            assert_eq!(sanitize_extra_mount(&raw, "/Users/x", "/tmp/task"), None, "expected {root:?} to be rejected");
+        }
+    }
+
+    #[test]
+    fn task_extra_mounts_are_added_and_deduped_by_container_path() {
+        let task = stub_task("t11", "/tmp/termic-docker-test-does-not-exist-11");
+        let env = std::collections::HashMap::new();
+        let extras = vec![
+            "/tmp/mcp-data:/data/mcp".to_string(),
+            "/tmp/other:/data/mcp".to_string(), // same container path - dropped
+            "/etc:/data/unsafe".to_string(),    // denylisted host isn't the point; container is fine, host stays as-is
+            "not-an-entry".to_string(),         // malformed - dropped
+        ];
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &[], &extras);
+        let containers: Vec<&str> = spec.mounts.iter().map(|m| m.container.as_str()).collect();
+        assert_eq!(containers.iter().filter(|c| **c == "/data/mcp").count(), 1, "{containers:?}");
+        let mcp_mount = spec.mounts.iter().find(|m| m.container == "/data/mcp").unwrap();
+        assert_eq!(mcp_mount.host, "/tmp/mcp-data");
+    }
+
+    #[test]
+    fn task_extra_mounts_cannot_shadow_the_agent_config_dir_mount() {
+        let task = stub_task("t12", "/tmp/termic-docker-test-does-not-exist-12");
+        let env = std::collections::HashMap::new();
+        let extras = vec!["/tmp/whatever:/root/.claude".to_string()];
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &[], &extras);
+        let claude_mounts: Vec<&str> = spec
+            .mounts
+            .iter()
+            .filter(|m| m.container == "/root/.claude")
+            .map(|m| m.host.as_str())
+            .collect();
+        assert_eq!(claude_mounts.len(), 1, "{claude_mounts:?}");
+        assert_ne!(claude_mounts[0], "/tmp/whatever");
+    }
+
+    #[test]
     fn user_extra_dirs_are_mounted_alongside_the_builtin_ones() {
         // copilot is KNOWN_SAFE_AGENTS - its extras are always mounted
         // regardless of persist_enabled, which only gates non-builtin agents.
         let task = stub_task("t5", "/tmp/termic-docker-test-does-not-exist-5");
         let env = std::collections::HashMap::new();
         let extras = vec![".mytool".to_string(), "../escape".to_string(), "/etc".to_string()];
-        let spec = build_spec(&task, "copilot", "img", &task.path, vec![], &env, &extras, false, &[]);
+        let spec = build_spec(&task, "copilot", "img", &task.path, vec![], &env, &extras, false, &[], &[]);
         let mounted: Vec<&str> = spec.mounts.iter().map(|m| m.container.as_str()).collect();
         assert!(mounted.contains(&"/root/.copilot"), "{mounted:?}");
         assert!(mounted.contains(&"/root/.mytool"), "{mounted:?}");
@@ -1057,7 +1241,7 @@ mod tests {
         let task = stub_task("t6", "/tmp/termic-docker-test-does-not-exist-6");
         let env = std::collections::HashMap::new();
         let extras = vec![".grok".to_string()];
-        let spec = build_spec(&task, "grok", "img", &task.path, vec![], &env, &extras, true, &[]);
+        let spec = build_spec(&task, "grok", "img", &task.path, vec![], &env, &extras, true, &[], &[]);
         assert!(!spec.mounts.iter().any(|m| m.container.contains("grok")));
         assert!(!persist_offerable("grok"));
     }
@@ -1069,13 +1253,13 @@ mod tests {
         let extras = vec![".mytool".to_string()];
         // Off by default: an unrecognized agent id with extras configured
         // but the opt-in switch still off mounts nothing at all.
-        let off = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &extras, false, &[]);
+        let off = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &extras, false, &[], &[]);
         assert!(off.mounts.iter().all(|m| !m.container.contains("mytool")));
 
         // Once opted in, the user's own dirs become the mount (there is no
         // confirmed built-in dir to fall back on for an agent this module
         // has never seen).
-        let on = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &extras, true, &[]);
+        let on = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &extras, true, &[], &[]);
         let mounted: Vec<&str> = on.mounts.iter().map(|m| m.container.as_str()).collect();
         assert!(mounted.contains(&"/root/.mytool"), "{mounted:?}");
     }
@@ -1084,7 +1268,7 @@ mod tests {
     fn custom_agent_persist_enabled_with_no_dirs_mounts_nothing() {
         let task = stub_task("t8", "/tmp/termic-docker-test-does-not-exist-8");
         let env = std::collections::HashMap::new();
-        let spec = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &[], true, &[]);
+        let spec = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &[], true, &[], &[]);
         // Only the always-there worktree/.git mounts - no agent config dir.
         assert!(spec.mounts.iter().all(|m| !m.why.contains("Docker agent")));
     }
@@ -1098,7 +1282,7 @@ mod tests {
         let task = stub_task("t9", "/tmp/termic-docker-test-does-not-exist-9");
         let env = std::collections::HashMap::new();
         let allowed = vec!["/tmp/some-shared-dir".to_string()];
-        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &allowed);
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &allowed, &[]);
         let mounted: Vec<&str> = spec.mounts.iter().map(|m| m.container.as_str()).collect();
         assert!(mounted.contains(&"/tmp/some-shared-dir"), "{mounted:?}");
     }
@@ -1110,7 +1294,7 @@ mod tests {
         // A regex: entry (Seatbelt-only, no literal path) and the task's own
         // path (already mounted implicitly as step 1) should both be no-ops.
         let allowed = vec!["regex:^$HOME/\\.foo$".to_string(), task.path.clone()];
-        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &allowed);
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &allowed, &[]);
         let host_paths: Vec<&str> = spec.mounts.iter().map(|m| m.host.as_str()).collect();
         // No stray mount was added for either entry - just the one implicit
         // worktree mount already covering task.path.

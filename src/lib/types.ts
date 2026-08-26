@@ -328,6 +328,13 @@ export interface Task {
   docker_sandbox_enabled?: boolean;
   /** User-appended `docker run` args for this task (e.g. `--memory 4g`). */
   docker_extra_args?: string[];
+  /** Extra bind mounts for this task's container, one per entry as
+   *  `host_path:container_path` (Docker's own `-v` shape). A dedicated
+   *  field, NOT part of `sandbox_rw_paths`/"Allowed paths": that list is
+   *  shared with Seatbelt and has no concept of a container path. Mainly
+   *  for persisting something a fresh container otherwise loses on
+   *  restart that the per-agent config dir mount doesn't cover. */
+  docker_extra_mounts?: string[];
   /** Multi-repo composition. Empty for single-repo tasks. */
   composition?: TaskMember[];
   /** Extra named ports (GH #196), frozen at creation and topped up at

@@ -486,6 +486,19 @@ pub struct Task {
     /// User-appended `docker run` args for this task (e.g. `--memory 4g`).
     #[serde(default)]
     pub docker_extra_args: Vec<String>,
+    /// Extra bind mounts for this task's Docker container, one per entry as
+    /// `host_path:container_path` (Docker's own `-v` shape - deliberately
+    /// NOT reusing `sandbox_rw_paths`/"Allowed paths": that list is shared
+    /// with Seatbelt via `live_sandbox_lists`, which has no concept of a
+    /// container path, so a host:container entry there would be ambiguous
+    /// the moment a shared global/project default is reused by a Seatbelt
+    /// task. Unlike the worktree/git-metadata mounts (host path == container
+    /// path, a git `commondir`-pointer requirement, not a choice), there's
+    /// no reason an arbitrary extra mount has to land at the same absolute
+    /// path inside the container - `docker::sanitize_extra_mount` validates
+    /// each entry before it can become a mount.
+    #[serde(default)]
+    pub docker_extra_mounts: Vec<String>,
     /// Multi-repo composition. Empty for single-repo tasks (the
     /// usual case — `path` already points at the worktree of the one
     /// project this task belongs to). For tasks created
@@ -2883,7 +2896,7 @@ fn pty_spawn(
         // so switching a task between Seatbelt and Docker doesn't lose
         // whatever extra directories were configured for it.
         let (docker_allowed_paths, _) = live_sandbox_lists(&task);
-        let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone(), &args.env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths);
+        let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone(), &args.env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts);
         let argv = docker::render_argv(&spec, &args.cmd, &args.args);
         dlog(&format!("[pty_spawn] docker task={} agent={} image={} argv={argv:?}", task.id, agent, image));
         Some((argv, spec.container_name))
@@ -3992,6 +4005,7 @@ fn task_open_repo(
         sandbox_allowed_hosts,
         docker_sandbox_enabled,
         docker_extra_args: Vec::new(),
+        docker_extra_mounts: Vec::new(),
         composition,
         extra_named_ports,
         port_block_len,
@@ -4225,6 +4239,7 @@ fn task_import_worktree(
         sandbox_allowed_hosts,
         docker_sandbox_enabled,
         docker_extra_args: Vec::new(),
+        docker_extra_mounts: Vec::new(),
         composition: Vec::new(),
         extra_named_ports,
         port_block_len,
@@ -4575,6 +4590,7 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
         sandbox_allowed_hosts,
         docker_sandbox_enabled,
         docker_extra_args: Vec::new(),
+        docker_extra_mounts: Vec::new(),
         // Single-project tasks leave composition empty. Multi-
         // repo task creation runs through a separate code path
         // (task_create_multi) that populates this and re-uses
@@ -5055,6 +5071,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         sandbox_allowed_hosts,
         docker_sandbox_enabled,
         docker_extra_args: Vec::new(),
+        docker_extra_mounts: Vec::new(),
         composition,
         extra_named_ports,
         port_block_len,
@@ -6001,12 +6018,15 @@ fn task_set_docker(
     id: String,
     enabled: bool,
     extra_args: Vec<String>,
+    extra_mounts: Vec<String>,
 ) -> Result<usize, String> {
     docker::validate_extra_args(&extra_args)?;
+    docker::validate_extra_mounts(&extra_mounts)?;
     let mut list = load_tasks();
     let w = list.iter_mut().find(|w| w.id == id).ok_or("no such task")?;
     w.docker_sandbox_enabled = enabled;
     w.docker_extra_args = extra_args;
+    w.docker_extra_mounts = extra_mounts;
     save_task(w).map_err(|e| e.to_string())?;
     if !enabled {
         docker::cleanup_task(&id);
@@ -15907,7 +15927,7 @@ fn docker_command_preview(task_id: String, agent_id: Option<String>) -> Result<D
     let agent_extra_dirs = settings.docker_agent_extra_dirs.get(&agent_id).cloned().unwrap_or_default();
     let agent_persist_enabled = settings.docker_agent_persist_enabled.get(&agent_id).copied().unwrap_or(false);
     let (docker_allowed_paths, _) = live_sandbox_lists(&task);
-    let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &agent.env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths);
+    let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &agent.env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts);
     let argv = docker::render_argv(&spec, &agent.command, &agent.args);
     Ok(DockerCommandPreview { spec, argv })
 }

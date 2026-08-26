@@ -341,8 +341,8 @@ export function onDockerBuildDone(cb: (d: { success: boolean; tag: string; error
 /** Toggle Docker sandboxing for one task + set its `docker run` extra args.
  *  Mirrors `taskSetSandbox`: pinned per task, SIGKILLs live PTYs so they
  *  relaunch under (or out of) the container. */
-export const taskSetDocker = (id: string, enabled: boolean, extraArgs: string[]) =>
-  invoke<number>("task_set_docker", { id, enabled, extraArgs });
+export const taskSetDocker = (id: string, enabled: boolean, extraArgs: string[], extraMounts: string[] = []) =>
+  invoke<number>("task_set_docker", { id, enabled, extraArgs, extraMounts });
 
 /** One registered agent's Docker config-dir mounts: the confirmed built-in
  *  list (read-only, only non-empty for `is_builtin`) plus whatever extras
