@@ -14,13 +14,14 @@ React 19 + Vite 8 + TypeScript on Tauri 2 (Rust + WKWebView). Tailwind v4 (`@the
 src/
 ├── main.tsx / App.tsx / index.css
 ├── lib/          (types, ipc wrappers, review prompt, utils.cn)
-├── store/        (app, ui, prefs, scriptRuns)
+├── store/        (app, ui, prefs, pr, scriptRuns)
 ├── hooks/        (useShortcuts, useAttentionNotifier)
 └── components/
     ├── task/ (MainArea, TaskView, TabBar, TerminalPane, EditorPane, DiffPane, AuxTerminal, RightPanel, FileTree)
     ├── sidebar/ / settings/ / dialogs/ / ui/ / views/
     └── UnifiedBar.tsx
 src-tauri/src/lib.rs   ← ALL Rust (PTY, project/task IO, settings, scripts, git, sandbox, proxy)
+src-tauri/src/forge.rs ← GitHub/GitLab PR-MR integration via the gh / glab CLIs (detection, status, create)
 ```
 
 ## Run / build

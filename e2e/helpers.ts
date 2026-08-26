@@ -56,11 +56,20 @@ export interface TermicApi {
   useUI: { getState: () => any; setState: (p: any) => void };
   usePrefs: { getState: () => any };
   useRace: { getState: () => any };
+  /** PR/MR store (src/store/pr.ts). Specs seed `byTask` directly to render
+   *  card states without a real forge/network. */
+  usePr: { getState: () => any; setState: (p: any) => void };
   ipc: any;
   invoke: (cmd: string, args?: Record<string, unknown>) => Promise<any>;
   runTabs: any;
   scriptRuns: { getState: () => any };
   usePromptLibrary: { getState: () => any };
+  /** Issue -> task composition (src/lib/issuePrompt.ts). */
+  issuePrompt: { buildIssuePrompt: (issue: any) => string };
+  /** Prompt seeding into a fresh agent (src/lib/seedPrompt.ts). */
+  seedPrompt: {
+    seedPromptWhenReady: (taskId: string, prompt: string, settleMs?: number, deadlineMs?: number) => void;
+  };
   signalLog: {
     recordTitle: (agentId: string, title: string, classified: string | null) => void;
     noteSubmit: (agentId: string) => void;
@@ -394,6 +403,32 @@ export async function openTask(name: string, activate = true): Promise<string> {
       return task.id as string;
     },
     name,
+    activate,
+  );
+}
+
+/**
+ * Create a worktree task (its own branch, cut from `main`) in the seeded
+ * `fixture-repo`, as opposed to `openTask`'s repo-root/main-checkout entry.
+ * PR/MR surfaces only make sense against a real branch - a main checkout
+ * sits on the project's default branch by definition, so it never has one.
+ */
+export async function createWorktreeTask(name: string, branch: string, activate = true): Promise<string> {
+  return browser.execute(
+    async (n, b, act) => {
+      const t = window.__termic!;
+      const proj = t.useApp
+        .getState()
+        .projects.find((p: any) => p.name === "fixture-repo");
+      const task = await t.ipc.taskCreate({
+        project_id: proj.id, name: n, cli: "fakeagent", base_branch: "main", branch: b,
+      });
+      await t.useApp.getState().loadAll();
+      if (act) t.useApp.getState().setActiveTask(task.id);
+      return task.id as string;
+    },
+    name,
+    branch,
     activate,
   );
 }

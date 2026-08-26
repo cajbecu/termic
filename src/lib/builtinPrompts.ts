@@ -172,6 +172,26 @@ Look for:
 
 Rules: behavior stays identical, the diff stays small, and the test suite stays green (run it before and after). If something looks simplifiable but risky, list it instead of touching it.`;
 
+/** The INSTRUCTION half of an issue-seeded task. The issue's own title,
+ *  number, link and body are prepended at task-creation time
+ *  (lib/issuePrompt.ts) - keeping them apart is what lets a user edit this
+ *  text in the prompt library and have every future issue task pick it up.
+ *  Deliberately tells the agent to fetch the comment thread itself: the
+ *  discussion is usually where the real requirements are, and shipping the
+ *  whole thread into the prompt would blow the context on issues that have
+ *  been argued over for months. */
+export const WORK_ISSUE_PROMPT = `Work on the issue above.
+
+1. Read the full discussion before you write anything: run the fetch command listed above. The comments usually carry the real requirements, constraints the reporter added later, and decisions that contradict the original description. Where the body and a later comment disagree, the comment wins unless a maintainer says otherwise.
+2. Reproduce the problem, or confirm the behavior the issue asks for is genuinely missing, before changing code. If you cannot reproduce it, say so and describe exactly what you tried instead of guessing at a fix.
+3. Restate in 2 or 3 lines what you are going to change and why, then do it. Keep the change scoped to this issue: no drive-by refactors, renames, or unrelated fixes.
+4. Match the project's existing conventions, and add or update the test that covers the behavior you changed, if the project has a test setup where that is natural.
+5. Run the project's checks and show them passing.
+
+Report at the end: what the issue actually asked for (including anything only the comments said), what you changed, and how to verify it.
+
+Do not close the issue, comment on it, or open a pull request unless I ask. If the issue is unclear, already fixed, or you disagree that it should be done, say so plainly instead of implementing something adjacent.`;
+
 export const FIX_MERGE_CONFLICT_PROMPT = `# Fix the merge conflicts
 
 Resolve the merge conflicts in this repository, or bring the base branch in first if that is what is missing, so the merge or rebase can finish.

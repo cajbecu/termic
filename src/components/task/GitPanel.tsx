@@ -45,6 +45,8 @@ import { CopyPathItems } from "./CopyPathItems";
 import { HistoryPanel, ScopePicker } from "./HistoryPanel";
 import { ComparePanel } from "./ComparePanel";
 import { fileIconUrl, folderIconUrl } from "@/lib/explorer/iconResolver";
+import { PrCard } from "./PrCard";
+import { usePr } from "@/store/pr";
 
 // Per-side status → glyph / fill / ink / label, shared with Compare (GH #208)
 // so the two panels cannot drift. Re-exported here because this is where they
@@ -373,6 +375,9 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
         closePreviewDiff();
         pushToast(push ? "Committed and pushed" : "Committed", "success");
         refresh();
+        // A push is the moment PR state likely changes (new commits on an
+        // open PR, or the user is about to create one) - poll right away.
+        if (push) usePr.getState().refresh(task.id, true);
       })
       .catch(e => pushToast(String(e), "error"))
       .finally(() => setCommitting(false));
@@ -387,7 +392,11 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
     setPushing(true);
     setPinnedRepoDir(dir);
     taskGitPush(task.id, dir)
-      .then(() => { pushToast(ahead > 0 ? `Pushed ${ahead} commit${ahead === 1 ? "" : "s"}` : "Pushed", "success"); refresh(); })
+      .then(() => {
+        pushToast(ahead > 0 ? `Pushed ${ahead} commit${ahead === 1 ? "" : "s"}` : "Pushed", "success");
+        refresh();
+        usePr.getState().refresh(task.id, true);
+      })
       .catch(e => pushToast(String(e), "error"))
       .finally(() => setPushing(false));
   };
@@ -454,6 +463,7 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
   if (!repo) {
     return (
       <div className="flex h-full flex-col">
+        {!task.is_main_checkout && <PrCard task={task} />}
         {!nonGit && <BranchBar task={task} branch={status.repos[0]?.branch ?? task.branch} dir="" />}
         <div className="px-3 py-3 text-[13.5px] text-[var(--color-fg-faint)]">
           {nonGit
@@ -505,6 +515,11 @@ export function GitPanel({ task, status, refresh, onOpenDiff, onDoubleClickDiff,
 
   return (
     <div className="flex h-full flex-col">
+      {/* A main checkout sits on the project's default branch by definition
+          (see archiveTask.ts's own no-branch-to-delete reasoning) - there is
+          never a PR/MR whose head is that branch, so there's nothing here
+          worth polling for. */}
+      {!task.is_main_checkout && <PrCard task={task} />}
       {/* 0. Repo sub-tabs (wrapping pills). OUTERMOST of the three controls
           here: which repo you are looking at is what the branch bar and all
           three sub-tabs below are ABOUT, so it cannot sit inside them. */}

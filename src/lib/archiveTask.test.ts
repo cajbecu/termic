@@ -20,6 +20,10 @@ vi.mock("@/store/app", () => ({
   useApp: {
     getState: () => ({
       activeTaskId: h.state.activeTaskId,
+      // openPrArchiveWarning (store/pr.ts) looks the task up by id to read
+      // its cached pr_number/pr_provider; empty here since these tests
+      // don't cover a task with a PR attached, unless a test seeds one via
+      // h.state.tasks for the GH #246 cleanup-failure toast's name lookup.
       tasks: h.state.tasks,
       setActiveTask: h.setActiveTask,
       loadAll: h.loadAll,

@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/store/app";
+import { usePr, initCommentWatcher } from "@/store/pr";
 import { taskSpotlightStatus } from "@/lib/ipc";
 import { reapOrphanedServers } from "@/lib/lsp/pageSession";
 import { installPointerEventsGuard } from "@/lib/pointerEventsGuard";
@@ -80,6 +81,12 @@ export function App() {
     // opens (AgentsSection drives the latter). Deliberately NOT on every
     // window focus — `loadAll` re-runs on focus, detection does not.
     useApp.getState().refreshClis();
+    // Forge CLI (gh / glab) detection for the PR integrations - same
+    // policy as agent CLI detection: startup + Settings visits only.
+    void usePr.getState().refreshForges();
+    // PR comment watcher: one global slow tick; only workspaces with a
+    // LIVE agent and the watch opt-in (bell or project setting) poll.
+    initCommentWatcher();
     // Kick off the update check + changelog fetch (idempotent).
     useUpdate.getState().init();
 

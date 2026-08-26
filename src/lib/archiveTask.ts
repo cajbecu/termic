@@ -14,6 +14,7 @@ import { useUI } from "@/store/ui";
 import { usePrefs } from "@/store/prefs";
 import { useArchivingTasks } from "@/store/archivingTasks";
 import { taskArchive } from "@/lib/ipc";
+import { openPrArchiveWarning } from "@/store/pr";
 import type { ConfirmCheckbox } from "@/store/ui";
 import type { Task } from "@/lib/types";
 import { taskLabel } from "@/lib/taskLabel";
@@ -61,22 +62,26 @@ export async function archiveAndRefresh(taskId: string, deleteBranch: boolean): 
  *  the setting, and one who deletes them by default does not have to re-tick it
  *  every time. */
 function archivePrompt(w: Task, deleteBranchDefault: boolean): { message: string; confirmLabel: string; checkbox?: ConfirmCheckbox } {
+  // Open-PR warning leads the copy (empty string for a task with no PR, or
+  // one already merged/closed) so the user sees it before the worktree
+  // removal details - archiving never touches the remote PR/MR.
+  const prWarning = openPrArchiveWarning(w.id);
   if (w.is_main_checkout) {
     return {
-      message: "This removes the Termic entry for the project's main checkout. The repo on disk is NOT touched, so you can re-open it from the project's + menu any time. Any agent running here will be terminated.",
+      message: prWarning + "This removes the Termic entry for the project's main checkout. The repo on disk is NOT touched, so you can re-open it from the project's + menu any time. Any agent running here will be terminated.",
       confirmLabel: "Remove entry",
     };
   }
   if ((w.composition?.length ?? 0) > 0) {
     const members = (w.composition ?? []).filter(m => m.mode === "worktree").map(m => m.dir_name);
     return {
-      message: `Easy to get back: the task stays in History and the branches stay in git, so you can recreate it later. This removes the on-disk worktrees (the host + ${members.join(", ") || "none"}) and any member symlinks to live checkouts (those live repos are NOT touched). Any running agent will be terminated.`,
+      message: prWarning + `Easy to get back: the task stays in History and the branches stay in git, so you can recreate it later. This removes the on-disk worktrees (the host + ${members.join(", ") || "none"}) and any member symlinks to live checkouts (those live repos are NOT touched). Any running agent will be terminated.`,
       confirmLabel: "Archive",
       checkbox: { label: "Delete the git branches", defaultValue: deleteBranchDefault },
     };
   }
   return {
-    message: "Easy to get back: the task stays in History and the branch stays in git, so you can spin up a fresh worktree on it later. This removes only the on-disk worktree directory (build artifacts: node_modules, .venv, untracked files) and terminates any running agent.",
+    message: prWarning + "Easy to get back: the task stays in History and the branch stays in git, so you can spin up a fresh worktree on it later. This removes only the on-disk worktree directory (build artifacts: node_modules, .venv, untracked files) and terminates any running agent.",
     confirmLabel: "Archive",
     checkbox: { label: "Delete the git branch:", branchName: w.branch || undefined, defaultValue: deleteBranchDefault },
   };

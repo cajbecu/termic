@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
 import { usePrefs } from "@/store/prefs";
+import { usePr } from "@/store/pr";
 import { AppDialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -13,16 +14,18 @@ import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
 import { defaultCliFirst, visibleCliIds, isTerminalCli, agentDisplayName } from "@/lib/agents";
 import { taskCreate, taskCreateMulti, settingsLoad, taskImportableWorktrees, taskImportWorktree, sandboxAvailable, taskOpenRepo, projectGitBranches, projectBranchContext } from "@/lib/ipc";
 import { launchSetupTab } from "@/lib/runTabs";
-import { seedPromptWhenReady } from "@/lib/seedPrompt";
+import { seedPromptWhenReady, SETUP_SPAWN_DEADLINE_MS } from "@/lib/seedPrompt";
 import { MAX_PROMPT_CHARS } from "@/lib/deepLink";
 import { withCreateLock } from "@/lib/createLock";
 import { usePendingTasks } from "@/store/pendingTasks";
 import { uniqueBranch, derivedBranch } from "@/lib/quickTask";
 import { cn } from "@/lib/utils";
-import { Check, Loader2, AlertTriangle, GitBranch, Link2, FolderGit2, Plus, History } from "lucide-react";
+import { Check, Loader2, AlertTriangle, GitBranch, Link2, FolderGit2, Plus, CircleDot, History } from "lucide-react";
 import { SandboxModeSelector } from "@/components/SandboxModeSelector";
 import { SANDBOX_PRESETS } from "@/lib/sandboxPresets";
-import type { MemberMode, ImportableWorktree, SandboxMode } from "@/lib/types";
+import type { MemberMode, ImportableWorktree, SandboxMode, ForgeIssue, IssueLookup } from "@/lib/types";
+import { projectForgeIssues } from "@/lib/ipc";
+import { buildIssuePrompt, issueBranch, issueTaskName } from "@/lib/issuePrompt";
 import { readMemberModes, persistMemberMode, seedMemberMode } from "@/components/dialogs/memberModes";
 
 const CLIS = ["claude", "codex", "agy", "grok", "opencode"] as const;
@@ -178,6 +181,18 @@ export function NewTaskDialog() {
   const [importList, setImportList] = useState<ImportableWorktree[]>([]);
   const [importLoading, setImportLoading] = useState(false);
   const [importSelected, setImportSelected] = useState<string | null>(null);
+  // Issue mode: seed the task from a GitHub issue / GitLab issue. Same shape
+  // as import mode (a picker replacing the name+branch fields), but it is
+  // orthogonal to worktree-vs-main-checkout - picking an issue only prefills
+  // the name and branch and arms the prompt. Loading is deferred to the
+  // moment the user asks for it: this is a network call through gh/glab, and
+  // most New Task opens have nothing to do with issues.
+  const canIssues = !isMulti && !project?.non_git;
+  const [issueMode, setIssueMode] = useState(false);
+  const [issueLookup, setIssueLookup] = useState<IssueLookup | null>(null);
+  const [issueLoading, setIssueLoading] = useState(false);
+  const [issueSelected, setIssueSelected] = useState<ForgeIssue | null>(null);
+  const [issueQuery, setIssueQuery] = useState("");
   // Resume-args override, set at create so it applies from the FIRST spawn.
   // Exactly the field the task menu's "Resume override" edits
   // (Task.resume_override, task_set_resume_override): same storage, same
@@ -508,6 +523,77 @@ export function NewTaskDialog() {
 
   // Adopt an existing worktree. No worktree-add / file-copy / setup
   // script, so this skips the streaming phases entirely.
+  /** Flip into issue mode and fetch. Re-fetches on every entry so a freshly
+   *  filed issue shows up without reopening the dialog. */
+  function enterIssues() {
+    setIssueMode(true);
+    setImportMode(false);
+    setErr(null);
+    if (!projectId) return;
+    setIssueLoading(true);
+    projectForgeIssues(projectId, 50)
+      .then(setIssueLookup)
+      .catch(e => setIssueLookup({
+        provider: null, remote_url: "", status: "error", message: String(e), issues: [],
+      }))
+      .finally(() => setIssueLoading(false));
+  }
+
+  // Resolve the project's forge up front. Backed by a cached, network-free
+  // command, so this costs one `git remote get-url` per repo per 5 minutes
+  // and gates whether the issue affordance exists at all: a repo on
+  // Bitbucket, a plain SSH host, or no remote shows nothing.
+  useEffect(() => {
+    if (projectId) void usePr.getState().resolveProvider(projectId);
+  }, [projectId]);
+  const forgeProvider = usePr(s => (projectId ? s.providerByProject[projectId] ?? null : null));
+  const forges = usePr(s => s.forges);
+  const forgeCli = forgeProvider === "gitlab" ? "glab" : "gh";
+  const forgeCliReady = !!forges?.find(f => f.provider === forgeProvider)?.authed;
+
+  // Client-side filter over the already-fetched list: no extra round-trip
+  // for typing, and 50 issues is small enough to scan in the renderer.
+  const visibleIssues = useMemo(() => {
+    const all = issueLookup?.issues ?? [];
+    const q = issueQuery.trim().toLowerCase();
+    if (!q) return all;
+    return all.filter(i =>
+      String(i.number).includes(q) ||
+      i.title.toLowerCase().includes(q) ||
+      i.labels.some(l => l.toLowerCase().includes(q)),
+    );
+  }, [issueLookup, issueQuery]);
+
+  function exitIssues() {
+    setIssueMode(false);
+    setIssueSelected(null);
+    setErr(null);
+  }
+
+  /** Picking an issue fills the name + branch (both still editable) and arms
+   *  the prompt. It does NOT force worktree mode: an issue task in the main
+   *  checkout is a legitimate thing to want, and silently switching the mode
+   *  under the user would be worse than letting them choose. */
+  function pickIssue(issue: ForgeIssue) {
+    setIssueSelected(issue);
+    setName(issueTaskName(issue));
+    setBranch(uniqueBranch(issueBranch(issue, branchPrefix), existingBranches));
+    setBranchEdited(false);
+    setErr(null);
+  }
+
+  /** After a create, hand the agent the issue. Best-effort and fire-and-
+   *  forget: the task itself is already created and usable, so a TUI that
+   *  never reaches its input box must not surface as a create failure. */
+  function seedIssue(taskId: string) {
+    if (!issueSelected) return;
+    seedPromptWhenReady(
+      taskId,
+      buildIssuePrompt(issueSelected),
+      SETUP_SPAWN_DEADLINE_MS,
+    );
+  }
+
   async function submitImport() {
     if (!projectId || !importSelected || !name.trim()) return;
     if (submittingRef.current) return;
@@ -526,6 +612,7 @@ export function NewTaskDialog() {
       ));
       await loadAll();
       setActive(w.id);
+      seedIssue(w.id);
       seedFirstMessage(w.id);
       close();
     } catch (e) {
@@ -557,6 +644,7 @@ export function NewTaskDialog() {
       ));
       await loadAll();
       setActive(w.id);
+      seedIssue(w.id);
       seedFirstMessage(w.id);
       close();
     } catch (e) {
@@ -590,6 +678,10 @@ export function NewTaskDialog() {
     if (submittingRef.current) return;
     submittingRef.current = true;
     const taskId = crypto.randomUUID();
+    // Worktree path: the id is pre-generated, so the seeder can start
+    // polling for the agent immediately and simply waits out the setup
+    // script (hence the longer deadline).
+    seedIssue(taskId);
     // Clean up any prior unlisteners from a previous (errored) submission
     // before registering new ones.
     for (const u of unlistenRef.current) u();
@@ -761,6 +853,131 @@ export function NewTaskDialog() {
             <span className="text-[var(--color-fg-faint)]">({importList.length})</span>
           </button>
         )}
+        {/* Start-from-an-issue affordance. Only for repos actually hosted on
+            a forge (issue #21/#22 tooling is CLI-backed, so it is real only
+            where gh/glab can reach). Doubles as the discovery point for the
+            CLIs: a GitHub repo whose owner has never installed gh still sees
+            the entry and learns what it would buy them. */}
+        {canIssues && forgeProvider && !issueMode && !importMode && (
+          <button
+            type="button"
+            onClick={enterIssues}
+            className="-mb-1 inline-flex items-center gap-1.5 self-start text-[12.5px] text-[var(--color-fg-dim)] hover:text-[var(--color-accent)]"
+          >
+            <CircleDot className="h-3.5 w-3.5" />
+            Start from a {forgeProvider === "gitlab" ? "GitLab" : "GitHub"} issue
+            {!forgeCliReady && (
+              <span className="text-[var(--color-fg-faint)]">(needs {forgeCli})</span>
+            )}
+          </button>
+        )}
+        {canIssues && issueMode && (
+          <button
+            type="button"
+            onClick={exitIssues}
+            className="-mb-1 inline-flex items-center gap-1.5 self-start text-[12.5px] text-[var(--color-fg-dim)] hover:text-[var(--color-accent)]"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Start from a blank task instead
+          </button>
+        )}
+
+        {/* Issue picker. Replaces nothing: it fills the name + branch fields
+            above, which stay editable. */}
+        {issueMode && (
+          <Field
+            label="Issue"
+            hint="Open issues, most recently updated first. The agent starts with the issue and reads the comments itself."
+          >
+            {issueLoading ? (
+              <div className="flex items-center gap-2 px-1 py-4 text-[12.5px] text-[var(--color-fg-faint)]">
+                <Loader2 className="h-4 w-4 animate-spin text-[var(--color-accent)]" /> Loading issues…
+              </div>
+            ) : issueLookup && issueLookup.status !== "ok" ? (
+              <div className="rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] px-3 py-3 text-[12.5px] text-[var(--color-fg-dim)]">
+                {issueLookup.status === "cli-missing" ? (
+                  <>
+                    <div className="text-[var(--color-fg)]">
+                      Issues need the <span className="mono">{forgeCli}</span> CLI
+                    </div>
+                    <div className="mt-1">
+                      Install it with <code className="mono">brew install {forgeCli}</code>, then sign in
+                      with <code className="mono">{forgeCli} auth login</code>. It also powers the PR card and
+                      merge detection.
+                    </div>
+                  </>
+                ) : issueLookup.status === "cli-unauthed" ? (
+                  <>
+                    <div className="text-[var(--color-fg)]">Sign in to load issues</div>
+                    <div className="mt-1">
+                      Run <code className="mono">{forgeCli} auth login</code> in a terminal, then reopen this.
+                    </div>
+                  </>
+                ) : (
+                  <span className="break-words">{issueLookup.message}</span>
+                )}
+              </div>
+            ) : (issueLookup?.issues.length ?? 0) === 0 ? (
+              <div className="rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] px-3 py-4 text-center text-[12px] text-[var(--color-fg-faint)]">
+                No open issues on this repo.
+              </div>
+            ) : (
+              <>
+                <input
+                  value={issueQuery}
+                  onChange={e => setIssueQuery(e.target.value)}
+                  placeholder="Filter by number, title or label"
+                  spellCheck={false} autoCorrect="off" autoCapitalize="off" autoComplete="off"
+                  className="mb-1.5 h-7 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 text-[12.5px] text-[var(--color-fg)] outline-none placeholder:text-[var(--color-fg-faint)] focus:border-[var(--color-accent)]"
+                />
+                <div className="max-h-[220px] overflow-auto rounded-md border border-[var(--color-border-soft)]">
+                  {visibleIssues.map(issue => (
+                    <button
+                      key={issue.number}
+                      type="button"
+                      onClick={() => pickIssue(issue)}
+                      title={issue.title}
+                      className={cn(
+                        "flex w-full items-start gap-2.5 border-b border-[var(--color-border-soft)] px-3 py-2 text-left last:border-b-0 hover:bg-[var(--color-hover)]",
+                        issueSelected?.number === issue.number && "bg-[var(--color-accent-deep)]/10",
+                      )}
+                    >
+                      <CircleDot className={cn(
+                        "mt-px h-4 w-4 shrink-0",
+                        issueSelected?.number === issue.number ? "text-[var(--color-accent)]" : "text-[var(--color-fg-faint)]",
+                      )} />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[13px] text-[var(--color-fg)]">
+                          <span className="text-[var(--color-fg-faint)]">#{issue.number}</span> {issue.title}
+                        </div>
+                        <div className="mt-0.5 flex items-center gap-2 text-[11px] text-[var(--color-fg-faint)]">
+                          {issue.author && <span className="truncate">{issue.author}</span>}
+                          {issue.comments > 0 && (
+                            <span className="shrink-0">
+                              {issue.comments} comment{issue.comments === 1 ? "" : "s"}
+                            </span>
+                          )}
+                          {issue.labels.slice(0, 3).map(l => (
+                            <span key={l} className="shrink-0 truncate rounded bg-[var(--color-bg-3)] px-1 text-[10.5px]">{l}</span>
+                          ))}
+                        </div>
+                      </div>
+                      {issueSelected?.number === issue.number && (
+                        <Check className="mt-px h-4 w-4 shrink-0 text-[var(--color-accent)]" />
+                      )}
+                    </button>
+                  ))}
+                  {visibleIssues.length === 0 && (
+                    <div className="px-3 py-4 text-center text-[12px] text-[var(--color-fg-faint)]">
+                      Nothing matches that filter.
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </Field>
+        )}
+
         {canImport && importMode && (
           <button
             type="button"

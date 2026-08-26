@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { archiveTask, clickByText, clickMenuItem, openRightTab, flushEditorMeasure, openTask, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitGone, waitVisible } from "../helpers";
+import { archiveTask, clickByText, clickMenuItem, createWorktreeTask, ensureActiveTask, openRightTab, flushEditorMeasure, openTask, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitGone, waitVisible } from "../helpers";
 
 // Git integration is central to termic (every task is a worktree/checkout).
 // This guards the Git panel: switching to it shows the working-tree status.
@@ -1674,5 +1674,390 @@ describe("git branch bar layout", () => {
     // Wrapped or not, nothing hangs outside the panel.
     expect(m.target!.right).toBeLessThanOrEqual(m.compareRow!.right + 0.5);
     expect(m.base!.right).toBeLessThanOrEqual(m.compareRow!.right + 0.5);
+  });
+});
+
+describe("pr card (#21)", () => {
+  let taskId: string | undefined;
+
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+  });
+
+  /** Let the card finish its own first lookup, then overwrite it. */
+  const seedPr = async (lookup: unknown) => {
+    await browser.waitUntil(
+      () =>
+        browser.execute((id) => {
+          const e = window.__termic!.usePr.getState().byTask[id!];
+          return !!e && !e.loading && e.fetchedAt > 0;
+        }, taskId),
+      { timeout: 20_000, timeoutMsg: "the PR card never completed its initial lookup" },
+    );
+    await browser.execute(
+      (id, lk) => {
+        window.__termic!.usePr.setState((s: any) => ({
+          byTask: { ...s.byTask, [id!]: { lookup: lk, loading: false, fetchedAt: Date.now() } },
+        }));
+      },
+      taskId,
+      lookup,
+    );
+  };
+
+  const OPEN_PR = {
+    provider: "github",
+    remote_url: "https://github.com/acme/widgets.git",
+    status: "ok",
+    message: "",
+    pr: {
+      provider: "github",
+      number: 4242,
+      url: "https://github.com/acme/widgets/pull/4242",
+      title: "Teach the parser about trailing commas",
+      state: "open",
+      checks: "passing",
+      review: "changes_requested",
+      base: "main",
+      head: "feature/commas",
+    },
+  };
+
+  it("renders nothing at all on a repo that is not hosted on a forge", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    // A worktree task, not a main checkout: PR/MR surfaces are scoped to a
+    // real branch, and a main checkout sits on the project's default branch
+    // by definition (never gets a card at all - see the main-checkout case
+    // below).
+    taskId = await createWorktreeTask("e2e-pr-card", "wt-pr-card");
+
+    await clickByText("Git");
+    // The fixture's origin is a local bare repo: neither GitHub nor GitLab,
+    // and not an instance any CLI is signed in to. A repo gh/glab could
+    // never help with gets no PR surface and no install nagging, so the
+    // card must be absent, not explaining itself.
+    await browser.waitUntil(
+      () =>
+        browser.execute((id) => {
+          const e = window.__termic!.usePr.getState().byTask[id!];
+          return !!e && !e.loading && e.fetchedAt > 0;
+        }, taskId),
+      { timeout: 20_000, timeoutMsg: "the PR lookup never settled" },
+    );
+    const status = await browser.execute(
+      (id) => window.__termic!.usePr.getState().byTask[id!]?.lookup?.status,
+      taskId,
+    );
+    expect(status).toBe("unsupported-remote");
+    await waitGone("[data-testid='pr-card']");
+  });
+
+  it("names the missing CLI and how to install it", async () => {
+    await seedPr({
+      provider: "github",
+      remote_url: "https://github.com/acme/widgets.git",
+      status: "cli-missing",
+      message: "",
+      pr: null,
+    });
+    await waitForText("need the gh CLI");
+    await waitForText("brew install gh");
+  });
+
+  it("tells the user to sign in when the CLI is unauthenticated", async () => {
+    await seedPr({
+      provider: "gitlab",
+      remote_url: "https://gitlab.com/acme/widgets.git",
+      status: "cli-unauthed",
+      message: "glab is not authenticated.",
+      pr: null,
+    });
+    await waitForText("Sign in to GitLab");
+    await waitForText("glab auth login");
+  });
+
+  it("offers to create one when the branch has no PR", async () => {
+    await seedPr({
+      provider: "github",
+      remote_url: "https://github.com/acme/widgets.git",
+      status: "ok",
+      message: "",
+      pr: null,
+    });
+    await waitForText("No pull request yet");
+  });
+
+  it("opens the create dialog from the card, prefilled", async () => {
+    await clickByText("Create");
+    await waitForText("Create pull request");
+    // Seeded from the fixture's last commit subject, not left blank.
+    const title = await browser.execute(
+      () =>
+        (document.querySelector("input[placeholder='Title']") as HTMLInputElement | null)?.value ?? "",
+    );
+    expect(title.length).toBeGreaterThan(0);
+    await clickByText("Cancel");
+    await waitForTextGone("Description (optional)");
+  });
+
+  it("renders an open PR with its number, title, checks and review", async () => {
+    await seedPr(OPEN_PR);
+    // The number + title live in a truncating flex child, which a narrow
+    // right panel collapses out of innerText — read the card's textContent.
+    await browser.waitUntil(
+      async () => {
+        const t = await browser.execute(
+          () => document.querySelector("[data-testid='pr-card']")?.textContent ?? "",
+        );
+        return t.includes("#4242") && t.includes("Teach the parser about trailing commas");
+      },
+      { timeout: 8_000, timeoutMsg: "the card never rendered the PR number + title" },
+    );
+    // State pill, CI rollup and review decision all render.
+    await waitForText("Open");
+    await waitForText("CI");
+    await waitForText("Changes requested");
+    await snap("pr-card-open.png");
+  });
+
+  it("badges the task row in the sidebar and links out to the PR (#21)", async () => {
+    const badge = "[data-testid='task-pr-badge']";
+    await waitVisible(badge);
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          (sel) => document.querySelector(sel)?.getAttribute("data-pr-state") === "open",
+          badge,
+        ),
+      { timeout: 8_000, timeoutMsg: "sidebar PR badge never showed the open state" },
+    );
+  });
+
+  it("follows the PR into merged, in the card and in the sidebar", async () => {
+    await seedPr({
+      ...OPEN_PR,
+      pr: { ...OPEN_PR.pr, state: "merged", checks: "none", review: "none" },
+    });
+    await waitForText("Merged");
+    await waitForTextGone("Changes requested");
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          () =>
+            document
+              .querySelector("[data-testid='task-pr-badge']")
+              ?.getAttribute("data-pr-state") === "merged",
+        ),
+      { timeout: 8_000, timeoutMsg: "sidebar PR badge never followed the merge" },
+    );
+    await snap("pr-card-merged.png");
+  });
+
+  // GitLab is a first-class provider, not a GitHub special case: same card,
+  // same states, MR wording and `!` numbering throughout (forge.rs maps
+  // glab's payloads onto the identical vocabulary, including the review
+  // decision it reconstructs from reviewer state + the approvals endpoint).
+  it("renders a GitLab MR with merge-request wording and ! numbering", async () => {
+    await seedPr({
+      provider: "gitlab",
+      remote_url: "https://gitlab.com/acme/widgets.git",
+      status: "ok",
+      message: "",
+      pr: {
+        provider: "gitlab",
+        number: 77,
+        url: "https://gitlab.com/acme/widgets/-/merge_requests/77",
+        title: "Drop the legacy importer",
+        state: "draft",
+        checks: "pending",
+        review: "approved",
+        base: "main",
+        head: "chore/importer",
+      },
+    });
+    await browser.waitUntil(
+      async () => {
+        const t = await browser.execute(
+          () => document.querySelector("[data-testid='pr-card']")?.textContent ?? "",
+        );
+        return t.includes("!77") && t.includes("Drop the legacy importer");
+      },
+      { timeout: 8_000, timeoutMsg: "the card never rendered the MR number + title" },
+    );
+    await waitForText("Draft");
+    await waitForText("Approved");
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          () =>
+            document
+              .querySelector("[data-testid='task-pr-badge']")
+              ?.getAttribute("data-pr-state") === "draft",
+        ),
+      { timeout: 8_000, timeoutMsg: "sidebar badge never showed the draft MR" },
+    );
+    await snap("pr-card-gitlab.png");
+  });
+
+  it("uses merge-request wording in the create dialog for GitLab", async () => {
+    await seedPr({
+      provider: "gitlab",
+      remote_url: "https://gitlab.com/acme/widgets.git",
+      status: "ok",
+      message: "",
+      pr: null,
+    });
+    await waitForText("No merge request yet");
+    await clickByText("Create");
+    await waitForText("Create merge request");
+    await waitForText("glab");
+    await clickByText("Cancel");
+    await waitForTextGone("Description (optional)");
+  });
+
+  it("drops the card entirely for a repo with no remote at all", async () => {
+    await seedPr({
+      provider: null,
+      remote_url: "",
+      status: "no-remote",
+      message: "No git remote configured.",
+      pr: null,
+    });
+    // Nothing PR-shaped is left in the panel — a local-only repo gets no
+    // "install gh" nagging, which is the whole point of the no-remote arm.
+    await waitForTextGone("Teach the parser about trailing commas");
+    await waitGone("[data-testid='task-pr-badge']");
+  });
+
+  it("refreshes immediately when the task's Git tab regains focus after being backgrounded", async () => {
+    // taskId stays mounted (display:none) once backgrounded - the point of
+    // this case is that switching back to it doesn't just resume the stale
+    // 60s tick, it forces an immediate lookup.
+    const before = await browser.execute(
+      (id) => window.__termic!.usePr.getState().byTask[id!]?.fetchedAt ?? 0,
+      taskId,
+    );
+    const otherTaskId = await createWorktreeTask("e2e-pr-card-focus", "wt-pr-card-focus");
+    try {
+      await ensureActiveTask(taskId!);
+      await browser.waitUntil(
+        async () => {
+          const after = await browser.execute(
+            (id) => window.__termic!.usePr.getState().byTask[id!]?.fetchedAt ?? 0,
+            taskId,
+          );
+          return after > before;
+        },
+        { timeout: 5_000, timeoutMsg: "regaining focus never forced a fresh PR lookup" },
+      );
+    } finally {
+      await archiveTask(otherTaskId);
+    }
+  });
+
+  it("never polls at all for a main checkout - there is no branch that could have a PR", async () => {
+    const mainTaskId = await openTask("e2e-pr-card-main");
+    try {
+      await clickByText("Git");
+      await waitForText("Working tree is clean");
+      // No lookup ever starts: the card isn't in the tree to trigger one,
+      // not just hidden after the fact. usePr's byTask entry stays entirely
+      // absent, the same as it would for a task nobody ever opened the Git
+      // tab on.
+      const entry = await browser.execute(
+        (id) => window.__termic!.usePr.getState().byTask[id!] ?? null,
+        mainTaskId,
+      );
+      expect(entry).toBeNull();
+      await waitGone("[data-testid='pr-card']");
+    } finally {
+      await archiveTask(mainTaskId);
+    }
+  });
+});
+
+// ─────────────────── Start a task from an issue ───────────────────
+//
+// The forge half needs a live gh/glab, which an offline fixture run has
+// none of, so this covers the parts that must hold regardless: the
+// affordance only exists for repos actually hosted on a forge, the prompt
+// composed for the agent carries the issue and tells it to read the thread
+// itself, and the branch/name derivation is traceable back to the issue.
+// The prompt composition itself is unit-tested in src/lib/issuePrompt.test.ts.
+
+describe("start a task from an issue", () => {
+  let taskId: string | undefined;
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+  });
+
+  it("resolves the fixture repo as NOT a forge, so no issue UI is offered", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    // The fixture pushes to a local bare repo. Nothing GitHub/GitLab-shaped
+    // may appear for it - that is the "only on GitHub/GitLab repos" rule.
+    const provider = await browser.execute(async () => {
+      const t = window.__termic!;
+      const proj = t.useApp.getState().projects.find((p: any) => p.name === "fixture-repo");
+      const r = await t.invoke("project_forge_provider", { projectId: proj.id });
+      return r.provider;
+    });
+    expect(provider).toBe(null);
+  });
+
+  it("reports the exact reason instead of an empty list", async () => {
+    const lookup = await browser.execute(async () => {
+      const t = window.__termic!;
+      const proj = t.useApp.getState().projects.find((p: any) => p.name === "fixture-repo");
+      return t.invoke("project_forge_issues", { projectId: proj.id, limit: 5 });
+    });
+    // A local bare remote is not a forge, and saying so beats a silent
+    // empty list the user cannot act on.
+    expect(lookup.status).toBe("unsupported-remote");
+    expect(lookup.issues).toEqual([]);
+  });
+
+  it("composes a prompt that carries the issue and defers the thread", async () => {
+    const built = await browser.execute(() =>
+      window.__termic!.issuePrompt.buildIssuePrompt({
+        provider: "github",
+        number: 21,
+        title: "Auto-archive when PR merges",
+        url: "https://github.com/simion/termic/issues/21",
+        body: "I would like to archive worktrees automatically.",
+        author: "adamatan",
+        comments: 4,
+        labels: ["enhancement"],
+        updated_at: "2026-07-01T10:00:00Z",
+      }));
+    expect(built).toContain("GitHub issue #21: Auto-archive when PR merges");
+    expect(built).toContain("archive worktrees automatically");
+    // 4 comments exist and are NOT inlined; the agent fetches them.
+    expect(built).toContain("4 comments");
+    expect(built).toContain("gh issue view 21 --comments");
+    expect(built).toContain("Work on the issue above.");
+    expect(built).toContain("Do not close the issue");
+  });
+
+  it("seeds the composed prompt into a fresh task's agent", async () => {
+    taskId = await openTask("e2e-issue-task");
+    await browser.execute((id) => {
+      window.__termic!.seedPrompt.seedPromptWhenReady(id!, "ISSUE-PROMPT-MARKER", 0, 20000);
+    }, taskId);
+
+    // Terminal content is a WebGL canvas, so assert the store's record of
+    // input having been written (same signal the race spec uses).
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          (id) =>
+            (window.__termic!.useApp.getState().tabs[id!] ?? []).some(
+              (t: any) => t.type === "terminal" && t.is_default && !!t.lastInputAt,
+            ),
+          taskId,
+        ),
+      { timeout: 25_000, timeoutMsg: "the issue prompt never reached the agent" },
+    );
   });
 });

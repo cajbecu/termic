@@ -1580,6 +1580,10 @@ pub fn render_filter_for(task: &Task, agent_override: Option<&str>) -> String {
         r"^objects\.githubusercontent\.com$".into(),
         r"^raw\.githubusercontent\.com$".into(),
         r"^.+\.githubusercontent\.com$".into(),
+        // GitLab (PR/MR integration parity - gitlab projects need push +
+        // glab API access from inside the cage just like github ones).
+        r"^gitlab\.com$".into(),
+        r"^.+\.gitlab\.com$".into(),
         // Package registries.
         r"^registry\.npmjs\.org$".into(),
         r"^.+\.npmjs\.org$".into(),

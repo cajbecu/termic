@@ -18,7 +18,7 @@ import {
   WRITE_TESTS_PROMPT, SECURITY_REVIEW_PROMPT, EXPLAIN_CHANGES_PROMPT, COMMIT_PROMPT,
   COMMIT_PUSH_PROMPT, VERIFY_PROMPT, FIX_BUG_PROMPT, STATUS_PROMPT,
   UPDATE_DOCS_PROMPT, RESEARCH_PROMPT, CONTINUE_PROMPT, SIMPLIFY_PROMPT,
-  HANDOFF_PROMPT, FIX_MERGE_CONFLICT_PROMPT,
+  WORK_ISSUE_PROMPT, HANDOFF_PROMPT, FIX_MERGE_CONFLICT_PROMPT,
 } from "@/lib/builtinPrompts";
 
 export interface Prompt {
@@ -48,6 +48,7 @@ export const DEFAULT_PROMPTS: readonly BuiltinDef[] = [
   { id: "builtin:merge-conflict",  title: "Fix merge conflicts",  body: FIX_MERGE_CONFLICT_PROMPT },
   { id: "builtin:verify",          title: "Verify end to end",    body: VERIFY_PROMPT },
   { id: "builtin:fix-bug",         title: "Fix the bug",          body: FIX_BUG_PROMPT },
+  { id: "builtin:work-issue",      title: "Work on the issue",    body: WORK_ISSUE_PROMPT },
   { id: "builtin:simplify",        title: "Simplify",             body: SIMPLIFY_PROMPT },
   { id: "builtin:status",          title: "What is the state?",   body: STATUS_PROMPT },
   { id: "builtin:continue",        title: "Continue from last",   body: CONTINUE_PROMPT },

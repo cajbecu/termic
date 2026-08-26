@@ -3,10 +3,12 @@
 // for input (lib/agentReady), then type the prompt and stamp lastInputAt
 // (which arms work-done detection for the turn that follows).
 //
-// Two callers, same recipe:
+// Three callers, same recipe:
 //   - Agent Race (lib/agentRace) spawns N agents at once, which contend
 //     for CPU.
 //   - The New Task dialog's optional first message (GH #192) spawns one.
+//   - The issue-seeded task path (lib/issuePrompt.ts) can sit behind a setup
+//     script before its PTY ever spawns, so it passes a much longer deadline.
 // They used to differ only in how long they slept before typing; readiness
 // is now observed rather than guessed, so contention needs no extra
 // patience - a busy machine simply paints later, and the wait sees it.
@@ -23,19 +25,27 @@ import { sendMessageToPty } from "@/lib/agentSend";
 import { waitForAgentReady, sleep } from "@/lib/agentReady";
 import type { TerminalTab } from "@/lib/types";
 
-const SPAWN_DEADLINE_MS = 15000;
+/** How long to wait for the agent's PTY before giving up. Race/New-Task
+ *  agents spawn immediately; an issue task can sit behind a setup script
+ *  first, so that caller passes SETUP_SPAWN_DEADLINE_MS instead. */
+export const SPAWN_DEADLINE_MS = 15000;
+export const SETUP_SPAWN_DEADLINE_MS = 90000;
 const POLL_MS = 150;
 
 /** Wait until `taskId`'s default agent tab has a live PTY and its agent is
  *  ready for input, then inject `prompt`. No-op for an empty prompt. */
-export function seedPromptWhenReady(taskId: string, prompt: string): void {
+export function seedPromptWhenReady(
+  taskId: string,
+  prompt: string,
+  deadlineMs: number = SPAWN_DEADLINE_MS,
+): void {
   if (!prompt.trim()) return;
   const defaultTab = () =>
     (useApp.getState().tabs[taskId] ?? []).find(
       (t): t is TerminalTab => t.type === "terminal" && !!t.is_default,
     );
   void (async () => {
-    const deadline = Date.now() + SPAWN_DEADLINE_MS;
+    const deadline = Date.now() + deadlineMs;
     while (!defaultTab()?.ptyId) {
       if (Date.now() >= deadline) return;
       await sleep(POLL_MS);

@@ -39,18 +39,21 @@ logLine("[termic] boot build=resume-fix-v3-sidebar-bypass").catch(() => {});
 // release bundles: both flags are statically false there.
 if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
   void (async () => {
-    const [app, ui, prefs, race, ipc, core, runTabs, scriptRuns, prompts, agentRace, signalLog, reviewComments, deepLink, previewBrowser, pendingTasks, archivingTasks, cmLanguage, cmAutocomplete, codeIntel, lspStatus, navHistory, pageSession] =
+    const [app, ui, prefs, race, pr, ipc, core, runTabs, scriptRuns, prompts, agentRace, issuePrompt, seedPrompt, signalLog, reviewComments, deepLink, previewBrowser, pendingTasks, archivingTasks, cmLanguage, cmAutocomplete, codeIntel, lspStatus, navHistory, pageSession] =
       await Promise.all([
         import("@/store/app"),
         import("@/store/ui"),
         import("@/store/prefs"),
         import("@/store/race"),
+        import("@/store/pr"),
         import("@/lib/ipc"),
         import("@tauri-apps/api/core"),
         import("@/lib/runTabs"),
         import("@/store/scriptRuns"),
         import("@/store/prompts"),
         import("@/lib/agentRace"),
+        import("@/lib/issuePrompt"),
+        import("@/lib/seedPrompt"),
         import("@/lib/agentSignalLog"),
         import("@/store/reviewComments"),
         import("@/lib/deepLink"),
@@ -69,6 +72,7 @@ if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
       useUI: ui.useUI,
       usePrefs: prefs.usePrefs,
       useRace: race.useRace,
+      usePr: pr.usePr,
       ipc,
       invoke: core.invoke,
       runTabs,
@@ -81,6 +85,8 @@ if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
       // openers delegate to, so a spec exercises the real resolution path.
       previewBrowser,
       agentRace,
+      issuePrompt,
+      seedPrompt,
       // Queued inline review comments: the e2e suite asserts what a selection
       // actually queued (line range + quote), which no DOM surface spells out
       // in full — the card shows a label, not the anchored text.

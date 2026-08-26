@@ -38,6 +38,7 @@ mod repo_config;
 mod shell_env;
 mod automation;
 mod cli_server;
+mod forge;
 mod mcp_server;
 // Row shapes + OS-agnostic logic (subtree walk, cpu_ratio, label_for,
 // signal_from_name) shared by every `procmon` variant below.
@@ -232,6 +233,28 @@ pub struct Project {
     #[serde(default)]
     pub run_scripts: Vec<crate::repo_config::RunCommand>,
 
+    /// What to do when a task's PR/MR is detected as merged:
+    ///   "ask" (default) - toast with an Archive action, user decides.
+    ///   "auto"          - archive the task immediately.
+    ///   "off"           - update the badge, do nothing else.
+    /// Stored as a string (not an enum) so settings.json stays forward-
+    /// compatible if more behaviors land; unknown values fall back to
+    /// "ask" on the frontend.
+    #[serde(default)]
+    pub on_pr_merge: Option<String>,
+    /// Always watch PR/MR comments for this project's tasks: every
+    /// task with a known PR behaves as if its watcher bell was
+    /// switched on. Off by default.
+    #[serde(default)]
+    pub watch_pr_comments: bool,
+    /// Let the comment watcher act on comments from commenters with no
+    /// verified standing on the repo (GitHub: no OWNER/MEMBER/COLLABORATOR
+    /// association; GitLab: not a project member) - see forge.rs's
+    /// `PrComment.trusted`. Off by default: those comments get fed
+    /// straight into an agent's PTY, and anyone who can see a PR/MR can
+    /// usually comment on it regardless of repo access.
+    #[serde(default)]
+    pub watch_untrusted_comments: bool,
     /// Personal extra named ports (GH #196), the projects.json layer.
     /// Unioned with the committed `.termic.yaml` `extra_named_ports`
     /// (yaml order first, deduped by name) into the effective list a
@@ -488,6 +511,32 @@ pub struct Task {
     /// Persisted so relaunch can restore the split configuration.
     #[serde(default)]
     pub split_layout: Option<String>,
+    /// Identity of the pull/merge request attached to this task's
+    /// branch, cached the first time `task_pr_status` (or a create)
+    /// resolves one. Only IDENTITY lives here - live state (checks,
+    /// reviews, merged) is re-fetched on every poll and kept in the
+    /// frontend store. Persisting the number lets the poller resolve the
+    /// PR by number (stable across branch deletion after merge - `glab`
+    /// can't find a merged MR by source branch anymore).
+    #[serde(default)]
+    pub pr_url: Option<String>,
+    #[serde(default)]
+    pub pr_number: Option<u64>,
+    /// "github" | "gitlab" - which forge the cached PR lives on.
+    #[serde(default)]
+    pub pr_provider: Option<String>,
+    /// Comment watcher opt-in for this task (the bell on the PR
+    /// card). Persisted so a relaunch resumes watching. The per-project
+    /// `watch_pr_comments` setting force-enables it for every task
+    /// of that project that has a PR.
+    #[serde(default)]
+    pub pr_watch: bool,
+    /// Newest comment timestamp (RFC3339 UTC) already handled by the
+    /// watcher. Comments after this are "new": surfaced as a toast and
+    /// typed into the main agent. Set to the newest existing comment the
+    /// moment watching is enabled, so history is never replayed.
+    #[serde(default)]
+    pub pr_comments_seen_at: Option<String>,
     /// Manual sidebar position within the task's project, assigned by
     /// `task_reorder` on drag-and-drop. `None` on every task the user has
     /// never reordered, and that is the point: `load_tasks` sorts `None`
@@ -1753,7 +1802,7 @@ fn git_bytes(args: &[&str], cwd: &Path) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
-fn git(args: &[&str], cwd: &Path) -> Result<String> {
+pub(crate) fn git(args: &[&str], cwd: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&git_bytes(args, cwd)?).into_owned())
 }
 
@@ -1964,6 +2013,14 @@ fn resolve_base_ref(repo: &Path, base: &str) -> String {
 /// tracked baseline at all (a repo with no commits, where even HEAD resolves
 /// to nothing).
 ///
+/// Resolved through `resolve_base_ref` like every other consumer of a stored
+/// base (task create, races, merge/archive). The stored value is a
+/// remote-tracking ref, and a repo with no remote has none of those: it is
+/// still pinned to "origin/main", because detect_default_remote names the
+/// remote it wishes existed. Diffing against that ref directly used to
+/// swallow the failure into an empty string, so every task in a local-only
+/// repo reported no changes at all.
+///
 /// Split out from `task_diff_inner` so it can be tested: that function needs a
 /// task record on disk, and `TERMIC_DATA_DIR` is process-global (it would race
 /// parallel tests). Same reasoning as `apply_cli_default_migration`.
@@ -1976,6 +2033,7 @@ fn diff_base_ref(wt: &Path, stored_base: &str) -> Option<String> {
     // downstream can still list.
     (exists(&base) && exists("HEAD")).then_some(base)
 }
+
 
 // ───────────────────────────── PTY manager ─────────────────────────────
 
@@ -3229,6 +3287,9 @@ fn project_add(root_path: String, non_git: Option<bool>) -> Result<Project, Stri
         // New projects start ungrouped; grouping is a sidebar action.
         group: None,
         run_scripts: Vec::new(),
+        on_pr_merge: None,
+        watch_pr_comments: false,
+        watch_untrusted_comments: false,
         extra_named_ports: Vec::new(),
     };
     list.push(p.clone());
@@ -3413,6 +3474,9 @@ fn project_add_multi(root_path: String, name: String, members: Vec<ProjectMember
         non_git,
         group: None,
         run_scripts: Vec::new(),
+        on_pr_merge: None,
+        watch_pr_comments: false,
+        watch_untrusted_comments: false,
         extra_named_ports: Vec::new(),
     };
     list.push(p.clone());
@@ -3776,11 +3840,16 @@ fn task_open_repo(
         resume_override: normalized_resume_override(resume_override),
         persisted_tabs: Vec::new(),
         right_split_tabs: Vec::new(),
-                split_layout: None,
+        split_layout: None,
+        archived_at: None,
+        pr_url: None,
+        pr_number: None,
+        pr_provider: None,
+        pr_watch: false,
+        pr_comments_seen_at: None,
         // New tasks are unordered: they append below any manually
         // ordered sibling (see sort_tasks).
         order: None,
-        archived_at: None,
     };
     save_task(&task).map_err(|e| e.to_string())?;
     Ok(task)
@@ -3995,11 +4064,16 @@ fn task_import_worktree(
         resume_override: normalized_resume_override(resume_override),
         persisted_tabs: Vec::new(),
         right_split_tabs: Vec::new(),
-                split_layout: None,
+        split_layout: None,
+        archived_at: None,
+        pr_url: None,
+        pr_number: None,
+        pr_provider: None,
+        pr_watch: false,
+        pr_comments_seen_at: None,
         // New tasks are unordered: they append below any manually
         // ordered sibling (see sort_tasks).
         order: None,
-        archived_at: None,
     };
     save_task(&task).map_err(|e| e.to_string())?;
     Ok(task)
@@ -4334,11 +4408,16 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
         resume_override: normalized_resume_override(args.resume_override.clone()),
         persisted_tabs: Vec::new(),
         right_split_tabs: Vec::new(),
-                split_layout: None,
+        split_layout: None,
+        archived_at: None,
+        pr_url: None,
+        pr_number: None,
+        pr_provider: None,
+        pr_watch: false,
+        pr_comments_seen_at: None,
         // New tasks are unordered: they append below any manually
         // ordered sibling (see sort_tasks).
         order: None,
-        archived_at: None,
     };
     save_task(&task).map_err(|e| e.to_string())?;
     drop(port_guard);
@@ -4752,11 +4831,16 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         resume_override: normalized_resume_override(args.resume_override.clone()),
         persisted_tabs: Vec::new(),
         right_split_tabs: Vec::new(),
-                split_layout: None,
+        split_layout: None,
+        archived_at: None,
+        pr_url: None,
+        pr_number: None,
+        pr_provider: None,
+        pr_watch: false,
+        pr_comments_seen_at: None,
         // New tasks are unordered: they append below any manually
         // ordered sibling (see sort_tasks).
         order: None,
-        archived_at: None,
     };
     save_task(&task).map_err(|e| e.to_string())?;
     drop(port_guard);
@@ -6646,17 +6730,21 @@ pub(crate) fn task_diff_inner(id: String) -> Result<TaskDiffSummary, String> {
     let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
     load_projects().into_iter().find(|p| p.id == w.project_id).ok_or("no proj")?;
     let wt = PathBuf::from(&w.path);
-    // Through resolve_base_ref like every other consumer of a stored base
-    // (task create, races, merge/archive). The stored value is a
-    // remote-tracking ref, and a repo with no remote has none of those: it is
-    // still pinned to "origin/main", because detect_default_remote names the
-    // remote it wishes existed. Diffing against that ref fails, and this
-    // function used to swallow the failure into an empty string, so every task
-    // in a local-only repo reported no changes at all.
-    //
-    // None means no tracked baseline exists (a repo with no commits); the
-    // untracked scan below still reports the files.
-    let base_ref = diff_base_ref(&wt, &w.base_branch);
+    // Resolved through resolve_base_ref (see diff_base_ref's doc comment) so a
+    // local-only repo still reports changes. None means no tracked baseline
+    // exists (a repo with no commits); the untracked scan below still
+    // reports the files.
+    let base_ref = diff_base_ref(&wt, &w.base_branch).map(|resolved| {
+        // Diff FROM the merge-base with the resolved base, not its tip: the
+        // tip degrades once the base advances (post-merge the range collapses
+        // to empty, post-fetch it picks up inverse noise) - issue #22. Falls
+        // back to the resolved ref itself when the merge-base can't be found.
+        git(&["merge-base", &resolved, "HEAD"], &wt)
+            .ok()
+            .map(|mb| mb.trim().to_string())
+            .filter(|mb| !mb.is_empty())
+            .unwrap_or(resolved)
+    });
 
     // Diff base..working-tree, NOT base..HEAD: a raced agent usually leaves its
     // work uncommitted, so base..HEAD would show nothing. `git diff <base>` is
@@ -7155,16 +7243,16 @@ fn parse_porcelain_line(line: &str) -> (Option<GitFile>, Option<GitFile>) {
 
     // Untracked: both columns are "?". Treat as a single unstaged add.
     if x == "?" {
-        return (None, Some(GitFile { status: "?".into(), path, ..Default::default() }));
+        return (None, Some(GitFile { status: "?".into(), path, fp: String::new(), ..Default::default() }));
     }
 
     let staged = if x != " " {
-        Some(GitFile { status: x.into(), path: path.clone(), ..Default::default() })
+        Some(GitFile { status: x.into(), path: path.clone(), fp: String::new(), ..Default::default() })
     } else {
         None
     };
     let unstaged = if y != " " {
-        Some(GitFile { status: y.into(), path, ..Default::default() })
+        Some(GitFile { status: y.into(), path, fp: String::new(), ..Default::default() })
     } else {
         None
     };
@@ -7239,7 +7327,6 @@ async fn task_git_status(id: String) -> Result<GitStatus, String> {
     .await
     .map_err(|e| e.to_string())?
 }
-
 /// Result of a branch switch: which branch we're on, whether local work was
 /// stashed to get there, and whether re-applying that stash hit conflicts
 /// (conflict markers are left in the tree and the stash is retained).
@@ -8198,6 +8285,7 @@ fn git_commit_files(cwd: &Path, sha: &str) -> Result<Vec<GitFile>, String> {
             path: path.to_string(),
             // A working-tree fingerprint is meaningless for a historical
             // revision (the "viewed" marks it feeds only track live files).
+            fp: String::new(),
             ..Default::default()
         });
     }
@@ -8585,6 +8673,331 @@ async fn task_commit(
     .map_err(|e| e.to_string())?
 }
 
+// ─────────────────────────── forge (PRs / MRs) ───────────────────────────
+
+/// Install + auth status for the forge CLIs (gh / glab). Drives the PR
+/// card's "install / sign in" hints and the Settings badges. async +
+/// spawn_blocking: each probe spawns subprocesses (version + auth status).
+#[tauri::command]
+async fn detect_forges() -> Vec<forge::ForgeCliStatus> {
+    tauri::async_runtime::spawn_blocking(forge::detect)
+        .await
+        .unwrap_or_default()
+}
+
+/// Everything the PR card needs in one round-trip: provider resolution
+/// from the task's remote + the live PR/MR snapshot (or a precise
+/// reason there isn't one). `status` tells the frontend exactly which
+/// hint to render — the user must always be able to see WHY the card is
+/// empty (no remote / unsupported host / CLI missing / not signed in).
+#[derive(Clone, Debug, Serialize)]
+pub struct PrLookup {
+    /// "github" | "gitlab" | null (no/unsupported remote).
+    pub provider: Option<String>,
+    pub remote_url: String,
+    /// "ok" | "no-remote" | "unsupported-remote" | "cli-missing"
+    /// | "cli-unauthed" | "error".
+    pub status: String,
+    /// Human hint for the non-ok states.
+    pub message: String,
+    /// Present iff status == "ok" AND a PR/MR exists for the branch.
+    pub pr: Option<forge::PrStatus>,
+}
+
+fn pr_lookup_blocking(id: &str) -> Result<PrLookup, String> {
+    let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
+    let cwd = PathBuf::from(&w.path);
+    // Cached, no network: a poll on a non-forge repo must cost a hashmap
+    // read, not a subprocess, because the PR card polls every task the user
+    // opens the Git tab on.
+    let (provider, remote_url) = forge::provider_for_repo(&cwd, &detect_default_remote(&cwd));
+    if remote_url.is_empty() {
+        return Ok(PrLookup {
+            provider: None,
+            remote_url,
+            status: "no-remote".into(),
+            message: "No git remote configured. Push the repo to GitHub or GitLab first.".into(),
+            pr: None,
+        });
+    }
+    let Some(provider) = provider else {
+        return Ok(PrLookup {
+            provider: None,
+            remote_url: remote_url.clone(),
+            status: "unsupported-remote".into(),
+            message: format!("Remote {remote_url} is not a GitHub or GitLab host."),
+            pr: None,
+        });
+    };
+    // Prefer the stored PR number (stable after the source branch is
+    // deleted post-merge — by-branch lookup on GitLab stops resolving).
+    let known_number = if w.pr_provider.as_deref() == Some(provider) { w.pr_number } else { None };
+    match forge::pr_status(provider, &cwd, known_number) {
+        Ok(pr) => {
+            // Cache the identity on the task record so future polls
+            // (and the next app launch) can resolve by number.
+            if let Some(ref p) = pr {
+                if w.pr_number != Some(p.number) || w.pr_provider.as_deref() != Some(provider) {
+                    let mut list = load_tasks();
+                    if let Some(wm) = list.iter_mut().find(|x| x.id == id) {
+                        wm.pr_url = Some(p.url.clone());
+                        wm.pr_number = Some(p.number);
+                        wm.pr_provider = Some(provider.to_string());
+                        let _ = save_task(wm);
+                    }
+                }
+            }
+            Ok(PrLookup {
+                provider: Some(provider.to_string()),
+                remote_url,
+                status: "ok".into(),
+                message: String::new(),
+                pr,
+            })
+        }
+        Err(forge::ForgeError::CliMissing(cli)) => Ok(PrLookup {
+            provider: Some(provider.to_string()),
+            remote_url,
+            status: "cli-missing".into(),
+            message: format!("The {cli} CLI is not installed. Install it (e.g. `brew install {cli}`) to see and create {}.",
+                if provider == forge::GITLAB { "merge requests" } else { "pull requests" }),
+            pr: None,
+        }),
+        Err(forge::ForgeError::Auth(msg)) => Ok(PrLookup {
+            provider: Some(provider.to_string()),
+            remote_url,
+            status: "cli-unauthed".into(),
+            message: msg,
+            pr: None,
+        }),
+        Err(forge::ForgeError::Other(msg)) => Ok(PrLookup {
+            provider: Some(provider.to_string()),
+            remote_url,
+            status: "error".into(),
+            message: msg,
+            pr: None,
+        }),
+    }
+}
+
+/// One issue-list round-trip: provider resolution + the open issues, or
+/// the exact reason there are none to show. Mirrors `PrLookup`'s shape so
+/// the New Task dialog can reuse the PR card's explain-yourself copy
+/// instead of inventing a second vocabulary for the same failures.
+#[derive(Serialize)]
+struct IssueLookup {
+    provider: Option<String>,
+    remote_url: String,
+    status: String,
+    message: String,
+    issues: Vec<forge::ForgeIssue>,
+}
+
+fn issue_lookup_blocking(project_id: &str, limit: u32) -> Result<IssueLookup, String> {
+    let p = load_projects()
+        .into_iter()
+        .find(|p| p.id == project_id)
+        .ok_or("no project")?;
+    let cwd = PathBuf::from(&p.root_path);
+    let (provider, remote_url) = forge::provider_for_repo(&cwd, &detect_default_remote(&cwd));
+    let none = |status: &str, message: String| IssueLookup {
+        provider: None,
+        remote_url: remote_url.clone(),
+        status: status.into(),
+        message,
+        issues: Vec::new(),
+    };
+    if remote_url.is_empty() {
+        return Ok(none(
+            "no-remote",
+            "No git remote configured, so there are no issues to pull from.".into(),
+        ));
+    }
+    let Some(provider) = provider else {
+        return Ok(none(
+            "unsupported-remote",
+            format!("Remote {remote_url} is not a GitHub or GitLab host."),
+        ));
+    };
+    let with = |status: &str, message: String, issues: Vec<forge::ForgeIssue>| IssueLookup {
+        provider: Some(provider.to_string()),
+        remote_url: remote_url.clone(),
+        status: status.into(),
+        message,
+        issues,
+    };
+    match forge::issue_list(provider, &cwd, limit) {
+        Ok(issues) => Ok(with("ok", String::new(), issues)),
+        Err(forge::ForgeError::CliMissing(cli)) => Ok(with(
+            "cli-missing",
+            format!("The {cli} CLI is not installed. Install it (e.g. `brew install {cli}`) to start a task from an issue."),
+            Vec::new(),
+        )),
+        Err(forge::ForgeError::Auth(msg)) => Ok(with("cli-unauthed", msg, Vec::new())),
+        Err(forge::ForgeError::Other(msg)) => Ok(with("error", msg, Vec::new())),
+    }
+}
+
+/// Which forge (if any) a project's repo is hosted on. Cached and NETWORK
+/// FREE - one `git remote get-url` per repo per 5 minutes, then a map read.
+/// This is what every forge surface gates on, so it is safe to call on each
+/// dialog open without thinking about it.
+#[derive(Serialize)]
+struct ForgeProvider {
+    provider: Option<String>,
+    remote_url: String,
+}
+
+#[tauri::command]
+async fn project_forge_provider(project_id: String) -> Result<ForgeProvider, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = load_projects()
+            .into_iter()
+            .find(|p| p.id == project_id)
+            .ok_or("no project")?;
+        let cwd = PathBuf::from(&p.root_path);
+        let (provider, remote_url) = forge::provider_for_repo(&cwd, &detect_default_remote(&cwd));
+        Ok(ForgeProvider { provider: provider.map(str::to_string), remote_url })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Open issues for a PROJECT (not a task): the New Task dialog runs before
+/// any task exists, so this resolves the repo from the project root.
+#[tauri::command]
+async fn project_forge_issues(project_id: String, limit: Option<u32>) -> Result<IssueLookup, String> {
+    let limit = limit.unwrap_or(50).clamp(1, 200);
+    tauri::async_runtime::spawn_blocking(move || issue_lookup_blocking(&project_id, limit))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Live PR/MR status for the task's branch (host repo). Hits the
+/// network via the forge CLI — callers poll at a slow cadence (60s), not
+/// the 4s git-status tick.
+#[tauri::command]
+async fn task_pr_status(id: String) -> Result<PrLookup, String> {
+    tauri::async_runtime::spawn_blocking(move || pr_lookup_blocking(&id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Push the branch (setting upstream if needed) and create the PR/MR.
+/// Returns the fresh lookup so the card can render the new PR without a
+/// second round-trip.
+#[tauri::command]
+async fn task_pr_create(
+    id: String,
+    title: String,
+    body: String,
+    base: String,
+    draft: bool,
+) -> Result<PrLookup, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        let cwd = PathBuf::from(&w.path);
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("a title is required".to_string());
+        }
+        let remote_url = git(&["remote", "get-url", &detect_default_remote(&cwd)], &cwd)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let provider = forge::provider_for_remote(&remote_url)
+            .ok_or_else(|| format!("remote {remote_url} is not a GitHub or GitLab host"))?;
+        let base = base.trim();
+        // Strip a remote-tracking prefix — tasks created off
+        // "origin/main" store that verbatim, but the forge wants "main".
+        let base = base.strip_prefix("origin/").unwrap_or(base);
+        if base.is_empty() {
+            return Err("a base branch is required".to_string());
+        }
+
+        // Push first so the forge sees the branch (same upstream fallback
+        // as task_commit's push).
+        if git(&["push"], &cwd).is_err() {
+            let remote = detect_default_remote(&cwd);
+            let branch = git(&["branch", "--show-current"], &cwd)
+                .map_err(|e| e.to_string())?.trim().to_string();
+            if branch.is_empty() {
+                return Err("cannot push: detached HEAD".to_string());
+            }
+            git(&["push", "-u", &remote, &branch], &cwd)
+                .map_err(|e| format!("push failed: {e}"))?;
+        }
+
+        let url = match forge::pr_create(provider, &cwd, title, body.trim(), base, draft) {
+            Ok(u) => u,
+            Err(forge::ForgeError::CliMissing(cli)) => {
+                return Err(format!("the {cli} CLI is not installed"))
+            }
+            Err(forge::ForgeError::Auth(m)) | Err(forge::ForgeError::Other(m)) => return Err(m),
+        };
+        // Persist identity immediately — the follow-up lookup also does
+        // this, but creation should never lose the URL even if the status
+        // fetch right after hiccups.
+        {
+            let mut list = load_tasks();
+            if let Some(wm) = list.iter_mut().find(|x| x.id == id) {
+                wm.pr_url = Some(url.clone());
+                wm.pr_number = forge::pr_number_from_url(&url);
+                wm.pr_provider = Some(provider.to_string());
+                let _ = save_task(wm);
+            }
+        }
+        pr_lookup_blocking(&id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Every comment on the task's PR/MR (discussion + review +
+/// inline), oldest first, normalized timestamps. Requires the PR
+/// identity to be known (a status poll or create already cached it).
+#[tauri::command]
+async fn task_pr_comments(id: String) -> Result<Vec<forge::PrComment>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
+        let provider = w.pr_provider.clone().ok_or("no PR known for this task yet")?;
+        let number = w.pr_number.ok_or("no PR known for this task yet")?;
+        let cwd = PathBuf::from(&w.path);
+        forge::pr_comments(&provider, &cwd, number).map_err(|e| match e {
+            forge::ForgeError::CliMissing(cli) => format!("the {cli} CLI is not installed"),
+            forge::ForgeError::Auth(m) | forge::ForgeError::Other(m) => m,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Persist the comment-watcher opt-in for a task (the PR card bell).
+#[tauri::command]
+fn task_set_pr_watch(id: String, watch: bool) -> Result<(), String> {
+    let mut list = load_tasks();
+    let w = list.iter_mut().find(|w| w.id == id).ok_or("no such task")?;
+    if w.pr_watch == watch {
+        return Ok(());
+    }
+    w.pr_watch = watch;
+    save_task(w).map_err(|e| e.to_string())
+}
+
+/// Persist the watcher's high-water mark (newest handled comment, RFC3339
+/// UTC) so a relaunch doesn't replay already-handled comments into the
+/// agent.
+#[tauri::command]
+fn task_set_pr_comments_seen(id: String, iso: String) -> Result<(), String> {
+    let mut list = load_tasks();
+    let w = list.iter_mut().find(|w| w.id == id).ok_or("no such task")?;
+    let next = if iso.is_empty() { None } else { Some(iso) };
+    if w.pr_comments_seen_at == next {
+        return Ok(());
+    }
+    w.pr_comments_seen_at = next;
+    save_task(w).map_err(|e| e.to_string())
+}
+
 /// Push the current branch. Tries a plain push first (upstream already set);
 /// on failure, most commonly a fresh worktree branch with no upstream, falls
 /// back to `-u <remote> <branch>` to create it.
@@ -8815,7 +9228,7 @@ fn check_task_path_existence(ws_path: &Path, rel: &str) -> Result<PathStat, Stri
 
 #[tauri::command]
 fn task_path_stat(id: String, path: String) -> Result<PathStat, String> {
-    let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no ws")?;
+    let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
     // Unlike a diff/read, "is this a directory" is a sensible question for a
     // path that's exactly a composition member's own root (e.g. a markdown
     // link's `..`/`/` resolves there per resolveTaskHref's member-floor
@@ -9640,7 +10053,6 @@ fn task_file_diff_sides_for_task(w: &Task, path: &str, scope: Option<&str>) -> R
         fp,
     })
 }
-
 fn task_file_diff_for_task(w: &Task, path: &str) -> Result<String, String> {
     let (cwd, rel_path) = resolve_task_git_path(w, path)?;
     // Tracked diff is safe because the path is forwarded to `git -C cwd diff`
@@ -9676,7 +10088,11 @@ fn task_file_diff_for_task(w: &Task, path: &str) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn task_file_diff_sides(id: String, path: String, scope: Option<String>) -> Result<FileDiffSides, String> {
+fn task_file_diff_sides(
+    id: String,
+    path: String,
+    scope: Option<String>,
+) -> Result<FileDiffSides, String> {
     let w = load_tasks().into_iter().find(|w| w.id == id).ok_or("no task")?;
     task_file_diff_sides_for_task(&w, &path, scope.as_deref())
 }
@@ -16527,6 +16943,8 @@ pub fn run() {
             task_diff, task_files, task_list_files_for_finder, task_match_ignored_files, task_send_diff_to_main,
             task_changes, task_git_status, task_git_branches, project_git_branches, project_branch_context, task_git_checkout, task_git_update, task_git_update_info, task_stage, task_unstage, task_commit, task_discard,
             task_git_log, task_git_refs, task_git_push, task_git_commit_files, task_git_compare, task_git_blame, task_git_commit_meta, task_git_commit_offset,
+            detect_forges, task_pr_status, task_pr_create, task_pr_comments, task_set_pr_watch, task_set_pr_comments_seen,
+            project_forge_issues, project_forge_provider,
             task_file_diff, task_file_diff_sides, task_file_read, file_read_external, task_file_read_base64, task_file_fp, task_file_write, task_dir_list, task_path_stat,
             task_path_rename, task_path_delete, task_reveal_path,
             scratch_list, scratch_read, scratch_write, scratch_set_meta, scratch_delete,

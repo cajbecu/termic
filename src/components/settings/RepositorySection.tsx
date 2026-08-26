@@ -1079,6 +1079,58 @@ export function RepositorySection({ projectId }: { projectId: string }) {
             }
           />
           <Field
+            label="When a pull request merges"
+            hint="Termic watches the PR/MR of each task you look at. On merge it can offer to archive the task (toast with an Archive button), archive it automatically, or do nothing."
+            control={
+              <select
+                value={draft.on_pr_merge ?? "ask"}
+                onChange={(e) => patch("on_pr_merge", e.target.value as Project["on_pr_merge"])}
+                className={cn(
+                  "rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[140px]",
+                  flashRing("on_pr_merge"),
+                )}
+              >
+                <option value="ask">Ask (toast)</option>
+                <option value="auto">Archive automatically</option>
+                <option value="off">Do nothing</option>
+              </select>
+            }
+          />
+          <Field
+            label="Always watch PR comments"
+            hint="When a launched task of this project has a pull request, new comments are automatically queued into its main agent to address. Equivalent to switching on the bell on every PR card. Off = opt in per task."
+            control={
+              <select
+                value={draft.watch_pr_comments ? "on" : "off"}
+                onChange={(e) => patch("watch_pr_comments", e.target.value === "on")}
+                className={cn(
+                  "rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[140px]",
+                  flashRing("watch_pr_comments"),
+                )}
+              >
+                <option value="off">Per task (bell)</option>
+                <option value="on">Always</option>
+              </select>
+            }
+          />
+          <Field
+            label="Act on comments from"
+            hint="A PR/MR comment gets fed to the agent to address, with real shell access. Anyone who can see a pull request can usually comment on it regardless of repo permissions, so by default only commenters with verified standing (owner, member, collaborator) are acted on."
+            control={
+              <select
+                value={draft.watch_untrusted_comments ? "on" : "off"}
+                onChange={(e) => patch("watch_untrusted_comments", e.target.value === "on")}
+                className={cn(
+                  "rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[140px]",
+                  flashRing("watch_untrusted_comments"),
+                )}
+              >
+                <option value="off">Collaborators only</option>
+                <option value="on">Everyone</option>
+              </select>
+            }
+          />
+          <Field
             label="Root path"
             hint="The git repo on disk. Do not move or delete this directory; remove the project in Termic instead."
             control={<Input value={draft.root_path} readOnly className="font-mono opacity-70 cursor-not-allowed" />}

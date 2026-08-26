@@ -146,6 +146,7 @@ interface UIState {
   welcomeOpen: boolean;
   /** Changelog dialog — full per-version release notes. */
   changelogOpen: boolean;
+  createPrForTaskId: string | null;      // null = closed
   /** Broadcast dialog — send one message to several open agents in a
    *  task at once. null = closed. UI-store (not app) so opening it
    *  doesn't churn the task tree. */
@@ -256,6 +257,8 @@ interface UIState {
   closeWelcome: () => void;
   openChangelog: () => void;
   closeChangelog: () => void;
+  openCreatePr: (taskId: string) => void;
+  closeCreatePr: () => void;
   openBroadcast: (taskId: string) => void;
   openProjectBroadcast: (projectId: string) => void;
   closeBroadcast: () => void;
@@ -393,6 +396,7 @@ export const useUI = create<UIState>(set => ({
   shortcutsHelpOpen: false,
   welcomeOpen: false,
   changelogOpen: false,
+  createPrForTaskId: null,
   broadcastForTaskId: null,
   broadcastForProjectId: null,
   raceProjectId: null,
@@ -444,6 +448,8 @@ export const useUI = create<UIState>(set => ({
   closeWelcome:      () => set({ welcomeOpen: false }),
   openChangelog:     () => set({ changelogOpen: true }),
   closeChangelog:    () => set({ changelogOpen: false }),
+  openCreatePr:      (taskId) => set({ createPrForTaskId: taskId }),
+  closeCreatePr:     () => set({ createPrForTaskId: null }),
   openBroadcast:     (taskId) => set({ broadcastForTaskId: taskId, broadcastForProjectId: null }),
   openProjectBroadcast: (projectId) => set({ broadcastForProjectId: projectId, broadcastForTaskId: null }),
   closeBroadcast:    () => set({ broadcastForTaskId: null, broadcastForProjectId: null }),

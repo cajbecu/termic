@@ -7,6 +7,7 @@ import { AlertTriangle, TerminalSquare, Copy, Check, ChevronUp, ChevronDown, Che
 import { PopoverRoot, PopoverTrigger, PopoverContent } from "@/components/ui/Popover";
 import { useUI } from "@/store/ui";
 import { isUserWatching, useApp } from "@/store/app";
+import { usePr } from "@/store/pr";
 import {
   QUIET_MS, SAMPLE_MS, SCROLLBACK_STABLE_SAMPLES, SETTLE_SAMPLES,
 } from "@/lib/settleTiming";
@@ -1745,6 +1746,16 @@ const captureArmedRef = useRef(false);
         // Fire-and-forget analytics. Real resume gating lives on the
         // has_resumable_history flag below, not here.
         ipc.taskRecordSpawn(task.id).catch(() => {});
+        // Launching a task is exactly the moment its PR/MR status is worth
+        // knowing, not something to wait on the user opening the Git tab
+        // for - only the primary agent tab counts as "the task launched",
+        // and only for a task that could ever have one (main checkouts
+        // never do, see GitPanel). Unforced: the store's own 30s floor still
+        // applies, so a crash-looping agent respawning repeatedly doesn't
+        // turn this into a hammer.
+        if (isAgent && isPrimaryTab && !task.is_main_checkout) {
+          usePr.getState().refresh(task.id);
+        }
         // If the spawn survives RESUME_FAILURE_MS without exiting, we
         // take that as proof there's a real session — persist true so
         // future spawns (even after termic restart) will pass resume
