@@ -438,6 +438,15 @@ pub fn build_spec(
     ];
     if let Some(cfg) = agent_config(agent_id, base_id, agent_extra_dirs, agent_persist_enabled) {
         let host_cfg = agent_config_host_dir(agent_id).to_string_lossy().into_owned();
+        // Create it OURSELVES, as the app user, before it becomes a `-v`
+        // source. A missing bind-mount source is created by the daemon
+        // instead, and who owns the result is the daemon's business: Docker
+        // Desktop on macOS happens to map it to the host user, which is the
+        // only reason this ever worked, while a Linux daemon creates it
+        // ROOT-owned. The container runs as the host uid (`--user`), so a
+        // root-owned config dir means the agent cannot write its own login or
+        // transcripts into it - EACCES, and a login that never persists.
+        let _ = std::fs::create_dir_all(&host_cfg);
         mounts.push(Mount::implicit(
             host_cfg.clone(),
             cfg.container_dir.clone(),
@@ -466,6 +475,9 @@ pub fn build_spec(
                 .join(rel)
                 .to_string_lossy()
                 .into_owned();
+            // Same reasoning as the config dir above: ours to create, not
+            // the daemon's.
+            let _ = std::fs::create_dir_all(&sub);
             mounts.push(Mount::implicit(
                 sub,
                 extra.clone(),
@@ -1218,6 +1230,23 @@ mod tests {
         // reason the clone exists.
         let cfg_mount = spec.mounts.iter().find(|m| m.container == "/root/.claude").unwrap();
         assert!(cfg_mount.host.ends_with("docker-agents/next-claude"), "{}", cfg_mount.host);
+    }
+
+    #[test]
+    fn the_agent_config_host_dir_exists_before_it_becomes_a_mount() {
+        // A missing `-v` source is created by the DAEMON, and its ownership
+        // is the daemon's business: Docker Desktop on macOS maps it to the
+        // host user (which is the only reason this ever worked), a Linux
+        // daemon creates it root-owned. The container runs as the host uid,
+        // so a root-owned config dir means the agent cannot write its login
+        // or its transcripts: EACCES, and a login that never sticks.
+        let task = stub_task("t-mk", "/tmp/termic-docker-test-does-not-exist");
+        let env = std::collections::HashMap::new();
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false,
+            &[], &[], "pty-mkdir0001", "claude");
+        let cfg = spec.mounts.iter().find(|m| m.container == "/root/.claude").unwrap();
+        assert!(std::path::Path::new(&cfg.host).is_dir(),
+            "host config dir must exist before docker sees it: {}", cfg.host);
     }
 
     #[test]
