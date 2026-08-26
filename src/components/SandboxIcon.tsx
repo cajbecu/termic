@@ -79,14 +79,13 @@ export function SandboxIcon({ mode, className, icon }: {
   return <Icon className={className} style={{ color: v.color }} fill={v.filled ? "currentColor" : "none"} />;
 }
 
-/** Docker's own cage never reaches the green "real cage" state either
- *  Seatbelt `enforce` mode does - it's filesystem-only, network stays
- *  unrestricted (see DockerEngineNote) - so it wears the same warning red
- *  Sidebar.tsx already uses for "YOLO on but the cage isn't actually
- *  enforced" (`--color-err`), not a new color of its own. Kept red even
- *  once a task is running Docker-caged: the color is about what Docker
- *  mode structurally CAN'T do yet (network), not about whether it's on. */
-export const DOCKER_SANDBOX_COLOR = "var(--color-err)";
+/** Same green as Seatbelt's `enforce`/`enforce-fs` (`--color-ok`): Docker
+ *  mode IS a real filesystem cage, same as those two, just via a different
+ *  mechanism. (An earlier version of this used the red `--color-err`
+ *  warning color, on the mistaken assumption it was already established
+ *  for Seatbelt - that red is YOLO's "on without a cage" warning color,
+ *  unrelated to any sandbox MODE's own identity.) */
+export const DOCKER_SANDBOX_COLOR = "var(--color-ok)";
 
 /** Docker's equivalent of `SandboxIcon` - same shape (a colored glyph,
  *  nothing else) so call sites that show "which cage" can drop this in

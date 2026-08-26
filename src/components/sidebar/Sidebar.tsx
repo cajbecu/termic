@@ -34,7 +34,7 @@ import { startSpotlight, stopSpotlight } from "@/lib/spotlight";
 import { ResizeHandle } from "@/components/ui/ResizeHandle";
 import type { Tab, Task, TerminalTab } from "@/lib/types";
 import { agentDisplayName } from "@/lib/agents";
-import { effectiveSandboxMode, isSandboxEnforced } from "@/lib/types";
+import { effectiveSandboxMode, isSandboxEnforced, isTaskCaged } from "@/lib/types";
 import { SandboxIcon, SANDBOX_VISUALS, DockerSandboxIcon } from "@/components/SandboxIcon";
 import { TaskLocationIcon } from "@/components/TaskLocationIcon";
 import { useTaskLabel } from "@/lib/taskLabel";
@@ -2752,14 +2752,15 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                     : SANDBOX_VISUALS[effectiveSandboxMode(w)].shortLabel}
                 </span>
               </DropdownItem>
-              {/* Per-task YOLO toggle. Disabled (auto-on) under
-                  Enforcing — the seatbelt is the boundary there. Red when
-                  on without a cage (dangerous). */}
+              {/* Per-task YOLO toggle. Disabled (auto-on) under Enforcing
+                  OR Docker mode - whichever cage mechanism, it's the real
+                  boundary there. Red when on without EITHER cage
+                  (dangerous). */}
               <DropdownItem
                 className="items-center [&>svg]:mt-0"
-                disabled={isSandboxEnforced(effectiveSandboxMode(w))}
+                disabled={isTaskCaged(w)}
                 onSelect={() => {
-                  if (isSandboxEnforced(effectiveSandboxMode(w))) return;
+                  if (isTaskCaged(w)) return;
                   const next = !w.yolo;
                   setTaskYolo(w.id, next);
                   void taskSetYolo(w.id, next);
@@ -2768,14 +2769,17 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                 <Zap
                   className={cn(
                     "h-4 w-4 text-[var(--color-fg-faint)]",
-                    (!!w.yolo && !isSandboxEnforced(effectiveSandboxMode(w))) && "text-[var(--color-err)]",
+                    (!!w.yolo && !isTaskCaged(w)) && "text-[var(--color-err)]",
                     effectiveSandboxMode(w) === "enforce" && "text-[var(--color-ok)]",
                     effectiveSandboxMode(w) === "enforce-fs" && "text-[var(--color-ok)]",
+                    w.docker_sandbox_enabled && "text-[var(--color-ok)]",
                   )}
-                  fill={(isSandboxEnforced(effectiveSandboxMode(w)) || !!w.yolo) ? "currentColor" : "none"}
+                  fill={(isTaskCaged(w) || !!w.yolo) ? "currentColor" : "none"}
                 />
                 <span>
-                  {effectiveSandboxMode(w) === "enforce"
+                  {w.docker_sandbox_enabled
+                    ? "YOLO: auto-on (Docker)"
+                    : effectiveSandboxMode(w) === "enforce"
                     ? "YOLO: auto-on (Enforcing)"
                     : effectiveSandboxMode(w) === "enforce-fs"
                     ? "YOLO: auto-on (Enforcing FS)"

@@ -35,7 +35,7 @@ import { setupImeReplacementBridge } from "@/lib/ime";
 import { deliverMessage, sendMessageToPty } from "@/lib/agentSend";
 import { failCliQueuedPrompts, reportCliPromptDelivery } from "@/lib/cliPromptReports";
 import type { TerminalTab, Task, SandboxMode } from "@/lib/types";
-import { effectiveSandboxMode, isSandboxEnforced } from "@/lib/types";
+import { effectiveSandboxMode, isSandboxEnforced, isTaskCaged } from "@/lib/types";
 import { SandboxIcon, SANDBOX_VISUALS, DockerSandboxIcon } from "@/components/SandboxIcon";
 import { TerminalExitedBanner } from "@/components/task/TerminalExitedBanner";
 import * as ipc from "@/lib/ipc";
@@ -1598,17 +1598,13 @@ const captureArmedRef = useRef(false);
           // for the pill / top-bar controls.
           ? loginShellArgs(userShell, launchCmd, !!(tab as TerminalTab).runTab)
           : spawnArgsForCli(tab.cli, {
-          // YOLO auto-on whenever the task is sandboxed: the seatbelt
-          // cage is the real security boundary, so the agent's own
+          // YOLO auto-on whenever the task is caged, by EITHER mechanism:
+          // Seatbelt ENFORCING / ENFORCING (FS), or Docker mode. Either way
+          // the cage is the real security boundary, so the agent's own
           // permission-prompt scaffolding is just friction. The user pref
-          // still wins when sandbox is off, and the wizard / sandbox dialog
-          // spell this out so nobody is surprised.
-          // Per-task YOLO flag, OR auto-on when ENFORCING / ENFORCING
-          // (FS) (there the seatbelt filesystem cage is the real boundary,
-          // so the agent's own prompts are friction). In Off/Monitoring
-          // it's purely the saved per-task flag — no silent auto-
-          // approve in an uncaged task.
-          yolo: (() => { const m = effectiveSandboxMode(task); return m === "enforce" || m === "enforce-fs" || !!task.yolo; })(),
+          // still wins when neither cage is on, and the wizard / sandbox
+          // dialog spell this out so nobody is surprised.
+          yolo: isTaskCaged(task) || !!task.yolo,
           resume: shouldResume,
           isPrimary: isPrimaryTab,
           sessionUuid,
@@ -2226,8 +2222,13 @@ const captureArmedRef = useRef(false);
   // YOLO live toggle — for agents that support runtime mode switching (only
   // gemini today), send the appropriate slash command. For claude/codex this
   // is a no-op; the next spawn picks up the new flag.
-  const effYolo = isSandboxEnforced(effectiveSandboxMode(task)) || !!task.yolo;
-  const enforced = isSandboxEnforced(effectiveSandboxMode(task));
+  const effYolo = isTaskCaged(task) || !!task.yolo;
+  // Whichever cage mechanism is on, its own toggle already restarts the
+  // PTY (Sandbox dialog's Save & restart, or Docker's taskSetDocker which
+  // always restarts) - so this effect's "ask to restart" prompt below only
+  // needs to fire for a genuine per-task YOLO flip on an otherwise-uncaged
+  // task, same reasoning `isTaskCaged` already carries for `effYolo`.
+  const enforced = isTaskCaged(task);
   const firstYoloRun = useRef(true);
   useEffect(() => {
     if (firstYoloRun.current) { firstYoloRun.current = false; return; }

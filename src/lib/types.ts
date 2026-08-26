@@ -25,9 +25,32 @@ export function effectiveSandboxMode(
  *  outside the allow-list). Covers both `enforce` and `enforce-fs` — they
  *  share the exact FS profile, so anything keyed off "the cage is the real
  *  boundary" (YOLO auto-on, drag-drop staging, etc.) must treat them alike.
- *  `enforce-fs` only differs in that the NETWORK sandbox is off. */
+ *  `enforce-fs` only differs in that the NETWORK sandbox is off.
+ *
+ *  Seatbelt-only. Docker mode is a real filesystem boundary too (same
+ *  structural shape as `enforce-fs`: cage the filesystem, leave network
+ *  open) but ALWAYS stores `sandbox_mode` as `off` (mutually exclusive with
+ *  Seatbelt) — a Docker-sandboxed task reads as `false` here on purpose,
+ *  since the drag-drop TMPDIR-staging workaround this also gates is
+ *  Seatbelt-specific plumbing with no Docker equivalent. For "is this task
+ *  caged AT ALL, whichever mechanism" (YOLO auto-on, etc.), use
+ *  `isTaskCaged` instead. */
 export function isSandboxEnforced(mode: SandboxMode): boolean {
   return mode === "enforce" || mode === "enforce-fs";
+}
+
+/** True when EITHER cage mechanism is actively enforcing the agent's
+ *  filesystem access — Seatbelt's `enforce`/`enforce-fs`, or Docker mode.
+ *  Both are "the agent's own permission prompts are just friction, the
+ *  real boundary is the cage" situations, so YOLO auto-on (and anything
+ *  else reasoning about "is this task caged, whichever way") must treat
+ *  them alike. Docker never reaches here via `isSandboxEnforced` (see its
+ *  doc comment) since `sandbox_mode` is always `off` while Docker is on. */
+export function isTaskCaged(
+  task: { sandbox_mode?: SandboxMode; sandbox_enabled?: boolean; docker_sandbox_enabled?: boolean } | null | undefined,
+): boolean {
+  if (!task) return false;
+  return isSandboxEnforced(effectiveSandboxMode(task)) || !!task.docker_sandbox_enabled;
 }
 
 /** The user-facing sandbox CHOICE: Seatbelt's four modes plus Docker as a
