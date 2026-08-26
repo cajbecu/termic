@@ -340,8 +340,11 @@ export function CommandPalette() {
       });
       cmds.push({
         id: "sandbox", section: "Agent", label: "Sandbox settings",
-        suffix: effectiveSandboxMode(task),
-        icon: ShieldCheck, keywords: "cage security enable disable",
+        // Docker mode always stores sandbox_mode as off (the two cages are
+        // mutually exclusive) - show it explicitly rather than the
+        // misleading "off".
+        suffix: task.docker_sandbox_enabled ? "docker" : effectiveSandboxMode(task),
+        icon: ShieldCheck, keywords: "cage security enable disable docker container",
         run: act(() => useUI.getState().openSandbox(task.id)),
       });
       cmds.push({

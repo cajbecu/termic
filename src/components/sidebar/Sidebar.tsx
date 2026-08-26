@@ -35,7 +35,7 @@ import { ResizeHandle } from "@/components/ui/ResizeHandle";
 import type { Tab, Task, TerminalTab } from "@/lib/types";
 import { agentDisplayName } from "@/lib/agents";
 import { effectiveSandboxMode, isSandboxEnforced } from "@/lib/types";
-import { SandboxIcon, SANDBOX_VISUALS } from "@/components/SandboxIcon";
+import { SandboxIcon, SANDBOX_VISUALS, DockerSandboxIcon } from "@/components/SandboxIcon";
 import { TaskLocationIcon } from "@/components/TaskLocationIcon";
 import { useTaskLabel } from "@/lib/taskLabel";
 
@@ -2604,7 +2604,7 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                   // the button visible; unless the collapsed attention/done
                   // badge is active — it lives in the same slot and the
                   // status icon would cover it.
-                  (w.sandbox_enabled || (!!w.yolo && !isSandboxEnforced(effectiveSandboxMode(w)))) && !(collapsed && (hasAttention || hasDone || hasWorking))
+                  (w.sandbox_enabled || w.docker_sandbox_enabled || (!!w.yolo && !isSandboxEnforced(effectiveSandboxMode(w)))) && !(collapsed && (hasAttention || hasDone || hasWorking))
                     ? "opacity-100 pointer-events-auto"
                     : "opacity-0 group-hover/wsrow:opacity-100 pointer-events-none group-hover/wsrow:pointer-events-auto",
                   taskRenaming !== null && "pointer-events-none",
@@ -2620,6 +2620,18 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                 {(() => {
                   const wMode = effectiveSandboxMode(w);
                   const stateOpacity = terminalTabs.length > 0 ? "opacity-100" : "opacity-40";
+                  // Docker mode always stores sandbox_mode as off (the two
+                  // cages are mutually exclusive), so it has to be checked
+                  // FIRST or a Docker-sandboxed task would show no badge at
+                  // all - "off" reads as "no cage" everywhere else, but here
+                  // it can mean "caged a different way".
+                  if (w.docker_sandbox_enabled) {
+                    return (
+                      <DockerSandboxIcon
+                        className={cn("absolute h-3.5 w-3.5 transition-opacity group-hover/wsrow:opacity-0", stateOpacity)}
+                      />
+                    );
+                  }
                   if (!!w.yolo && !isSandboxEnforced(wMode)) {
                     return (
                       <Zap
@@ -2645,7 +2657,7 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                 <MoreVertical
                   className={cn(
                     "h-3.5 w-3.5 text-[var(--color-fg-faint)] transition-opacity",
-                    (w.sandbox_enabled || (!!w.yolo && !isSandboxEnforced(effectiveSandboxMode(w)))) && "opacity-0 group-hover/wsrow:opacity-100",
+                    (w.sandbox_enabled || w.docker_sandbox_enabled || (!!w.yolo && !isSandboxEnforced(effectiveSandboxMode(w)))) && "opacity-0 group-hover/wsrow:opacity-100",
                   )}
                 />
               </button>
@@ -2731,8 +2743,14 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                 className="items-center [&>svg]:mt-0"
                 onSelect={() => useUI.getState().openSandbox(w.id)}
               >
-                <SandboxIcon mode={effectiveSandboxMode(w)} className="h-4 w-4" />
-                <span>{effectiveSandboxMode(w) === "off" ? "Sandbox settings" : SANDBOX_VISUALS[effectiveSandboxMode(w)].shortLabel}</span>
+                {w.docker_sandbox_enabled
+                  ? <DockerSandboxIcon className="h-4 w-4" />
+                  : <SandboxIcon mode={effectiveSandboxMode(w)} className="h-4 w-4" />}
+                <span>
+                  {w.docker_sandbox_enabled ? "Docker Container"
+                    : effectiveSandboxMode(w) === "off" ? "Sandbox settings"
+                    : SANDBOX_VISUALS[effectiveSandboxMode(w)].shortLabel}
+                </span>
               </DropdownItem>
               {/* Per-task YOLO toggle. Disabled (auto-on) under
                   Enforcing — the seatbelt is the boundary there. Red when

@@ -324,7 +324,7 @@ export function TaskSandboxDialog() {
                     <div className="text-[var(--color-fg-faint)]">Loading…</div>
                   )}
                   {dockerPreviewErr && (
-                    <div className="text-[var(--color-danger)]">{dockerPreviewErr}</div>
+                    <div className="text-[var(--color-err)]">{dockerPreviewErr}</div>
                   )}
                   {dockerPreview && (
                     <>

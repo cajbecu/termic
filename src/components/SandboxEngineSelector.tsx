@@ -6,8 +6,9 @@
 // reachable from the edit-sandbox dialog after a task already exists.
 // When "macOS Seatbelt" is picked, the caller renders SandboxModeSelector
 // (hideOff) below this for the Monitor / Enforcing (FS) / Enforcing choice.
-import { Container, Shield, ShieldOff, type LucideIcon } from "lucide-react";
+import { Shield, ShieldOff, Container, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { DOCKER_SANDBOX_COLOR } from "@/components/SandboxIcon";
 
 export type SandboxEngine = "off" | "seatbelt" | "docker";
 
@@ -22,7 +23,12 @@ interface EngineCard {
 const CARDS: EngineCard[] = [
   { id: "off", label: "OFF", desc: "Full filesystem + network access.", Icon: ShieldOff, color: "var(--color-fg-faint)" },
   { id: "seatbelt", label: "macOS SEATBELT", desc: "Kernel-level cage, runs on this Mac.", Icon: Shield, color: "var(--color-ok)" },
-  { id: "docker", label: "DOCKER CONTAINER", desc: "Runs the agent inside a container instead.", Icon: Container, color: "var(--color-accent)" },
+  // Docker's cage never reaches the green "real cage" state Seatbelt's
+  // enforce mode does - it's filesystem-only, network stays unrestricted
+  // (see DockerEngineNote) - so it wears the same warning red Sidebar.tsx
+  // uses for "YOLO on but the cage isn't actually enforced", not its own
+  // color. See SandboxIcon.tsx's DOCKER_SANDBOX_COLOR doc comment.
+  { id: "docker", label: "DOCKER CONTAINER", desc: "Runs the agent inside a container instead.", Icon: Container, color: DOCKER_SANDBOX_COLOR },
 ];
 
 export function SandboxEngineSelector({

@@ -10,7 +10,7 @@
 //   enforce-fs → green OUTLINE     (filesystem cage, network open)
 //   enforce    → green FILLED      (filesystem + network cage)
 // Both enforce modes share the green; FILL is what tells them apart.
-import { Shield, ShieldOff, type LucideIcon } from "lucide-react";
+import { Shield, ShieldOff, Container, type LucideIcon } from "lucide-react";
 import type { SandboxMode } from "@/lib/types";
 
 export interface SandboxVisual {
@@ -77,4 +77,20 @@ export function SandboxIcon({ mode, className, icon }: {
   const v = SANDBOX_VISUALS[mode];
   const Icon = icon ?? v.Icon;
   return <Icon className={className} style={{ color: v.color }} fill={v.filled ? "currentColor" : "none"} />;
+}
+
+/** Docker's own cage never reaches the green "real cage" state either
+ *  Seatbelt `enforce` mode does - it's filesystem-only, network stays
+ *  unrestricted (see DockerEngineNote) - so it wears the same warning red
+ *  Sidebar.tsx already uses for "YOLO on but the cage isn't actually
+ *  enforced" (`--color-err`), not a new color of its own. Kept red even
+ *  once a task is running Docker-caged: the color is about what Docker
+ *  mode structurally CAN'T do yet (network), not about whether it's on. */
+export const DOCKER_SANDBOX_COLOR = "var(--color-err)";
+
+/** Docker's equivalent of `SandboxIcon` - same shape (a colored glyph,
+ *  nothing else) so call sites that show "which cage" can drop this in
+ *  next to `SandboxIcon` without a different contract. */
+export function DockerSandboxIcon({ className }: { className?: string }) {
+  return <Container className={className} style={{ color: DOCKER_SANDBOX_COLOR }} />;
 }

@@ -36,7 +36,7 @@ import { deliverMessage, sendMessageToPty } from "@/lib/agentSend";
 import { failCliQueuedPrompts, reportCliPromptDelivery } from "@/lib/cliPromptReports";
 import type { TerminalTab, Task, SandboxMode } from "@/lib/types";
 import { effectiveSandboxMode, isSandboxEnforced } from "@/lib/types";
-import { SandboxIcon, SANDBOX_VISUALS } from "@/components/SandboxIcon";
+import { SandboxIcon, SANDBOX_VISUALS, DockerSandboxIcon } from "@/components/SandboxIcon";
 import { TerminalExitedBanner } from "@/components/task/TerminalExitedBanner";
 import * as ipc from "@/lib/ipc";
 import { maybeRebuildDockerImageForLaunch } from "@/lib/dockerDailyRebuild";
@@ -2561,7 +2561,7 @@ const captureArmedRef = useRef(false);
 }
 
 export function FooterBar({ task, sandboxWarning }: {
-  task: { id: string; cli?: string; sandbox_enabled?: boolean; sandbox_mode?: SandboxMode; sandbox_allowed_hosts?: string[]; sandbox_rw_paths?: string[] };
+  task: { id: string; cli?: string; sandbox_enabled?: boolean; sandbox_mode?: SandboxMode; sandbox_allowed_hosts?: string[]; sandbox_rw_paths?: string[]; docker_sandbox_enabled?: boolean };
   sandboxWarning: string | null;
 }) {
   const splitOpen     = useApp(s => !!s.terminalSplit[task.id]);
@@ -2597,6 +2597,11 @@ export function FooterBar({ task, sandboxWarning }: {
       <span className="font-medium">Sandbox degraded</span>
       <span className="text-[var(--color-fg-faint)]">·</span>
       <span className="truncate">{sandboxWarning}</span>
+    </>
+  ) : task.docker_sandbox_enabled ? (
+    <>
+      <DockerSandboxIcon className="h-3.5 w-3.5" />
+      <span>Sandbox: docker container</span>
     </>
   ) : (
     <>
