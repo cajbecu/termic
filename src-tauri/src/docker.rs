@@ -116,12 +116,14 @@ struct AgentConfig {
 
 /// Map an agent id to its config-dir wiring, derived from
 /// `agent_dirs::state_dirs` (the confirmed-state-dir list shared with
-/// Seatbelt's default allow-list — see that module's doc comment).
-/// Returns `None` for agents we don't yet support in Docker mode (grok is
-/// the Phase-1 outlier: binary + skills + config all live under ~/.grok,
-/// no clean relocation env — Docker support declined here independently
-/// of whether Seatbelt lists a state dir for it).
-fn agent_config(agent_id: &str) -> Option<AgentConfig> {
+/// Seatbelt's default allow-list — see that module's doc comment), plus
+/// any user-added extras (Settings → Docker Sandbox → per-agent extra
+/// dirs, `Settings.docker_agent_extra_dirs`). Returns `None` for agents we
+/// don't yet support in Docker mode (grok is the Phase-1 outlier: binary +
+/// skills + config all live under ~/.grok, no clean relocation env —
+/// Docker support declined here independently of whether Seatbelt lists a
+/// state dir for it).
+fn agent_config(agent_id: &str, user_extra_dirs: &[String]) -> Option<AgentConfig> {
     if !matches!(agent_id, "claude" | "codex" | "copilot" | "agy" | "antigravity" | "opencode") {
         return None;
     }
@@ -131,11 +133,31 @@ fn agent_config(agent_id: &str) -> Option<AgentConfig> {
         "codex" => Some("CODEX_HOME"),
         _ => None,
     };
+    let extra_dirs = rest
+        .iter()
+        .map(|d| format!("/root/{d}"))
+        .chain(user_extra_dirs.iter().filter_map(|d| sanitize_extra_dir(d)).map(|d| format!("/root/{d}")))
+        .collect();
     Some(AgentConfig {
         container_dir: format!("/root/{first}"),
         relocation_env,
-        extra_dirs: rest.iter().map(|d| format!("/root/{d}")).collect(),
+        extra_dirs,
     })
+}
+
+/// Reject anything that isn't a plain relative dotfile-style path before it
+/// can become a mount TARGET inside the container. Without this, a stray
+/// `../..` in a user-added extra dir would resolve outside `/root` (e.g.
+/// `/root/../../etc` -> `/etc`), silently bind-mounting an agent's config
+/// folder over an unrelated container path. Returns the trimmed, leading-
+/// dot-stripped-of-slashes relative path, or `None` if it doesn't look
+/// like one.
+fn sanitize_extra_dir(d: &str) -> Option<String> {
+    let d = d.trim();
+    if d.is_empty() || d.starts_with('/') || d.contains("..") || d.contains('\0') {
+        return None;
+    }
+    Some(d.trim_start_matches("./").to_string())
 }
 
 /// Host directory that persists an agent's login + sessions + MCP config
@@ -163,6 +185,7 @@ pub fn build_spec(
     cwd: &str,
     extra_args: Vec<String>,
     spawn_env: &std::collections::HashMap<String, String>,
+    agent_extra_dirs: &[String],
 ) -> DockerSpec {
     let mut mounts: Vec<Mount> = Vec::new();
 
@@ -226,7 +249,7 @@ pub fn build_spec(
         ("TERM".to_string(), "xterm-256color".to_string()),
         ("COLORTERM".to_string(), "truecolor".to_string()),
     ];
-    if let Some(cfg) = agent_config(agent_id) {
+    if let Some(cfg) = agent_config(agent_id, agent_extra_dirs) {
         let host_cfg = agent_config_host_dir(agent_id).to_string_lossy().into_owned();
         mounts.push(Mount::implicit(
             host_cfg.clone(),
@@ -859,7 +882,7 @@ mod tests {
         let task = stub_task("t1", "/tmp/termic-docker-test-does-not-exist");
         let mut spawn_env = std::collections::HashMap::new();
         spawn_env.insert("MY_CUSTOM_VAR".to_string(), "hello".to_string());
-        let spec = build_spec(&task, "claude", "termic-sandbox:abc", &task.path, vec![], &spawn_env);
+        let spec = build_spec(&task, "claude", "termic-sandbox:abc", &task.path, vec![], &spawn_env, &[]);
         assert!(spec.env.iter().any(|(k, v)| k == "MY_CUSTOM_VAR" && v == "hello"));
         assert!(spec.env.iter().any(|(k, _)| k == "TERM"));
     }
@@ -872,7 +895,7 @@ mod tests {
         let task = stub_task("t2", "/tmp/termic-docker-test-does-not-exist-2");
         let mut spawn_env = std::collections::HashMap::new();
         spawn_env.insert("TERM".to_string(), "dumb".to_string());
-        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &spawn_env);
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &spawn_env, &[]);
         let term_values: Vec<&str> = spec.env.iter().filter(|(k, _)| k == "TERM").map(|(_, v)| v.as_str()).collect();
         assert_eq!(term_values, vec!["xterm-256color", "dumb"]);
     }
@@ -896,7 +919,7 @@ mod tests {
             ("opencode", "/root/.config/opencode", &["/root/.local/share/opencode"]),
         ];
         for (agent, primary, extras) in cases {
-            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env);
+            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env, &[]);
             let mounted: Vec<&str> = spec.mounts.iter().map(|m| m.container.as_str()).collect();
             assert!(mounted.contains(primary), "{agent}: expected {primary} in {mounted:?}");
             for e in *extras {
@@ -905,7 +928,7 @@ mod tests {
         }
         // grok stays unsupported in Docker mode regardless of what
         // agent_dirs lists for Seatbelt's sake.
-        let grok_spec = build_spec(&task, "grok", "img", &task.path, vec![], &env);
+        let grok_spec = build_spec(&task, "grok", "img", &task.path, vec![], &env, &[]);
         assert!(!grok_spec.mounts.iter().any(|m| m.container.contains("grok")));
     }
 
@@ -914,10 +937,47 @@ mod tests {
         let task = stub_task("t4", "/tmp/termic-docker-test-does-not-exist-4");
         let env = std::collections::HashMap::new();
         for (agent, var) in [("claude", "CLAUDE_CONFIG_DIR"), ("codex", "CODEX_HOME")] {
-            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env);
+            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env, &[]);
             let val = spec.env.iter().find(|(k, _)| k == var).map(|(_, v)| v.as_str());
             assert_eq!(val, Some(format!("/root/.{agent}").as_str()));
         }
+    }
+
+    #[test]
+    fn sanitize_extra_dir_accepts_plain_relative_paths() {
+        assert_eq!(sanitize_extra_dir(".mytool"), Some(".mytool".to_string()));
+        assert_eq!(sanitize_extra_dir(".config/mytool"), Some(".config/mytool".to_string()));
+        assert_eq!(sanitize_extra_dir("./.mytool"), Some(".mytool".to_string()));
+        assert_eq!(sanitize_extra_dir("  .mytool  "), Some(".mytool".to_string()));
+    }
+
+    #[test]
+    fn sanitize_extra_dir_rejects_escapes_and_absolutes() {
+        for bad in ["", "   ", "/etc", "../../etc", ".foo/../../etc", "/root/.claude"] {
+            assert_eq!(sanitize_extra_dir(bad), None, "expected {bad:?} to be rejected");
+        }
+    }
+
+    #[test]
+    fn user_extra_dirs_are_mounted_alongside_the_builtin_ones() {
+        let task = stub_task("t5", "/tmp/termic-docker-test-does-not-exist-5");
+        let env = std::collections::HashMap::new();
+        let extras = vec![".mytool".to_string(), "../escape".to_string(), "/etc".to_string()];
+        let spec = build_spec(&task, "copilot", "img", &task.path, vec![], &env, &extras);
+        let mounted: Vec<&str> = spec.mounts.iter().map(|m| m.container.as_str()).collect();
+        assert!(mounted.contains(&"/root/.copilot"), "{mounted:?}");
+        assert!(mounted.contains(&"/root/.mytool"), "{mounted:?}");
+        // The two unsafe entries never became mounts at all.
+        assert!(!mounted.iter().any(|m| m.contains("escape") || *m == "/etc"), "{mounted:?}");
+    }
+
+    #[test]
+    fn user_extra_dirs_are_ignored_for_an_unsupported_agent() {
+        let task = stub_task("t6", "/tmp/termic-docker-test-does-not-exist-6");
+        let env = std::collections::HashMap::new();
+        let extras = vec![".mytool".to_string()];
+        let spec = build_spec(&task, "grok", "img", &task.path, vec![], &env, &extras);
+        assert!(!spec.mounts.iter().any(|m| m.container.contains("mytool")));
     }
 
     // ── Activity monitor integration ──────────────────────────────────

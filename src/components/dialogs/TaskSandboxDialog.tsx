@@ -13,7 +13,10 @@ import { AppDialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/utils";
 import { taskLabel } from "@/lib/taskLabel";
-import { settingsLoad, taskSetSandbox, sandboxAvailable, taskSetDocker, dockerImageStatus, type DockerImageStatus } from "@/lib/ipc";
+import {
+  settingsLoad, taskSetSandbox, sandboxAvailable, taskSetDocker, dockerImageStatus, dockerCommandPreview,
+  type DockerImageStatus, type DockerCommandPreview,
+} from "@/lib/ipc";
 import { effectiveSandboxMode, type SandboxMode, type Settings } from "@/lib/types";
 import { AlertTriangle, Shield, Zap, Save, RotateCw, Container } from "lucide-react";
 import { SandboxModeSelector } from "@/components/SandboxModeSelector";
@@ -80,6 +83,34 @@ export function TaskSandboxDialog() {
   }, [taskId]);
   const dockerOffered = !!dockerSettings?.docker_sandbox_enabled && !!dockerImage?.available;
   const dockerOn = !!task?.docker_sandbox_enabled;
+
+  // Command preview: the exact `docker run ...` a launch would build right
+  // now (docker_command_preview -> the SAME build_spec/render_argv the real
+  // spawn path uses), fetched on demand rather than whenever the dialog
+  // opens - it is not needed to decide the toggle, only to double-check it.
+  const [showDockerPreview, setShowDockerPreview] = useState(false);
+  const [dockerPreview, setDockerPreview] = useState<DockerCommandPreview | null>(null);
+  const [dockerPreviewErr, setDockerPreviewErr] = useState<string | null>(null);
+  const [dockerPreviewLoading, setDockerPreviewLoading] = useState(false);
+  async function toggleDockerPreview() {
+    if (!task) return;
+    const next = !showDockerPreview;
+    setShowDockerPreview(next);
+    if (!next || dockerPreview) return;
+    setDockerPreviewLoading(true);
+    setDockerPreviewErr(null);
+    try {
+      setDockerPreview(await dockerCommandPreview(task.id));
+    } catch (e) {
+      setDockerPreviewErr(String(e));
+    } finally {
+      setDockerPreviewLoading(false);
+    }
+  }
+  // Re-fetch on the task's own SIGKILL-and-relaunch triggers (toggling
+  // Docker on/off, editing extra-args) so a stale preview never survives
+  // the thing it was showing changing under it.
+  useEffect(() => { setDockerPreview(null); }, [task?.docker_sandbox_enabled, task?.docker_extra_args]);
 
   async function toggleDocker(next: boolean) {
     if (!task || dockerBusy) return;
@@ -280,6 +311,42 @@ export function TaskSandboxDialog() {
               </div>
             </div>
           </label>
+        )}
+
+        {dockerOffered && (
+          <div>
+            <Button variant="ghost" onClick={toggleDockerPreview} disabled={!task}>
+              {showDockerPreview ? "Hide command preview" : "Preview command"}
+            </Button>
+            {showDockerPreview && (
+              <div className="mt-2 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-3 text-[12px]">
+                {dockerPreviewLoading && (
+                  <div className="text-[var(--color-fg-faint)]">Loading…</div>
+                )}
+                {dockerPreviewErr && (
+                  <div className="text-[var(--color-danger)]">{dockerPreviewErr}</div>
+                )}
+                {dockerPreview && (
+                  <>
+                    <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-dim)]">
+                      {dockerPreview.argv.map((a, i) => (i === 0 ? a : `  ${a}`)).join(" \\\n")}
+                    </pre>
+                    <div className="mt-3 flex flex-col gap-1.5 border-t border-[var(--color-border-soft)] pt-2.5">
+                      {dockerPreview.spec.mounts.map((m, i) => (
+                        <div key={i} className="flex flex-col gap-0.5">
+                          <div className="font-mono text-[11px] text-[var(--color-fg)]">
+                            {m.host} <span className="text-[var(--color-fg-faint)]">→</span> {m.container}
+                            <span className="ml-1.5 text-[var(--color-fg-faint)]">{m.read_only ? "(read-only)" : "(read/write)"}</span>
+                          </div>
+                          <div className="text-[11px] text-[var(--color-fg-faint)]">{m.why}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
         )}
 
         {/* YOLO trade-off note. Sandboxed agents auto-skip their own

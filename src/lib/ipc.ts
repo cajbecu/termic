@@ -342,6 +342,48 @@ export function onDockerBuildDone(cb: (d: { success: boolean; tag: string; error
 export const taskSetDocker = (id: string, enabled: boolean, extraArgs: string[]) =>
   invoke<number>("task_set_docker", { id, enabled, extraArgs });
 
+/** One Docker-supported agent's config-dir mounts: the confirmed built-in
+ *  list (read-only) plus whatever extras the user added. `extra` is edited
+ *  by patching `Settings.docker_agent_extra_dirs` directly (settingsSave),
+ *  no separate write command. */
+export interface DockerAgentDirs {
+  agent_id: string;
+  builtin: string[];
+  extra: string[];
+}
+export const dockerAgentDirs = () => invoke<DockerAgentDirs[]>("docker_agent_dirs");
+
+/** One bind mount in a Docker command preview: host -> container, with the
+ *  plain-language reason it exists. */
+export interface DockerMount {
+  host: string;
+  container: string;
+  read_only: boolean;
+  provenance: "implicit" | "user";
+  why: string;
+  load_bearing: boolean;
+}
+export interface DockerSpec {
+  container_name: string;
+  label: string;
+  image: string;
+  mounts: DockerMount[];
+  workdir: string;
+  env: [string, string][];
+  extra_args: string[];
+}
+export interface DockerCommandPreview {
+  spec: DockerSpec;
+  argv: string[];
+}
+/** Exactly what `docker run ...` this task's Docker-mode agent launch
+ *  would build right now, WITHOUT spawning anything - the same
+ *  `build_spec`/`render_argv` the real spawn path uses, so it can't drift
+ *  from what actually runs. Works even before the image is built. Omit
+ *  `agentId` to preview the task's own `cli`. */
+export const dockerCommandPreview = (taskId: string, agentId?: string) =>
+  invoke<DockerCommandPreview>("docker_command_preview", { taskId, agentId: agentId ?? null });
+
 /** "Allow for this repo" — append a host to the repo's committed
  *  `.termic.yaml` (shared with the team, read by the termic CLI).
  *  Comment-preserving; takes effect on the next agent restart.

@@ -18,8 +18,8 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirro
 import { StreamLanguage } from "@codemirror/language";
 import {
   dockerCheck, dockerImageStatus, dockerGetDockerfile, dockerDefaultDockerfile,
-  dockerSetDockerfile, dockerBuildImage, onDockerBuildLog, onDockerBuildDone,
-  type DockerStatus, type DockerImageStatus,
+  dockerSetDockerfile, dockerBuildImage, onDockerBuildLog, onDockerBuildDone, dockerAgentDirs,
+  type DockerStatus, type DockerImageStatus, type DockerAgentDirs,
 } from "@/lib/ipc";
 import { Block, SectionTitle, Toggle, useBackendSettings } from "./Controls";
 import { DockerRebuildFrequencyPicker } from "@/components/DockerRebuildFrequencyPicker";
@@ -30,6 +30,7 @@ export function DockerSection() {
   const { settings, patch } = useBackendSettings();
   const [status, setStatus] = useState<DockerStatus | null>(null);
   const [image, setImage] = useState<DockerImageStatus | null>(null);
+  const [agentDirs, setAgentDirs] = useState<DockerAgentDirs[]>([]);
 
   // Dockerfile editor state.
   const hostRef = useRef<HTMLDivElement>(null);
@@ -60,6 +61,7 @@ export function DockerSection() {
   const refresh = () => {
     dockerCheck().then(setStatus).catch(() => {});
     dockerImageStatus().then(setImage).catch(() => {});
+    dockerAgentDirs().then(setAgentDirs).catch(() => {});
   };
   useEffect(() => {
     dockerGetDockerfile()
@@ -265,6 +267,33 @@ export function DockerSection() {
             <DockerAvailability status={status} />
           </Block>
 
+          {/* Per-agent config dirs: the confirmed built-in list ("Logins"
+              above) is read-only - it's what makes login/session sharing
+              actually work - plus whatever extra dirs the user wants
+              mounted alongside it (a custom skills dir, an extra MCP
+              config location, etc). */}
+          <Block>
+            <div className="text-[14px] font-medium">Per-agent config dirs</div>
+            <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+              What gets mounted into each agent's shared config folder (see "Logins" above). The built-in dirs
+              are confirmed to hold real state and can't be removed; add more below if an agent (or an MCP
+              server it runs) keeps state somewhere else you want to persist across container restarts.
+            </div>
+            <div className="mt-3 flex flex-col gap-3">
+              {agentDirs.map(d => (
+                <AgentDirsRow
+                  key={d.agent_id}
+                  dirs={d}
+                  displayName={settings.agents.find(a => a.id === d.agent_id)?.display_name ?? d.agent_id}
+                  onChangeExtra={next => {
+                    setAgentDirs(cur => cur.map(a => a.agent_id === d.agent_id ? { ...a, extra: next } : a));
+                    patch({ docker_agent_extra_dirs: { ...(settings.docker_agent_extra_dirs ?? {}), [d.agent_id]: next } });
+                  }}
+                />
+              ))}
+            </div>
+          </Block>
+
           {/* Dockerfile editor */}
           <Block>
             <div className="flex items-center justify-between gap-3">
@@ -379,6 +408,56 @@ function ImageStatusLine({ image, dirty }: { image: DockerImageStatus | null; di
           {describeLastBuildDate(image.last_built_date)}
         </span>
       )}
+    </div>
+  );
+}
+
+/** One agent's row in "Per-agent config dirs": its built-in dirs as
+ *  read-only chips, plus a small textarea for user-added extras. Local
+ *  draft state mirrors `PathsTextarea` (AgentsSection.tsx) so a
+ *  half-typed line doesn't get clobbered by the next `docker_agent_dirs`
+ *  refresh - it only needs its own copy here since that component isn't
+ *  exported and this is the only other place editing a raw dir list. */
+function AgentDirsRow({ dirs, displayName, onChangeExtra }: {
+  dirs: DockerAgentDirs; displayName: string; onChangeExtra: (next: string[]) => void;
+}) {
+  const serialize = (v: string[]) => v.join("\n");
+  const [draft, setDraft] = useState(serialize(dirs.extra));
+  const external = serialize(dirs.extra);
+  useEffect(() => {
+    const parsed = draft.split("\n").map(l => l.trim()).filter(Boolean).join("\n");
+    if (parsed === external) return;
+    setDraft(external);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [external]);
+
+  return (
+    <div className="flex flex-col gap-1.5 rounded-md border border-[var(--color-border-soft)] px-3 py-2.5">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[13px] font-medium">{displayName}</span>
+        <div className="flex flex-wrap justify-end gap-1">
+          {dirs.builtin.map(d => (
+            <code
+              key={d}
+              title="Built-in - confirmed to hold real state, can't be removed"
+              className="rounded bg-[var(--color-bg-2)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--color-fg-dim)]"
+            >
+              {d}
+            </code>
+          ))}
+        </div>
+      </div>
+      <textarea
+        value={draft}
+        onChange={e => {
+          setDraft(e.target.value);
+          onChangeExtra(e.target.value.split("\n").map(l => l.trim()).filter(Boolean));
+        }}
+        placeholder=".mytool (extra dirs to mount, one per line)"
+        spellCheck={false}
+        rows={1}
+        className="w-full resize-y rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 font-mono text-[12px] text-[var(--color-fg)] placeholder:text-[var(--color-fg-faint)] focus:border-[var(--color-accent-soft)] focus:outline-none"
+      />
     </div>
   );
 }

@@ -559,6 +559,13 @@ export interface Settings {
    *  Defaults to `"daily"` when absent (both the Rust struct's derived
    *  Default AND its serde fallback agree - see `DockerRebuildFrequency`). */
   docker_rebuild_frequency?: "off" | "daily" | "weekly";
+  /** Per-agent EXTRA directories mounted into that agent's Docker config
+   *  dir, on top of the confirmed built-in list (Settings → Docker
+   *  Sandbox). Keyed by agent id; each entry is a path relative to the
+   *  agent's home (e.g. `.mytool`, `.config/mytool`) - sanitized on the
+   *  Rust side before it can become a mount, so a stray `..` or absolute
+   *  path here is inert rather than escaping the container's `/root`. */
+  docker_agent_extra_dirs?: Record<string, string[]>;
   /** Personal (this-machine) glob patterns hidden from the "All files"
    *  tree across every project. Unioned with each project's committed
    *  `.termic.yaml` `exclude`. `.git` is always hidden regardless. */

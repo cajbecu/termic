@@ -2868,7 +2868,12 @@ fn pty_spawn(
         // Belt-and-suspenders: remove any stale same-named container left
         // by an unclean shutdown so `--name` doesn't collide on respawn.
         docker::cleanup_task(&task.id);
-        let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone(), &args.env);
+        let agent_extra_dirs = load_settings_inner()
+            .docker_agent_extra_dirs
+            .get(&agent)
+            .cloned()
+            .unwrap_or_default();
+        let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone(), &args.env, &agent_extra_dirs);
         let argv = docker::render_argv(&spec, &args.cmd, &args.args);
         dlog(&format!("[pty_spawn] docker task={} agent={} image={} argv={argv:?}", task.id, agent, image));
         Some((argv, spec.container_name))
@@ -14904,6 +14909,16 @@ pub struct Settings {
     /// frontend-driven action same as a manual rebuild).
     #[serde(default)]
     pub docker_rebuild_frequency: DockerRebuildFrequency,
+    /// Per-agent EXTRA directories mounted into that agent's Docker config
+    /// dir, on top of the confirmed built-in list `agent_dirs::state_dirs`
+    /// returns (Settings → Docker Sandbox). Keyed by agent id; each entry
+    /// is a path relative to the agent's home, same convention as
+    /// `agent_dirs::state_dirs` (e.g. `.mytool`, `.config/mytool`).
+    /// `docker::sanitize_extra_dir` filters every entry before it can
+    /// become a mount, so a stray `..` or absolute path here is inert
+    /// rather than escaping the container's `/root`.
+    #[serde(default)]
+    pub docker_agent_extra_dirs: std::collections::HashMap<String, Vec<String>>,
     /// Personal (this-machine) glob patterns hidden from the "All files"
     /// tree across every project. Unioned with each project's committed
     /// `.termic.yaml` `exclude` list. `.git` is always hidden regardless.
@@ -15751,6 +15766,74 @@ fn docker_build_image(app: AppHandle, no_cache: bool) -> Result<(), String> {
         }));
     });
     Ok(())
+}
+
+/// Every Docker-supported agent's confirmed built-in state dirs (from
+/// `agent_dirs::state_dirs`) alongside whatever extras the user has added
+/// for it (`Settings.docker_agent_extra_dirs`) — read side for Settings →
+/// Docker Sandbox's per-agent dir list. Writing back is just a normal
+/// `settings_save` patch of `docker_agent_extra_dirs`, no separate command.
+#[derive(Serialize)]
+struct DockerAgentDirs {
+    agent_id: String,
+    /// Read-only: the confirmed state dirs Docker always mounts.
+    builtin: Vec<String>,
+    /// User-editable: extra dirs mounted on top of `builtin`.
+    extra: Vec<String>,
+}
+
+#[tauri::command]
+fn docker_agent_dirs() -> Vec<DockerAgentDirs> {
+    let extras = load_settings_inner().docker_agent_extra_dirs;
+    // "agy" and "antigravity" are the same agent under two ids (see
+    // agent_dirs.rs); only one is a real registered Agent id, so drive
+    // this from the actual agent list rather than agent_dirs' match arms
+    // to avoid listing a phantom "antigravity" row nobody can edit.
+    ["claude", "codex", "copilot", "agy", "opencode"]
+        .into_iter()
+        .map(|id| DockerAgentDirs {
+            agent_id: id.to_string(),
+            builtin: agent_dirs::state_dirs(id).iter().map(|s| s.to_string()).collect(),
+            extra: extras.get(id).cloned().unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// Everything `render_argv` would spawn for this task's Docker-mode agent
+/// launch, WITHOUT spawning anything — the same `build_spec`/`render_argv`
+/// the real spawn path uses, so the preview can never drift from what
+/// actually runs. Works even before the image has been built (falls back
+/// to a placeholder tag) so it stays useful as a "what would this do"
+/// check while you're still setting Docker mode up.
+#[derive(Serialize)]
+struct DockerCommandPreview {
+    spec: docker::DockerSpec,
+    argv: Vec<String>,
+}
+
+#[tauri::command]
+fn docker_command_preview(task_id: String, agent_id: Option<String>) -> Result<DockerCommandPreview, String> {
+    let task = load_tasks()
+        .into_iter()
+        .find(|t| t.id == task_id)
+        .ok_or_else(|| "task not found".to_string())?;
+    let agent_id = agent_id.unwrap_or_else(|| task.cli.clone());
+    let settings = load_settings_inner();
+    let agent = settings
+        .agents
+        .iter()
+        .find(|a| a.id == agent_id)
+        .ok_or_else(|| format!("unknown agent {agent_id}"))?;
+    // A representative command, not the exact one a real launch would
+    // build (that also mints/resumes a session id, YOLO flags, etc. —
+    // frontend-side logic this command has no access to). The mounts, env
+    // and hardening flags — the security-relevant part this preview
+    // exists to show — are identical to a real spawn either way.
+    let image = docker::spawn_image_tag().unwrap_or_else(|| "<image not built yet>".to_string());
+    let agent_extra_dirs = settings.docker_agent_extra_dirs.get(&agent_id).cloned().unwrap_or_default();
+    let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &agent.env, &agent_extra_dirs);
+    let argv = docker::render_argv(&spec, &agent.command, &agent.args);
+    Ok(DockerCommandPreview { spec, argv })
 }
 
 /// Run a shell command in `cwd` and return trimmed stdout. Used by
@@ -17342,7 +17425,7 @@ pub fn run() {
             lsp_offer, lsp_catalog, lsp_install, lsp_install_zuban, lsp_check_update, lsp_update, lsp_start, lsp_send, lsp_stop, lsp_reap_foreign, lsp_list,
             notify, open_path, reveal_path, open_file_external, open_external_url, browser_command_check, home_dir, project_tasks_path_default, tasks_path_conflicts, default_shell, path_exists, path_is_git_repo, log_line, pty_debug_append, terminal_stage_file, install_notification_sound, play_completion_sound,
             settings_load, settings_save, discovery_dismiss, agents_save, agents_defaults, run_capture_command, discover_repos, detect_clis,
-            docker_check, docker_image_status, docker_get_dockerfile, docker_default_dockerfile, docker_set_dockerfile, docker_build_image,
+            docker_check, docker_image_status, docker_get_dockerfile, docker_default_dockerfile, docker_set_dockerfile, docker_build_image, docker_agent_dirs, docker_command_preview,
             automation::automation_result,
             automation::automation_armed,
             pty_alive,
