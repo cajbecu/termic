@@ -2919,7 +2919,10 @@ fn pty_spawn(
         let (docker_allowed_paths, _) = live_sandbox_lists(&task);
         // Docker-specific env when this agent declares one (see Agent.docker_env).
         let docker_env = docker_env_for(&docker_settings.agents, &agent, &args.env);
-        let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone(), &docker_env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts, &id);
+        // A cloned agent stores state under its OWN id (that is what gives it
+        // a separate login) but has its BASE agent's config shape.
+        let agent_base = docker::base_agent_id(&docker_settings.agents, &agent).to_string();
+        let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone(), &docker_env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts, &id, &agent_base);
         let argv = docker::render_argv(&spec, &args.cmd, &args.args);
         dlog(&format!("[pty_spawn] docker task={} agent={} image={} argv={argv:?}", task.id, agent, image));
         Some((argv, spec.container_name))
@@ -15308,8 +15311,15 @@ pub struct Agent {
     /// output, unusual title patterns, never-quiet PTYs).
     #[serde(default = "default_true")]
     pub work_done: bool,
-    /// ID of the agent this one was cloned from. Purely informational —
-    /// surfaced in the UI as "extends: <name>" in the settings card.
+    /// ID of the agent this one was cloned from. NOT merely informational:
+    /// Docker mode resolves a clone's config SHAPE through it (see
+    /// `docker::base_agent_id`), because a clone of claude runs the claude
+    /// binary and keeps claude's config layout. It used to be documented as
+    /// informational and read by nothing, which is exactly why cloned agents
+    /// were unusable in Docker: they matched no known agent, so nothing was
+    /// mounted and no config-dir relocation var was set, and the agent wrote
+    /// its login into the container's throwaway filesystem. Also surfaced in
+    /// the UI as "extends: <name>" on the settings card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extends: Option<String>,
     /// "agent" (default) or "terminal". Terminal entries share the registry
@@ -16038,14 +16048,15 @@ fn docker_agent_dirs() -> Vec<DockerAgentDirs> {
             // "confirmed to hold real state, can't be removed" for the one
             // agent `agent_config` deliberately mounts NOTHING for, right
             // under a note saying it is unsupported in Docker mode.
-            builtin: if docker::KNOWN_SAFE_AGENTS.contains(&a.id.as_str()) {
-                agent_dirs::state_dirs(&a.id).iter().map(|s| s.to_string()).collect()
+            builtin: if docker::KNOWN_SAFE_AGENTS.contains(&docker::base_agent_id(&settings.agents, &a.id)) {
+                agent_dirs::state_dirs(docker::base_agent_id(&settings.agents, &a.id))
+                    .iter().map(|s| s.to_string()).collect()
             } else {
                 Vec::new()
             },
             extra: settings.docker_agent_extra_dirs.get(&a.id).cloned().unwrap_or_default(),
-            is_builtin: docker::KNOWN_SAFE_AGENTS.contains(&a.id.as_str()),
-            persist_offerable: docker::persist_offerable(&a.id),
+            is_builtin: docker::KNOWN_SAFE_AGENTS.contains(&docker::base_agent_id(&settings.agents, &a.id)),
+            persist_offerable: docker::persist_offerable(docker::base_agent_id(&settings.agents, &a.id)),
             persist_enabled: settings.docker_agent_persist_enabled.get(&a.id).copied().unwrap_or(false),
             host_dir: docker::agent_config_host_dir(&a.id).to_string_lossy().into_owned(),
             container_home: "/root".to_string(),
@@ -16148,7 +16159,8 @@ fn docker_command_preview_sync(task_id: Option<String>, agent_id: Option<String>
     let agent_persist_enabled = settings.docker_agent_persist_enabled.get(&agent_id).copied().unwrap_or(false);
     let (docker_allowed_paths, _) = live_sandbox_lists(&task);
     let preview_env = docker_env_for(&settings.agents, &agent_id, &agent.env);
-    let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &preview_env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts, PREVIEW_PTY_ID);
+    let agent_base = docker::base_agent_id(&settings.agents, &agent_id).to_string();
+    let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &preview_env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts, PREVIEW_PTY_ID, &agent_base);
     let argv = docker::render_argv(&spec, &agent.command, &agent.args);
     Ok(DockerCommandPreview { spec, argv })
 }

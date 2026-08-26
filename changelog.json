@@ -1,6 +1,11 @@
 {
   "versions": [
     {
+      "version": "1.0.0",
+      "date": "2026-08-26",
+      "summary": "🎉 Termic 1.0 ships the last three headline features: code navigation, pull requests, Docker sandboxing."
+    },
+    {
       "version": "0.29.0",
       "date": "2026-08-21",
       "summary": "Scratchpads that survive a relaunch, highlighting for every language CodeMirror knows, and editable SVGs."
