@@ -416,16 +416,31 @@ function maybeHandleMerged(taskId: string, prev: PrLookup | null | undefined, ne
   const mode = project?.on_pr_merge ?? "ask";
   const label = next.pr.provider === "gitlab" ? `MR !${next.pr.number}` : `PR #${next.pr.number}`;
   if (mode === "off") return;
+  // Same opt-in desktop notification as the comment watcher and every
+  // other agent-activity banner (useAttentionNotifier): a merge is very
+  // often detected on a task that ISN'T the one on screen (that's the
+  // whole point of polling every mounted task, not just the active one),
+  // so the in-app toast alone routinely goes unseen.
+  const notifyMerge = (body: string) => {
+    if (!usePrefs.getState().desktopNotifications) return;
+    notify(taskLabel(task, usePrefs.getState().useBranchAsTaskName), body).catch(() => {});
+  };
   if (mode === "auto") {
     useUI.getState().pushToast(`${label} merged. Archiving "${task.name}"`, "success");
+    notifyMerge(`${label} merged, archiving`);
     void archiveAndRefresh(taskId, true);
     return;
   }
   // "ask" (default): non-destructive nudge with a one-click archive.
+  // Sticky (no auto-dismiss timer) - a merge notice is asking the user to
+  // decide something, and a bottom-right toast that expires in seconds is
+  // easy to miss entirely for a task that isn't the one on screen, which
+  // is the common case here.
   useUI.getState().pushToast(`${label} merged. Archive "${task.name}"?`, "success", {
-    ttlMs: 15_000,
+    sticky: true,
     action: { label: "Archive", onClick: () => { void archiveAndRefresh(taskId, true); } },
   });
+  notifyMerge(`${label} merged. Archive "${task.name}"?`);
 }
 
 /** A task's PR/MR just went from none to existing. Every mounted task keeps

@@ -99,10 +99,34 @@ describe("merged-PR lifecycle (issue #21)", () => {
     expect(toasts).toHaveLength(1);
     expect(toasts[0].msg).toContain("merged");
     expect(toasts[0].action?.label).toBe("Archive");
+    // Sticky: a merge notice is a decision to make, not a status update,
+    // and it commonly lands on a task that isn't the one on screen - it
+    // must not expire before anyone gets to read it.
+    expect(toasts[0].sticky).toBe(true);
     expect(archiveAndRefresh).not.toHaveBeenCalled();
     // The action wires through to the archive flow.
     toasts[0].action!.onClick();
     expect(archiveAndRefresh).toHaveBeenCalledWith("ws1", true);
+  });
+
+  it("fires a desktop notification alongside the toast, gated on the pref", async () => {
+    usePrefs.setState({ desktopNotifications: true });
+    seedApp(undefined, { id: "ws-notify" });
+    vi.mocked(ipc.taskPrStatus).mockResolvedValue(lookupWith("open"));
+    await usePr.getState().refresh("ws-notify", true);
+    vi.mocked(ipc.taskPrStatus).mockResolvedValue(lookupWith("merged"));
+    await usePr.getState().refresh("ws-notify", true);
+    expect(ipc.notify).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("merged"));
+  });
+
+  it("skips the desktop notification when the pref is off", async () => {
+    usePrefs.setState({ desktopNotifications: false });
+    seedApp(undefined, { id: "ws-notify-off" });
+    vi.mocked(ipc.taskPrStatus).mockResolvedValue(lookupWith("open"));
+    await usePr.getState().refresh("ws-notify-off", true);
+    vi.mocked(ipc.taskPrStatus).mockResolvedValue(lookupWith("merged"));
+    await usePr.getState().refresh("ws-notify-off", true);
+    expect(ipc.notify).not.toHaveBeenCalled();
   });
 
   it("fires only once per session for the same task", async () => {
@@ -122,6 +146,16 @@ describe("merged-PR lifecycle (issue #21)", () => {
     vi.mocked(ipc.taskPrStatus).mockResolvedValue(lookupWith("merged"));
     await usePr.getState().refresh("ws-auto", true);
     expect(archiveAndRefresh).toHaveBeenCalledWith("ws-auto", true);
+  });
+
+  it("auto: also notifies (desktop) when the pref is on", async () => {
+    usePrefs.setState({ desktopNotifications: true });
+    seedApp("auto", { id: "ws-auto-notify" });
+    vi.mocked(ipc.taskPrStatus).mockResolvedValue(lookupWith("open"));
+    await usePr.getState().refresh("ws-auto-notify", true);
+    vi.mocked(ipc.taskPrStatus).mockResolvedValue(lookupWith("merged"));
+    await usePr.getState().refresh("ws-auto-notify", true);
+    expect(ipc.notify).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("archiving"));
   });
 
   it("off: badge only, no toast, no archive", async () => {

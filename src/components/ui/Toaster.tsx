@@ -31,10 +31,11 @@ export function Toaster() {
 function ToastItem({ t }: { t: Toast }) {
   const dismiss = useUI(s => s.dismissToast);
   useEffect(() => {
+    if (t.sticky) return;
     const ttl = t.ttlMs ?? DEFAULT_TTL_MS;
     const h = setTimeout(() => dismiss(t.id), ttl);
     return () => clearTimeout(h);
-  }, [t.id, t.ttlMs, dismiss]);
+  }, [t.id, t.ttlMs, t.sticky, dismiss]);
   const Ic = ICONS[t.kind];
   return (
     <div
