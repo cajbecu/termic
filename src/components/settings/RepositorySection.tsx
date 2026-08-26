@@ -734,6 +734,70 @@ export function RepositorySection({ projectId }: { projectId: string }) {
               <ExcludeEditor value={rc?.exclude ?? []} onChange={patchExclude} />
             </div>
           </div>
+
+        {/* Spotlight — lives in Scripts & run because it controls
+            how the run command is executed (root path vs worktree). */}
+        <div className="border-t border-[var(--color-border-soft)] pt-6">
+          <div className="mb-3 flex items-center gap-2 text-[14px] font-medium text-[var(--color-fg)]">
+            <AudioWaveform className="h-4 w-4 text-[var(--color-accent)]" />
+            Spotlight
+          </div>
+
+          {isMulti ? (
+            <p className="text-[13px] text-[var(--color-fg-faint)]">
+              Spotlight is not supported for multi-repo projects.
+            </p>
+          ) : (
+            <div className="flex flex-col gap-4">
+              <label className="flex cursor-pointer items-start gap-3 select-none">
+                <Checkbox
+                  checked={!!draft.spotlight_enabled}
+                  onChange={(v) => patch("spotlight_enabled", v as any)}
+                />
+                <div>
+                  <span className="text-[13.5px] font-medium text-[var(--color-fg)]">
+                    Enable spotlight for this project
+                  </span>
+                  <p className="mt-1 text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
+                    When enabled, you can spotlight a task from its settings menu.
+                    Spotlight syncs that task's changes to your main checkout automatically
+                    so you can run and test from there. Committed changes appear as a checkpoint
+                    commit on main; uncommitted edits sync as working-tree changes; untracked
+                    files are copied (.gitignore respected). Main must be clean to start.
+                    Stopping spotlight removes the checkpoint commit and restores main.
+                    While spotlight is active, the run script executes at the repo root.
+                  </p>
+                </div>
+              </label>
+
+              {draft.spotlight_enabled && (
+                <div className="ml-7">
+                  {spotlightTaskName ? (
+                    <div className="flex items-center gap-3 rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-3 py-2">
+                      <AudioWaveform className="termic-spotlight-wave h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
+                      <span className="flex-1 text-[13px] text-[var(--color-fg)]">
+                        <strong>{spotlightTaskName}</strong> is spotlighted right now
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => stopSpotlight(spotlightTaskId!).catch(e =>
+                          useUI.getState().pushToast(String(e), "error")
+                        )}
+                        className="rounded px-2.5 py-1 text-[12px] font-medium bg-[var(--color-bg-3)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] hover:bg-[var(--color-hover)]"
+                      >
+                        Stop
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="text-[12.5px] text-[var(--color-fg-faint)]">
+                      No task is spotlighted right now.
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
         </div>
       )}
 
@@ -863,69 +927,6 @@ export function RepositorySection({ projectId }: { projectId: string }) {
           />
         </div>
 
-        {/* Spotlight — lives in Scripts & run because it controls
-            how the run command is executed (root path vs worktree). */}
-        <div className="border-t border-[var(--color-border-soft)] pt-6">
-          <div className="mb-3 flex items-center gap-2 text-[14px] font-medium text-[var(--color-fg)]">
-            <AudioWaveform className="h-4 w-4 text-[var(--color-accent)]" />
-            Spotlight
-          </div>
-
-          {isMulti ? (
-            <p className="text-[13px] text-[var(--color-fg-faint)]">
-              Spotlight is not supported for multi-repo projects.
-            </p>
-          ) : (
-            <div className="flex flex-col gap-4">
-              <label className="flex cursor-pointer items-start gap-3 select-none">
-                <Checkbox
-                  checked={!!draft.spotlight_enabled}
-                  onChange={(v) => patch("spotlight_enabled", v as any)}
-                />
-                <div>
-                  <span className="text-[13.5px] font-medium text-[var(--color-fg)]">
-                    Enable spotlight for this project
-                  </span>
-                  <p className="mt-1 text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
-                    When enabled, you can spotlight a task from its settings menu.
-                    Spotlight syncs that task's changes to your main checkout automatically
-                    so you can run and test from there. Committed changes appear as a checkpoint
-                    commit on main; uncommitted edits sync as working-tree changes; untracked
-                    files are copied (.gitignore respected). Main must be clean to start.
-                    Stopping spotlight removes the checkpoint commit and restores main.
-                    While spotlight is active, the run script executes at the repo root.
-                  </p>
-                </div>
-              </label>
-
-              {draft.spotlight_enabled && (
-                <div className="ml-7">
-                  {spotlightTaskName ? (
-                    <div className="flex items-center gap-3 rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-3 py-2">
-                      <AudioWaveform className="termic-spotlight-wave h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
-                      <span className="flex-1 text-[13px] text-[var(--color-fg)]">
-                        <strong>{spotlightTaskName}</strong> is spotlighted right now
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => stopSpotlight(spotlightTaskId!).catch(e =>
-                          useUI.getState().pushToast(String(e), "error")
-                        )}
-                        className="rounded px-2.5 py-1 text-[12px] font-medium bg-[var(--color-bg-3)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] hover:bg-[var(--color-hover)]"
-                      >
-                        Stop
-                      </button>
-                    </div>
-                  ) : (
-                    <p className="text-[12.5px] text-[var(--color-fg-faint)]">
-                      No task is spotlighted right now.
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
         </div>
       )}
 

@@ -1878,6 +1878,17 @@ describe("per-project code navigation tab", () => {
     await clickRepoTab("scripts");
     await waitForTextGone("Auto start");
   });
+
+  // The move that created this tab took a neighbour with it: Spotlight sat
+  // right below the code-nav block in Scripts & run, and a range move swept it
+  // into the new tab, where it means nothing. It belongs with the scripts
+  // because it decides where the run command executes (repo root vs worktree).
+  it("leaves Spotlight on the scripts tab, where it belongs", async () => {
+    await clickRepoTab("scripts");
+    await waitForText("Enable spotlight for this project");
+    await clickRepoTab("codenav");
+    await waitForTextGone("Enable spotlight for this project");
+  });
 });
 
 describe("settings reorder drags", () => {
