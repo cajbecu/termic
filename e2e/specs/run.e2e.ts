@@ -313,6 +313,74 @@ describe("sidebar run stop", () => {
       (id) => window.__termic!.useApp.getState().activeTab[id], taskId,
     )).toBe(tabId);
   });
+
+  // Collapsing a task hides the child row that carries the run controls, which
+  // is exactly when a run is hardest to notice and to stop. The header row
+  // takes them over, inline after the name, one per run tab and capped.
+  it("moves the run controls onto the header row while collapsed", async () => {
+    // Whichever half the run is showing: the case before this one restarted
+    // it, so the tab may hold a live ptyId (Stop) or not (Play). What is
+    // asserted is WHERE the control lives, not which of the pair it is.
+    const inHeader = () => browser.execute((id, tab) => {
+      const row = document.querySelector(`[data-sidebar-task-id="${id}"]`);
+      const btn = document.querySelector(
+        `[data-testid="sidebar-run-stop-${tab}"], [data-testid="sidebar-run-play-${tab}"]`,
+      );
+      return { present: !!btn, inside: !!row && !!btn && row.contains(btn) };
+    }, taskId, tabId);
+
+    await browser.execute((id) => {
+      window.__termic!.useApp.getState().setTaskCollapsed(id, true);
+    }, taskId);
+    // Inline in the header itself, not a child row that survived the collapse
+    // and not the trailing badge/kebab column.
+    await browser.waitUntil(async () => (await inHeader()).inside, {
+      timeout: 8_000,
+      timeoutMsg: "the collapsed header never carried the run control",
+    });
+
+    // Expanded, the header hands it back rather than showing it twice: the
+    // control is still on screen, just not inside the header row.
+    await browser.execute((id) => {
+      window.__termic!.useApp.getState().setTaskCollapsed(id, false);
+    }, taskId);
+    await browser.waitUntil(async () => {
+      const r = await inHeader();
+      return r.present && !r.inside;
+    }, {
+      timeout: 8_000,
+      timeoutMsg: "the expanded header kept a run control of its own",
+    });
+  });
+
+  // A task can hold several runs (per-member, custom commands, setup), so the
+  // collapsed header shows one button each up to the cap and none past it,
+  // rather than filling the row with icons or picking one arbitrarily.
+  it("shows one button per run tab, up to three", async () => {
+    const extras = ["e2e-collapsed-2", "e2e-collapsed-3", "e2e-collapsed-4"];
+    const visible = () => browser.execute((id) => {
+      const row = document.querySelector(`[data-sidebar-task-id="${id}"]`);
+      return row ? row.querySelectorAll('[data-testid^="sidebar-run-"]').length : -1;
+    }, taskId);
+
+    await browser.execute((id) => {
+      window.__termic!.useApp.getState().setTaskCollapsed(id, true);
+    }, taskId);
+    await browser.waitUntil(async () => (await visible()) === 1,
+      { timeout: 8_000, timeoutMsg: "the one run tab never showed its button" });
+
+    for (const [i, label] of extras.entries()) {
+      await browser.execute((id, l) => {
+        window.__termic!.runTabs.launchCustomRun(id, { label: l, command: "sleep 30" });
+      }, taskId, label);
+      // 2 and 3 add a button each; the 4th takes the whole set past the cap.
+      const want = i < 2 ? i + 2 : 0;
+      await browser.waitUntil(async () => (await visible()) === want, {
+        timeout: 8_000,
+        timeoutMsg: `expected ${want} run buttons after adding ${label}`,
+      });
+    }
+  });
 });
 
 // P1: the Run commands manager (GH #124). Guards that it opens for a project

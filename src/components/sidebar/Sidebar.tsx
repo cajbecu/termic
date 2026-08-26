@@ -2044,6 +2044,94 @@ function PendingTaskRow({ pending }: { pending: import("@/store/pendingTasks").P
   );
 }
 
+/** The two controls a run tab carries in the sidebar tree (GH #54): a red Stop
+ *  while its PTY is up, a quiet Play once it is not. `ptyId`, which
+ *  TerminalPane clears on process exit, is what "running" means here and in
+ *  the tab pill alike.
+ *
+ *  One component, two places: the run tab's own child row, and the task header
+ *  row while it is COLLAPSED, where that child row is not rendered and a live
+ *  run would otherwise be invisible (and unstoppable) from anywhere but the
+ *  task that owns it. Only ever ONE of the two is on screen for a given tab,
+ *  so the testids stay unique.
+ *
+ *  Actions come from `useApp.getState()` inside the handlers rather than
+ *  subscriptions: this renders once per run row, and a store action's identity
+ *  never changes anyway. `isMounted` is a prop because the caller already
+ *  subscribes to it. */
+function RunTabControl({ taskId, tab, title, isMounted }: {
+  taskId: string;
+  tab: TerminalTab;
+  title: string;
+  isMounted: boolean;
+}) {
+  if (tab.ptyId) {
+    return (
+      // An instant Tip, not a native `title`: on the collapsed header the
+      // button is the ONLY thing naming the process it kills, and a tooltip
+      // that arrives a second later is no use to a cursor already on its way
+      // to the click. `delay` defaults to 0, hence no wait.
+      <Tip content={`Stop ${title}`} side="right">
+        <button
+          data-no-drag
+          data-testid={`sidebar-run-stop-${tab.id}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            const ptyId = tab.ptyId;
+            if (ptyId) ptyKill(ptyId).catch(() => {});
+          }}
+          className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--color-err)] hover:bg-[var(--color-bg-3)] hover:opacity-80"
+        >
+          <Square className="h-2.5 w-2.5" fill="currentColor" />
+        </button>
+      </Tip>
+    );
+  }
+  return (
+    <Tip content={`Run ${title}`} side="right">
+    <button
+      data-no-drag
+      data-testid={`sidebar-run-play-${tab.id}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        // RunPane owns the restart and only exists under a mounted TaskView,
+        // so bring the task up first and put the run tab in front, exactly as
+        // clicking the row would. Fronting the tab is also what makes this
+        // safe from the COLLAPSED header: the run the user just started is on
+        // screen, not hidden behind a chevron they never opened.
+        const wasMounted = isMounted;
+        const app = useApp.getState();
+        app.setActiveTask(taskId);
+        app.setActiveTabId(taskId, tab.id);
+        // An already-mounted task needs the event: its RunPane is sitting on a
+        // finished run and only a remount respawns it. A task that was NOT
+        // mounted spawns the run as RunPane mounts, so firing as well would
+        // kill that spawn and redo it. The exception is a tab restored idle,
+        // whose pane shows a play placeholder and waits for exactly this
+        // event. Deferred to a macrotask so a just-mounted listener is
+        // attached first, and a timer rather than rAF because rAF is frozen on
+        // an occluded window (docs/gotchas.md).
+        if (wasMounted || tab.runTab?.idle) {
+          window.setTimeout(() => {
+            window.dispatchEvent(new CustomEvent(
+              "termic-run-tab-restart", { detail: { tabId: tab.id } },
+            ));
+          }, 0);
+        }
+      }}
+      className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--color-fg-faint)] hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)]"
+    >
+      <Play className="h-2.5 w-2.5" />
+    </button>
+    </Tip>
+  );
+}
+
+/** How many run buttons a COLLAPSED task header will carry inline. Three fits
+ *  next to a name in a narrow sidebar; past that the row reads as a toolbar,
+ *  and the task expands to reach them instead. */
+const COLLAPSED_RUN_BUTTON_CAP = 3;
+
 function TabBadge({ reason }: { reason: "attention" | "done" | "working" }) {
   if (reason === "working") {
     return (
@@ -2161,6 +2249,16 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
   // Sidebar only shows main-pane terminal tabs; split-pane tabs live in SplitView.
   const terminalTabs = tabs.filter((t): t is TerminalTab => t.type === "terminal" && !t.paneId);
   const isLoaded = terminalTabs.some(t => t.ptyId);
+  // The run controls the COLLAPSED header row carries, mirroring the child rows
+  // that are not rendered while collapsed: one button per run tab, each with
+  // the same Stop-while-live / Play-once-finished pair its own row would have
+  // had. Capped at 3, because a task can hold more than one run (a multi-repo
+  // task runs one per member, custom run commands add their own, and a setup
+  // tab is a third kind) and a header row that fills with icons stops being a
+  // name. Past the cap the task expands to reach them, which is what the tab
+  // strip makes it do anyway.
+  const runRowTabs = terminalTabs.filter(t => !!t.runTab);
+  const collapsedRunTabs = runRowTabs.length <= COLLAPSED_RUN_BUTTON_CAP ? runRowTabs : [];
   // The sidebar only renders terminal tabs as child rows; edit/diff tabs
   // are transient file views with no row. When the active tab is one of
   // those (or there's no active tab), no child row carries the selection,
@@ -2451,6 +2549,23 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
               </span>
             )
           )}
+          {/* Collapsed rows carry each run tab's own control, inline after the
+              name and count. A collapsed task hides the child rows that would
+              otherwise offer them, which is precisely when a run is hardest to
+              notice and to stop. NOT in the trailing slot: that column is the
+              badge and the kebab, and a third icon there reads as one of them.
+              Expanded rows leave it to the child rows instead of showing it
+              twice. Each carries an instant tooltip naming its tab, since the
+              icon alone cannot say which run of several it belongs to. */}
+          {!taskRenaming && collapsed && collapsedRunTabs.map(rt => (
+            <RunTabControl
+              key={rt.id}
+              taskId={w.id}
+              tab={rt}
+              title={rt.customTitle ? rt.title : (rt.liveTitle || rt.title)}
+              isMounted={isMounted}
+            />
+          ))}
         </div>
 
         {/* Trailing slot: status badge by default, single kebab (⋮)
@@ -2805,58 +2920,12 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
             )}
             {/* Run tabs (GH #54): the same two controls the tab pill carries,
                 because a run is otherwise invisible (and unstoppable) from
-                anywhere but the task that owns it. `ptyId`, cleared on process
-                exit, is what "running" means in both places: red Stop while it
-                is up, quiet Play once it is not. */}
-            {!isTabRenaming && tab.runTab && (tab.ptyId ? (
-              <button
-                data-no-drag
-                data-testid={`sidebar-run-stop-${tab.id}`}
-                title="Stop run"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  const ptyId = tab.ptyId;
-                  if (ptyId) ptyKill(ptyId).catch(() => {});
-                }}
-                className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--color-err)] hover:bg-[var(--color-bg-3)] hover:opacity-80"
-              >
-                <Square className="h-2.5 w-2.5" fill="currentColor" />
-              </button>
-            ) : (
-              <button
-                data-no-drag
-                data-testid={`sidebar-run-play-${tab.id}`}
-                title={`Run ${title}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  // RunPane owns the restart and only exists under a mounted
-                  // TaskView, so bring the task up first and put the run tab
-                  // in front, exactly as clicking the row would.
-                  const wasMounted = isMounted;
-                  setActive(w.id);
-                  setActiveTabId(w.id, tab.id);
-                  // An already-mounted task needs the event: its RunPane is
-                  // sitting on a finished run and only a remount respawns it.
-                  // A task that was NOT mounted spawns the run as RunPane
-                  // mounts, so firing as well would kill that spawn and redo
-                  // it. The exception is a tab restored idle, whose pane shows
-                  // a play placeholder and waits for exactly this event.
-                  // Deferred to a macrotask so a just-mounted listener is
-                  // attached first, and a timer rather than rAF because rAF is
-                  // frozen on an occluded window (docs/gotchas.md).
-                  if (wasMounted || tab.runTab?.idle) {
-                    window.setTimeout(() => {
-                      window.dispatchEvent(new CustomEvent(
-                        "termic-run-tab-restart", { detail: { tabId: tab.id } },
-                      ));
-                    }, 0);
-                  }
-                }}
-                className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--color-fg-faint)] hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)]"
-              >
-                <Play className="h-2.5 w-2.5" />
-              </button>
-            ))}
+                anywhere but the task that owns it. The collapsed task header
+                renders the identical control (see `collapsedRunTabs`), so this
+                pair lives in one component. */}
+            {!isTabRenaming && tab.runTab && (
+              <RunTabControl taskId={w.id} tab={tab} title={title} isMounted={isMounted} />
+            )}
             {/* Trailing slot — status badge by default. Close × only
                 appears when hovering the badge itself, not the whole
                 row — row hover keeps the badge visible. */}

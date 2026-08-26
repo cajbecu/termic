@@ -66,6 +66,23 @@ it.
 Both read the same thing, `tab.ptyId`, which TerminalPane clears on process
 exit: red Stop while the run is up, quiet Play once it is not.
 
+A COLLAPSED task header carries those same controls itself, inline right after
+the name and the terminal count. Collapsing hides the child row that would
+otherwise offer them, which is exactly when a run is hardest to notice and to
+stop, so `RunTabControl` renders in whichever of the two places is on screen
+(never both, so its testids stay unique). Three constraints shape it:
+
+- **Inline, not in the trailing slot.** That column is the status badge and the
+  kebab; a third icon there reads as one of them.
+- **One button per run tab, capped at `COLLAPSED_RUN_BUTTON_CAP` (3).** A task
+  can hold several runs at once (a multi-repo task runs one per member, custom
+  run commands add their own, and a setup tab is a third kind), so a single
+  button cannot stand for "the" run. Past the cap the header shows none and the
+  task expands to reach them, which is what the tab strip makes it do anyway.
+- **An instant `Tip`, not a native `title`.** On a collapsed row the button is
+  the only thing naming the process it kills, and a tooltip that arrives a
+  second later is no use to a cursor already on its way to the click.
+
 Play has a wrinkle Stop does not. The restart travels as a
 `termic-run-tab-restart` window event, and the only listener is the tab's
 `RunPane`, which exists solely under a mounted `TaskView` — so the row brings
