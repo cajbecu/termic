@@ -1879,15 +1879,47 @@ describe("per-project code navigation tab", () => {
     await waitForTextGone("Auto start");
   });
 
-  // The move that created this tab took a neighbour with it: Spotlight sat
-  // right below the code-nav block in Scripts & run, and a range move swept it
-  // into the new tab, where it means nothing. It belongs with the scripts
-  // because it decides where the run command executes (repo root vs worktree).
-  it("leaves Spotlight on the scripts tab, where it belongs", async () => {
+  it("no longer leaves Spotlight on the scripts tab", async () => {
     await clickRepoTab("scripts");
-    await waitForText("Enable spotlight for this project");
-    await clickRepoTab("codenav");
     await waitForTextGone("Enable spotlight for this project");
+  });
+});
+
+// Spotlight mirrors a task's git changes onto the main checkout, so it moved
+// off Scripts & run (where the code-nav split had originally left it, per the
+// regression this test used to guard) onto the Git tab, alongside the other
+// git-workflow settings (branch/remote, PR merge behavior, comment watching).
+describe("per-project Git tab", () => {
+  let projectId!: string;
+
+  const clickRepoTab = (id: string) =>
+    browser.execute((t) => {
+      const btn = document.querySelector(`[data-repo-tab="${t}"]`) as HTMLElement | null;
+      if (!btn) throw new Error("no repo sub-tab: " + t);
+      btn.click();
+    }, id);
+
+  after(async () => {
+    await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
+  });
+
+  it("carries the git workflow settings and Spotlight, not the scripts tab", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    projectId = await browser.execute(() =>
+      window.__termic!.useApp.getState().projects.find((p: any) => p.name === "fixture-repo").id,
+    ) as string;
+    await browser.execute(
+      (id) => window.__termic!.useApp.getState().openSettings("repositories", id), projectId,
+    );
+    await waitVisible('[data-repo-tab="git"]');
+    await clickRepoTab("git");
+    for (const text of [
+      "Branch new tasks from", "Remote", "When a pull request merges",
+      "Watch PR comments", "Act on comments from", "Enable spotlight for this project",
+    ]) {
+      await waitForText(text);
+    }
   });
 });
 

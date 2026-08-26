@@ -473,6 +473,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
     { id: "scripts",  label: isMulti ? "Members & scripts" : "Scripts & run" },
     { id: "sandbox",  label: "Sandbox" },
     { id: "codenav",  label: codeIntelName(typeChecking) },
+    { id: "git",      label: "Git" },
     { id: "advanced", label: "More" },
   ];
 
@@ -734,70 +735,6 @@ export function RepositorySection({ projectId }: { projectId: string }) {
               <ExcludeEditor value={rc?.exclude ?? []} onChange={patchExclude} />
             </div>
           </div>
-
-        {/* Spotlight — lives in Scripts & run because it controls
-            how the run command is executed (root path vs worktree). */}
-        <div className="border-t border-[var(--color-border-soft)] pt-6">
-          <div className="mb-3 flex items-center gap-2 text-[14px] font-medium text-[var(--color-fg)]">
-            <AudioWaveform className="h-4 w-4 text-[var(--color-accent)]" />
-            Spotlight
-          </div>
-
-          {isMulti ? (
-            <p className="text-[13px] text-[var(--color-fg-faint)]">
-              Spotlight is not supported for multi-repo projects.
-            </p>
-          ) : (
-            <div className="flex flex-col gap-4">
-              <label className="flex cursor-pointer items-start gap-3 select-none">
-                <Checkbox
-                  checked={!!draft.spotlight_enabled}
-                  onChange={(v) => patch("spotlight_enabled", v as any)}
-                />
-                <div>
-                  <span className="text-[13.5px] font-medium text-[var(--color-fg)]">
-                    Enable spotlight for this project
-                  </span>
-                  <p className="mt-1 text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
-                    When enabled, you can spotlight a task from its settings menu.
-                    Spotlight syncs that task's changes to your main checkout automatically
-                    so you can run and test from there. Committed changes appear as a checkpoint
-                    commit on main; uncommitted edits sync as working-tree changes; untracked
-                    files are copied (.gitignore respected). Main must be clean to start.
-                    Stopping spotlight removes the checkpoint commit and restores main.
-                    While spotlight is active, the run script executes at the repo root.
-                  </p>
-                </div>
-              </label>
-
-              {draft.spotlight_enabled && (
-                <div className="ml-7">
-                  {spotlightTaskName ? (
-                    <div className="flex items-center gap-3 rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-3 py-2">
-                      <AudioWaveform className="termic-spotlight-wave h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
-                      <span className="flex-1 text-[13px] text-[var(--color-fg)]">
-                        <strong>{spotlightTaskName}</strong> is spotlighted right now
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => stopSpotlight(spotlightTaskId!).catch(e =>
-                          useUI.getState().pushToast(String(e), "error")
-                        )}
-                        className="rounded px-2.5 py-1 text-[12px] font-medium bg-[var(--color-bg-3)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] hover:bg-[var(--color-hover)]"
-                      >
-                        Stop
-                      </button>
-                    </div>
-                  ) : (
-                    <p className="text-[12.5px] text-[var(--color-fg-faint)]">
-                      No task is spotlighted right now.
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
         </div>
       )}
 
@@ -1031,6 +968,139 @@ export function RepositorySection({ projectId }: { projectId: string }) {
         </div>
       )}
 
+      {subTab === "git" && (
+        <div className="flex flex-col gap-7">
+          {/* The same field the project `+` menu's "Branch from" row writes,
+              so the two can't disagree. */}
+          <GitField
+            label="Branch new tasks from"
+            hint="Each task is an isolated copy of your codebase, branched off here. The project + menu writes this too."
+            control={<Input value={draft.base_branch} onChange={(e) => patch("base_branch", e.target.value)} className={cn("font-mono", flashRing("base_branch"))} placeholder="origin/master" />}
+          />
+          <GitField
+            label="Remote"
+            hint="Git remote name (used when resolving the base branch)."
+            control={<Input value={draft.remote} onChange={(e) => patch("remote", e.target.value)} className={cn("font-mono", flashRing("remote"))} placeholder="origin" />}
+          />
+          <GitField
+            label="When a pull request merges"
+            hint="Termic watches the PR/MR of each task you look at. On merge it can offer to archive the task (toast with an Archive button), archive it automatically, or do nothing."
+            control={
+              <select
+                value={draft.on_pr_merge ?? "ask"}
+                onChange={(e) => patch("on_pr_merge", e.target.value as Project["on_pr_merge"])}
+                className={cn(
+                  "rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[140px]",
+                  flashRing("on_pr_merge"),
+                )}
+              >
+                <option value="ask">Ask (toast)</option>
+                <option value="auto">Archive automatically</option>
+                <option value="off">Do nothing</option>
+              </select>
+            }
+          />
+          <GitField
+            label="Watch PR comments"
+            hint="When a launched task of this project has a pull request, new comments are automatically queued into its main agent to address. Equivalent to switching on the bell on every PR card. Off = opt in per task."
+            control={
+              <select
+                value={draft.watch_pr_comments ? "on" : "off"}
+                onChange={(e) => patch("watch_pr_comments", e.target.value === "on")}
+                className={cn(
+                  "rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[140px]",
+                  flashRing("watch_pr_comments"),
+                )}
+              >
+                <option value="off">Per task (bell)</option>
+                <option value="on">Always</option>
+              </select>
+            }
+          />
+          <GitField
+            label="Act on comments from"
+            hint="A PR/MR comment gets fed to the agent to address, with real shell access. Anyone who can see a pull request can usually comment on it regardless of repo permissions, so by default only commenters with verified standing (owner, member, collaborator) are acted on."
+            control={
+              <select
+                value={draft.watch_untrusted_comments ? "on" : "off"}
+                onChange={(e) => patch("watch_untrusted_comments", e.target.value === "on")}
+                className={cn(
+                  "rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[140px]",
+                  flashRing("watch_untrusted_comments"),
+                )}
+              >
+                <option value="off">Collaborators only</option>
+                <option value="on">Everyone</option>
+              </select>
+            }
+          />
+
+          {/* Spotlight mirrors a task's git changes onto the main checkout,
+              so it lives here rather than on Scripts & run. */}
+          <div className="border-t border-[var(--color-border-soft)] pt-6">
+            <div className="mb-3 flex items-center gap-2 text-[14px] font-medium text-[var(--color-fg)]">
+              <AudioWaveform className="h-4 w-4 text-[var(--color-accent)]" />
+              Spotlight
+            </div>
+
+            {isMulti ? (
+              <p className="text-[13px] text-[var(--color-fg-faint)]">
+                Spotlight is not supported for multi-repo projects.
+              </p>
+            ) : (
+              <div className="flex flex-col gap-4">
+                <label className="flex cursor-pointer items-start gap-3 select-none">
+                  <Checkbox
+                    checked={!!draft.spotlight_enabled}
+                    onChange={(v) => patch("spotlight_enabled", v as any)}
+                  />
+                  <div>
+                    <span className="text-[13.5px] font-medium text-[var(--color-fg)]">
+                      Enable spotlight for this project
+                    </span>
+                    <p className="mt-1 text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
+                      When enabled, you can spotlight a task from its settings menu.
+                      Spotlight syncs that task's changes to your main checkout automatically
+                      so you can run and test from there. Committed changes appear as a checkpoint
+                      commit on main; uncommitted edits sync as working-tree changes; untracked
+                      files are copied (.gitignore respected). Main must be clean to start.
+                      Stopping spotlight removes the checkpoint commit and restores main.
+                      While spotlight is active, the run script executes at the repo root.
+                    </p>
+                  </div>
+                </label>
+
+                {draft.spotlight_enabled && (
+                  <div className="ml-7">
+                    {spotlightTaskName ? (
+                      <div className="flex items-center gap-3 rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-3 py-2">
+                        <AudioWaveform className="termic-spotlight-wave h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
+                        <span className="flex-1 text-[13px] text-[var(--color-fg)]">
+                          <strong>{spotlightTaskName}</strong> is spotlighted right now
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => stopSpotlight(spotlightTaskId!).catch(e =>
+                            useUI.getState().pushToast(String(e), "error")
+                          )}
+                          className="rounded px-2.5 py-1 text-[12px] font-medium bg-[var(--color-bg-3)] text-[var(--color-fg-dim)] hover:text-[var(--color-fg)] hover:bg-[var(--color-hover)]"
+                        >
+                          Stop
+                        </button>
+                      </div>
+                    ) : (
+                      <p className="text-[12.5px] text-[var(--color-fg-faint)]">
+                        No task is spotlighted right now.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {subTab === "advanced" && (
         <div className="flex flex-col gap-7">
           <Field
@@ -1079,58 +1149,6 @@ export function RepositorySection({ projectId }: { projectId: string }) {
             }
           />
           <Field
-            label="When a pull request merges"
-            hint="Termic watches the PR/MR of each task you look at. On merge it can offer to archive the task (toast with an Archive button), archive it automatically, or do nothing."
-            control={
-              <select
-                value={draft.on_pr_merge ?? "ask"}
-                onChange={(e) => patch("on_pr_merge", e.target.value as Project["on_pr_merge"])}
-                className={cn(
-                  "rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[140px]",
-                  flashRing("on_pr_merge"),
-                )}
-              >
-                <option value="ask">Ask (toast)</option>
-                <option value="auto">Archive automatically</option>
-                <option value="off">Do nothing</option>
-              </select>
-            }
-          />
-          <Field
-            label="Always watch PR comments"
-            hint="When a launched task of this project has a pull request, new comments are automatically queued into its main agent to address. Equivalent to switching on the bell on every PR card. Off = opt in per task."
-            control={
-              <select
-                value={draft.watch_pr_comments ? "on" : "off"}
-                onChange={(e) => patch("watch_pr_comments", e.target.value === "on")}
-                className={cn(
-                  "rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[140px]",
-                  flashRing("watch_pr_comments"),
-                )}
-              >
-                <option value="off">Per task (bell)</option>
-                <option value="on">Always</option>
-              </select>
-            }
-          />
-          <Field
-            label="Act on comments from"
-            hint="A PR/MR comment gets fed to the agent to address, with real shell access. Anyone who can see a pull request can usually comment on it regardless of repo permissions, so by default only commenters with verified standing (owner, member, collaborator) are acted on."
-            control={
-              <select
-                value={draft.watch_untrusted_comments ? "on" : "off"}
-                onChange={(e) => patch("watch_untrusted_comments", e.target.value === "on")}
-                className={cn(
-                  "rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[13.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] min-w-[140px]",
-                  flashRing("watch_untrusted_comments"),
-                )}
-              >
-                <option value="off">Collaborators only</option>
-                <option value="on">Everyone</option>
-              </select>
-            }
-          />
-          <Field
             label="Root path"
             hint="The git repo on disk. Do not move or delete this directory; remove the project in Termic instead."
             control={<Input value={draft.root_path} readOnly className="font-mono opacity-70 cursor-not-allowed" />}
@@ -1165,18 +1183,6 @@ export function RepositorySection({ projectId }: { projectId: string }) {
               </>
             }
           />
-          {/* The same field the project `+` menu's "Branch from" row writes,
-              so the two can't disagree. */}
-          <Field
-            label="Branch new tasks from"
-            hint="Each task is an isolated copy of your codebase, branched off here. The project + menu writes this too."
-            control={<Input value={draft.base_branch} onChange={(e) => patch("base_branch", e.target.value)} className={cn("font-mono", flashRing("base_branch"))} placeholder="origin/master" />}
-          />
-          <Field
-            label="Remote"
-            hint="Git remote name (used when resolving the base branch)."
-            control={<Input value={draft.remote} onChange={(e) => patch("remote", e.target.value)} className={cn("font-mono", flashRing("remote"))} placeholder="origin" />}
-          />
 
           {/* Danger zone pinned to the bottom of More — same
               page as the rarely-touched metadata, since it's also
@@ -1203,7 +1209,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
   );
 }
 
-type SubTab = "scripts" | "sandbox" | "codenav" | "advanced";
+type SubTab = "scripts" | "sandbox" | "codenav" | "git" | "advanced";
 
 function Field({ label, hint, control }: { label: string; hint?: string; control: React.ReactNode }) {
   return (
@@ -1211,6 +1217,23 @@ function Field({ label, hint, control }: { label: string; hint?: string; control
       <div className="text-[14px] font-medium">{label}</div>
       {hint && <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">{hint}</div>}
       <div className="mt-2">{control}</div>
+    </div>
+  );
+}
+
+/** Same field shape as `Field`, but the control sits to the RIGHT of the
+ *  label/hint column instead of stacked below it - matches Appearance's
+ *  own Field layout. Used on the Git tab, whose controls are all a single
+ *  select/input, small enough that stacking them under a hint just adds
+ *  vertical scroll for no reason. */
+function GitField({ label, hint, control }: { label: string; hint?: string; control: React.ReactNode }) {
+  return (
+    <div className="flex items-start justify-between gap-6">
+      <div className="min-w-0 flex-1">
+        <div className="text-[14px] font-medium">{label}</div>
+        {hint && <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">{hint}</div>}
+      </div>
+      <div className="shrink-0">{control}</div>
     </div>
   );
 }
