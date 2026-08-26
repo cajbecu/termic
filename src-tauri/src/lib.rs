@@ -15680,6 +15680,19 @@ pub(crate) fn load_settings_inner() -> Settings {
         s.agents.sort_by_key(|a| {
             order.iter().position(|id| id == &a.id).unwrap_or(usize::MAX)
         });
+        // `builtin` is DERIVED, never trusted from disk. It is persisted in
+        // settings.json, and the UI uses it as the delete guard ("built-ins
+        // can be edited but not removed"), so an agent that was shipped once
+        // and later dropped from `default_agents()` stayed flagged
+        // `builtin: true` forever on existing installs: undeletable, with no
+        // code left behind it. That is exactly what happened to `gemini`.
+        // Re-stamping from the current default list self-heals those records
+        // into ordinary custom agents (keeping the user's command / args /
+        // env, which they may still want) and equally re-promotes a built-in
+        // whose stored copy lost the flag.
+        for a in s.agents.iter_mut() {
+            a.builtin = order.iter().any(|id| id == &a.id);
+        }
     }
     // Migration: backfill missing `sandbox_allowed_paths` entries on
     // BUILT-IN agents. We MERGE the shipped defaults into the stored
@@ -22590,6 +22603,40 @@ filename f.rs
             .filter(|n| n.contains(".tmp."))
             .collect();
         assert!(strays.is_empty(), "failed write left staging files: {strays:?}");
+    }
+
+    #[test]
+    fn builtin_flag_is_derived_from_the_current_default_list() {
+        // `builtin` is persisted in settings.json AND used by the UI as the
+        // delete guard. When an agent is dropped from `default_agents()`
+        // (gemini was), every existing install kept a record flagged
+        // `builtin: true` for an id with no code behind it: permanently
+        // undeletable. The load path re-stamps the flag so those records
+        // decay into ordinary custom agents.
+        let defaults: Vec<String> = default_agents().iter().map(|a| a.id.clone()).collect();
+        assert!(!defaults.iter().any(|id| id == "gemini"),
+            "gemini is no longer shipped; this test encodes that");
+
+        // Records shaped like what is actually on disk. Cloned from a real
+        // shipped agent because `Agent` has no Default; only id + builtin
+        // matter here.
+        let template = default_agents().into_iter().next().unwrap();
+        let stored = |id: &str, builtin: bool| Agent {
+            id: id.into(), builtin, ..template.clone()
+        };
+        // Exactly the re-stamp the loader performs.
+        let mut agents = vec![
+            stored("gemini", true),
+            stored("claude", false),
+            stored("my-own", true),
+        ];
+        for a in agents.iter_mut() {
+            a.builtin = defaults.iter().any(|id| id == &a.id);
+        }
+        let flag = |id: &str| agents.iter().find(|a| a.id == id).unwrap().builtin;
+        assert!(!flag("gemini"), "a dropped built-in becomes deletable");
+        assert!(flag("claude"), "a real built-in is re-promoted even if the stored copy lost the flag");
+        assert!(!flag("my-own"), "a custom agent never gains the flag by claiming it on disk");
     }
 
     // ── files_to_copy for multi-repo members (GH #264) ──────────────
