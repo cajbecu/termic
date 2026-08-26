@@ -380,6 +380,17 @@ pub fn build_spec(
     let mut env: Vec<(String, String)> = vec![
         ("TERM".to_string(), "xterm-256color".to_string()),
         ("COLORTERM".to_string(), "truecolor".to_string()),
+        // `render_argv` runs the container as the HOST user's own uid:gid
+        // (see its `-u` flag) rather than root, so agents that refuse
+        // `--dangerously-skip-permissions` under root (Claude Code) work in
+        // Docker mode too. That uid has no matching /etc/passwd entry
+        // inside the container, so HOME/USER don't auto-resolve the way
+        // they do for root - every agent's config still lives under
+        // `/root` (that's what `agent_config`/`agent_config_host_dir`
+        // mount into), so HOME is pinned there explicitly rather than
+        // moved to a uid-specific home directory.
+        ("HOME".to_string(), "/root".to_string()),
+        ("USER".to_string(), "agent".to_string()),
     ];
     if let Some(cfg) = agent_config(agent_id, agent_extra_dirs, agent_persist_enabled) {
         let host_cfg = agent_config_host_dir(agent_id).to_string_lossy().into_owned();
@@ -534,6 +545,23 @@ pub fn validate_extra_mounts(mounts: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// The `docker run --user` value: the HOST process's own uid:gid, so the
+/// container's file access matches the host user that already owns every
+/// bind-mounted path (worktree, agent config dir). `getuid`/`getgid` are
+/// unix-only in `libc` (Windows has no uid concept); Docker sandbox mode is
+/// currently exercised on macOS/Linux hosts only, so a Windows build falls
+/// back to `0:0` (root) rather than failing to compile - this flag has no
+/// meaning there yet.
+#[cfg(unix)]
+fn host_uid_gid() -> String {
+    format!("{}:{}", unsafe { libc::getuid() }, unsafe { libc::getgid() })
+}
+
+#[cfg(not(unix))]
+fn host_uid_gid() -> String {
+    "0:0".to_string()
+}
+
 // ──────────────────────────── render_argv ──────────────────────────────
 
 /// Render the spec to the exact argv we spawn. THE single source of truth:
@@ -573,6 +601,20 @@ pub fn render_argv(spec: &DockerSpec, cmd: &str, args: &[String]) -> Vec<String>
     argv.push("no-new-privileges:true".into());
     argv.push("--pids-limit".into());
     argv.push("512".into());
+    // Run as the HOST user's own uid:gid, not root. Two reasons: (1) Claude
+    // Code (and presumably others) refuse `--dangerously-skip-permissions`
+    // under root, which broke every YOLO-auto-on Docker task; (2) the
+    // worktree/git-metadata/agent-config-dir mounts are all bind-mounted
+    // from paths this same host user already owns, so matching uid:gid
+    // exactly means the container sees the identical ownership/permissions
+    // the host process already has - no chown, no `--user`-vs-bind-mount
+    // guessing. `Dockerfile.default` world-permissions `/root` (where every
+    // agent's config/binaries live, `HOME` above) at build time so an
+    // arbitrary runtime uid with no matching `/etc/passwd` entry can still
+    // read/write it. `-u`/`--user` is in `UNSAFE_EXTRA_ARG_PREFIXES` so a
+    // task can never override this from `docker_extra_args`.
+    argv.push("--user".into());
+    argv.push(host_uid_gid());
     argv.extend(spec.extra_args.iter().cloned());
     argv.push(spec.image.clone());
     argv.push(cmd.to_string());
@@ -1142,6 +1184,24 @@ mod tests {
         for bad in ["", "   ", "/etc", "../../etc", ".foo/../../etc", "/root/.claude"] {
             assert_eq!(sanitize_extra_dir(bad), None, "expected {bad:?} to be rejected");
         }
+    }
+
+    #[test]
+    fn render_argv_runs_as_the_host_uid_gid_with_home_pinned_to_root() {
+        // Claude Code (and presumably others) refuse
+        // --dangerously-skip-permissions under root - `render_argv` runs
+        // the container as the HOST user's own uid:gid instead so YOLO
+        // auto-on works in Docker mode too, matching ownership of every
+        // bind-mounted path along the way. HOME/USER have to be pinned
+        // explicitly since that uid has no /etc/passwd entry in the image.
+        let task = stub_task("t13", "/tmp/termic-docker-test-does-not-exist-13");
+        let env = std::collections::HashMap::new();
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &[], &[]);
+        let argv = render_argv(&spec, "claude", &[]);
+        let user_idx = argv.iter().position(|a| a == "--user").expect("--user flag missing");
+        assert_eq!(argv[user_idx + 1], host_uid_gid());
+        assert!(spec.env.iter().any(|(k, v)| k == "HOME" && v == "/root"));
+        assert!(spec.env.iter().any(|(k, _)| k == "USER"));
     }
 
     #[test]

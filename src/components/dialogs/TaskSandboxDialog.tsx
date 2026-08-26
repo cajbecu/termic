@@ -170,6 +170,11 @@ export function TaskSandboxDialog() {
       useUI.getState().markPendingPtyRestart(task.id);
       await taskSetDocker(task.id, next, task.docker_extra_args ?? []);
       await loadAll();
+      // The confirm dialog just above IS the save step for Docker (unlike
+      // Seatbelt's separate draft-then-Save flow) - closing here so the
+      // dialog doesn't linger open over the terminal it just restarted,
+      // looking like the choice didn't take or more input is still needed.
+      close();
     } catch (e) {
       setErr(String(e));
     } finally {

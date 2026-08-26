@@ -58,5 +58,14 @@ RUN curl -fsSL https://antigravity.google/cli/install.sh | bash
 # ── Add baked-in skills here ────────────────────────────────────────────
 # COPY my-skills/ /root/.claude/skills/
 
+# termic runs this container as the HOST user's own uid:gid (`docker run
+# -u`), not root - some agent CLIs (Claude Code) refuse
+# --dangerously-skip-permissions when running as root. That uid has no
+# matching /etc/passwd entry in here, so it can't own /root the normal way;
+# world read/write/execute is the simplest fix for a throwaway,
+# single-tenant sandbox container (already --rm, --cap-drop ALL,
+# no-new-privileges) that's about to run as an arbitrary numeric uid anyway.
+RUN chmod -R a+rwX /root
+
 WORKDIR /workspace
 CMD ["bash"]
