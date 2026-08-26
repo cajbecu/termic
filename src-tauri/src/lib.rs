@@ -9110,10 +9110,27 @@ fn pr_lookup_blocking(id: &str) -> Result<PrLookup, String> {
             pr: None,
         });
     };
-    // Prefer the stored PR number (stable after the source branch is
-    // deleted post-merge — by-branch lookup on GitLab stops resolving).
+    // Resolve by BRANCH first, and only fall back to the stored number.
+    //
+    // Preferring the stored number pinned this task to whichever PR it saw
+    // first, for good: close that PR, open a replacement on the same branch,
+    // and every later poll kept reporting the dead one - its checks, its
+    // review state, and a merge that would never come, so auto-archive could
+    // not fire either. Nothing ever cleared the number.
+    //
+    // The number still matters for the case it was added for: once a PR is
+    // merged and its source branch deleted, a by-branch lookup stops
+    // resolving on GitLab. That is exactly when the branch lookup returns
+    // None, so it is the fallback rather than the default. Normal polls stay
+    // at one CLI call; only the deleted-branch case pays for a second.
     let known_number = if w.pr_provider.as_deref() == Some(provider) { w.pr_number } else { None };
-    match forge::pr_status(provider, &cwd, known_number) {
+    let by_branch = forge::pr_status(provider, &cwd, None);
+    let resolved = match by_branch {
+        Ok(Some(pr)) => Ok(Some(pr)),
+        Ok(None) if known_number.is_some() => forge::pr_status(provider, &cwd, known_number),
+        other => other,
+    };
+    match resolved {
         Ok(pr) => {
             // Cache the identity on the task record so future polls
             // (and the next app launch) can resolve by number.
@@ -9288,9 +9305,20 @@ async fn task_pr_create(
         let provider = forge::provider_for_remote(&remote_url)
             .ok_or_else(|| format!("remote {remote_url} is not a GitHub or GitLab host"))?;
         let base = base.trim();
-        // Strip a remote-tracking prefix — tasks created off
+        // Strip THIS repo's remote-tracking prefix - tasks created off
         // "origin/main" store that verbatim, but the forge wants "main".
-        let base = base.strip_prefix("origin/").unwrap_or(base);
+        // Hardcoding "origin/" broke every project whose remote is named
+        // something else: a repo on `upstream` sent `--base upstream/main`
+        // and the create failed. `detect_default_remote` is the same
+        // resolver the push above uses, so the two cannot disagree about
+        // which remote this repo actually has. The literal "origin/" stays
+        // as a fallback for a detached/remote-less checkout, where the
+        // stored base can still carry it.
+        let remote_prefix = format!("{}/", detect_default_remote(&cwd));
+        let base = base
+            .strip_prefix(&remote_prefix)
+            .or_else(|| base.strip_prefix("origin/"))
+            .unwrap_or(base);
         if base.is_empty() {
             return Err("a base branch is required".to_string());
         }

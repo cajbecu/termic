@@ -108,6 +108,30 @@ export const usePr = create<PrStore>((set, get) => ({
       }));
       maybeHandleMerged(taskId, prev, lookup);
       maybeHandleOpened(taskId, prev, lookup);
+      // Rust persists the PR identity onto the task record the moment this
+      // lookup resolves one, but the STORE only learned it from loadAll()
+      // (launch / window focus). `watchedTasks` gates on `pr_number` +
+      // `pr_provider`, so until that happened a PR discovered in THIS
+      // session was never watched: the bell rendered as armed and no
+      // comment ever queued.
+      //
+      // Patch the three fields rather than calling loadAll(): a full reload
+      // from inside a poll is re-entrant (it can kick off more refreshes)
+      // and replaces every task object, which fans out through every
+      // mounted task's selectors. Guarded on the transition, so a steady
+      // poll of an already-known PR writes nothing at all - see
+      // docs/performance.md bear trap 8 on unchanged store writes.
+      const found = lookup.pr;
+      if (found) {
+        const known = useApp.getState().tasks.find(t => t.id === taskId);
+        if (known && (known.pr_number !== found.number || known.pr_provider !== found.provider)) {
+          useApp.setState(st => ({
+            tasks: st.tasks.map(t => t.id === taskId
+              ? { ...t, pr_number: found.number, pr_provider: found.provider, pr_url: found.url }
+              : t),
+          }));
+        }
+      }
     } catch (err) {
       // Keep the stale snapshot; record the attempt so we don't retry in
       // a tight loop on a broken setup.
@@ -251,9 +275,18 @@ export function commentPromptFor(
   const inlineCmd = provider === "gitlab"
     ? `glab api "projects/:id/merge_requests/${number}/notes?per_page=100"`
     : `gh api "repos/{owner}/{repo}/pulls/${number}/comments"`;
-  const excerpt = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 140);
+  // Strip control characters BEFORE collapsing whitespace. `\s` does not
+  // cover ESC, so an OSC/CSI sequence in a comment body survived into the
+  // text handed to `ptyWrite` and was then interpreted by the agent's
+  // xterm - it could retitle the tab, move the cursor, or repaint over what
+  // the agent had written. Comment bodies, authors and paths are all
+  // attacker-influenced: anyone who can comment on the PR can put bytes
+  // here. This is display text for a terminal, so the control range goes.
+  const plain = (s: string) =>
+    s.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim();
+  const excerpt = (s: string) => plain(s).slice(0, 140);
   const summary = fresh.slice(0, 4)
-    .map(c => `${c.author}${c.path ? ` on ${c.path}` : ""}: "${excerpt(c.body)}"`)
+    .map(c => `${plain(c.author)}${c.path ? ` on ${plain(c.path)}` : ""}: "${excerpt(c.body)}"`)
     .join(" · ");
   const more = fresh.length > 4 ? ` (+${fresh.length - 4} more)` : "";
   return (
@@ -388,6 +421,30 @@ export function openPrArchiveWarning(taskId: string): string {
  *  archive fires once per app session, not on every subsequent poll. */
 const mergeHandled = new Set<string>();
 
+/** Persisted "we already announced this merge" marker.
+ *
+ *  The in-memory Set above is session-local, so on the next launch a task
+ *  that is still around with a merged PR looked brand new: `prev` is null
+ *  (no poll yet this session) and `knewPr` is true (pr_number is persisted),
+ *  so the merge was announced AGAIN, every single launch. Under
+ *  `on_pr_merge: "auto"` that is an archive with no confirmation, on a task
+ *  the user had deliberately kept.
+ *
+ *  Keyed by PR number as well as task, so a genuinely NEW PR on the same
+ *  task still announces its own merge. localStorage rather than the task
+ *  record because this is notification bookkeeping for one machine, the same
+ *  place every other per-task UI flag lives - it does not belong in data
+ *  that syncs meaning to the agent or the CLI. */
+const mergeKey = (taskId: string, number: number) => `prMergeHandled:${taskId}:${number}`;
+function mergeAlreadyHandled(taskId: string, number: number): boolean {
+  if (mergeHandled.has(taskId)) return true;
+  try { return localStorage.getItem(mergeKey(taskId, number)) === "1"; } catch { return false; }
+}
+function rememberMergeHandled(taskId: string, number: number) {
+  mergeHandled.add(taskId);
+  try { localStorage.setItem(mergeKey(taskId, number), "1"); } catch { /* private mode */ }
+}
+
 /** Issue #21: when a poll sees the PR flip to merged, act per the
  *  project's `on_pr_merge` setting - "ask" (default) toasts with an
  *  Archive action, "auto" archives immediately, "off" only updates the
@@ -398,7 +455,7 @@ const mergeHandled = new Set<string>();
  */
 function maybeHandleMerged(taskId: string, prev: PrLookup | null | undefined, next: PrLookup) {
   if (next.status !== "ok" || next.pr?.state !== "merged") return;
-  if (mergeHandled.has(taskId)) return;
+  if (mergeAlreadyHandled(taskId, next.pr.number)) return;
   const app = useApp.getState();
   const task = app.tasks.find(w => w.id === taskId);
   if (!task || task.archived) return;
@@ -407,10 +464,10 @@ function maybeHandleMerged(taskId: string, prev: PrLookup | null | undefined, ne
   if (!knewPr || wasMerged) {
     // Either we never knew about a PR (nothing "completed" from the
     // user's perspective) or we already showed it merged this session.
-    mergeHandled.add(taskId);
+    rememberMergeHandled(taskId, next.pr.number);
     return;
   }
-  mergeHandled.add(taskId);
+  rememberMergeHandled(taskId, next.pr.number);
 
   const project = app.projects.find(p => p.id === task.project_id);
   const mode = project?.on_pr_merge ?? "ask";

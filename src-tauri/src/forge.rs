@@ -651,7 +651,14 @@ fn github_pr_comments(bin: &str, cwd: &Path, number: u64) -> Result<Vec<PrCommen
     // Inline review comments live in a separate API namespace. Best-effort:
     // a failure here (fine-grained token scopes, GHE quirks) must not hide
     // the discussion comments we already have.
-    let path = format!("repos/{{owner}}/{{repo}}/pulls/{n}/comments?per_page=100");
+    // NEWEST first, explicitly. GitHub defaults this endpoint to ascending
+    // by creation, so on a PR with more than 100 inline comments the single
+    // page we read was the OLDEST hundred - and the watcher, which only ever
+    // reports comments newer than what it has seen, silently stopped seeing
+    // anything new at all. The GitLab twin below already passes sort=desc.
+    let path = format!(
+        "repos/{{owner}}/{{repo}}/pulls/{n}/comments?per_page=100&sort=created&direction=desc"
+    );
     if let Ok(o2) = run(bin, &["api", &path], Some(cwd)) {
         if o2.status.success() {
             if let Ok(v2) = serde_json::from_slice::<serde_json::Value>(&o2.stdout) {
@@ -842,7 +849,11 @@ const PROVIDER_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 /// gates every forge surface on, so it has to be cheap enough to call on
 /// every dialog open and every panel render.
 pub fn provider_for_repo(cwd: &Path, remote: &str) -> (Option<&'static str>, String) {
-    let key = cwd.to_string_lossy().into_owned();
+    // The REMOTE is part of the key. Keyed on cwd alone, a repo whose remote
+    // was renamed or repointed kept serving the old provider and URL for the
+    // whole TTL, even though `remote` is what the lookup below reads - the
+    // argument was accepted and then ignored.
+    let key = format!("{}\u{1}{remote}", cwd.to_string_lossy());
     if let Some(hit) = provider_cache().lock().unwrap().get(&key) {
         if hit.at.elapsed() < PROVIDER_TTL {
             return (hit.provider, hit.remote_url.clone());

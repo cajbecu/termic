@@ -62,6 +62,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   usePr.setState({ byTask: {}, forges: null });
   useUI.setState({ toasts: [] });
+  // "This merge was already announced" is persisted (it has to survive a
+  // relaunch, or every launch re-toasts a merged PR). Tests reuse task ids
+  // and PR numbers, so without this each case would inherit the previous
+  // one's marker and silently assert nothing.
+  try { localStorage.clear(); } catch { /* no storage in this env */ }
 });
 
 describe("usePr.refresh", () => {
@@ -504,3 +509,74 @@ describe("openPrArchiveWarning (#21)", () => {
     expect(msg).toContain("GitLab");
   });
 });
+
+describe("commentPromptFor sanitizing", () => {
+  type C = Parameters<typeof commentPromptFor>[2][number];
+  const comment = (over: Partial<C> = {}) => ({
+    id: "1", author: "reviewer", body: "looks good", path: null, created_at: "", ...over,
+  }) as C;
+
+  it("strips terminal escape sequences out of a comment body", () => {
+    // The composed message is written into the agent's PTY, so an OSC/CSI
+    // sequence in a comment body would be INTERPRETED by xterm: retitle the
+    // tab, move the cursor, repaint over what the agent had written. Anyone
+    // who can comment on the PR can put these bytes there.
+    const msg = commentPromptFor("github", 7, [
+      comment({ body: "\u001b]0;pwned\u0007hello \u001b[31mred" }),
+    ]);
+    expect(msg).not.toContain("\u001b");
+    expect(msg).not.toContain("\u0007");
+    expect(msg).toContain("hello");
+    expect(msg).toContain("red");
+  });
+
+  it("strips them from the author and the file path too", () => {
+    const msg = commentPromptFor("github", 7, [
+      comment({ author: "ev\u001b[2Jil", path: "src\u001b[Ka.ts" }),
+    ]);
+    expect(msg).not.toContain("\u001b");
+  });
+
+  it("still reads normally for an ordinary comment", () => {
+    const msg = commentPromptFor("github", 7, [
+      comment({ author: "alice", body: "please rename  this\nvariable", path: "src/a.ts" }),
+    ]);
+    expect(msg).toContain("alice");
+    expect(msg).toContain("src/a.ts");
+    // Whitespace collapsed, nothing else lost.
+    expect(msg).toContain("please rename this variable");
+  });
+});
+
+describe("learning a PR identity mid-session", () => {
+  it("puts the number and provider on the task so the watcher can see it", async () => {
+    // `watchedTasks` gates on pr_number + pr_provider, which Rust persists
+    // but the store only re-read on loadAll() (launch / window focus). A PR
+    // created during this session therefore went unwatched: the bell showed
+    // as armed and no comment was ever queued.
+    seedApp();
+    expect(useApp.getState().tasks[0].pr_number).toBeUndefined();
+
+    vi.mocked(ipc.taskPrStatus).mockResolvedValue(lookupWith("open"));
+    await usePr.getState().refresh("ws1", true);
+
+    const task = useApp.getState().tasks.find(t => t.id === "ws1")!;
+    expect(task.pr_number).toBe(lookupWith("open").pr!.number);
+    expect(task.pr_provider).toBe(lookupWith("open").pr!.provider);
+  });
+
+  it("leaves the task object alone when the PR is already known", async () => {
+    // Writing an unchanged value through the store re-runs every mounted
+    // task's selectors for nothing (docs/performance.md bear trap 8), and
+    // this runs on a poll.
+    const pr = lookupWith("open").pr!;
+    seedApp(undefined, { pr_number: pr.number, pr_provider: pr.provider } as never);
+    const before = useApp.getState().tasks[0];
+
+    vi.mocked(ipc.taskPrStatus).mockResolvedValue(lookupWith("open"));
+    await usePr.getState().refresh("ws1", true);
+
+    expect(useApp.getState().tasks[0]).toBe(before);
+  });
+});
+

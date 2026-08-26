@@ -478,6 +478,13 @@ export function NewTaskDialog() {
     setResumeOverride(""); setResumeOpen(false);
     setPrompt(seed?.prompt ?? "");
     setImportMode(wantImport);
+    // Issue mode is per-OPEN, like import mode beside it. It was left out of
+    // this reset, so picking issue #42 in project A and cancelling meant the
+    // next open - for a DIFFERENT project - still showed project A's issue
+    // list, and creating from it seeded the agent with project A's issue.
+    setIssueMode(false);
+    setIssueSelected(null);
+    setIssueLookup(null);
     // Load existing branches so `derived` can auto-number past a collision
     // (#129). Only meaningful for single-repo git projects (worktree mode).
     setExistingBranches([]);
