@@ -547,6 +547,13 @@ export function NewTaskDialog() {
   // (lib/seedPrompt); best-effort, so a create never fails over a prompt.
   function seedFirstMessage(taskId: string) {
     if (!canPrompt) return;
+    // Never alongside the issue prompt. Both seeders poll the SAME default
+    // tab and write to the same PTY, and `sendMessageToPty` writes the text
+    // then a CR shortly after - two of them interleave into one input line
+    // followed by two Enters. In issue mode the composed issue prompt IS the
+    // first message, so it wins and the typed box is not sent (it is hidden
+    // there too, so there is normally nothing in it to lose).
+    if (issueSelected) return;
     seedPromptWhenReady(taskId, prompt.trim());
   }
 
@@ -1225,7 +1232,7 @@ export function NewTaskDialog() {
             grows it as the user types, so the hint that used to explain
             "typed once ready, nothing sent until Create" isn't needed to
             justify the extra height; the placeholder carries that now. */}
-        {canPrompt && (
+        {canPrompt && !issueSelected && (
           <Field label="Initial prompt">
             <div className="flex flex-col gap-1">
               <textarea

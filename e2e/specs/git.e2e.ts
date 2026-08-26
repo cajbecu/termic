@@ -2043,7 +2043,10 @@ describe("start a task from an issue", () => {
   it("seeds the composed prompt into a fresh task's agent", async () => {
     taskId = await openTask("e2e-issue-task");
     await browser.execute((id) => {
-      window.__termic!.seedPrompt.seedPromptWhenReady(id!, "ISSUE-PROMPT-MARKER", 0, 20000);
+      // 3-arg signature: (taskId, prompt, deadlineMs). A 4th argument used
+      // to be passed here, which silently made the DEADLINE 0 - the seeder
+      // then gave up on its first poll and the prompt never landed.
+      window.__termic!.seedPrompt.seedPromptWhenReady(id!, "ISSUE-PROMPT-MARKER", 20000);
     }, taskId);
 
     // Terminal content is a WebGL canvas, so assert the store's record of
