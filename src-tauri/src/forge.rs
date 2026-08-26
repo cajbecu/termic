@@ -545,21 +545,23 @@ fn gitlab_review_decision(bin: &str, cwd: &Path, mr: &serde_json::Value, iid: u6
 /// Map an approvals payload onto the shared review vocabulary. Split out
 /// from the request so the mapping is testable without a network.
 fn gitlab_approvals_to_review(a: &serde_json::Value) -> String {
-    if a["approved"].as_bool().unwrap_or(false) {
-        return "approved".into();
-    }
-    let left = a["approvals_left"].as_u64();
     let required = a["approvals_required"].as_u64().unwrap_or(0);
     let approved_by = a["approved_by"].as_array().map(|v| v.len()).unwrap_or(0);
-    // `approved` is absent on older GitLab; derive it from the counters.
-    if required > 0 && left == Some(0) {
-        return "approved".into();
-    }
     if required > 0 {
+        // `approved` means something here: there is an actual rule to
+        // satisfy. Absent on older GitLab - fall back to the counter.
+        let left = a["approvals_left"].as_u64();
+        if a["approved"].as_bool().unwrap_or(false) || left == Some(0) {
+            return "approved".into();
+        }
         return "review_required".into();
     }
-    // No approval rule configured: an approval that DID land still reads as
-    // approved; otherwise there is nothing to report.
+    // No approval rule configured ("Approval is optional"): GitLab's
+    // `approved` flag is true here REGARDLESS of whether anyone has
+    // actually approved - the requirement, which is none, is vacuously
+    // satisfied. Trusting it unconditionally is exactly what showed
+    // "Approved" on an MR with zero real approvals. Only a real approval
+    // counts when there's no rule to have satisfied.
     if approved_by > 0 { "approved".into() } else { "none".into() }
 }
 
@@ -1159,8 +1161,20 @@ mod tests {
     #[test]
     fn gitlab_review_mapping() {
         let j = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
-        // Explicit flag wins.
-        assert_eq!(gitlab_approvals_to_review(&j(r#"{"approved":true}"#)), "approved");
+        // The bug this guards against: GitLab's `approved` flag is true
+        // even with zero real approvals when no approval rule is
+        // configured (a real "Approval is optional" MR payload) - the
+        // requirement, having none, is vacuously satisfied. Blindly
+        // trusting the flag showed "Approved" on an MR nobody had approved.
+        assert_eq!(
+            gitlab_approvals_to_review(&j(r#"{"approved":true,"approvals_required":0,"approved_by":[]}"#)),
+            "none"
+        );
+        // With an actual rule in play, the flag DOES mean something.
+        assert_eq!(
+            gitlab_approvals_to_review(&j(r#"{"approved":true,"approvals_required":1,"approved_by":[{"user":{}}]}"#)),
+            "approved"
+        );
         // Older GitLab without `approved`: derive from the counters.
         assert_eq!(
             gitlab_approvals_to_review(&j(r#"{"approvals_required":2,"approvals_left":0}"#)),
