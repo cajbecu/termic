@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { dataDir } from "../../wdio.conf.js";
-import { archiveTask, clickWhenVisible, dismissOverlays, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitVisible } from "../helpers";
+import { archiveTask, clickWhenVisible, dismissOverlays, openTask, pointerDrag, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitVisible } from "../helpers";
 
 /** Click the [role="switch"] in the settings row whose label matches exactly.
  *  Toggle rows are label + switch inside one .justify-between wrapper
@@ -1690,6 +1690,180 @@ describe("default tasks path", () => {
 // agentsSave. Both snapshot their order up front and put it back in teardown:
 // this profile is shared with every other spec, and a drifted order outlives
 // the run (see the signal-inspector note above).
+// P2: how double-Shift is chosen. It is the one shortcut with no chord, so
+// the Shortcuts page cannot offer to rebind it; what it offers instead is when
+// the gesture applies, from off to either Shift anywhere.
+describe("double-Shift mode", () => {
+  const SELECT = '[data-testid="double-shift-mode"]';
+  let original = "left";
+
+  const pref = () =>
+    browser.execute(() => window.__termic!.usePrefs.getState().doubleShiftMode);
+
+  const choose = (mode: string) =>
+    browser.execute((sel, m) => {
+      const el = document.querySelector(sel) as HTMLSelectElement;
+      const set = Object.getOwnPropertyDescriptor(
+        window.HTMLSelectElement.prototype, "value")!.set!;
+      set.call(el, m);
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    }, SELECT, mode);
+
+  after(async () => {
+    await browser.execute((v) => {
+      window.__termic!.usePrefs.getState().setDoubleShiftMode(v as any);
+    }, original);
+    await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
+  });
+
+  it("sits on the double-Shift row, defaulting to the left Shift", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    original = await pref() as string;
+    await browser.execute(() => {
+      window.__termic!.usePrefs.getState().setDoubleShiftMode("left");
+      window.__termic!.useApp.getState().openSettings("shortcuts");
+    });
+    await waitVisible(SELECT);
+    // On the fixed row itself, not a block of its own somewhere else on the
+    // page: that row is where a reader goes to ask about this gesture.
+    expect(await browser.execute((sel) => {
+      const el = document.querySelector(sel);
+      return !!el?.closest('[data-testid="fixed-shortcut-row"]');
+    }, SELECT)).toBe(true);
+    expect(await browser.execute((sel) =>
+      (document.querySelector(sel) as HTMLSelectElement).value, SELECT)).toBe("left");
+  });
+
+  it("offers exactly the four modes", async () => {
+    const opts = await browser.execute((sel) =>
+      [...(document.querySelector(sel) as HTMLSelectElement).options].map(o => o.value), SELECT);
+    expect(opts).toEqual(["off", "left", "outside-terminal", "any"]);
+  });
+
+  it("writes each choice to the pref", async () => {
+    for (const mode of ["off", "any", "outside-terminal", "left"]) {
+      await choose(mode);
+      await browser.waitUntil(async () => (await pref()) === mode, {
+        timeout: 5_000,
+        timeoutMsg: `double-Shift mode never became ${mode}`,
+      });
+    }
+  });
+});
+
+// P2: the per-project code navigation tab. It used to sit at the tail of
+// Scripts & run, a tab about setup/run/archive scripts that also carries a
+// personal/.termic.yaml storage strip the code-nav settings deliberately do
+// not use. Its own tab is where it belongs, and the tab has to actually carry
+// the controls rather than just exist.
+describe("per-project code navigation tab", () => {
+  let projectId!: string;
+
+  const clickRepoTab = (id: string) =>
+    browser.execute((t) => {
+      const btn = document.querySelector(`[data-repo-tab="${t}"]`) as HTMLElement | null;
+      if (!btn) throw new Error("no repo sub-tab: " + t);
+      btn.click();
+    }, id);
+
+  const tabText = () =>
+    browser.execute(() =>
+      [...document.querySelectorAll("[data-repo-tab]")].map(b => b.textContent?.trim() ?? ""));
+
+  /** Put the project's code-nav fields back to shipped defaults. The .e2e
+   *  profile outlives the run, so a case that arms auto start leaves it armed
+   *  for the NEXT run of this file (and for any later spec reading the same
+   *  project), which is how this spec first failed on its own second run. */
+  const resetCodeNav = () =>
+    browser.execute(async (id) => {
+      const app = window.__termic!.useApp.getState();
+      const p = { ...app.projects.find((x: any) => x.id === id) } as any;
+      p.code_intel_auto = "off";
+      delete p.code_intel_languages;
+      await window.__termic!.ipc.projectUpdate(p);
+      await app.loadAll();
+    }, projectId);
+
+  after(async () => {
+    if (projectId) await resetCodeNav();
+    await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
+  });
+
+  it("offers the tab, named after the feature", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    projectId = await browser.execute(() =>
+      window.__termic!.useApp.getState().projects.find((p: any) => p.name === "fixture-repo").id,
+    ) as string;
+    await resetCodeNav();
+    await browser.execute(
+      (id) => window.__termic!.useApp.getState().openSettings("repositories", id), projectId,
+    );
+    await waitVisible('[data-repo-tab="codenav"]');
+    // The label follows lib/lsp/featureName.ts, which renames the whole
+    // feature once diagnostics are on, so assert it is one of the two rather
+    // than pinning whichever the profile happens to have set.
+    const labels = await tabText();
+    expect(labels.some(l => l === "Code navigation" || l === "Code intelligence")).toBe(true);
+  });
+
+  it("carries the arming modes under a heading of their own", async () => {
+    await clickRepoTab("codenav");
+    // The radios used to follow the language checkboxes with no heading at
+    // all, leaving three hints to explain what was being chosen between.
+    await waitForText("Auto start");
+    const body = await browser.execute(() =>
+      document.querySelector('[data-repo-tab="codenav"]')?.closest("div")?.parentElement?.textContent ?? "");
+    for (const mode of ["Off", "Main checkout only", "Main checkout and worktrees"]) {
+      expect(body).toContain(mode);
+    }
+  });
+
+  // The languages belong to auto start: they say what runs WITHOUT being
+  // asked, so with nothing running by itself there is nothing to narrow.
+  it("shows the language list only once something starts automatically", async () => {
+    await waitForTextGone("start on their own");
+    await clickWhenVisible('[data-testid="code-nav-auto-main"]');
+    await waitForText("start on their own");
+  });
+
+  // Going back to Off must not leave a stored list behind: it is off screen
+  // from here on, and a list that outlives its own UI is state nothing on the
+  // page can explain.
+  it("drops a narrowed list when auto start goes back off", async () => {
+    // Seed BOTH halves through the store rather than leaning on the previous
+    // case's debounced save, which had not necessarily landed yet: a
+    // projectUpdate built from a stale copy would have written its own value
+    // straight back over it.
+    await browser.execute(async (id) => {
+      const app = window.__termic!.useApp.getState();
+      const p = app.projects.find((x: any) => x.id === id);
+      await window.__termic!.ipc.projectUpdate({
+        ...p, code_intel_auto: "main", code_intel_languages: ["python"],
+      });
+      await app.loadAll();
+    }, projectId);
+    // Re-enter the tab so the form re-seeds from the store.
+    await clickRepoTab("scripts");
+    await clickRepoTab("codenav");
+    await waitForText("start on their own");
+
+    await clickWhenVisible('[data-testid="code-nav-auto-off"]');
+    await browser.waitUntil(async () => !(await browser.execute(
+      (id) => window.__termic!.useApp.getState().projects
+        .find((x: any) => x.id === id)?.code_intel_languages?.length,
+      projectId,
+    )), { timeout: 8_000, timeoutMsg: "the narrowed list survived turning auto start off" });
+    await waitForTextGone("start on their own");
+  });
+
+  it("no longer leaves any of it on the scripts tab", async () => {
+    await clickRepoTab("scripts");
+    await waitForTextGone("Auto start");
+  });
+});
+
 describe("settings reorder drags", () => {
   after(async () => {
     await browser.execute(() => window.__termic!.useApp.getState().closeSettings());

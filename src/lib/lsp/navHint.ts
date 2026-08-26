@@ -26,7 +26,7 @@ import { currentCodeIntelName } from "./featureName";
 import { StateEffect, StateField, type Extension } from "@codemirror/state";
 import { useApp } from "@/store/app";
 import { usePrefs } from "@/store/prefs";
-import { useCodeIntel, checkoutRoot, grantKey, projectServes } from "@/store/codeIntel";
+import { useCodeIntel, checkoutRoot, grantKey } from "@/store/codeIntel";
 import { useUI } from "@/store/ui";
 import { lspServerFor } from "./languages";
 
@@ -163,9 +163,9 @@ export function navHint(taskId: string, language: () => string): Extension {
         if (pos == null) return false;
         const word = wordAt(view, pos);
         if (!word) return false;
-        // A language the PROJECT has excluded is not one to offer: the answer
-        // there is "you decided not to", not "turn it on".
-        const offerable = !!server && projectServes(project, server);
+        // Offered for any language something can serve. The project's list
+        // governs auto start, not whether a reader may turn this on here.
+        const offerable = !!server;
         event.preventDefault();
         view.dispatch({
           effects: setHint.of({

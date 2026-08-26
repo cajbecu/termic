@@ -25,6 +25,30 @@ const WOULD_INSTALL: Record<string, string> = {
   ruby: "ruby-lsp",
 };
 
+/** Every language termic can serve, with the name a settings page shows.
+ *
+ *  ONE list, because two drifted: the per-project language checkboxes
+ *  enumerated four of these, so unticking Go there wrote a list of the three
+ *  remaining UI ids and silently took C++, Swift and Ruby with it. Anything
+ *  offering a per-language choice reads this, and `serverNames.test.ts` pins
+ *  it against `WOULD_INSTALL`, which is the real set. */
+export const SERVABLE_LANGUAGES: readonly { id: string; label: string }[] = [
+  { id: "typescript", label: "TypeScript / JavaScript" },
+  { id: "python",     label: "Python" },
+  { id: "rust",       label: "Rust" },
+  { id: "go",         label: "Go" },
+  { id: "cpp",        label: "C / C++ / Objective-C" },
+  { id: "swift",      label: "Swift" },
+  { id: "ruby",       label: "Ruby" },
+];
+
+/** The ids alone, for callers that only need membership. */
+export const SERVABLE_LANGUAGE_IDS: readonly string[] =
+  SERVABLE_LANGUAGES.map(l => l.id);
+
+/** Test-only view of the set every servable language must be listed in. */
+export const WOULD_INSTALL_IDS: readonly string[] = Object.keys(WOULD_INSTALL);
+
 /** Binaries whose file name is not what a person calls them. */
 const PRETTY_EXE: Record<string, string> = {
   // The versioned names Linux distributions install clangd under. Without

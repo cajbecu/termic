@@ -122,10 +122,19 @@ export function projectForCheckout(
   return undefined;
 }
 
-/** Which languages this project wants served. Undefined means all of them,
- *  which is the default: a project that has said nothing gets every language
- *  termic can serve, offered one click at a time. */
-export function projectServes(
+/** Which languages this project starts AUTOMATICALLY, when it has a standing
+ *  instruction to start anything at all. Undefined means every language the
+ *  detection found, which is the default.
+ *
+ *  Auto start only. It used to gate the editor chip, Search Everywhere and the
+ *  nav hint as well, which made one list answer two different questions: "do
+ *  not spend memory on Go here without asking" and "never offer me Go here".
+ *  Only the first is worth a setting, and conflating them meant unticking a
+ *  language to keep four servers from starting by themselves also took away
+ *  the one-click button for it, with the cost disclosure that button carries.
+ *  Everything termic can serve is offered on request; this decides what runs
+ *  without one. */
+export function autoStartsLanguage(
   project: { code_intel_languages?: string[] } | undefined,
   server: string | null,
 ): boolean {

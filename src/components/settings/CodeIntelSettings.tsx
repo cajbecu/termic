@@ -4,14 +4,12 @@ import type { Project } from "@/lib/types";
 import { useCodeIntel } from "@/store/codeIntel";
 import { lspOffer, type LspOffer } from "@/lib/lsp/install";
 import { serverGuide, parseRaw, type ServerGuide } from "@/lib/lsp/serverSettings";
+import { SERVABLE_LANGUAGES } from "@/lib/lsp/serverNames";
 import { cn } from "@/lib/utils";
 
-const CODE_INTEL_LANGUAGES = [
-  { id: "typescript", label: "TypeScript / TSX / JavaScript" },
-  { id: "python", label: "Python" },
-  { id: "rust", label: "Rust" },
-  { id: "go", label: "Go" },
-];
+/** The same seven the project's own language list uses: a per-language
+ *  settings panel that knows about four of them is the drift this replaced. */
+const CODE_INTEL_LANGUAGES = SERVABLE_LANGUAGES;
 
 export function CodeIntelSettings({
   project,

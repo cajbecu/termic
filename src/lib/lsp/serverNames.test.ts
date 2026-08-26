@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { MEMORY_NOTE, MEMORY_SHORT, serverFor } from "./serverNames";
+import {
+  MEMORY_NOTE, MEMORY_SHORT, SERVABLE_LANGUAGES, SERVABLE_LANGUAGE_IDS,
+  WOULD_INSTALL_IDS, serverFor,
+} from "./serverNames";
 
 // What a server is CALLED, and what it costs. Both are shown at the moment
 // somebody decides whether to start a process, so a gap here is a gap in the
@@ -37,5 +40,21 @@ describe("a language with nothing resolved yet", () => {
     // Two tables quoting different numbers for one server is the failure this
     // prevents: the row says 85 MB and the prompt says 250.
     expect(Object.keys(MEMORY_SHORT).sort()).toEqual(Object.keys(MEMORY_NOTE).sort());
+  });
+});
+
+describe("the servable language list", () => {
+  it("names every language termic can serve, and nothing else", () => {
+    // The bug this replaces: the per-project checkboxes listed four of the
+    // seven, so materialising that list (which the first untick does) dropped
+    // the other three from auto start without ever showing them.
+    expect([...SERVABLE_LANGUAGE_IDS].sort()).toEqual([...WOULD_INSTALL_IDS].sort());
+  });
+
+  it("gives each one a label a person would recognise", () => {
+    for (const { id, label } of SERVABLE_LANGUAGES) {
+      expect(label.trim(), id).not.toBe("");
+      expect(label, id).not.toBe(id);
+    }
   });
 });

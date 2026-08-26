@@ -24,10 +24,11 @@ import { Compass } from "lucide-react";
 import type { Project, Task } from "@/lib/types";
 import { useApp } from "@/store/app";
 import { usePrefs } from "@/store/prefs";
-import { useCodeIntel, checkoutRoot, grantKey, autoArms, projectServes, type CodeIntelAuto } from "@/store/codeIntel";
+import { useCodeIntel, checkoutRoot, grantKey, autoArms, type CodeIntelAuto } from "@/store/codeIntel";
 import { useLspStatus, statusKey, statusDetail, isBusy } from "@/store/lspStatus";
 import { lspServerFor } from "@/lib/lsp/languages";
-import { lspOffer, lspInstall, type LspOffer } from "@/lib/lsp/install";
+import { lspOffer, type LspOffer } from "@/lib/lsp/install";
+import { confirmAndInstall } from "@/lib/lsp/installFlow";
 import { cn } from "@/lib/utils";
 import { MEMORY_NOTE, serverFor } from "@/lib/lsp/serverNames";
 import { codeIntelName, codeIntelNameLower } from "@/lib/lsp/featureName";
@@ -93,11 +94,14 @@ export function CodeIntelChip({ task, registryName }: {
   }, [offered, server, armed, auto, offer?.exe, task.is_main_checkout, task.id, key, arm]);
 
   // Nothing to offer: the feature is off app-wide, no server answers for this
-  // language, the project has excluded this language, or nothing is installed
-  // and termic has nothing pinned for it (gopls, say, which upstream publishes
-  // no binary for). An absence, not a dead toggle.
+  // language, or nothing is installed and termic has nothing pinned for it
+  // (gopls, say, which upstream publishes no binary for). An absence, not a
+  // dead toggle.
+  //
+  // The project's language list is deliberately NOT consulted: it says what
+  // starts by itself, not what may be started. Asking for a server on the file
+  // in front of you is always allowed, and the button discloses its cost.
   if (!offered || !server) return null;
-  if (!projectServes(project, server)) return null;
   if (offer && !offer.exe && !offer.installLabel) return null;
 
   const isMain = !!task.is_main_checkout;
@@ -109,22 +113,18 @@ export function CodeIntelChip({ task, registryName }: {
   // shipped, into a termic-owned directory, never onto the user's PATH), then
   // arm the checkout in the same gesture.
   const install = async () => {
-    const ok = await askConfirm({
-      title: `Download ${offer!.installLabel}?`,
-      message: [
-        `Nothing on this machine serves ${registryName}, so termic can fetch its own copy: ${mb} MB, verified against a checksum shipped in this release, into termic's own folder. It is never added to your PATH and deleting termic deletes it.`,
-        MEMORY_NOTE[serverFor(null, server)] ?? "",
-      ].filter(Boolean).join("\n\n"),
-      confirmLabel: "Download",
-      key: `code-intel-install:${server}`,
-    });
-    if (!ok) return;
     setInstalling(true);
     try {
-      await lspInstall(server);
-      arm(key, task.id);
-    } catch (e) {
-      pushToast(`Could not install ${offer!.installLabel}: ${e}`, "error");
+      // Shared with Search Everywhere's offer row (`lib/lsp/installFlow.ts`),
+      // which had its own copy of this and got it wrong: it armed without
+      // downloading. One disclosure, one download, one place to fix.
+      const ready = await confirmAndInstall({
+        server,
+        label: offer!.installLabel!,
+        bytes: offer!.installBytes,
+        language: registryName,
+      });
+      if (ready) arm(key, task.id);
     } finally {
       setInstalling(false);
     }

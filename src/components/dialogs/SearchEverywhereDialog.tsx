@@ -16,9 +16,10 @@ import { Compass, Search } from "lucide-react";
 import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
 import { usePrefs } from "@/store/prefs";
-import { useCodeIntel, checkoutRoot, grantKey, projectServes } from "@/store/codeIntel";
+import { useCodeIntel, checkoutRoot, grantKey } from "@/store/codeIntel";
 import { projectUpdate, taskListFilesForFinder } from "@/lib/ipc";
 import { lspOffer } from "@/lib/lsp/install";
+import { confirmAndInstall } from "@/lib/lsp/installFlow";
 import type { SymbolHit } from "@/lib/lsp/symbolSearch";
 import { languagesPresent } from "@/lib/lsp/projectLanguages";
 import { SERVERS, languageName } from "@/lib/lsp/languages";
@@ -38,7 +39,12 @@ const MAX_SYMBOLS = 25;
 
 interface FileRow { kind: "file"; path: string; matches: number[]; score: number }
 interface SymbolRow { kind: "symbol"; hit: SymbolHit }
-interface OfferRow { kind: "offer"; server: string; label: string; installable: boolean; exe: string | null }
+interface OfferRow {
+  kind: "offer"; server: string; label: string; installable: boolean; exe: string | null;
+  /** Download size for an installable row, so its confirm can say what it
+   *  costs. 0 when unknown, which prints no figure rather than inventing one. */
+  bytes: number;
+}
 type Row = OfferRow | FileRow | SymbolRow;
 
 export function SearchEverywhereDialog() {
@@ -71,9 +77,12 @@ export function SearchEverywhereDialog() {
   const [files, setFiles] = useState<string[]>([]);
   const [symbols, setSymbols] = useState<SymbolHit[]>([]);
   const [offers, setOffers] = useState<
-    Array<{ server: string; label: string; installable: boolean; exe: string | null }>
+    Array<{ server: string; label: string; installable: boolean; exe: string | null; bytes: number }>
   >([]);
   const [activeIdx, setActiveIdx] = useState(0);
+  /** Server id currently downloading, so its button says so and cannot be
+   *  pressed twice into two concurrent fetches of the same archive. */
+  const [installing, setInstalling] = useState<string | null>(null);
   /** Which button within the active row the keyboard is on. */
   const [actionIdx, setActionIdx] = useState(0);
   // In flight, including the debounce. Without it the Symbols section had only
@@ -122,21 +131,26 @@ export function SearchEverywhereDialog() {
     if (!taskId || !root || armed.length) { setOffers([]); return; }
     let alive = true;
     void (async () => {
-      const found: Array<{ server: string; label: string; installable: boolean; exe: string | null }> = [];
+      const found: Array<{ server: string; label: string; installable: boolean; exe: string | null; bytes: number }> = [];
       // ONLY what this project is written in. Offering "Enable Rust" and
       // "Enable Go" on a Django repo is noise dressed as help: it asks the
       // reader to evaluate three languages that appear nowhere in their
       // checkout, and the one that does appear is buried among them. Detection
       // is over the file list the dialog already has (projectLanguages), so
       // this costs nothing.
+      // Every detected language is offered: the project's list is about what
+      // starts automatically, not about what the reader may ask for here.
       const order = detected.filter(d => SERVERS.includes(d));
       for (const server of order) {
-        if (!projectServes(project, server)) continue;
         try {
           const offer = await lspOffer(root, server);
-          if (offer.exe) found.push({ server, label: server, installable: false, exe: offer.exe });
-          else if (offer.installLabel) {
-            found.push({ server, label: offer.installLabel, installable: true, exe: null });
+          if (offer.exe) {
+            found.push({ server, label: server, installable: false, exe: offer.exe, bytes: 0 });
+          } else if (offer.installLabel) {
+            found.push({
+              server, label: offer.installLabel, installable: true, exe: null,
+              bytes: offer.installBytes ?? 0,
+            });
           }
         } catch { /* not available on this platform */ }
       }
@@ -221,7 +235,10 @@ export function SearchEverywhereDialog() {
   function pick(row: Row) {
     if (!taskId || !task) return;
     if (row.kind === "offer") {
-      arm(row.server);
+      // An installable row has nothing to arm yet: arming it alone was the
+      // keyboard half of the same bug the button had.
+      if (row.installable) void installAndArm(row);
+      else arm(row.server);
       return; // Do NOT close the dialog
     }
     if (row.kind === "file") {
@@ -236,6 +253,32 @@ export function SearchEverywhereDialog() {
       });
     }
     close();
+  }
+
+  /**
+   * Download the server, THEN arm. This row's Install button used to call
+   * `arm()` alone, which grants and flips the feature on without fetching
+   * anything: with no executable on the machine nothing could start, so the
+   * dialog sat waiting for symbols that were never coming and the editor chip
+   * went on offering the same download.
+   *
+   * Shares `confirmAndInstall` with the chip, so there is one disclosure and
+   * one download path rather than two that can drift apart again.
+   */
+  async function installAndArm(row: OfferRow) {
+    if (!taskId || installing) return;
+    setInstalling(row.server);
+    try {
+      const ready = await confirmAndInstall({
+        server: row.server,
+        label: row.label,
+        bytes: row.bytes,
+        language: languageName(row.server),
+      });
+      if (ready) arm(row.server);
+    } finally {
+      setInstalling(null);
+    }
   }
 
   /** Turn it on for THIS task's checkout. The grant is refcounted and lapses
@@ -375,10 +418,11 @@ export function SearchEverywhereDialog() {
               <button
                 type="button"
                 data-testid={`se-arm-${row.server}`}
-                onMouseDown={(e) => { e.preventDefault(); arm(row.server); }}
-                className="rounded-md bg-[var(--color-accent-deep)] px-2.5 py-1 text-[12px] font-medium text-white hover:opacity-90"
+                disabled={installing === row.server}
+                onMouseDown={(e) => { e.preventDefault(); void installAndArm(row); }}
+                className="rounded-md bg-[var(--color-accent-deep)] px-2.5 py-1 text-[12px] font-medium text-white hover:opacity-90 disabled:opacity-60"
               >
-                Install
+                {installing === row.server ? "Downloading…" : "Install"}
               </button>
             ) : (
               <CodeIntelActions

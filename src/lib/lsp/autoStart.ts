@@ -17,7 +17,7 @@
 
 import { useApp } from "@/store/app";
 import {
-  useCodeIntel, checkoutRoot, grantKey, autoArms, projectServes, type CodeIntelAuto,
+  useCodeIntel, checkoutRoot, grantKey, autoArms, autoStartsLanguage, type CodeIntelAuto,
 } from "@/store/codeIntel";
 import type { Project, Task } from "@/lib/types";
 
@@ -64,7 +64,7 @@ export function planAutoStart(
     const root = checkoutRoot(task, project);
     if (!root) continue;
     for (const server of languagesFor(project, task)) {
-      if (!projectServes(project, server)) continue;
+      if (!autoStartsLanguage(project, server)) continue;
       const key = grantKey(root, server);
       const existing = byKey.get(key);
       if (existing) existing.taskIds.push(task.id);

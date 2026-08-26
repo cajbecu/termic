@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { useCodeIntel, checkoutRoot, grantKey, autoArms, projectServes } from "./codeIntel";
+import { useCodeIntel, checkoutRoot, grantKey, autoArms, autoStartsLanguage } from "./codeIntel";
 import type { Project, Task } from "@/lib/types";
 
 const task = (over: Partial<Task>): Task => ({
@@ -94,17 +94,20 @@ describe("one repo, several languages", () => {
     expect(useCodeIntel.getState().isArmed(grantKey("/repos/django", "typescript"))).toBe(false);
   });
 
-  it("serves every language unless the project narrowed the list", () => {
-    // Said nothing: everything termic can serve is on offer.
-    expect(projectServes(undefined, "python")).toBe(true);
-    expect(projectServes({}, "typescript")).toBe(true);
-    // Narrowed: the excluded language shows no button at all, rather than a
-    // button that does nothing.
+  it("auto-starts every language unless the project narrowed the list", () => {
+    // Said nothing: whatever detection found starts on its own.
+    expect(autoStartsLanguage(undefined, "python")).toBe(true);
+    expect(autoStartsLanguage({}, "typescript")).toBe(true);
+    // Narrowed: the unticked language does not start by ITSELF. It is still
+    // offered on the editor chip, which is the whole point of the split -- one
+    // list answering "do not spend memory here without asking" and not also
+    // "never offer me this language", which is a different question nobody
+    // asked it.
     const proj = { code_intel_languages: ["python"] };
-    expect(projectServes(proj, "python")).toBe(true);
-    expect(projectServes(proj, "typescript")).toBe(false);
-    // Nothing serves a language nothing serves.
-    expect(projectServes(undefined, null)).toBe(false);
+    expect(autoStartsLanguage(proj, "python")).toBe(true);
+    expect(autoStartsLanguage(proj, "typescript")).toBe(false);
+    // Nothing auto-starts a language nothing serves.
+    expect(autoStartsLanguage(undefined, null)).toBe(false);
   });
 });
 
