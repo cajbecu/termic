@@ -566,6 +566,13 @@ export interface Settings {
    *  Rust side before it can become a mount, so a stray `..` or absolute
    *  path here is inert rather than escaping the container's `/root`. */
   docker_agent_extra_dirs?: Record<string, string[]>;
+  /** Opt-in switch (keyed by agent id) for mounting `docker_agent_extra_dirs`
+   *  at all for an agent OUTSIDE the small known-safe built-in set
+   *  (claude/codex/copilot/agy/opencode). Off by default, including for a
+   *  newly-added custom agent: guessing a config dir for an unknown agent
+   *  risks silently shadowing a binary the image baked in at that same
+   *  path. Meaningless for a built-in agent - it's always mounted. */
+  docker_agent_persist_enabled?: Record<string, boolean>;
   /** Personal (this-machine) glob patterns hidden from the "All files"
    *  tree across every project. Unioned with each project's committed
    *  `.termic.yaml` `exclude`. `.git` is always hidden regardless. */

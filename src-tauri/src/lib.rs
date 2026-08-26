@@ -2868,12 +2868,10 @@ fn pty_spawn(
         // Belt-and-suspenders: remove any stale same-named container left
         // by an unclean shutdown so `--name` doesn't collide on respawn.
         docker::cleanup_task(&task.id);
-        let agent_extra_dirs = load_settings_inner()
-            .docker_agent_extra_dirs
-            .get(&agent)
-            .cloned()
-            .unwrap_or_default();
-        let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone(), &args.env, &agent_extra_dirs);
+        let docker_settings = load_settings_inner();
+        let agent_extra_dirs = docker_settings.docker_agent_extra_dirs.get(&agent).cloned().unwrap_or_default();
+        let agent_persist_enabled = docker_settings.docker_agent_persist_enabled.get(&agent).copied().unwrap_or(false);
+        let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone(), &args.env, &agent_extra_dirs, agent_persist_enabled);
         let argv = docker::render_argv(&spec, &args.cmd, &args.args);
         dlog(&format!("[pty_spawn] docker task={} agent={} image={} argv={argv:?}", task.id, agent, image));
         Some((argv, spec.container_name))
@@ -14919,6 +14917,16 @@ pub struct Settings {
     /// rather than escaping the container's `/root`.
     #[serde(default)]
     pub docker_agent_extra_dirs: std::collections::HashMap<String, Vec<String>>,
+    /// Opt-in switch for mounting `docker_agent_extra_dirs` at all, per
+    /// agent OUTSIDE the small known-safe built-in set (claude/codex/
+    /// copilot/agy/opencode). Defaults to `false`/absent for every agent,
+    /// including newly-added custom ones - deriving a guessed mount for an
+    /// unknown agent risks the exact failure `agent_dirs.rs` documents for
+    /// grok/agy: an empty dir mounted over a path that also holds a binary
+    /// baked into the image silently shadows it. A built-in agent is never
+    /// looked up here; it's always persisted regardless.
+    #[serde(default)]
+    pub docker_agent_persist_enabled: std::collections::HashMap<String, bool>,
     /// Personal (this-machine) glob patterns hidden from the "All files"
     /// tree across every project. Unioned with each project's committed
     /// `.termic.yaml` `exclude` list. `.git` is always hidden regardless.
@@ -15768,33 +15776,51 @@ fn docker_build_image(app: AppHandle, no_cache: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Every Docker-supported agent's confirmed built-in state dirs (from
-/// `agent_dirs::state_dirs`) alongside whatever extras the user has added
-/// for it (`Settings.docker_agent_extra_dirs`) — read side for Settings →
-/// Docker Sandbox's per-agent dir list. Writing back is just a normal
-/// `settings_save` patch of `docker_agent_extra_dirs`, no separate command.
+/// Every REGISTERED agent's Docker config-dir state — read side for
+/// Settings → Docker Sandbox's "Per-agent config dirs" list. Writing back
+/// is just a normal `settings_save` patch of `docker_agent_extra_dirs` /
+/// `docker_agent_persist_enabled`, no separate write command.
 #[derive(Serialize)]
 struct DockerAgentDirs {
     agent_id: String,
-    /// Read-only: the confirmed state dirs Docker always mounts.
+    display_name: String,
+    /// Read-only: the confirmed state dirs Docker always mounts. Empty for
+    /// anything outside `docker::KNOWN_SAFE_AGENTS` — there is nothing
+    /// confirmed for an agent this module has never seen.
     builtin: Vec<String>,
     /// User-editable: extra dirs mounted on top of `builtin`.
     extra: Vec<String>,
+    /// True for the small set that gets mounted unconditionally
+    /// (claude/codex/copilot/agy/opencode). `persist_enabled` is
+    /// meaningless for these — they're never gated by it.
+    is_builtin: bool,
+    /// False only for grok, which is permanently blocked from Docker
+    /// persistence regardless of `persist_enabled` (see
+    /// `docker::agent_config`'s doc comment) — the frontend hides the
+    /// opt-in toggle entirely rather than offering one that can never do
+    /// anything.
+    persist_offerable: bool,
+    /// Opt-in switch (`Settings.docker_agent_persist_enabled`) for
+    /// mounting `extra` at all when `is_builtin` is false. See
+    /// `docker::agent_config`'s doc comment for why this defaults to off.
+    persist_enabled: bool,
 }
 
 #[tauri::command]
 fn docker_agent_dirs() -> Vec<DockerAgentDirs> {
-    let extras = load_settings_inner().docker_agent_extra_dirs;
-    // "agy" and "antigravity" are the same agent under two ids (see
-    // agent_dirs.rs); only one is a real registered Agent id, so drive
-    // this from the actual agent list rather than agent_dirs' match arms
-    // to avoid listing a phantom "antigravity" row nobody can edit.
-    ["claude", "codex", "copilot", "agy", "opencode"]
-        .into_iter()
-        .map(|id| DockerAgentDirs {
-            agent_id: id.to_string(),
-            builtin: agent_dirs::state_dirs(id).iter().map(|s| s.to_string()).collect(),
-            extra: extras.get(id).cloned().unwrap_or_default(),
+    let settings = load_settings_inner();
+    settings
+        .agents
+        .iter()
+        .filter(|a| !a.disabled)
+        .map(|a| DockerAgentDirs {
+            agent_id: a.id.clone(),
+            display_name: a.display_name.clone(),
+            builtin: agent_dirs::state_dirs(&a.id).iter().map(|s| s.to_string()).collect(),
+            extra: settings.docker_agent_extra_dirs.get(&a.id).cloned().unwrap_or_default(),
+            is_builtin: docker::KNOWN_SAFE_AGENTS.contains(&a.id.as_str()),
+            persist_offerable: docker::persist_offerable(&a.id),
+            persist_enabled: settings.docker_agent_persist_enabled.get(&a.id).copied().unwrap_or(false),
         })
         .collect()
 }
@@ -15831,7 +15857,8 @@ fn docker_command_preview(task_id: String, agent_id: Option<String>) -> Result<D
     // exists to show — are identical to a real spawn either way.
     let image = docker::spawn_image_tag().unwrap_or_else(|| "<image not built yet>".to_string());
     let agent_extra_dirs = settings.docker_agent_extra_dirs.get(&agent_id).cloned().unwrap_or_default();
-    let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &agent.env, &agent_extra_dirs);
+    let agent_persist_enabled = settings.docker_agent_persist_enabled.get(&agent_id).copied().unwrap_or(false);
+    let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &agent.env, &agent_extra_dirs, agent_persist_enabled);
     let argv = docker::render_argv(&spec, &agent.command, &agent.args);
     Ok(DockerCommandPreview { spec, argv })
 }

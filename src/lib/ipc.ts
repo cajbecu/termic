@@ -342,14 +342,28 @@ export function onDockerBuildDone(cb: (d: { success: boolean; tag: string; error
 export const taskSetDocker = (id: string, enabled: boolean, extraArgs: string[]) =>
   invoke<number>("task_set_docker", { id, enabled, extraArgs });
 
-/** One Docker-supported agent's config-dir mounts: the confirmed built-in
- *  list (read-only) plus whatever extras the user added. `extra` is edited
- *  by patching `Settings.docker_agent_extra_dirs` directly (settingsSave),
- *  no separate write command. */
+/** One registered agent's Docker config-dir mounts: the confirmed built-in
+ *  list (read-only, only non-empty for `is_builtin`) plus whatever extras
+ *  the user added. Both `extra` and `persist_enabled` are edited by
+ *  patching `Settings.docker_agent_extra_dirs` / `docker_agent_persist_enabled`
+ *  directly (settingsSave), no separate write command. */
 export interface DockerAgentDirs {
   agent_id: string;
+  display_name: string;
   builtin: string[];
   extra: string[];
+  /** True for the small set (claude/codex/copilot/agy/opencode) mounted
+   *  unconditionally - `persist_enabled` is meaningless for these. */
+  is_builtin: boolean;
+  /** False only for grok, which can never persist config in Docker mode
+   *  regardless of `persist_enabled` (its binary lives inside its own
+   *  config dir, so an opt-in mount would shadow it). Hide the toggle
+   *  entirely rather than offer one that can't do anything. */
+  persist_offerable: boolean;
+  /** Opt-in switch for mounting `extra` at all, for anything outside the
+   *  known-safe built-in set. Off by default, including for a newly-added
+   *  custom agent - see docker.rs's `agent_config` for why. */
+  persist_enabled: boolean;
 }
 export const dockerAgentDirs = () => invoke<DockerAgentDirs[]>("docker_agent_dirs");
 

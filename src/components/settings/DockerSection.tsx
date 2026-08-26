@@ -24,13 +24,15 @@ import {
 import { Block, SectionTitle, Toggle, useBackendSettings } from "./Controls";
 import { DockerRebuildFrequencyPicker } from "@/components/DockerRebuildFrequencyPicker";
 import { describeLastBuildDate } from "@/lib/dockerDailyRebuild";
-import { Loader2, CircleCheck, CircleAlert } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { Loader2, CircleCheck, CircleAlert, ChevronDown, Lock, X } from "lucide-react";
 
 export function DockerSection() {
   const { settings, patch } = useBackendSettings();
   const [status, setStatus] = useState<DockerStatus | null>(null);
   const [image, setImage] = useState<DockerImageStatus | null>(null);
   const [agentDirs, setAgentDirs] = useState<DockerAgentDirs[]>([]);
+  const [showAgentDirs, setShowAgentDirs] = useState(false);
 
   // Dockerfile editor state.
   const hostRef = useRef<HTMLDivElement>(null);
@@ -271,27 +273,45 @@ export function DockerSection() {
               above) is read-only - it's what makes login/session sharing
               actually work - plus whatever extra dirs the user wants
               mounted alongside it (a custom skills dir, an extra MCP
-              config location, etc). */}
+              config location, etc). Collapsed by default: this is a
+              "look it up when you need it" reference, not something
+              every visit to this page needs to see. */}
           <Block>
-            <div className="text-[14px] font-medium">Per-agent config dirs</div>
-            <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
-              What gets mounted into each agent's shared config folder (see "Logins" above). The built-in dirs
-              are confirmed to hold real state and can't be removed; add more below if an agent (or an MCP
-              server it runs) keeps state somewhere else you want to persist across container restarts.
-            </div>
-            <div className="mt-3 flex flex-col gap-3">
-              {agentDirs.map(d => (
-                <AgentDirsRow
-                  key={d.agent_id}
-                  dirs={d}
-                  displayName={settings.agents.find(a => a.id === d.agent_id)?.display_name ?? d.agent_id}
-                  onChangeExtra={next => {
-                    setAgentDirs(cur => cur.map(a => a.agent_id === d.agent_id ? { ...a, extra: next } : a));
-                    patch({ docker_agent_extra_dirs: { ...(settings.docker_agent_extra_dirs ?? {}), [d.agent_id]: next } });
-                  }}
-                />
-              ))}
-            </div>
+            <button
+              type="button"
+              onClick={() => setShowAgentDirs(s => !s)}
+              className="flex w-full items-center justify-between gap-3 text-left"
+            >
+              <div>
+                <div className="text-[14px] font-medium">Per-agent config dirs</div>
+                <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+                  What gets mounted into each agent's shared config folder (see "Logins" above).
+                </div>
+              </div>
+              <ChevronDown className={cn("h-4 w-4 shrink-0 text-[var(--color-fg-faint)] transition-transform", showAgentDirs && "rotate-180")} />
+            </button>
+            {showAgentDirs && (
+              <div className="mt-3 flex flex-col gap-2">
+                <div className="text-[12px] text-[var(--color-fg-faint)]">
+                  Locked chips are confirmed to hold real state and can't be removed. Click "+ add" to mount
+                  something else there too (a custom skills dir, an extra MCP config location).
+                </div>
+                {agentDirs.map(d => (
+                  <AgentDirsRow
+                    key={d.agent_id}
+                    dirs={d}
+                    onChangeExtra={next => {
+                      setAgentDirs(cur => cur.map(a => a.agent_id === d.agent_id ? { ...a, extra: next } : a));
+                      patch({ docker_agent_extra_dirs: { ...(settings.docker_agent_extra_dirs ?? {}), [d.agent_id]: next } });
+                    }}
+                    onTogglePersist={next => {
+                      setAgentDirs(cur => cur.map(a => a.agent_id === d.agent_id ? { ...a, persist_enabled: next } : a));
+                      patch({ docker_agent_persist_enabled: { ...(settings.docker_agent_persist_enabled ?? {}), [d.agent_id]: next } });
+                    }}
+                  />
+                ))}
+              </div>
+            )}
           </Block>
 
           {/* Dockerfile editor */}
@@ -412,52 +432,100 @@ function ImageStatusLine({ image, dirty }: { image: DockerImageStatus | null; di
   );
 }
 
-/** One agent's row in "Per-agent config dirs": its built-in dirs as
- *  read-only chips, plus a small textarea for user-added extras. Local
- *  draft state mirrors `PathsTextarea` (AgentsSection.tsx) so a
- *  half-typed line doesn't get clobbered by the next `docker_agent_dirs`
- *  refresh - it only needs its own copy here since that component isn't
- *  exported and this is the only other place editing a raw dir list. */
-function AgentDirsRow({ dirs, displayName, onChangeExtra }: {
-  dirs: DockerAgentDirs; displayName: string; onChangeExtra: (next: string[]) => void;
+/** One agent's row in "Per-agent config dirs": name, its built-in dirs as
+ *  locked chips, its extra dirs as removable chips, and a "+ add" affordance
+ *  that becomes a one-line input. For an agent OUTSIDE the known-safe
+ *  built-in set, an opt-in "Persist config in Docker mode" checkbox gates
+ *  whether `extra` is mounted at all - see docker.rs's `agent_config`. */
+function AgentDirsRow({ dirs, onChangeExtra, onTogglePersist }: {
+  dirs: DockerAgentDirs;
+  onChangeExtra: (next: string[]) => void;
+  onTogglePersist: (next: boolean) => void;
 }) {
-  const serialize = (v: string[]) => v.join("\n");
-  const [draft, setDraft] = useState(serialize(dirs.extra));
-  const external = serialize(dirs.extra);
-  useEffect(() => {
-    const parsed = draft.split("\n").map(l => l.trim()).filter(Boolean).join("\n");
-    if (parsed === external) return;
-    setDraft(external);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [external]);
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+  const canAdd = dirs.is_builtin || dirs.persist_enabled;
+
+  function commit() {
+    const v = draft.trim();
+    if (v && !dirs.extra.includes(v)) onChangeExtra([...dirs.extra, v]);
+    setDraft("");
+    setAdding(false);
+  }
 
   return (
-    <div className="flex flex-col gap-1.5 rounded-md border border-[var(--color-border-soft)] px-3 py-2.5">
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-[13px] font-medium">{displayName}</span>
-        <div className="flex flex-wrap justify-end gap-1">
-          {dirs.builtin.map(d => (
-            <code
-              key={d}
-              title="Built-in - confirmed to hold real state, can't be removed"
-              className="rounded bg-[var(--color-bg-2)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--color-fg-dim)]"
+    <div className="flex flex-col gap-1.5 rounded-md border border-[var(--color-border-soft)] px-3 py-2">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="mr-0.5 text-[13px] font-medium">{dirs.display_name}</span>
+        {dirs.builtin.map(d => (
+          <span
+            key={d}
+            title="Built-in - confirmed to hold real state, can't be removed"
+            className="flex items-center gap-1 rounded bg-[var(--color-bg-2)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--color-fg-dim)]"
+          >
+            <Lock className="h-2.5 w-2.5 text-[var(--color-fg-faint)]" />
+            {d}
+          </span>
+        ))}
+        {dirs.extra.map(d => (
+          <span
+            key={d}
+            className="flex items-center gap-1 rounded bg-[var(--color-accent)]/10 px-1.5 py-0.5 font-mono text-[11px] text-[var(--color-fg-dim)]"
+          >
+            {d}
+            <button
+              type="button"
+              onClick={() => onChangeExtra(dirs.extra.filter(x => x !== d))}
+              aria-label={`Remove ${d}`}
+              className="text-[var(--color-fg-faint)] hover:text-[var(--color-danger)]"
             >
-              {d}
-            </code>
-          ))}
-        </div>
+              <X className="h-2.5 w-2.5" />
+            </button>
+          </span>
+        ))}
+        {adding ? (
+          <input
+            autoFocus
+            value={draft}
+            onChange={e => setDraft(e.target.value)}
+            onBlur={commit}
+            onKeyDown={e => {
+              if (e.key === "Enter") commit();
+              if (e.key === "Escape") { setDraft(""); setAdding(false); }
+            }}
+            placeholder=".mytool"
+            spellCheck={false}
+            className="w-24 rounded border border-[var(--color-accent-soft)] bg-[var(--color-bg)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--color-fg)] outline-none"
+          />
+        ) : canAdd ? (
+          <button
+            type="button"
+            onClick={() => setAdding(true)}
+            className="rounded border border-dashed border-[var(--color-border)] px-1.5 py-0.5 text-[11px] text-[var(--color-fg-faint)] hover:border-[var(--color-accent-soft)] hover:text-[var(--color-fg)]"
+          >
+            + add
+          </button>
+        ) : null}
       </div>
-      <textarea
-        value={draft}
-        onChange={e => {
-          setDraft(e.target.value);
-          onChangeExtra(e.target.value.split("\n").map(l => l.trim()).filter(Boolean));
-        }}
-        placeholder=".mytool (extra dirs to mount, one per line)"
-        spellCheck={false}
-        rows={1}
-        className="w-full resize-y rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 font-mono text-[12px] text-[var(--color-fg)] placeholder:text-[var(--color-fg-faint)] focus:border-[var(--color-accent-soft)] focus:outline-none"
-      />
+      {!dirs.is_builtin && dirs.persist_offerable && (
+        <label className="flex items-center gap-1.5 text-[11px] text-[var(--color-fg-faint)]">
+          <input
+            type="checkbox"
+            checked={dirs.persist_enabled}
+            onChange={e => onTogglePersist(e.target.checked)}
+          />
+          Persist config in Docker mode
+          {dirs.persist_enabled && dirs.extra.length === 0 && (
+            <span className="text-[var(--color-warn)]">(add a dir above, nothing is mounted yet)</span>
+          )}
+        </label>
+      )}
+      {!dirs.is_builtin && !dirs.persist_offerable && (
+        <span className="text-[11px] text-[var(--color-fg-faint)]">
+          Not supported in Docker mode: its config and its binary share a location, so mounting anything here
+          would risk hiding the binary the image installed.
+        </span>
+      )}
     </div>
   );
 }
