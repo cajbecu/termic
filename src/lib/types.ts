@@ -132,6 +132,17 @@ export interface Project {
    *  team-shared equivalent lives in `.termic.yaml` under
    *  `scripts.run_scripts`; the two lists are merged at read time. */
   run_scripts?: RunCommand[];
+  /** What to do when a task's PR/MR merges: "ask" (toast with an
+   *  Archive action - the default), "auto" (archive immediately), or
+   *  "off". Unknown/missing values are treated as "ask". */
+  on_pr_merge?: "ask" | "auto" | "off" | null;
+  /** Always watch PR/MR comments: every launched task of this
+   *  project with a known PR behaves as if its watcher bell is on. */
+  watch_pr_comments?: boolean;
+  /** Let the comment watcher act on comments from commenters with no
+   *  verified standing on the repo (see `PrComment.trusted`). Off by
+   *  default: an untrusted comment gets fed straight into an agent's PTY. */
+  watch_untrusted_comments?: boolean;
   /** Personal extra named ports (GH #196): env var names unioned with
    *  the committed `.termic.yaml` list (yaml first, deduped). */
   extra_named_ports?: string[];
@@ -296,6 +307,17 @@ export interface Task {
   persisted_tabs?: PersistedTab[];
   /** JSON-encoded SplitTree for the active tab's pane layout. Restored on relaunch. */
   split_layout?: string | null;
+  /** Cached PR/MR identity (set the first time a status poll or a create
+   *  resolves one). Live state (checks / merged / reviews) is NOT here -
+   *  it's re-fetched and kept in the pr store. */
+  pr_url?: string | null;
+  pr_number?: number | null;
+  pr_provider?: "github" | "gitlab" | null;
+  /** Comment-watcher opt-in (the PR card bell). Watching only runs while
+   *  the task has a LIVE agent - there's nobody to tell otherwise. */
+  pr_watch?: boolean;
+  /** Newest comment timestamp (RFC3339 UTC) the watcher already handled. */
+  pr_comments_seen_at?: string | null;
 }
 
 /** One durable agent tab persisted on a task. Mirror of
@@ -836,6 +858,91 @@ export interface UpdateInfo {
   branch: string;
   upstream: string;
   base: string;
+}
+
+// ───────────────────────────── forge (PRs / MRs) ─────────────────────────────
+
+/** Install + auth status for one forge CLI (gh / glab). Mirrors
+ *  `ForgeCliStatus` in src-tauri/src/forge.rs. */
+export interface ForgeCliStatus {
+  id: "gh" | "glab";
+  provider: "github" | "gitlab";
+  found: boolean;
+  path: string;
+  version: string;
+  authed: boolean;
+  account: string;
+  /** Instances this CLI is signed in to. Teaches termic that an
+   *  unrelated hostname is a forge remote (self-hosted GitLab, GHE). */
+  hosts: string[];
+}
+
+/** Normalized PR/MR snapshot. Mirrors `PrStatus` in forge.rs. */
+export interface PrStatus {
+  provider: "github" | "gitlab";
+  number: number;
+  url: string;
+  title: string;
+  state: "open" | "draft" | "merged" | "closed";
+  checks: "none" | "pending" | "passing" | "failing";
+  review: "none" | "approved" | "changes_requested" | "review_required";
+  base: string;
+  head: string;
+}
+
+/** One normalized PR/MR comment (discussion / review / inline). Mirrors
+ *  `PrComment` in forge.rs. */
+export interface PrComment {
+  id: string;
+  author: string;
+  body: string;
+  /** RFC3339 UTC - lexicographically comparable. */
+  created_at: string;
+  kind: "comment" | "review" | "inline";
+  path?: string | null;
+  /** Whether the author has verified standing on the repo (GitHub: an
+   *  authorAssociation of OWNER/MEMBER/COLLABORATOR; GitLab: current
+   *  project membership). False for anyone else - seeing a PR/MR and
+   *  commenting on it don't require repo access. */
+  trusted: boolean;
+}
+
+/** One open issue, normalized across providers. Mirrors `ForgeIssue` in
+ *  src-tauri/src/forge.rs. `body` rides along in the list so picking one in
+ *  the New Task dialog needs no second round-trip. */
+export interface ForgeIssue {
+  provider: "github" | "gitlab";
+  number: number;
+  title: string;
+  url: string;
+  body: string;
+  author: string;
+  /** Comment count only. The agent is told to fetch the thread itself. */
+  comments: number;
+  labels: string[];
+  updated_at: string;
+}
+
+/** One issue-list round-trip. Same status vocabulary as `PrLookup`, so the
+ *  picker reuses the PR card's explain-yourself copy. Mirrors `IssueLookup`
+ *  in src-tauri/src/lib.rs. */
+export interface IssueLookup {
+  provider: "github" | "gitlab" | null;
+  remote_url: string;
+  status: "ok" | "no-remote" | "unsupported-remote" | "cli-missing" | "cli-unauthed" | "error";
+  message: string;
+  issues: ForgeIssue[];
+}
+
+/** One PR poll round-trip: provider resolution + snapshot, or the exact
+ *  reason there isn't one (drives the PR card's hint copy). Mirrors
+ *  `PrLookup` in src-tauri/src/lib.rs. */
+export interface PrLookup {
+  provider: "github" | "gitlab" | null;
+  remote_url: string;
+  status: "ok" | "no-remote" | "unsupported-remote" | "cli-missing" | "cli-unauthed" | "error";
+  message: string;
+  pr: PrStatus | null;
 }
 
 export interface FileEntry {

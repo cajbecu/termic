@@ -146,6 +146,7 @@ interface UIState {
   welcomeOpen: boolean;
   /** Changelog dialog — full per-version release notes. */
   changelogOpen: boolean;
+  createPrForTaskId: string | null;      // null = closed
   /** Broadcast dialog — send one message to several open agents in a
    *  task at once. null = closed. UI-store (not app) so opening it
    *  doesn't churn the task tree. */
@@ -256,6 +257,8 @@ interface UIState {
   closeWelcome: () => void;
   openChangelog: () => void;
   closeChangelog: () => void;
+  openCreatePr: (taskId: string) => void;
+  closeCreatePr: () => void;
   openBroadcast: (taskId: string) => void;
   openProjectBroadcast: (projectId: string) => void;
   closeBroadcast: () => void;
@@ -348,11 +351,11 @@ interface UIState {
    *  early if needed). Auto-dismiss is handled by <Toaster/>.
    *  `opts.action` adds a button (e.g. "Undo") whose click runs the
    *  callback AND dismisses the toast. */
-  pushToast: (msg: string, kind?: ToastKind, opts?: { action?: ToastAction; ttlMs?: number }) => string;
+  pushToast: (msg: string, kind?: ToastKind, opts?: { action?: ToastAction; ttlMs?: number; sticky?: boolean }) => string;
   dismissToast: (id: string) => void;
 }
 
-export type ToastKind = "success" | "info" | "error";
+export type ToastKind = "success" | "info" | "warning" | "error";
 export interface ToastAction { label: string; onClick: () => void; }
 export interface Toast {
   id: string;
@@ -361,6 +364,12 @@ export interface Toast {
   action?: ToastAction;
   /** Override the global TTL for this toast (e.g. longer for undo). */
   ttlMs?: number;
+  /** Never auto-dismiss - only a click (the action, or the X) removes it.
+   *  For a toast that asks the user to actually decide something (e.g. "PR
+   *  merged, archive?"): a few-second TTL guarantees it's gone before
+   *  anyone reads it if it lands while they're looking at a different
+   *  task, which a merge notice usually does. */
+  sticky?: boolean;
 }
 
 /** Keys withdrawn while their confirm was still inside askConfirm's macrotask
@@ -393,6 +402,7 @@ export const useUI = create<UIState>(set => ({
   shortcutsHelpOpen: false,
   welcomeOpen: false,
   changelogOpen: false,
+  createPrForTaskId: null,
   broadcastForTaskId: null,
   broadcastForProjectId: null,
   raceProjectId: null,
@@ -444,6 +454,8 @@ export const useUI = create<UIState>(set => ({
   closeWelcome:      () => set({ welcomeOpen: false }),
   openChangelog:     () => set({ changelogOpen: true }),
   closeChangelog:    () => set({ changelogOpen: false }),
+  openCreatePr:      (taskId) => set({ createPrForTaskId: taskId }),
+  closeCreatePr:     () => set({ createPrForTaskId: null }),
   openBroadcast:     (taskId) => set({ broadcastForTaskId: taskId, broadcastForProjectId: null }),
   openProjectBroadcast: (projectId) => set({ broadcastForProjectId: projectId, broadcastForTaskId: null }),
   closeBroadcast:    () => set({ broadcastForTaskId: null, broadcastForProjectId: null }),
@@ -560,7 +572,7 @@ export const useUI = create<UIState>(set => ({
   },
   pushToast: (msg, kind = "success", opts) => {
     const id = crypto.randomUUID();
-    set(s => ({ toasts: [...s.toasts, { id, msg, kind, action: opts?.action, ttlMs: opts?.ttlMs }] }));
+    set(s => ({ toasts: [...s.toasts, { id, msg, kind, action: opts?.action, ttlMs: opts?.ttlMs, sticky: opts?.sticky }] }));
     return id;
   },
   dismissToast: (id) => set(s => ({ toasts: s.toasts.filter(t => t.id !== id) })),

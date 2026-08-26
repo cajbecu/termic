@@ -1,19 +1,21 @@
 // Bottom-right toast stack. One mount in <App/>; all transient
-// success/info/error feedback goes through useUI().pushToast().
+// success/info/warning/error feedback goes through useUI().pushToast().
 import { useEffect } from "react";
-import { CheckCircle2, Info, XCircle, X } from "lucide-react";
+import { CheckCircle2, Info, AlertTriangle, XCircle, X } from "lucide-react";
 import { useUI, type Toast } from "@/store/ui";
 import { cn } from "@/lib/utils";
 
 const ICONS = {
   success: CheckCircle2,
   info: Info,
+  warning: AlertTriangle,
   error: XCircle,
 };
 
 const TONE = {
   success: "border-[var(--color-ok)]/40 text-[var(--color-ok)]",
   info:    "border-[var(--color-accent)]/40 text-[var(--color-accent)]",
+  warning: "border-[var(--color-warn)]/40 text-[var(--color-warn)]",
   error:   "border-[var(--color-err)]/40 text-[var(--color-err)]",
 };
 
@@ -31,10 +33,11 @@ export function Toaster() {
 function ToastItem({ t }: { t: Toast }) {
   const dismiss = useUI(s => s.dismissToast);
   useEffect(() => {
+    if (t.sticky) return;
     const ttl = t.ttlMs ?? DEFAULT_TTL_MS;
     const h = setTimeout(() => dismiss(t.id), ttl);
     return () => clearTimeout(h);
-  }, [t.id, t.ttlMs, dismiss]);
+  }, [t.id, t.ttlMs, t.sticky, dismiss]);
   const Ic = ICONS[t.kind];
   return (
     <div

@@ -20,7 +20,10 @@ import { BrowserCommandField } from "./BrowserCommandField";
 import { LINK_CLICK_MODIFIER as CLICK_MOD } from "@/lib/previewBrowser";
 import { Block, SectionTitle, Toggle, useBackendSettings } from "./Controls";
 import { cn, cleanLines } from "@/lib/utils";
+import { usePr } from "@/store/pr";
+import { CircleCheck, CircleX, RefreshCw } from "lucide-react";
 import { IS_MAC } from "@/lib/shortcuts";
+import { Tip } from "@/components/ui/Tooltip";
 
 export function GeneralSection() {
   const { settings, store, patch } = useBackendSettings();
@@ -173,6 +176,13 @@ export function GeneralSection() {
         </div>
       </Block>
 
+      {/* Forge CLI status: PR/MR features ride on the official CLIs, so
+          surface install + auth state HERE (the PR card shows the same
+          hints contextually). Re-probed on every Settings visit. */}
+      <Block>
+        <ForgeStatusBlock />
+      </Block>
+
       {/* Personal file-tree excludes. Hide noise (caches, venvs, build
           output) from the "All files" tree across every project on this
           machine. Per-project, team-shared excludes live in each repo's
@@ -283,6 +293,80 @@ export function GeneralSection() {
           onChange={setLoadRemoteImages}
         />
       </Block>
+    </div>
+  );
+}
+
+
+/** Install + auth status for the forge CLIs (gh / glab). PR features are
+ *  CLI-backed by design (no tokens stored in termic), so this block is
+ *  where users learn what to install and how to sign in. */
+function ForgeStatusBlock() {
+  const forges = usePr(s => s.forges);
+  const refreshForges = usePr(s => s.refreshForges);
+  const [probing, setProbing] = useState(false);
+  useEffect(() => { void refreshForges(); }, [refreshForges]);
+  const reprobe = () => {
+    setProbing(true);
+    refreshForges().finally(() => setTimeout(() => setProbing(false), 400));
+  };
+  return (
+    <div>
+      <div className="flex items-center gap-2">
+        <div className="text-[14px] font-medium">Pull request integrations</div>
+        <Tip content="Re-detect the CLIs">
+          <button
+            onClick={reprobe}
+            className="flex h-6 w-6 items-center justify-center rounded text-[var(--color-fg-faint)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]"
+          >
+            <RefreshCw className={cn("h-3.5 w-3.5", probing && "animate-spin")} />
+          </button>
+        </Tip>
+      </div>
+      <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+        PR/MR status, creating a PR, merge detection, and starting a task from an issue all run through
+        the official CLIs. Termic never stores tokens: sign in once with each CLI and it all works.
+        Self-hosted GitHub Enterprise and GitLab work too, as long as the CLI is signed in to that host.
+      </div>
+      <div className="mt-3 flex flex-col gap-2">
+        {(forges ?? []).map(f => (
+          <div key={f.id} className="flex items-center gap-2.5 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] px-3 py-2">
+            <span className="w-24 shrink-0 text-[13px] font-medium text-[var(--color-fg)]">
+              {f.provider === "gitlab" ? "GitLab" : "GitHub"}
+              <span className="ml-1.5 font-mono text-[11px] text-[var(--color-fg-faint)]">{f.id}</span>
+            </span>
+            {!f.found ? (
+              <span className="flex items-center gap-1.5 text-[12.5px] text-[var(--color-fg-dim)]">
+                <CircleX className="h-3.5 w-3.5 text-[var(--color-fg-faint)]" />
+                Not installed.
+                <code className="rounded bg-[var(--color-bg-3)] px-1 py-px font-mono text-[11px]">brew install {f.id}</code>
+              </span>
+            ) : !f.authed ? (
+              <span className="flex items-center gap-1.5 text-[12.5px] text-[var(--color-warn)]">
+                <CircleX className="h-3.5 w-3.5" />
+                Installed, not signed in.
+                <code className="rounded bg-[var(--color-bg-3)] px-1 py-px font-mono text-[11px] text-[var(--color-fg)]">{f.id} auth login</code>
+              </span>
+            ) : (
+              <span className="flex min-w-0 items-center gap-1.5 text-[12.5px] text-[var(--color-fg-dim)]">
+                <CircleCheck className="h-3.5 w-3.5 shrink-0" style={{ color: "#3fb950" }} />
+                <span className="truncate">
+                  Signed in{f.account ? <> as <span className="text-[var(--color-fg)]">{f.account}</span></> : null}
+                  {/* Hosts matter: this is how a self-hosted user confirms
+                      termic will recognise their instance's remotes. */}
+                  {f.hosts?.length ? (
+                    <span className="text-[var(--color-fg-faint)]"> · {f.hosts.join(", ")}</span>
+                  ) : null}
+                  {f.version ? <span className="text-[var(--color-fg-faint)]"> · {f.version}</span> : null}
+                </span>
+              </span>
+            )}
+          </div>
+        ))}
+        {forges === null && (
+          <div className="text-[12.5px] text-[var(--color-fg-faint)]">Probing CLIs…</div>
+        )}
+      </div>
     </div>
   );
 }

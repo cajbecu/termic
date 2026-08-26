@@ -8,6 +8,7 @@ import type {
   Project, ProjectMember, Task, CreateTaskArgs, CreateMultiArgs, Settings, DiscoveredRepo,
   ImportableWorktree, CliInfo, ChangeFile, Changes, GitStatus, CheckoutResult, UpdateMode, UpdateResult, UpdateInfo, FileEntry, Agent, RepoConfig,
   SandboxMode, TaskDiffSummary, CliInstallStatus, McpStatus, BranchContext, BlameFile, GitCommit, GitCompare, GitFile, GitLogPage, GitRef,
+  ForgeCliStatus, PrLookup, PrComment, IssueLookup,
 } from "./types";
 import type { CustomThemeFile } from "./customTheme";
 import {
@@ -564,6 +565,36 @@ export const taskCommit  = (id: string, dirName: string, subject: string, body: 
   invoke<void>("task_commit", { id, dirName, subject, body, amend, push });
 export const taskDiscard = (id: string, dirName: string, paths: string[]) =>
   invoke<void>("task_discard", { id, dirName, paths });
+// ── forge (PRs / MRs) ──
+/** Install + auth status for the forge CLIs (gh / glab). Subprocess
+ *  probes only, no network. */
+export const detectForges = () =>
+  invoke<ForgeCliStatus[]>("detect_forges");
+/** Live PR/MR lookup for the task's branch. Hits the network via
+ *  the forge CLI - poll at a slow cadence (the pr store owns this). */
+export const taskPrStatus = (id: string) =>
+  invoke<PrLookup>("task_pr_status", { id });
+/** Which forge a project's repo is hosted on, or null. Cached in Rust and
+ *  network-free, so callers may treat it as cheap. */
+export const projectForgeProvider = (projectId: string) =>
+  invoke<{ provider: "github" | "gitlab" | null; remote_url: string }>(
+    "project_forge_provider", { projectId });
+/** Open issues for a PROJECT's repo (the New Task dialog runs before any
+ *  task exists). Network-bound via the forge CLI. */
+export const projectForgeIssues = (projectId: string, limit?: number) =>
+  invoke<IssueLookup>("project_forge_issues", { projectId, limit: limit ?? null });
+/** Push the branch (sets upstream if needed) + create the PR/MR, then
+ *  return the fresh lookup. */
+export const taskPrCreate = (id: string, title: string, body: string, base: string, draft: boolean) =>
+  invoke<PrLookup>("task_pr_create", { id, title, body, base, draft });
+/** Every comment on the task's PR/MR, oldest first. Requires the PR
+ *  identity to be cached (a status poll or create already ran). */
+export const taskPrComments = (id: string) =>
+  invoke<PrComment[]>("task_pr_comments", { id });
+export const taskSetPrWatch = (id: string, watch: boolean) =>
+  invoke<void>("task_set_pr_watch", { id, watch });
+export const taskSetPrCommentsSeen = (id: string, iso: string) =>
+  invoke<void>("task_set_pr_comments_seen", { id, iso });
 export const taskRunScript= (id: string, which: "setup" | "run" = "run") =>
   invoke<string>("task_run_script", { id, which });
 /** Kick off a streaming run. Subscribe to:

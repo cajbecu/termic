@@ -56,6 +56,7 @@ export type ShortcutId =
   | "zoom-in"
   | "zoom-out"
   | "zoom-reset"
+  | "create-pr"
   | "stage-file"
   | "discard-file"
   | "add-selection-to-agent"
@@ -227,6 +228,10 @@ export const SHORTCUT_DEFS: ShortcutDef[] = [
   { id: "add-selection-to-agent", group: "General", label: "Add selection to agent",
     hint: "Opens a comment on the selected lines. Comments queue up and go to the agent as one batch, so you can mark several places before sending.",
     defaultBinding: B("l", { cmd: true, shift: true }) },
+
+  { id: "create-pr", group: "Git", label: "Create pull request",
+    hint: "Opens the Create PR / MR dialog for the active task",
+    defaultBinding: B("r", { cmd: true, alt: true }) },
 
   // Git — contextual: these act on the file selected in the Git panel and
   // are handled there (GitPanel), not the global handler. The discard

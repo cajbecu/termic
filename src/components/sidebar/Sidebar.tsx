@@ -8,7 +8,7 @@ import { usePrefs } from "@/store/prefs";
 import { Button } from "@/components/ui/Button";
 import { Tip } from "@/components/ui/Tooltip";
 import { Spinner } from "@/components/ui/Spinner";
-import { LayoutGrid, History, FolderPlus, Settings, Plus, Archive, Layers, Moon, Cog, MoreVertical, GitBranch, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Bell, Bug, Mail, Zap, X, Pencil, Copy, ChevronsDownUp, ChevronsUpDown, Check, AudioWaveform, Radio, SquareChevronRight, CircleStop, Trash2, Folder, FolderMinus, FolderOpen, Megaphone, Keyboard, Activity, Waypoints, Square, Play } from "lucide-react";
+import { LayoutGrid, History, FolderPlus, Settings, Plus, Archive, Layers, Moon, Cog, MoreVertical, GitBranch, GitBranchPlus, FolderGit2, ChevronRight, ChevronDown, Bell, Bug, Mail, Zap, X, Pencil, Copy, ChevronsDownUp, ChevronsUpDown, Check, AudioWaveform, Radio, SquareChevronRight, CircleStop, Trash2, Folder, FolderMinus, FolderOpen, Megaphone, Keyboard, GitPullRequest, GitPullRequestDraft, GitPullRequestClosed, GitMerge, Activity, Waypoints, Square, Play } from "lucide-react";
 import { DropdownRoot, DropdownTrigger, DropdownMenu, DropdownItem, DropdownSeparator, DropdownLabel, DropdownSub, DropdownSubTrigger, DropdownSubContent } from "@/components/ui/Dropdown";
 import { ContextMenuRoot, ContextMenuTrigger, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuLabel, ContextMenuSub, ContextMenuSubTrigger, ContextMenuSubContent } from "@/components/ui/ContextMenu";
 import { ProjectActionsMenuItems } from "./ProjectActionsMenuItems";
@@ -17,6 +17,7 @@ import { newScratchTab } from "@/lib/scratchTabs";
 import { UpdateCard } from "./UpdateCard";
 import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { useUI } from "@/store/ui";
+import { usePr } from "@/store/pr";
 import { usePendingTasks } from "@/store/pendingTasks";
 import { useIsArchiving } from "@/store/archivingTasks";
 import { cn } from "@/lib/utils";
@@ -2537,6 +2538,12 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
               <TaskLocationIcon isMainCheckout={w.is_main_checkout} size="h-3.5 w-3.5" />
             </>
           )}
+          {/* PR/MR state: tiny pull-request glyph colored by live state
+              (green open / purple merged / red closed / gray draft or
+              unknown-yet). Falls back to the persisted pr_url for
+              tasks not visited this session - state unknown, but
+              the link out (issue #21) still works. Click opens the PR. */}
+          {!taskRenaming && <TaskPrBadge task={w} />}
           {/* Spotlight active indicator: just the animated wave icon.
               No branch text — avoids any truncation of the task name. */}
           {!taskRenaming && isSpotlighted ? (
@@ -3079,5 +3086,45 @@ function PendingRepoRootRow({ mode, cli, value, branch, onChange, onBranchChange
         </div>
       )}
     </div>
+  );
+}
+
+
+/** Tiny PR/MR state glyph on a task row. Live state when this session
+ *  has polled the task (colored), otherwise the persisted identity only
+ *  (muted glyph - "there is a PR, state unknown"). Click opens it on the
+ *  forge; that's the sidebar's link-out (issue #21). */
+function TaskPrBadge({ task }: { task: import("@/lib/types").Task }) {
+  const pr = usePr(s => s.byTask[task.id]?.lookup?.pr ?? null);
+  const url = pr?.url ?? task.pr_url ?? null;
+  if (!url) return null;
+  const noun = (pr?.provider ?? task.pr_provider) === "gitlab" ? "MR" : "PR";
+  const num = pr?.number ?? task.pr_number;
+  const state = pr?.state ?? null;
+  // Failing checks override the state color for open/draft: this glyph is
+  // the only PR signal visible without opening the Git tab, and an all-green
+  // "open" icon next to a red CI failure (visible only in the full card) is
+  // exactly the confusing case - a broken build shouldn't look identical to
+  // a healthy one at a glance. Merged/closed keep their own color; the PR
+  // is already done, so CI at HEAD stops being the thing worth flagging.
+  const failing = pr?.checks === "failing" && (state === "open" || state === "draft");
+  const { Icon, color, label } =
+    state === "merged" ? { Icon: GitMerge, color: "#a371f7", label: "merged" } :
+    state === "closed" ? { Icon: GitPullRequestClosed, color: "var(--color-err)", label: "closed" } :
+    state === "draft"  ? { Icon: GitPullRequestDraft, color: failing ? "var(--color-err)" : "var(--color-fg-faint)", label: failing ? "draft · checks failing" : "draft" } :
+    state === "open"   ? { Icon: GitPullRequest, color: failing ? "var(--color-err)" : "#3fb950", label: failing ? "open · checks failing" : "open" } :
+    { Icon: GitPullRequest, color: "var(--color-fg-faint)", label: "" };
+  return (
+    <Tip content={`${noun}${num ? ` ${noun === "MR" ? "!" : "#"}${num}` : ""}${label ? ` · ${label}` : ""}. Open on ${noun === "MR" ? "GitLab" : "GitHub"}`} delay={0}>
+      <button
+        data-no-drag
+        data-testid="task-pr-badge"
+        data-pr-state={state ?? "unknown"}
+        onClick={(e) => { e.stopPropagation(); openPath(url).catch(() => {}); }}
+        className="shrink-0 rounded p-px hover:bg-[var(--color-bg-3)]"
+      >
+        <Icon className="h-3 w-3" style={{ color }} />
+      </button>
+    </Tip>
   );
 }

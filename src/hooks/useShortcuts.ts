@@ -562,6 +562,12 @@ export function useShortcuts() {
           return;
         }
 
+        case "create-pr":
+          if (!taskId) return;
+          e.preventDefault();
+          useUI.getState().openCreatePr(taskId);
+          return;
+
         // ⌘T → new tab, behaviour depends on which pane has focus. NO
         // `isTyping` guard (xterm's hidden textarea).
         case "new-tab": {

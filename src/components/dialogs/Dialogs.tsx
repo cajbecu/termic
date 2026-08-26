@@ -13,6 +13,7 @@ import { ResumeOverrideDialog } from "./ResumeOverrideDialog";
 import { ShortcutsHelpDialog } from "./ShortcutsHelpDialog";
 import { WelcomeDialog } from "./WelcomeDialog";
 import { ChangelogDialog } from "./ChangelogDialog";
+import { CreatePrDialog } from "./CreatePrDialog";
 import { BroadcastDialog } from "./BroadcastDialog";
 import { RaceDialog } from "./RaceDialog";
 import { RaceCompare } from "@/components/task/RaceCompare";
@@ -52,6 +53,7 @@ export function Dialogs() {
       <ShortcutsHelpDialog />
       <WelcomeDialog />
       <ChangelogDialog />
+      <CreatePrDialog />
       <BroadcastDialog />
       <RaceDialog />
       <RaceCompare />

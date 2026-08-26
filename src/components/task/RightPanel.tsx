@@ -14,6 +14,8 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useApp, useActiveTask } from "@/store/app";
 import { useUI } from "@/store/ui";
+import { usePr, watchTickNow } from "@/store/pr";
+import { useAlignedSpin } from "@/hooks/useAlignedSpin";
 import {
   taskGitStatus, taskRunScriptStream, repoConfigLoad, repoConfigLoadAt,
   taskSpotlightResync,
@@ -26,6 +28,7 @@ import { cn } from "@/lib/utils";
 import { Play, ChevronDown, ChevronUp, Square, Globe, X, AudioWaveform, RefreshCw, Copy, Check, Settings, SquareArrowOutUpRight, PanelBottom } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Tip } from "@/components/ui/Tooltip";
+import { Spinner } from "@/components/ui/Spinner";
 import { AuxTerminal } from "./AuxTerminal";
 import { FileTree } from "./FileTree";
 import { GitPanel } from "./GitPanel";
@@ -102,7 +105,12 @@ export function RightPanel() {
   // while away show up in the tree. Folded into FileTree's reloadToken;
   // its sameChildren gate makes the no-change case render-free.
   const [focusReload, setFocusReload] = useState(0);
-  const [refreshing, setRefreshing] = useState(false);
+  const [refreshClicked, setRefreshClicked] = useState(false);
+  // See useAlignedSpin: cutting animate-spin off at an arbitrary point in
+  // its cycle snaps the icon back to rest from wherever it was, which reads
+  // as a visible stutter - this rounds the visible window up to a whole
+  // rotation.
+  const refreshing = useAlignedSpin(refreshClicked);
   // Multi-repo tasks add a Target selector to the footer so
   // Setup/Run can target a composition member. Stored as the
   // member's dir_name. Single-repo tasks keep this empty
@@ -229,13 +237,20 @@ export function RightPanel() {
     refreshGit();
   }, [fsRevision, gitRevision, refreshGit]);
 
-  // Header refresh button: re-read both the file tree and git status. The
-  // brief `refreshing` flag spins the icon for feedback.
+  // Header refresh button: re-read the file tree, git status, and (if the
+  // repo has one) the PR/MR card - "refresh" should mean everything this
+  // panel shows, not just the parts GitPanel itself owns. Also kicks the
+  // comment-watcher tick, same reasoning as PrCard's own refresh button.
+  // The brief `refreshing` flag spins the icon for feedback.
   const doRefresh = () => {
     refreshGit();
     setFileTreeReload(n => n + 1);
-    setRefreshing(true);
-    window.setTimeout(() => setRefreshing(false), 600);
+    if (task && !task.is_main_checkout) {
+      usePr.getState().refresh(task.id, true);
+      watchTickNow();
+    }
+    setRefreshClicked(true);
+    window.setTimeout(() => setRefreshClicked(false), 600);
   };
 
   // Subscribe to streaming output for BOTH setup and run kinds on the active
@@ -505,7 +520,12 @@ export function RightPanel() {
               onClick={doRefresh}
               className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--color-fg-dim)] hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]"
             >
-              <RefreshCw className={cn("h-4 w-4", refreshing && "animate-spin")} />
+              {/* A rotating SVG icon wobbles/looks off-center at this size
+                  (see ui/Spinner's doc comment) - its border-radius ring is
+                  symmetric by construction and pixel-snapped. */}
+              {refreshing
+                ? <Spinner size={14} />
+                : <RefreshCw className="h-4 w-4" />}
             </button>
           </Tip>
         </div>

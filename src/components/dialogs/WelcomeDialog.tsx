@@ -17,6 +17,7 @@ import { AppDialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { discoverRepos, detectClis, settingsLoad, settingsSave, agentsSave, projectAdd } from "@/lib/ipc";
+import { usePr } from "@/store/pr";
 import { Checkbox } from "@/components/ui/Checkbox";
 import type { CliInfo, DiscoveredRepo } from "@/lib/types";
 import { useApp } from "@/store/app";
@@ -24,7 +25,7 @@ import { CliIcon, CLI_LABEL } from "@/icons/cli";
 import { TermicMark } from "@/icons/TermicLogo";
 import { cn } from "@/lib/utils";
 import { usePrefs, applyTheme, type ThemeMode } from "@/store/prefs";
-import { Sun, Moon, Monitor, Sunrise, Droplet, Binary, Code2, Flower2 } from "lucide-react";
+import { Sun, Moon, Monitor, Sunrise, Droplet, Binary, Code2, Flower2, GitPullRequest } from "lucide-react";
 
 type Step = 0 | 1 | 2;
 
@@ -302,6 +303,59 @@ function StepRepos({ dir, setDir, summary, clis, setClis, browse }: {
             )}
           </div>
         ))}
+      </div>
+
+      <ForgeRows />
+    </div>
+  );
+}
+
+/** Issue #21: say up front whether the forge CLIs are there, and name
+ *  exactly what stops working without them. PR features are CLI-backed by
+ *  design (termic stores no tokens), so a missing `gh` is not a bug the
+ *  user can debug from inside the app unless we tell them here. Same
+ *  found-green / missing-gray language as the agent rows above: most
+ *  people have one forge, not both, and a wall of red reads as failure. */
+function ForgeRows() {
+  const forges = usePr(s => s.forges);
+  const refreshForges = usePr(s => s.refreshForges);
+  useEffect(() => { void refreshForges(); }, [refreshForges]);
+  return (
+    <div className="rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-3">
+      <div className="mb-2 flex items-center gap-1.5 text-[11.5px] uppercase tracking-wider text-[var(--color-fg-dim)]">
+        <GitPullRequest className="h-3.5 w-3.5" />
+        Pull requests
+      </div>
+      {forges === null && (
+        <div className="text-[13.5px] text-[var(--color-fg-faint)]">Checking…</div>
+      )}
+      {(forges ?? []).map(f => (
+        <div key={f.id} className={cn("flex items-center gap-2 py-1 text-[13.5px]", !f.authed && "opacity-70")}>
+          <span className={f.authed ? "text-[var(--color-ok)]" : "text-[var(--color-fg-faint)]"}>
+            <GitPullRequest className="h-4 w-4" />
+          </span>
+          <span className={cn("min-w-[60px]", !f.authed && "text-[var(--color-fg-dim)]")}>
+            {f.provider === "gitlab" ? "GitLab" : "GitHub"}
+          </span>
+          {!f.found ? (
+            <span className="text-[12px] text-[var(--color-fg-faint)]">
+              <span className="font-mono">{f.id}</span> not installed ·{" "}
+              <span className="font-mono">brew install {f.id}</span>
+            </span>
+          ) : !f.authed ? (
+            <span className="text-[12px] text-[var(--color-fg-faint)]">
+              signed out · <span className="font-mono">{f.id} auth login</span>
+            </span>
+          ) : (
+            <span className="truncate font-mono text-[12px] text-[var(--color-fg-dim)]" title={f.path}>
+              {f.account ? `${f.id} · ${f.account}` : f.version || f.path}
+            </span>
+          )}
+        </div>
+      ))}
+      <div className="mt-1.5 text-[12px] text-[var(--color-fg-faint)]">
+        Without these, PR status, creating a PR, merge detection, and starting a task from an issue stay
+        off. Everything else works. You can set them up later; Settings re-checks each visit.
       </div>
     </div>
   );

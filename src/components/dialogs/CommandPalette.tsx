@@ -12,7 +12,7 @@ import {
   PanelLeft, PanelRight, PanelBottom, Palette, Keyboard, Settings as SettingsIcon,
   FolderCog, RefreshCw, ScrollText, Bug, SlidersHorizontal, Bot, BookText,
   Check, ChevronLeft, ListTodo, Bell, SquareTerminal, FolderPlus, History, Square,
-  Play, Swords, Megaphone, Columns2, Rows2, Clock, UserPen, Activity, Code2,
+  Play, Swords, Megaphone, Columns2, Rows2, Clock, UserPen, GitPullRequest, Activity, Code2,
   NotepadText, Waypoints, type LucideIcon,
 } from "lucide-react";
 import { useUI } from "@/store/ui";
@@ -343,6 +343,11 @@ export function CommandPalette() {
         suffix: effectiveSandboxMode(task),
         icon: ShieldCheck, keywords: "cage security enable disable",
         run: act(() => useUI.getState().openSandbox(task.id)),
+      });
+      cmds.push({
+        id: "create-pr", section: "Agent", label: "Create pull request",
+        icon: GitPullRequest, keywords: "pr mr merge request github gitlab",
+        run: act(() => useUI.getState().openCreatePr(task.id)),
       });
     }
 
