@@ -117,9 +117,18 @@ export function TaskSandboxDialog() {
   // Re-fetch on the task's own SIGKILL-and-relaunch triggers (toggling
   // Docker on/off, editing extra-args/extra-mounts) so a stale preview
   // never survives the thing it was showing changing under it.
+  // Keyed on the CONTENT of the two lists, not their array identity. Every
+  // `loadAll()` rebuilds the task objects, so identity changes on any
+  // unrelated refresh and an open preview panel blanked itself for no
+  // reason the user could see.
+  const dockerPreviewKey = [
+    task?.docker_sandbox_enabled ? "1" : "0",
+    (task?.docker_extra_args ?? []).join("\u0000"),
+    (task?.docker_extra_mounts ?? []).join("\u0000"),
+  ].join("|");
   useEffect(() => {
     setDockerPreview(null);
-  }, [task?.docker_sandbox_enabled, task?.docker_extra_args, task?.docker_extra_mounts]);
+  }, [dockerPreviewKey]);
 
   // Extra mounts: a dedicated per-task list (`host_path:container_path`,
   // Docker's own -v shape), NOT "Allowed paths" - that list is shared with
@@ -169,7 +178,16 @@ export function TaskSandboxDialog() {
     setDockerBusy(true);
     try {
       useUI.getState().markPendingPtyRestart(task.id);
-      await taskSetDocker(task.id, next, task.docker_extra_args ?? []);
+      // Pass the mounts back explicitly. `task_set_docker` assigns
+      // `docker_extra_mounts` unconditionally and the ipc wrapper defaults
+      // the argument to [], so omitting it here ERASED the task's mount
+      // list every time Docker was toggled - turn it off and back on and
+      // the persisted paths were gone.
+      await taskSetDocker(
+        task.id, next,
+        task.docker_extra_args ?? [],
+        task.docker_extra_mounts ?? [],
+      );
       await loadAll();
       // The confirm dialog just above IS the save step for Docker (unlike
       // Seatbelt's separate draft-then-Save flow) - closing here so the
@@ -278,12 +296,66 @@ export function TaskSandboxDialog() {
   // keep their existing, already-shipped commit semantics; this just picks
   // which one a click should drive. Unlike the old two-tier selector, a
   // Seatbelt card click here IS the final mode (no separate submode grid).
+  /**
+   * Leave Docker AND land on a Seatbelt mode, as one decision.
+   *
+   * This used to be `await toggleDocker(false); chooseMode(next)`, which
+   * had two bugs feeding each other: `toggleDocker` closes the dialog on
+   * success, so `chooseMode` then mutated a draft nobody could ever Save -
+   * clicking ENFORCING on a Docker task turned the container OFF and the
+   * seatbelt never ON, leaving the task fully uncaged. And when the user
+   * CANCELLED the confirm, `toggleDocker` returned early but `chooseMode`
+   * ran anyway, moving the picker to a mode that was never applied.
+   *
+   * The sandbox record is written BEFORE Docker is switched off, so there
+   * is no window where the task has neither cage: `task_set_docker` is what
+   * kills the PTYs, and by the time they respawn the Seatbelt mode is
+   * already on the record.
+   */
+  async function leaveDockerFor(next: SandboxMode) {
+    if (!task || dockerBusy) return;
+    const ok = await useUI.getState().askConfirm({
+      title: `Switch "${taskLabel(task, useBranchAsTaskName)}" out of Docker?`,
+      message: next === "off"
+        ? "The container will be stopped and the agent relaunched on your Mac with NO sandbox. Any agent currently running in this task will be terminated and relaunched."
+        : "The container will be stopped and the agent relaunched under the Seatbelt sandbox instead. Any agent currently running in this task will be terminated and relaunched.",
+      confirmLabel: next === "off" ? "Stop using Docker" : "Switch to Seatbelt",
+    });
+    if (!ok) return;
+    setDockerBusy(true);
+    setErr(null);
+    const lines = (v: string) => v.split("\n").map(l => l.trim()).filter(Boolean);
+    try {
+      useUI.getState().markPendingPtyRestart(task.id);
+      // Order matters: record the cage first (no restart), then drop Docker,
+      // which is the call that kills the PTYs.
+      await taskSetSandbox(task.id, next, lines(rwText), lines(hostsText), false);
+      await taskSetDocker(
+        task.id, false,
+        task.docker_extra_args ?? [],
+        task.docker_extra_mounts ?? [],
+      );
+      await loadAll();
+      setMode(next);
+      close();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setDockerBusy(false);
+    }
+  }
+
   async function choose(next: SandboxSelection) {
     if (next === "docker") {
       if (!dockerOn) await toggleDocker(true);
       return;
     }
-    if (dockerOn) await toggleDocker(false);
+    // Coming FROM Docker commits immediately (Docker's own semantics);
+    // an ordinary Seatbelt pick stays a draft the Save button commits.
+    if (dockerOn) {
+      await leaveDockerFor(next);
+      return;
+    }
     chooseMode(next);
   }
 

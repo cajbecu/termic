@@ -133,10 +133,17 @@ export function NewTaskDialog() {
   }, [osSandboxOk, selection]);
   const [dockerSettingsForNew, setDockerSettingsForNew] = useState<{ docker_sandbox_enabled?: boolean } | null>(null);
   const [dockerImageForNew, setDockerImageForNew] = useState<DockerImageStatus | null>(null);
+  // Keyed on the OPEN signal, not mount-only. This dialog is rendered
+  // unconditionally (Dialogs.tsx) and so never unmounts, so a mount-only
+  // probe answered once per app launch: enable Docker and build the image in
+  // Settings, come back here, and the Docker card stayed disabled for the
+  // rest of the session with no way to refresh it. TaskSandboxDialog keys
+  // the identical fetch on its own open signal for exactly this reason.
   useEffect(() => {
+    if (!projectId) return;
     settingsLoad().then(setDockerSettingsForNew).catch(() => {});
     dockerImageStatus().then(setDockerImageForNew).catch(() => {});
-  }, []);
+  }, [projectId]);
   const dockerOffered = !!dockerSettingsForNew?.docker_sandbox_enabled && !!dockerImageForNew?.available;
   // Docker became unavailable (image rebuilt away, global switch flipped
   // off) while it was the picked selection - fall back rather than

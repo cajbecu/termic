@@ -119,7 +119,7 @@ struct AgentConfig {
 /// only lists dirs `docs/plans/docker-sandbox/findings.md` actually
 /// verified. grok is the one exception still declined outright: binary +
 /// skills + config all live under `~/.grok`, no clean relocation env.
-pub const KNOWN_SAFE_AGENTS: &[&str] = &["claude", "codex", "copilot", "agy", "antigravity", "opencode"];
+pub const KNOWN_SAFE_AGENTS: &[&str] = &["claude", "codex", "copilot", "agy", "antigravity", "opencode", "pi"];
 
 /// Whether an agent OUTSIDE `KNOWN_SAFE_AGENTS` can even be offered the
 /// opt-in "persist config in Docker mode" toggle at all. `false` for grok
@@ -373,6 +373,15 @@ pub fn build_spec(
         if p.is_empty() || mounts.iter().any(|m| m.host == p) {
             continue;
         }
+        // Skip what isn't there. Seatbelt tolerates a stale entry in the
+        // allow-list (it is just a rule that never matches), so these lists
+        // accumulate paths from long-deleted projects - but `docker run -v`
+        // does NOT: one missing host path fails the whole run with an opaque
+        // daemon error, which would make EVERY Docker task in that config
+        // unlaunchable because of a directory nobody has needed for months.
+        if !std::path::Path::new(&p).exists() {
+            continue;
+        }
         mounts.push(Mount::implicit(
             p.clone(),
             p,
@@ -411,8 +420,23 @@ pub fn build_spec(
         ));
         for extra in &cfg.extra_dirs {
             // Extra dirs share the same host config dir subtree by name.
+            //
+            // Strip `/root/` (the container prefix), NOT `/root/.`. With the
+            // dot in the pattern, an entry that does not begin with one -
+            // `config/mytool`, which `sanitize_extra_dir` accepts - matched
+            // nothing, so the "relative" name stayed `/root/config/mytool`,
+            // and `Path::join` with an ABSOLUTE argument discards the base:
+            // the host side silently became `/root/config/mytool` instead of
+            // a path inside termic's own agent folder. On macOS that fails
+            // the run outright; on Linux it bind-mounts a root-owned path.
+            //
+            // The separate leading-dot strip keeps the host layout it has
+            // always had (`.antigravity` -> `<agent>/antigravity`), so this
+            // fix does not orphan anyone's existing state.
+            let rel = extra.strip_prefix("/root/").unwrap_or(extra);
+            let rel = rel.strip_prefix('.').unwrap_or(rel);
             let sub = PathBuf::from(&host_cfg)
-                .join(extra.trim_start_matches("/root/."))
+                .join(rel)
                 .to_string_lossy()
                 .into_owned();
             mounts.push(Mount::implicit(
@@ -504,6 +528,12 @@ const UNSAFE_EXTRA_ARG_PREFIXES: &[&str] = &[
     "-u",
     "--cap-drop",
     "--pids-limit",
+    // Siblings of flags already listed, and just as capable of widening the
+    // boundary: `--volumes-from` mounts another container's volumes wholesale
+    // (the `-v`/`--mount` hole through a different door), and
+    // `--device-cgroup-rule` grants device access the way `--device` does.
+    "--volumes-from",
+    "--device-cgroup-rule",
 ];
 
 /// Reject any `docker_extra_args` entry that could weaken the container
@@ -1119,6 +1149,33 @@ mod tests {
     }
 
     #[test]
+    fn pi_persists_its_config_and_does_not_repeat_groks_mistake() {
+        // pi keeps settings.json + trust.json under ~/.pi/agent/, so `.pi` is
+        // the config dir. It qualifies for persistence ONLY because the image
+        // installs it from npm (binary in the global prefix, outside HOME).
+        // pi's own install.sh can drop the binary in ~/.pi/agent/bin, which
+        // is precisely why grok is excluded - mounting a config dir over the
+        // binary's own directory shadows the binary.
+        assert!(KNOWN_SAFE_AGENTS.contains(&"pi"));
+        assert_eq!(crate::agent_dirs::state_dirs("pi"), &[".pi"]);
+
+        let task = stub_task("t-pi", "/tmp/termic-docker-test-does-not-exist");
+        let env = std::collections::HashMap::new();
+        let spec = build_spec(&task, "pi", "img", &task.path, vec![], &env, &[], false, &[], &[], "pty-pi000001");
+        assert!(spec.mounts.iter().any(|m| m.container == "/root/.pi"),
+            "pi's config dir must be mounted, or every Docker launch re-authenticates");
+        // No relocation env var is claimed for pi: the docs describe no
+        // single variable that moves the whole config dir (only the session
+        // dir), so the mount IS the mechanism.
+        assert!(!spec.env.iter().any(|(k, _)| k.starts_with("PI_")),
+            "no PI_* var should be invented here without one in pi's docs");
+
+        // grok stays excluded, deliberately.
+        assert!(!KNOWN_SAFE_AGENTS.contains(&"grok"));
+        assert!(!persist_offerable("grok"));
+    }
+
+    #[test]
     fn build_spec_names_the_container_per_pty_not_per_task() {
         // A task can host several agent tabs, each with its own container.
         // Keyed on task id alone, tab B's `--name` collided with tab A's live
@@ -1381,12 +1438,35 @@ mod tests {
         // global Settings + task pin + .termic.yaml) used to be completely
         // invisible to Docker mode. It's now mounted the same way Seatbelt
         // allows it: at its own resolved path, unified across both engines.
+        // A REAL directory: `docker run -v` cannot mount a path that is not
+        // there, so only existing entries are staged (see the next case).
+        let shared = tempfile::tempdir().unwrap();
+        let shared_path = shared.path().to_string_lossy().into_owned();
         let task = stub_task("t9", "/tmp/termic-docker-test-does-not-exist-9");
         let env = std::collections::HashMap::new();
-        let allowed = vec!["/tmp/some-shared-dir".to_string()];
+        let allowed = vec![shared_path.clone()];
         let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &allowed, &[], "pty-aaaa1111");
-        let mounted: Vec<&str> = spec.mounts.iter().map(|m| m.container.as_str()).collect();
-        assert!(mounted.contains(&"/tmp/some-shared-dir"), "{mounted:?}");
+        let mounted: Vec<String> = spec.mounts.iter().map(|m| m.container.clone()).collect();
+        let canon = canonicalize_or_keep(&shared_path);
+        assert!(mounted.contains(&canon), "{mounted:?}");
+    }
+
+    #[test]
+    fn a_stale_allowed_path_is_skipped_instead_of_failing_the_whole_run() {
+        // Seatbelt tolerates an allow-list entry whose directory is long
+        // gone - it is just a rule that never matches - so these lists
+        // accumulate paths from deleted projects. `docker run -v` does not:
+        // one missing host path fails the entire run with an opaque daemon
+        // error, which would make EVERY Docker task in that config
+        // unlaunchable because of a directory nobody has needed for months.
+        let gone = "/tmp/termic-docker-test-definitely-not-here-9f3a2b";
+        assert!(!std::path::Path::new(gone).exists(), "fixture assumption");
+        let task = stub_task("t9b", "/tmp/termic-docker-test-does-not-exist-9b");
+        let env = std::collections::HashMap::new();
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false,
+            &[gone.to_string()], &[], "pty-aaaa1111");
+        assert!(!spec.mounts.iter().any(|m| m.host == gone),
+            "a vanished allow-list entry must not become a -v flag");
     }
 
     #[test]

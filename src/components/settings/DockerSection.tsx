@@ -348,9 +348,34 @@ export function DockerSection() {
             </button>
             {showAgentDirs && (
               <div className="mt-3 flex flex-col gap-2">
-                <div className="text-[12px] text-[var(--color-fg-faint)]">
-                  Locked chips are confirmed to hold real state and can't be removed. Click "+ add" to mount
-                  something else there too (a custom skills dir, an extra MCP config location).
+                {/* "Relative to WHAT?" answered before the list, because a
+                    bare `.claude` chip reads like a path on your Mac and is
+                    not one: it names a folder inside the agent's HOME in the
+                    CONTAINER, backed by a termic-owned folder on the host. */}
+                <div className="flex flex-col gap-2 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-3 py-2.5 text-[12px] text-[var(--color-fg-dim)]">
+                  <div>
+                    Each entry is a folder NAME, not a path on your Mac. It is mounted at that name inside the
+                    container's home (<code className="font-mono">/root</code>), and backed by a folder termic
+                    owns, one per agent:
+                  </div>
+                  <div className="font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-faint)]">
+                    {agentDirs[0]?.host_dir
+                      ? <>{agentDirs[0].host_dir.replace(/\/[^/]*$/, "")}/<span className="text-[var(--color-fg)]">&lt;agent&gt;</span>/<span className="text-[var(--color-fg)]">.claude</span></>
+                      : "…/termic/docker-agents/<agent>/.claude"}
+                    {"  \u2192  "}
+                    <span className="text-[var(--color-fg)]">/root/.claude</span>
+                  </div>
+                  <div>
+                    That host folder is <b className="text-[var(--color-fg)]">not</b> your real{" "}
+                    <code className="font-mono">~/.claude</code>. It is per agent and shared by every Docker task
+                    running that agent, which is exactly what makes a login done once inside a container still be
+                    there for the next task. A cloned agent gets its own folder, so cloning is all it takes to keep
+                    a work login separate from a personal one.
+                  </div>
+                  <div>
+                    Locked chips are confirmed to hold real state and can't be removed. Click "+ add" to mount
+                    something else there too (a custom skills dir, an extra MCP config location).
+                  </div>
                 </div>
                 {agentDirs.map(d => (
                   <AgentDirsRow
@@ -624,7 +649,7 @@ function AgentDirsRow({ dirs, onChangeExtra, onTogglePersist }: {
               type="button"
               onClick={() => onChangeExtra(dirs.extra.filter(x => x !== d))}
               aria-label={`Remove ${d}`}
-              className="text-[var(--color-fg-faint)] hover:text-[var(--color-danger)]"
+              className="text-[var(--color-fg-faint)] hover:text-[var(--color-err)]"
             >
               <X className="h-2.5 w-2.5" />
             </button>
