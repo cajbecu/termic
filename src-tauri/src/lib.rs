@@ -6056,10 +6056,18 @@ fn task_set_docker(
     w.docker_extra_args = extra_args;
     w.docker_extra_mounts = extra_mounts;
     save_task(w).map_err(|e| e.to_string())?;
-    if !enabled {
-        docker::cleanup_task(&id);
-    }
-    Ok(kill_task_ptys(&state, &id))
+    let killed = kill_task_ptys(&state, &id);
+    // Always reap the OLD container here, not just when Docker is being
+    // turned off: killing the PTY only kills the local `docker run` client
+    // (attached foreground, no `-d`), never the container server-side, and
+    // `--rm` only fires on the container's own clean exit. Without this,
+    // editing extra_args/extra_mounts while staying on Docker left the old
+    // container running until whatever tab this was respawned into on its
+    // own - relying on `pty_spawn`'s own pre-spawn cleanup (belt-and-
+    // suspenders there) instead of tearing it down the moment we know it's
+    // stale. Harmless when there was nothing to remove.
+    docker::cleanup_task(&id);
+    Ok(killed)
 }
 
 /// (tasks with a live agent, live AGENT PTYs). Ground truth for what
