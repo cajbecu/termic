@@ -2612,14 +2612,16 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
               >
                 {/* Idle badge, hidden on row hover so the cog shows through.
                     Precedence: dangerous YOLO (red, no cage) → sandbox mode.
-                    Running state is shown via OPACITY (dim when idle, solid
-                    when an agent is running), so the icon's FILL is free to
-                    encode the MODE — full enforce = filled shield, FS-only /
-                    monitor = outline. That keeps the two enforce modes
-                    distinguishable even when no agent is running. */}
+                    Running state is shown via COLOR (gray when idle, the
+                    mode's real color once an agent is running) - a same-
+                    color-just-dimmer badge read as "caged" even for a task
+                    that wasn't actually running anything. The icon's FILL
+                    still encodes the MODE regardless of state - full
+                    enforce = filled shield, FS-only / monitor = outline -
+                    so the two enforce modes stay distinguishable even gray. */}
                 {(() => {
                   const wMode = effectiveSandboxMode(w);
-                  const stateOpacity = terminalTabs.length > 0 ? "opacity-100" : "opacity-40";
+                  const isLaunched = terminalTabs.length > 0;
                   // Docker mode always stores sandbox_mode as off (the two
                   // cages are mutually exclusive), so it has to be checked
                   // FIRST or a Docker-sandboxed task would show no badge at
@@ -2628,14 +2630,18 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                   if (w.docker_sandbox_enabled) {
                     return (
                       <DockerSandboxIcon
-                        className={cn("absolute h-3.5 w-3.5 transition-opacity group-hover/wsrow:opacity-0", stateOpacity)}
+                        active={isLaunched}
+                        className="absolute h-3.5 w-3.5 transition-opacity group-hover/wsrow:opacity-0"
                       />
                     );
                   }
                   if (!!w.yolo && !isSandboxEnforced(wMode)) {
                     return (
                       <Zap
-                        className={cn("absolute h-3.5 w-3.5 text-[var(--color-err)] transition-opacity group-hover/wsrow:opacity-0", stateOpacity)}
+                        className={cn(
+                          "absolute h-3.5 w-3.5 text-[var(--color-err)] transition-opacity group-hover/wsrow:opacity-0",
+                          isLaunched ? "opacity-100" : "opacity-40",
+                        )}
                         fill="currentColor"
                       />
                     );
@@ -2644,7 +2650,8 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                     return (
                       <SandboxIcon
                         mode={wMode}
-                        className={cn("absolute h-3.5 w-3.5 transition-opacity group-hover/wsrow:opacity-0", stateOpacity)}
+                        active={isLaunched}
+                        className="absolute h-3.5 w-3.5 transition-opacity group-hover/wsrow:opacity-0"
                       />
                     );
                   }

@@ -69,14 +69,21 @@ export function sandboxPickerLabel(mode: SandboxMode): string {
  *  toolbar uses Eye for monitoring); everything else is canonical.
  *  (Activity state is shown by callers via opacity, not fill — fill always
  *  encodes the mode so the two enforce variants stay distinguishable.) */
-export function SandboxIcon({ mode, className, icon }: {
+export function SandboxIcon({ mode, className, icon, active = true }: {
   mode: SandboxMode;
   className?: string;
   icon?: LucideIcon;
+  /** False = the task isn't currently running an agent - shows the same
+   *  faint gray as OFF regardless of mode (enforce green, monitor amber,
+   *  etc. are a LIVE status, not a settings badge; a task sitting idle
+   *  shouldn't visually claim to be actively caging anything). True (the
+   *  default) keeps every existing caller's behavior unchanged. */
+  active?: boolean;
 }) {
   const v = SANDBOX_VISUALS[mode];
   const Icon = icon ?? v.Icon;
-  return <Icon className={className} style={{ color: v.color }} fill={v.filled ? "currentColor" : "none"} />;
+  const color = active ? v.color : "var(--color-fg-faint)";
+  return <Icon className={className} style={{ color }} fill={v.filled ? "currentColor" : "none"} />;
 }
 
 /** Same green as Seatbelt's `enforce`/`enforce-fs` (`--color-ok`): Docker
@@ -90,6 +97,6 @@ export const DOCKER_SANDBOX_COLOR = "var(--color-ok)";
 /** Docker's equivalent of `SandboxIcon` - same shape (a colored glyph,
  *  nothing else) so call sites that show "which cage" can drop this in
  *  next to `SandboxIcon` without a different contract. */
-export function DockerSandboxIcon({ className }: { className?: string }) {
-  return <Container className={className} style={{ color: DOCKER_SANDBOX_COLOR }} />;
+export function DockerSandboxIcon({ className, active = true }: { className?: string; active?: boolean }) {
+  return <Container className={className} style={{ color: active ? DOCKER_SANDBOX_COLOR : "var(--color-fg-faint)" }} />;
 }
