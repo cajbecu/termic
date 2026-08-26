@@ -294,6 +294,14 @@ pub fn build_spec(
     // every restart that `agent_config`'s built-in list doesn't cover (an
     // MCP server's own data dir, say).
     extra_mounts: &[String],
+    // The PTY id this spawn is for. A task can host SEVERAL agent tabs
+    // (TabBar.spawnTab), and each one gets its own container, so the
+    // container's `--name` has to be unique per TAB, not per task. Keyed on
+    // task id alone, tab B's spawn collided with tab A's live container on
+    // `--name` and the pre-spawn label sweep tore A down mid-session
+    // (GH #231). The task label below stays task-scoped on purpose: archive
+    // and the Docker toggle DO want to reap every container of one task.
+    pty_id: &str,
 ) -> DockerSpec {
     let mut mounts: Vec<Mount> = Vec::new();
 
@@ -457,7 +465,10 @@ pub fn build_spec(
     }
 
     DockerSpec {
-        container_name: format!("termic-{}", task.id),
+        // task id keeps the name recognisable in `docker ps`; the pty id
+        // makes it unique per tab. Both are uuids, so the result is always
+        // a legal container name.
+        container_name: format!("termic-{}-{}", task.id, short_id(pty_id)),
         label: format!("{LABEL_KEY}={}", task.id),
         image: image.to_string(),
         mounts,
@@ -861,6 +872,12 @@ pub fn cleanup_task(task_id: &str) {
     rm_by_filter(&format!("label={LABEL_KEY}={task_id}"));
 }
 
+/// First 8 chars of an id, for a readable-but-unique container name.
+/// Falls back to the whole string when it is shorter than that.
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
 /// `docker rm -f` every termic-labeled container (app quit). Non-fatal.
 pub fn cleanup_all() {
     rm_by_filter(&format!("label={LABEL_KEY}"));
@@ -1102,6 +1119,31 @@ mod tests {
     }
 
     #[test]
+    fn build_spec_names_the_container_per_pty_not_per_task() {
+        // A task can host several agent tabs, each with its own container.
+        // Keyed on task id alone, tab B's `--name` collided with tab A's live
+        // container, and the task-scoped label sweep on spawn tore A down
+        // mid-session (GH #231). The LABEL stays task-scoped on purpose:
+        // archive and the Docker toggle do want to reap the whole task.
+        let task = stub_task("task-1", "/tmp/termic-docker-test-does-not-exist");
+        let env = std::collections::HashMap::new();
+        let a = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &[], &[], "aaaaaaaa-1111-2222-3333-444444444444");
+        let b = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &[], &[], "bbbbbbbb-1111-2222-3333-444444444444");
+        assert_ne!(a.container_name, b.container_name,
+            "two tabs of one task must not share a container name");
+        assert!(a.container_name.starts_with("termic-task-1-"));
+        assert_eq!(a.label, b.label, "the task label is shared, so archive reaps both");
+        assert_eq!(a.label, "termic.task=task-1");
+    }
+
+    #[test]
+    fn short_id_is_safe_for_ids_shorter_than_the_cut() {
+        assert_eq!(short_id("aaaaaaaa-bbbb"), "aaaaaaaa");
+        assert_eq!(short_id("abc"), "abc");
+        assert_eq!(short_id(""), "");
+    }
+
+    #[test]
     fn build_spec_forwards_the_per_spawn_env_overlay() {
         // The per-agent env block from Settings -> Agents & Terminals
         // (envForCli) rides in as SpawnArgs.env, same as the Seatbelt path.
@@ -1110,7 +1152,7 @@ mod tests {
         let task = stub_task("t1", "/tmp/termic-docker-test-does-not-exist");
         let mut spawn_env = std::collections::HashMap::new();
         spawn_env.insert("MY_CUSTOM_VAR".to_string(), "hello".to_string());
-        let spec = build_spec(&task, "claude", "termic-sandbox:abc", &task.path, vec![], &spawn_env, &[], false, &[], &[]);
+        let spec = build_spec(&task, "claude", "termic-sandbox:abc", &task.path, vec![], &spawn_env, &[], false, &[], &[], "pty-aaaa1111");
         assert!(spec.env.iter().any(|(k, v)| k == "MY_CUSTOM_VAR" && v == "hello"));
         assert!(spec.env.iter().any(|(k, _)| k == "TERM"));
     }
@@ -1123,7 +1165,7 @@ mod tests {
         let task = stub_task("t2", "/tmp/termic-docker-test-does-not-exist-2");
         let mut spawn_env = std::collections::HashMap::new();
         spawn_env.insert("TERM".to_string(), "dumb".to_string());
-        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &spawn_env, &[], false, &[], &[]);
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &spawn_env, &[], false, &[], &[], "pty-aaaa1111");
         let term_values: Vec<&str> = spec.env.iter().filter(|(k, _)| k == "TERM").map(|(_, v)| v.as_str()).collect();
         assert_eq!(term_values, vec!["xterm-256color", "dumb"]);
     }
@@ -1147,7 +1189,7 @@ mod tests {
             ("opencode", "/root/.config/opencode", &["/root/.local/share/opencode"]),
         ];
         for (agent, primary, extras) in cases {
-            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env, &[], false, &[], &[]);
+            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env, &[], false, &[], &[], "pty-aaaa1111");
             let mounted: Vec<&str> = spec.mounts.iter().map(|m| m.container.as_str()).collect();
             assert!(mounted.contains(primary), "{agent}: expected {primary} in {mounted:?}");
             for e in *extras {
@@ -1156,7 +1198,7 @@ mod tests {
         }
         // grok stays unsupported in Docker mode regardless of what
         // agent_dirs lists for Seatbelt's sake.
-        let grok_spec = build_spec(&task, "grok", "img", &task.path, vec![], &env, &[], false, &[], &[]);
+        let grok_spec = build_spec(&task, "grok", "img", &task.path, vec![], &env, &[], false, &[], &[], "pty-aaaa1111");
         assert!(!grok_spec.mounts.iter().any(|m| m.container.contains("grok")));
     }
 
@@ -1165,7 +1207,7 @@ mod tests {
         let task = stub_task("t4", "/tmp/termic-docker-test-does-not-exist-4");
         let env = std::collections::HashMap::new();
         for (agent, var) in [("claude", "CLAUDE_CONFIG_DIR"), ("codex", "CODEX_HOME")] {
-            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env, &[], false, &[], &[]);
+            let spec = build_spec(&task, agent, "img", &task.path, vec![], &env, &[], false, &[], &[], "pty-aaaa1111");
             let val = spec.env.iter().find(|(k, _)| k == var).map(|(_, v)| v.as_str());
             assert_eq!(val, Some(format!("/root/.{agent}").as_str()));
         }
@@ -1196,7 +1238,7 @@ mod tests {
         // explicitly since that uid has no /etc/passwd entry in the image.
         let task = stub_task("t13", "/tmp/termic-docker-test-does-not-exist-13");
         let env = std::collections::HashMap::new();
-        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &[], &[]);
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &[], &[], "pty-aaaa1111");
         let argv = render_argv(&spec, "claude", &[]);
         let user_idx = argv.iter().position(|a| a == "--user").expect("--user flag missing");
         assert_eq!(argv[user_idx + 1], host_uid_gid());
@@ -1254,7 +1296,7 @@ mod tests {
             "/etc:/data/unsafe".to_string(),    // denylisted host isn't the point; container is fine, host stays as-is
             "not-an-entry".to_string(),         // malformed - dropped
         ];
-        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &[], &extras);
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &[], &extras, "pty-aaaa1111");
         let containers: Vec<&str> = spec.mounts.iter().map(|m| m.container.as_str()).collect();
         assert_eq!(containers.iter().filter(|c| **c == "/data/mcp").count(), 1, "{containers:?}");
         let mcp_mount = spec.mounts.iter().find(|m| m.container == "/data/mcp").unwrap();
@@ -1266,7 +1308,7 @@ mod tests {
         let task = stub_task("t12", "/tmp/termic-docker-test-does-not-exist-12");
         let env = std::collections::HashMap::new();
         let extras = vec!["/tmp/whatever:/root/.claude".to_string()];
-        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &[], &extras);
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &[], &extras, "pty-aaaa1111");
         let claude_mounts: Vec<&str> = spec
             .mounts
             .iter()
@@ -1284,7 +1326,7 @@ mod tests {
         let task = stub_task("t5", "/tmp/termic-docker-test-does-not-exist-5");
         let env = std::collections::HashMap::new();
         let extras = vec![".mytool".to_string(), "../escape".to_string(), "/etc".to_string()];
-        let spec = build_spec(&task, "copilot", "img", &task.path, vec![], &env, &extras, false, &[], &[]);
+        let spec = build_spec(&task, "copilot", "img", &task.path, vec![], &env, &extras, false, &[], &[], "pty-aaaa1111");
         let mounted: Vec<&str> = spec.mounts.iter().map(|m| m.container.as_str()).collect();
         assert!(mounted.contains(&"/root/.copilot"), "{mounted:?}");
         assert!(mounted.contains(&"/root/.mytool"), "{mounted:?}");
@@ -1301,7 +1343,7 @@ mod tests {
         let task = stub_task("t6", "/tmp/termic-docker-test-does-not-exist-6");
         let env = std::collections::HashMap::new();
         let extras = vec![".grok".to_string()];
-        let spec = build_spec(&task, "grok", "img", &task.path, vec![], &env, &extras, true, &[], &[]);
+        let spec = build_spec(&task, "grok", "img", &task.path, vec![], &env, &extras, true, &[], &[], "pty-aaaa1111");
         assert!(!spec.mounts.iter().any(|m| m.container.contains("grok")));
         assert!(!persist_offerable("grok"));
     }
@@ -1313,13 +1355,13 @@ mod tests {
         let extras = vec![".mytool".to_string()];
         // Off by default: an unrecognized agent id with extras configured
         // but the opt-in switch still off mounts nothing at all.
-        let off = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &extras, false, &[], &[]);
+        let off = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &extras, false, &[], &[], "pty-aaaa1111");
         assert!(off.mounts.iter().all(|m| !m.container.contains("mytool")));
 
         // Once opted in, the user's own dirs become the mount (there is no
         // confirmed built-in dir to fall back on for an agent this module
         // has never seen).
-        let on = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &extras, true, &[], &[]);
+        let on = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &extras, true, &[], &[], "pty-aaaa1111");
         let mounted: Vec<&str> = on.mounts.iter().map(|m| m.container.as_str()).collect();
         assert!(mounted.contains(&"/root/.mytool"), "{mounted:?}");
     }
@@ -1328,7 +1370,7 @@ mod tests {
     fn custom_agent_persist_enabled_with_no_dirs_mounts_nothing() {
         let task = stub_task("t8", "/tmp/termic-docker-test-does-not-exist-8");
         let env = std::collections::HashMap::new();
-        let spec = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &[], true, &[], &[]);
+        let spec = build_spec(&task, "my-custom-agent", "img", &task.path, vec![], &env, &[], true, &[], &[], "pty-aaaa1111");
         // Only the always-there worktree/.git mounts - no agent config dir.
         assert!(spec.mounts.iter().all(|m| !m.why.contains("Docker agent")));
     }
@@ -1342,7 +1384,7 @@ mod tests {
         let task = stub_task("t9", "/tmp/termic-docker-test-does-not-exist-9");
         let env = std::collections::HashMap::new();
         let allowed = vec!["/tmp/some-shared-dir".to_string()];
-        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &allowed, &[]);
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &allowed, &[], "pty-aaaa1111");
         let mounted: Vec<&str> = spec.mounts.iter().map(|m| m.container.as_str()).collect();
         assert!(mounted.contains(&"/tmp/some-shared-dir"), "{mounted:?}");
     }
@@ -1354,7 +1396,7 @@ mod tests {
         // A regex: entry (Seatbelt-only, no literal path) and the task's own
         // path (already mounted implicitly as step 1) should both be no-ops.
         let allowed = vec!["regex:^$HOME/\\.foo$".to_string(), task.path.clone()];
-        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &allowed, &[]);
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &allowed, &[], "pty-aaaa1111");
         let host_paths: Vec<&str> = spec.mounts.iter().map(|m| m.host.as_str()).collect();
         // No stray mount was added for either entry - just the one implicit
         // worktree mount already covering task.path.

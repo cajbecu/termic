@@ -2888,14 +2888,27 @@ fn pty_spawn(
     // `docker` CLI client it samples sits nearly idle while the real work
     // happens in the daemon's VM), so `procmon_roots` needs this name to
     // ask `docker stats` instead. See procmon.rs's docker_stats module.
+    // Minted here rather than just before the PTY is registered: the
+    // container's `--name` is derived from it (one container per TAB, see
+    // build_spec's `pty_id`), so it has to exist before the docker argv is
+    // rendered. Same value keys the PTY map below.
+    let id = Uuid::new_v4().to_string();
     let docker_argv: Option<(Vec<String>, String)> = if let Some(task) = docker_task {
         let agent = args.agent_id.clone().unwrap_or_else(|| task.cli.clone());
         let image = docker::spawn_image_tag().ok_or_else(|| {
             "Docker image not built. Open Settings → Docker Sandbox and build it first.".to_string()
         })?;
-        // Belt-and-suspenders: remove any stale same-named container left
-        // by an unclean shutdown so `--name` doesn't collide on respawn.
-        docker::cleanup_task(&task.id);
+        // NO pre-spawn sweep here. This used to be
+        // `docker::cleanup_task(&task.id)`, "belt-and-suspenders against a
+        // stale same-named container", but the name is now per-PTY off a
+        // fresh uuid, so a same-named leftover cannot exist. The sweep was
+        // label-scoped to the TASK, so opening a SECOND agent tab in a
+        // Docker task `docker rm -f`'d the first tab's still-running
+        // container mid-session (GH #231). Leftovers from an unclean
+        // shutdown are still reaped: `cleanup_all` runs at launch (every
+        // termic-labeled container alive then is provably orphaned) and
+        // again at quit. Dropping it also takes daemon round trips off the
+        // spawn path, which is a sync command.
         let docker_settings = load_settings_inner();
         let agent_extra_dirs = docker_settings.docker_agent_extra_dirs.get(&agent).cloned().unwrap_or_default();
         let agent_persist_enabled = docker_settings.docker_agent_persist_enabled.get(&agent).copied().unwrap_or(false);
@@ -2904,7 +2917,7 @@ fn pty_spawn(
         // so switching a task between Seatbelt and Docker doesn't lose
         // whatever extra directories were configured for it.
         let (docker_allowed_paths, _) = live_sandbox_lists(&task);
-        let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone(), &args.env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts);
+        let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone(), &args.env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts, &id);
         let argv = docker::render_argv(&spec, &args.cmd, &args.args);
         dlog(&format!("[pty_spawn] docker task={} agent={} image={} argv={argv:?}", task.id, agent, image));
         Some((argv, spec.container_name))
@@ -3094,7 +3107,6 @@ fn pty_spawn(
         sandbox::register_root_pid(wid, pid);
     }
 
-    let id = Uuid::new_v4().to_string();
     let master = pair.master;
     let mut reader = master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = master.take_writer().map_err(|e| e.to_string())?;
@@ -15954,6 +15966,12 @@ struct DockerCommandPreview {
     argv: Vec<String>,
 }
 
+/// Stand-in pty id for the command PREVIEW. A preview belongs to no tab,
+/// and the only thing the id feeds is the container's `--name` suffix, so a
+/// fixed marker keeps the rendered name stable between openings instead of
+/// showing the user a different random suffix every time.
+const PREVIEW_PTY_ID: &str = "preview";
+
 #[tauri::command]
 fn docker_command_preview(task_id: String, agent_id: Option<String>) -> Result<DockerCommandPreview, String> {
     let task = load_tasks()
@@ -15976,7 +15994,7 @@ fn docker_command_preview(task_id: String, agent_id: Option<String>) -> Result<D
     let agent_extra_dirs = settings.docker_agent_extra_dirs.get(&agent_id).cloned().unwrap_or_default();
     let agent_persist_enabled = settings.docker_agent_persist_enabled.get(&agent_id).copied().unwrap_or(false);
     let (docker_allowed_paths, _) = live_sandbox_lists(&task);
-    let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &agent.env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts);
+    let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &agent.env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts, "preview");
     let argv = docker::render_argv(&spec, &agent.command, &agent.args);
     Ok(DockerCommandPreview { spec, argv })
 }
