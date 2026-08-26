@@ -22,6 +22,7 @@ import { uniqueBranch, derivedBranch } from "@/lib/quickTask";
 import { cn } from "@/lib/utils";
 import { Check, Loader2, AlertTriangle, GitBranch, Link2, FolderGit2, Plus, CircleDot, History } from "lucide-react";
 import { SandboxPicker, DockerEngineNote } from "@/components/SandboxPicker";
+import { ListField } from "@/components/settings/Controls";
 import { SANDBOX_PRESETS } from "@/lib/sandboxPresets";
 import { selectionToFields, type MemberMode, type ImportableWorktree, type SandboxSelection, type ForgeIssue, type IssueLookup } from "@/lib/types";
 import { projectForgeIssues } from "@/lib/ipc";
@@ -151,6 +152,11 @@ export function NewTaskDialog() {
   // behave normally (blank lines while typing don't fight the split).
   const [sbRw,    setSbRw]    = useState("");
   const [sbHosts, setSbHosts] = useState("");
+  // Docker's own per-task extra mounts (host_path:container_path). Seeded
+  // from Settings.docker_default_extra_mounts, same lifecycle as sbRw/
+  // sbHosts above; no per-project default exists for this one (Docker has
+  // no project-level sandbox config the way Seatbelt does).
+  const [dockerMounts, setDockerMounts] = useState("");
   // Multi-repo: per-member spec, keyed by member root_path. Seeded when
   // the dialog opens for a multi project from project.members (which are
   // self-contained — no project lookup). Scripts are not per-task —
@@ -405,6 +411,7 @@ export function NewTaskDialog() {
     // merge global defaults on top (dedupe-preserving order).
     setSbRw((p?.sandbox_rw_paths ?? []).join("\n"));
     setSbHosts((p?.sandbox_allowed_hosts ?? []).join("\n"));
+    setDockerMounts("");
     // Seed the per-member spec (multi-repo only). Each git member starts
     // on its last-used mode (remembered per root_path, like the single-repo
     // dialog remembers its toggle) and falls back to Worktree — the simplest
@@ -453,6 +460,7 @@ export function NewTaskDialog() {
         setSbRw(merge(s.sandbox_default_rw_paths,      p?.sandbox_rw_paths));
         setSbHosts(merge(s.sandbox_default_allowed_hosts, p?.sandbox_allowed_hosts));
       }
+      setDockerMounts(merge(s.docker_default_extra_mounts));
     }).catch(() => {});
     // Import mode: off by default. We eager-load the project's existing
     // unopened worktrees so the "Import an existing worktree instead"
@@ -624,7 +632,10 @@ export function NewTaskDialog() {
       const splitLines = (s: string) => s.split("\n").map(l => l.trim()).filter(Boolean);
       const w = await withCreateLock(() => taskImportWorktree(
         projectId, importSelected, name.trim(), cli,
-        { enabled: sandbox, mode: sandboxMode, rwPaths: splitLines(sbRw), allowedHosts: splitLines(sbHosts), docker: dockerWanted },
+        {
+          enabled: sandbox, mode: sandboxMode, rwPaths: splitLines(sbRw), allowedHosts: splitLines(sbHosts),
+          docker: dockerWanted, dockerExtraMounts: dockerWanted ? splitLines(dockerMounts) : undefined,
+        },
         undefined, // no externally-started session id from this dialog
         // Gated on capability, not just field state: the input hides when
         // the agent switches to one with nothing to resume, but the typed
@@ -658,7 +669,10 @@ export function NewTaskDialog() {
       // other create path (createLock.ts).
       const w = await withCreateLock(() => taskOpenRepo(
         projectId, cli, name.trim(),
-        { enabled: sandbox, mode: sandboxMode, rwPaths: splitLines(sbRw), allowedHosts: splitLines(sbHosts), docker: dockerWanted },
+        {
+          enabled: sandbox, mode: sandboxMode, rwPaths: splitLines(sbRw), allowedHosts: splitLines(sbHosts),
+          docker: dockerWanted, dockerExtraMounts: dockerWanted ? splitLines(dockerMounts) : undefined,
+        },
         undefined,
         undefined, // no externally-started session id from this dialog
         resumeOverrideArg(),
@@ -755,6 +769,7 @@ export function NewTaskDialog() {
           sandbox_rw_paths:       sandbox ? splitLines(sbRw)    : undefined,
           sandbox_allowed_hosts:  sandbox ? splitLines(sbHosts) : undefined,
           docker_sandbox_enabled: dockerWanted,
+          docker_extra_mounts:    dockerWanted ? splitLines(dockerMounts) : undefined,
           resume_override: resumeOverrideArg(),
         }));
       } else {
@@ -775,6 +790,7 @@ export function NewTaskDialog() {
           sandbox_rw_paths:       sandbox ? splitLines(sbRw)    : undefined,
           sandbox_allowed_hosts:  sandbox ? splitLines(sbHosts) : undefined,
           docker_sandbox_enabled: dockerWanted,
+          docker_extra_mounts:    dockerWanted ? splitLines(dockerMounts) : undefined,
         }));
       }
       await loadAll();
@@ -1418,8 +1434,14 @@ export function NewTaskDialog() {
             compact
           />
           {selection === "docker" && (
-            <div className="mt-2">
+            <div className="mt-2 flex flex-col gap-2">
               <DockerEngineNote compact />
+              <ListField
+                label="Extra mounts"
+                placeholder={"$HOME/mcp-data:/data/mcp"}
+                value={dockerMounts}
+                onChange={setDockerMounts}
+              />
             </div>
           )}
         </Field>

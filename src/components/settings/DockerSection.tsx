@@ -19,20 +19,50 @@ import { StreamLanguage } from "@codemirror/language";
 import {
   dockerCheck, dockerImageStatus, dockerGetDockerfile, dockerDefaultDockerfile,
   dockerSetDockerfile, dockerBuildImage, onDockerBuildLog, onDockerBuildDone, dockerAgentDirs,
+  settingsSave,
   type DockerStatus, type DockerImageStatus, type DockerAgentDirs,
 } from "@/lib/ipc";
-import { Block, SectionTitle, Toggle, useBackendSettings } from "./Controls";
+import type { Settings } from "@/lib/types";
+import { Block, ListField, SectionTitle, Toggle, useBackendSettings } from "./Controls";
 import { DockerRebuildFrequencyPicker } from "@/components/DockerRebuildFrequencyPicker";
 import { describeLastBuildDate } from "@/lib/dockerDailyRebuild";
-import { cn } from "@/lib/utils";
+import { cn, cleanLines } from "@/lib/utils";
 import { Loader2, CircleCheck, CircleAlert, ChevronDown, Lock, X } from "lucide-react";
 
 export function DockerSection() {
-  const { settings, patch } = useBackendSettings();
+  const { settings, patch, store } = useBackendSettings();
   const [status, setStatus] = useState<DockerStatus | null>(null);
   const [image, setImage] = useState<DockerImageStatus | null>(null);
   const [agentDirs, setAgentDirs] = useState<DockerAgentDirs[]>([]);
   const [showAgentDirs, setShowAgentDirs] = useState(false);
+
+  // Default extra mounts: seeded into a new Docker-sandboxed task's own
+  // "Extra mounts" field (Sandbox dialog / New task dialog), same
+  // host_path:container_path shape, same explicit dirty/Save pattern as
+  // "Global sandbox defaults" (SandboxSection) - a textarea wants an
+  // explicit commit, unlike the toggles above which patch on every change.
+  const [defaultMounts, setDefaultMounts] = useState("");
+  const [defaultMountsOriginal, setDefaultMountsOriginal] = useState("");
+  const [mountsBusy, setMountsBusy] = useState(false);
+  const mountsHydrated = useRef(false);
+  useEffect(() => {
+    if (!settings || mountsHydrated.current) return;
+    mountsHydrated.current = true;
+    const v = (settings.docker_default_extra_mounts ?? []).join("\n");
+    setDefaultMounts(v);
+    setDefaultMountsOriginal(v);
+  }, [settings]);
+  const defaultMountsDirty = defaultMounts !== defaultMountsOriginal;
+  async function saveDefaultMounts() {
+    if (!settings) return;
+    setMountsBusy(true);
+    try {
+      const next: Settings = { ...settings, docker_default_extra_mounts: cleanLines(defaultMounts) };
+      await settingsSave(next);
+      store(next);
+      setDefaultMountsOriginal(defaultMounts);
+    } finally { setMountsBusy(false); }
+  }
 
   // Dockerfile editor state.
   const hostRef = useRef<HTMLDivElement>(null);
@@ -312,6 +342,38 @@ export function DockerSection() {
                 ))}
               </div>
             )}
+          </Block>
+
+          {/* Default extra mounts: the Settings-level companion to a
+              task's own "Extra mounts" field (Sandbox dialog / New task
+              dialog). Same host_path:container_path shape - these are
+              UNIONED into a new Docker-sandboxed task's mounts at
+              creation, then owned by the task from then on: the user can
+              edit, remove, or add to them per task with no effect back
+              here. Global rather than per-agent, unlike "Per-agent config
+              dirs" above: an extra mount's use case (persisting an MCP
+              server's own data dir, say) isn't tied to which agent runs. */}
+          <Block>
+            <div className="text-[14px] font-medium">Default extra mounts</div>
+            <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+              Bind-mount these host directories into every NEW Docker-sandboxed task by default, one per line as{" "}
+              <code className="font-mono">host_path:container_path</code> (same field and format as a task's own
+              "Extra mounts"). The user can edit, remove, or add to them per task afterward - editing this list only
+              affects tasks created from now on.
+            </div>
+            <div className="mt-3">
+              <ListField
+                label="Extra mounts"
+                placeholder={"$HOME/mcp-data:/data/mcp"}
+                value={defaultMounts}
+                onChange={setDefaultMounts}
+              />
+            </div>
+            <div className="mt-3">
+              <Button variant="primary" disabled={!defaultMountsDirty || mountsBusy} onClick={saveDefaultMounts}>
+                {mountsBusy ? "Saving…" : "Save"}
+              </Button>
+            </div>
           </Block>
 
           {/* Dockerfile editor */}

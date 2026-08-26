@@ -431,6 +431,8 @@ export interface CreateMultiArgs {
    *  exclusive with sandbox_mode/sandbox_enabled - when true, Rust stores
    *  those as off regardless of what else was sent. */
   docker_sandbox_enabled?: boolean;
+  /** See `CreateTaskArgs.docker_extra_mounts`. */
+  docker_extra_mounts?: string[];
   /** Resume-args override for the host task, applied from the first spawn.
    *  Same field as the task menu's "Resume override". */
   resume_override?: string;
@@ -463,6 +465,13 @@ export interface CreateTaskArgs {
    *  exclusive with sandbox_mode/sandbox_enabled - when true, Rust stores
    *  those as off regardless of what else was sent. */
   docker_sandbox_enabled?: boolean;
+  /** Override for the task's Docker extra mounts (`host_path:
+   *  container_path`). The New task dialog seeds this from
+   *  `Settings.docker_default_extra_mounts` and lets the user edit before
+   *  Create, same convention as `sandbox_rw_paths`. Unset falls back to
+   *  `Settings.docker_default_extra_mounts` verbatim (only meaningful with
+   *  `docker_sandbox_enabled`). */
+  docker_extra_mounts?: string[];
   /** Pre-set launch command for a `cli === "custom"` worktree task (quick
    *  "Custom command" in worktree mode). The default tab runs this through a
    *  login shell instead of an agent binary. Null/undefined for agent/shell. */
@@ -627,6 +636,17 @@ export interface Settings {
    *  risks silently shadowing a binary the image baked in at that same
    *  path. Meaningless for a built-in agent - it's always mounted. */
   docker_agent_persist_enabled?: Record<string, boolean>;
+  /** Default `Task.docker_extra_mounts` entries (same `host_path:
+   *  container_path` shape, Settings → Docker Sandbox), unioned into a new
+   *  Docker-sandboxed task's mounts at creation time - the New Task
+   *  dialog seeds its own "Extra mounts" field from this, same convention
+   *  as `sandbox_default_rw_paths` seeding a project's allow-list. Editing
+   *  this later only affects NEW tasks; an existing task's own
+   *  `docker_extra_mounts` is frozen at creation and edited from then on
+   *  via `taskSetDocker`. Global, not per-agent: unlike
+   *  `docker_agent_extra_dirs`, an extra mount's use case isn't tied to
+   *  which agent is running. */
+  docker_default_extra_mounts?: string[];
   /** Personal (this-machine) glob patterns hidden from the "All files"
    *  tree across every project. Unioned with each project's committed
    *  `.termic.yaml` `exclude`. `.git` is always hidden regardless. */

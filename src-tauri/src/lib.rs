@@ -776,6 +776,14 @@ pub struct CreateTaskArgs {
     /// as off). Unset/false → Seatbelt (or no cage) as usual.
     #[serde(default)]
     pub docker_sandbox_enabled: Option<bool>,
+    /// Optional override for the task's Docker extra mounts (`host_path:
+    /// container_path`). The dialog seeds the field from
+    /// `Settings.docker_default_extra_mounts` and lets the user add/remove
+    /// before Create, same convention as `sandbox_rw_paths` above. Unset →
+    /// fall back to `Settings.docker_default_extra_mounts` verbatim
+    /// (only meaningful when `docker_sandbox_enabled` is also true).
+    #[serde(default)]
+    pub docker_extra_mounts: Option<Vec<String>>,
     /// Pre-set launch command for a `cli == "custom"` worktree task. The
     /// default tab runs this through a login shell instead of an agent
     /// binary (e.g. `npm run dev`, `ssh box`). None for agent / shell tasks.
@@ -3812,6 +3820,7 @@ fn task_open_repo(
     sandbox_rw_paths: Option<Vec<String>>,
     sandbox_allowed_hosts: Option<Vec<String>>,
     docker_sandbox_enabled: Option<bool>,
+    docker_extra_mounts: Option<Vec<String>>,
     resume_session_id: Option<String>,
     resume_override: Option<String>,
 ) -> Result<Task, String> {
@@ -3968,6 +3977,15 @@ fn task_open_repo(
     };
     let sandbox_rw_paths = sandbox_rw_paths.unwrap_or_default();
     let sandbox_allowed_hosts = sandbox_allowed_hosts.unwrap_or_default();
+    // Unlike sandbox_rw_paths/sandbox_allowed_hosts above, this DOES fall
+    // back to a global default (Settings.docker_default_extra_mounts) - the
+    // "don't surprise a quick main-checkout open with cage restrictions"
+    // reasoning above is about the Seatbelt allow-list widening what's
+    // ALLOWED; this only takes effect once the user has already explicitly
+    // turned Docker mode on for this task, same as the always-on per-agent
+    // config dir mount.
+    let docker_extra_mounts = docker_extra_mounts
+        .unwrap_or_else(|| if docker_sandbox_enabled { load_settings_inner().docker_default_extra_mounts } else { Vec::new() });
     // Externally-started session to attach (GH #169): the natural fit
     // here, since the main checkout shares its cwd with sessions the user
     // started in the repo directly. NOTE has_resumable_history stays
@@ -4005,7 +4023,7 @@ fn task_open_repo(
         sandbox_allowed_hosts,
         docker_sandbox_enabled,
         docker_extra_args: Vec::new(),
-        docker_extra_mounts: Vec::new(),
+        docker_extra_mounts,
         composition,
         extra_named_ports,
         port_block_len,
@@ -4117,6 +4135,7 @@ fn task_import_worktree(
     sandbox_rw_paths: Option<Vec<String>>,
     sandbox_allowed_hosts: Option<Vec<String>>,
     docker_sandbox_enabled: Option<bool>,
+    docker_extra_mounts: Option<Vec<String>>,
     resume_session_id: Option<String>,
     resume_override: Option<String>,
     yolo: Option<bool>,
@@ -4209,6 +4228,8 @@ fn task_import_worktree(
         .unwrap_or_else(|| merge(&globals.sandbox_default_rw_paths, &proj.sandbox_rw_paths));
     let sandbox_allowed_hosts = sandbox_allowed_hosts
         .unwrap_or_else(|| merge(&globals.sandbox_default_allowed_hosts, &proj.sandbox_allowed_hosts));
+    let docker_extra_mounts = docker_extra_mounts
+        .unwrap_or_else(|| if docker_sandbox_enabled { globals.docker_default_extra_mounts.clone() } else { Vec::new() });
 
     // GH #169 seed; has_resumable_history stays false deliberately, see
     // seeded_session_ids and the task_open_repo note (per-cli seed vs
@@ -4239,7 +4260,7 @@ fn task_import_worktree(
         sandbox_allowed_hosts,
         docker_sandbox_enabled,
         docker_extra_args: Vec::new(),
-        docker_extra_mounts: Vec::new(),
+        docker_extra_mounts,
         composition: Vec::new(),
         extra_named_ports,
         port_block_len,
@@ -4564,6 +4585,8 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
         .unwrap_or_else(|| merge(&globals.sandbox_default_rw_paths, &proj.sandbox_rw_paths));
     let sandbox_allowed_hosts = args.sandbox_allowed_hosts
         .unwrap_or_else(|| merge(&globals.sandbox_default_allowed_hosts, &proj.sandbox_allowed_hosts));
+    let docker_extra_mounts = args.docker_extra_mounts
+        .unwrap_or_else(|| if docker_sandbox_enabled { globals.docker_default_extra_mounts.clone() } else { Vec::new() });
     // GH #169 seed; has_resumable_history stays false deliberately, see
     // seeded_session_ids and the task_open_repo note (per-cli seed vs
     // task-wide flag).
@@ -4590,7 +4613,7 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
         sandbox_allowed_hosts,
         docker_sandbox_enabled,
         docker_extra_args: Vec::new(),
-        docker_extra_mounts: Vec::new(),
+        docker_extra_mounts,
         // Single-project tasks leave composition empty. Multi-
         // repo task creation runs through a separate code path
         // (task_create_multi) that populates this and re-uses
@@ -4661,6 +4684,9 @@ pub struct CreateMultiArgs {
     /// enforced in `task_create_multi_sync`.
     #[serde(default)]
     pub docker_sandbox_enabled: Option<bool>,
+    /// See `CreateTaskArgs::docker_extra_mounts`.
+    #[serde(default)]
+    pub docker_extra_mounts: Option<Vec<String>>,
     /// Resume-args override for the host task, set at create so the first
     /// spawn already carries it. Same storage as `task_set_resume_override`.
     #[serde(default)]
@@ -5044,6 +5070,8 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
     }
     let sandbox_rw_paths    = args.sandbox_rw_paths.unwrap_or(base_rw);
     let sandbox_allowed_hosts = args.sandbox_allowed_hosts.unwrap_or(base_hosts);
+    let docker_extra_mounts = args.docker_extra_mounts
+        .unwrap_or_else(|| if docker_sandbox_enabled { globals.docker_default_extra_mounts.clone() } else { Vec::new() });
 
     let cli = args.cli.unwrap_or_else(|| host.default_cli.clone());
     // Block base allocated above, before the members were created.
@@ -5071,7 +5099,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
         sandbox_allowed_hosts,
         docker_sandbox_enabled,
         docker_extra_args: Vec::new(),
-        docker_extra_mounts: Vec::new(),
+        docker_extra_mounts,
         composition,
         extra_named_ports,
         port_block_len,
@@ -14995,6 +15023,19 @@ pub struct Settings {
     /// looked up here; it's always persisted regardless.
     #[serde(default)]
     pub docker_agent_persist_enabled: std::collections::HashMap<String, bool>,
+    /// Default `Task.docker_extra_mounts` entries (same `host_path:
+    /// container_path` shape, Settings → Docker Sandbox), unioned into a new
+    /// Docker-sandboxed task's mounts at creation time (`NewTaskDialog`
+    /// merges this with the task's own additions, same convention as
+    /// `sandbox_default_rw_paths` merging with a project's list). Editing
+    /// this later only affects NEW tasks - a task's own `docker_extra_mounts`
+    /// is frozen at creation and edited from then on via `task_set_docker`,
+    /// same immutability promise as every other sandbox default in this
+    /// struct. Global, not per-agent: unlike `docker_agent_extra_dirs`, an
+    /// extra mount's use case (persisting an MCP server's own data dir,
+    /// say) isn't tied to which agent is running.
+    #[serde(default)]
+    pub docker_default_extra_mounts: Vec<String>,
     /// Personal (this-machine) glob patterns hidden from the "All files"
     /// tree across every project. Unioned with each project's committed
     /// `.termic.yaml` `exclude` list. `.git` is always hidden regardless.
