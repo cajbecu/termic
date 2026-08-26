@@ -44,6 +44,13 @@ pub fn state_dirs(agent_id: &str) -> &'static [&'static str] {
         // opencode follows XDG: config in `.config/opencode`, auth +
         // session DB in `.local/share/opencode`.
         "opencode" => &[".config/opencode", ".local/share/opencode"],
+        // pi (Earendil): global settings + trust file live under
+        // `~/.pi/agent/`, so the whole `.pi` tree is the config dir. Safe to
+        // mount in Docker ONLY because the image installs pi from npm (the
+        // binary lands in the global prefix, outside HOME) - pi's own
+        // install.sh can put it in `~/.pi/agent/bin`, which would be grok's
+        // situation exactly. See assets/Dockerfile.default.
+        "pi" => &[".pi"],
         // grok: binary, bundled skills, and config all live under `.grok`
         // with no clean relocation env. Listed here for Seatbelt (which
         // allows the real path regardless); `docker::agent_config` still

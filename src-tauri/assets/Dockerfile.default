@@ -48,6 +48,14 @@ RUN npm install -g opencode-ai
 RUN curl -fsSL https://x.ai/cli/install.sh | bash
 # agy (Google Antigravity, native binary -> ~/.local/bin) https://antigravity.google/docs/cli/install
 RUN curl -fsSL https://antigravity.google/cli/install.sh | bash
+# pi (Earendil) https://pi.dev/docs/latest — installed from npm ON PURPOSE,
+# not via https://pi.dev/install.sh. That script's managed mode can put the
+# binary in ~/.pi/agent/bin, i.e. INSIDE the same ~/.pi that holds
+# settings.json and trust.json — grok's exact shape, and the reason grok can
+# never persist config in Docker (mounting the config dir would shadow the
+# binary). The npm package puts `pi` in the image's global prefix instead, so
+# ~/.pi holds config only and IS safe to mount.
+RUN npm install -g @earendil-works/pi-coding-agent
 
 # ── Add your MCP servers here (installed into the image) ────────────────
 # RUN npm install -g @some/mcp-server
