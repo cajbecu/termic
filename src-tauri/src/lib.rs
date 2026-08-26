@@ -6093,6 +6093,7 @@ fn procmon_roots(manager: &PtyManager) -> Vec<procmon::Root> {
                     tab_id: None,
                     pid: srv.pid as u32,
                     out_bytes: None,
+                    docker_container: None,
                 });
             }
         }
