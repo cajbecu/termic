@@ -841,6 +841,24 @@ pub fn write_dockerfile(contents: &str) -> Result<(), String> {
 
 // ──────────────────────────── Image build ──────────────────────────────
 
+/// Helper to construct a `Command` targeting the `docker` binary, configured
+/// with the login-shell-resolved PATH and any `DOCKER_*` environment variables.
+///
+/// On macOS, GUI apps inherit a bare `/usr/bin:/bin:/usr/sbin:/sbin` PATH from
+/// launchd, which misses `/usr/local/bin`, `/opt/homebrew/bin`, `~/.docker/bin`,
+/// OrbStack, and custom DOCKER_HOST / DOCKER_CONTEXT settings in shell profiles.
+pub fn docker_cmd() -> Command {
+    let mut cmd = Command::new("docker");
+    let (path, inject) = crate::shell_env::spawn_env();
+    cmd.env("PATH", path);
+    for (k, v) in inject {
+        if k.starts_with("DOCKER_") || k == "COLIMA_PROFILE" {
+            cmd.env(k, v);
+        }
+    }
+    cmd
+}
+
 /// Construct the `docker build` Command + the tag it will produce, writing
 /// the Dockerfile to disk first. The caller drives execution (the command
 /// layer streams its output line-by-line off a background thread; never on
@@ -856,7 +874,7 @@ pub fn build_command(dockerfile: &str, no_cache: bool) -> Result<(Command, Strin
     let df_path = dir.join("Dockerfile");
     std::fs::write(&df_path, dockerfile).map_err(|e| e.to_string())?;
 
-    let mut cmd = Command::new("docker");
+    let mut cmd = docker_cmd();
     // --progress=plain so the streamed log is line-based (not a TTY redraw).
     cmd.args(["build", "--progress=plain", "-t", &tag, "-f"]);
     cmd.arg(&df_path);
@@ -923,7 +941,7 @@ pub struct DockerStatus {
 
 /// Probe for the `docker` binary + a running daemon. Cheap; no build.
 pub fn check() -> DockerStatus {
-    let version = Command::new("docker")
+    let version = docker_cmd()
         .arg("--version")
         .output()
         .ok()
@@ -931,7 +949,7 @@ pub fn check() -> DockerStatus {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
     let binary = version.is_some();
     let daemon = binary
-        && Command::new("docker")
+        && docker_cmd()
             .arg("info")
             .output()
             .map(|o| o.status.success())
@@ -942,7 +960,7 @@ pub fn check() -> DockerStatus {
 /// Does an image with this tag already exist locally? (Drives dropdown
 /// availability + the "not built / rebuild" Settings state.)
 pub fn image_exists(tag: &str) -> bool {
-    Command::new("docker")
+    docker_cmd()
         .args(["image", "inspect", tag])
         .output()
         .map(|o| o.status.success())
@@ -1091,7 +1109,7 @@ fn short_id(id: &str) -> &str {
 ///
 /// Off-thread at every call site: it shells out to the daemon.
 pub fn rm_container(name: &str) {
-    let _ = Command::new("docker").args(["rm", "-f", name]).output();
+    let _ = docker_cmd().args(["rm", "-f", name]).output();
 }
 
 /// `docker rm -f` every termic-labeled container (app quit). Non-fatal.
@@ -1100,7 +1118,7 @@ pub fn cleanup_all() {
 }
 
 fn rm_by_filter(filter: &str) {
-    let ids = Command::new("docker")
+    let ids = docker_cmd()
         .args(["ps", "-aq", "--filter", filter])
         .output()
         .ok()
@@ -1108,7 +1126,7 @@ fn rm_by_filter(filter: &str) {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
     for id in ids.lines().filter(|l| !l.trim().is_empty()) {
-        let _ = Command::new("docker").args(["rm", "-f", id]).output();
+        let _ = docker_cmd().args(["rm", "-f", id]).output();
     }
 }
 
@@ -1128,6 +1146,7 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 
 /// One container's live usage, as `docker stats --no-stream` reports it.
+#[derive(Clone, Debug, PartialEq)]
 struct ContainerStats {
     cpu_pct: f64,
     mem_bytes: u64,
@@ -1217,7 +1236,7 @@ fn query_stats(names: &[String]) -> HashMap<String, ContainerStats> {
     if names.is_empty() {
         return HashMap::new();
     }
-    let out = Command::new("docker")
+    let out = docker_cmd()
         .arg("stats")
         .arg("--no-stream")
         .arg("--format")

@@ -124,6 +124,8 @@ export function DockerSection() {
       .catch(() => {})
       .finally(() => setDfLoaded(true));
     refresh();
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
   }, []);
 
   // ── CodeMirror init (once, after the Dockerfile has loaded so the

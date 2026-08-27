@@ -3029,6 +3029,12 @@ fn pty_spawn(
         for (k, v) in login_inject {
             cmd.env(k, v);
         }
+    } else if is_docker {
+        for (k, v) in login_inject {
+            if k.starts_with("DOCKER_") || k == "COLIMA_PROFILE" {
+                cmd.env(k, v);
+            }
+        }
     }
     for (k, v) in &args.env {
         cmd.env(k, expand_tilde_env(v));
