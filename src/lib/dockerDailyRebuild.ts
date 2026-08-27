@@ -106,11 +106,14 @@ export async function maybeRebuildDockerImageForLaunch(task: Task): Promise<void
 const REBUILD_EVENT_TIMEOUT_MS = 15 * 60 * 1000;
 
 async function promptAndRebuild(task: Task, lastBuiltDate: string | null, ask: boolean): Promise<void> {
-  let background = false;
+  // Automatic ALWAYS means background: someone who turned the prompt off said
+  // "stop interrupting me", and silently blocking their first launch of the
+  // day would be that same interruption without the dialog.
+  let background = !ask;
   if (ask) {
     const choice = await useUI.getState().askDockerRebuild(task.name, lastBuiltDate);
     if (choice === "skip") return;
-    background = choice === "background";
+    background = choice === "always" || choice === "background";
     if (choice === "always") {
       // Persist BEFORE the build so the answer survives even if the rebuild
       // fails or the app is closed while it runs.

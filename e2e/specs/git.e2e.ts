@@ -1736,6 +1736,30 @@ describe("pr card (#21)", () => {
     if (taskId) await archiveTask(taskId);
   });
 
+  /** Seed a lookup and wait for `text`, RE-SEEDING on every poll.
+   *
+   *  A real lookup landing mid-assertion overwrites the seeded one, and the
+   *  fixture repo is not on a forge, so the real answer is
+   *  "unsupported-remote" - for which the card renders nothing and the wait
+   *  times out. Several things trigger a real lookup (an agent PTY spawning,
+   *  the panel's own refresh), so which case lost the race varied between
+   *  runs; it presented as two adjacent tests taking turns to fail.
+   *
+   *  Re-asserting the seed each poll makes the race unlosable without
+   *  disabling `refresh`, which other cases in this file legitimately need. */
+  const seedPrAndWaitForText = async (lookup: unknown, text: string) => {
+    await seedPr(lookup);
+    await browser.waitUntil(async () => {
+      await browser.execute(
+        (id, lk) => {
+          window.__termic!.usePr.setState((s: any) => ({
+            byTask: { ...s.byTask, [id!]: { lookup: lk, loading: false, fetchedAt: Date.now() } },
+          }));
+        }, taskId, lookup);
+      return browser.execute((t) => document.body.innerText.includes(t), text);
+    }, { timeoutMsg: `never appeared with the lookup held in place: ${text}` });
+  };
+
   /** Let the card finish its own first lookup, then overwrite it. */
   const seedPr = async (lookup: unknown) => {
     await browser.waitUntil(
@@ -1806,26 +1830,24 @@ describe("pr card (#21)", () => {
   });
 
   it("names the missing CLI and how to install it", async () => {
-    await seedPr({
+    await seedPrAndWaitForText({
       provider: "github",
       remote_url: "https://github.com/acme/widgets.git",
       status: "cli-missing",
       message: "",
       pr: null,
-    });
-    await waitForText("need the gh CLI");
+    }, "need the gh CLI");
     await waitForText("brew install gh");
   });
 
   it("tells the user to sign in when the CLI is unauthenticated", async () => {
-    await seedPr({
+    await seedPrAndWaitForText({
       provider: "gitlab",
       remote_url: "https://gitlab.com/acme/widgets.git",
       status: "cli-unauthed",
       message: "glab is not authenticated.",
       pr: null,
-    });
-    await waitForText("Sign in to GitLab");
+    }, "Sign in to GitLab");
     await waitForText("glab auth login");
   });
 

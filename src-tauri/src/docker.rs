@@ -845,6 +845,10 @@ pub fn write_dockerfile(contents: &str) -> Result<(), String> {
 /// the Dockerfile to disk first. The caller drives execution (the command
 /// layer streams its output line-by-line off a background thread; never on
 /// the synchronous Tauri path). `no_cache` => `--no-cache --pull`.
+/// The build arg the shipped Dockerfile declares just above its agent
+/// installs. Passing a fresh value invalidates from that line down.
+pub const AGENT_REFRESH_ARG: &str = "TERMIC_AGENT_REFRESH";
+
 pub fn build_command(dockerfile: &str, no_cache: bool) -> Result<(Command, String), String> {
     let tag = image_tag(dockerfile);
     let dir = docker_dir();
@@ -857,12 +861,40 @@ pub fn build_command(dockerfile: &str, no_cache: bool) -> Result<(Command, Strin
     cmd.args(["build", "--progress=plain", "-t", &tag, "-f"]);
     cmd.arg(&df_path);
     if no_cache {
-        cmd.args(["--no-cache", "--pull"]);
+        // "Update agents" only needs the AGENT layers re-run. Docker
+        // invalidates a layer and everything after it, so `--no-cache` also
+        // re-pulls the base image and re-runs the apt install - minutes of
+        // work that almost never changed. When the Dockerfile declares the
+        // refresh arg, bump it instead: the agent installs re-run (they are
+        // unpinned, which is the whole reason this action exists) and the
+        // expensive layers above stay cached.
+        //
+        // A Dockerfile that does NOT declare it falls back to `--no-cache`,
+        // because the arg would be silently unconsumed - docker only warns -
+        // and the user would get a fully cached build that updates nothing.
+        // That covers anyone whose saved Dockerfile predates this.
+        if dockerfile.contains(AGENT_REFRESH_ARG) {
+            cmd.arg("--build-arg");
+            cmd.arg(format!("{AGENT_REFRESH_ARG}={}", refresh_token()));
+        } else {
+            cmd.args(["--no-cache", "--pull"]);
+        }
     }
     // Build context is the docker dir (lets users `COPY` baked skills etc.
     // from a path they control next to the Dockerfile).
     cmd.arg(&dir);
     Ok((cmd, tag))
+}
+
+/// A value that differs from the last one, so the layer below the arg is
+/// invalidated. Seconds since the epoch: monotonic in practice and readable
+/// in `docker history`, which beats a random number when someone is trying to
+/// work out why a layer rebuilt.
+fn refresh_token() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 // ─────────────────────── Image tag + availability ──────────────────────
@@ -1567,6 +1599,44 @@ mod tests {
         assert_eq!(sanitize_extra_dir("/opt/cache"), Some("/opt/cache".to_string()));
         assert_eq!(sanitize_extra_dir("/opt/cache/"), Some("/opt/cache".to_string()));
         assert_eq!(sanitize_extra_dir("/root/.claude"), Some("/root/.claude".to_string()));
+    }
+
+    /// The argv `build_command` produced, as plain strings.
+    fn build_argv(dockerfile: &str, no_cache: bool) -> Vec<String> {
+        let (cmd, _) = build_command(dockerfile, no_cache).unwrap();
+        cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+    }
+
+    #[test]
+    fn updating_agents_busts_only_the_agent_layers() {
+        // `--no-cache` also re-pulls the base image and re-runs the apt
+        // install, which is the slow half of the build and is not what
+        // "update agents" is asking for. The shipped Dockerfile declares a
+        // refresh arg above its agent installs; bumping that invalidates from
+        // there down and leaves the expensive layers cached.
+        let df = DEFAULT_DOCKERFILE;
+        assert!(df.contains(AGENT_REFRESH_ARG), "the shipped Dockerfile must declare it");
+        let argv = build_argv(df, true);
+        assert!(argv.iter().any(|a| a.starts_with(&format!("{AGENT_REFRESH_ARG}="))), "{argv:?}");
+        assert!(!argv.iter().any(|a| a == "--no-cache"), "{argv:?}");
+    }
+
+    #[test]
+    fn a_dockerfile_without_the_arg_still_gets_a_real_no_cache_build() {
+        // Anyone whose SAVED Dockerfile predates the arg would otherwise get a
+        // fully cached build that updates nothing: docker only warns about an
+        // unconsumed build-arg, it does not fail.
+        let argv = build_argv("FROM node:lts-bookworm\nRUN echo hi\n", true);
+        assert!(argv.iter().any(|a| a == "--no-cache"), "{argv:?}");
+        assert!(argv.iter().any(|a| a == "--pull"), "{argv:?}");
+        assert!(!argv.iter().any(|a| a.starts_with(AGENT_REFRESH_ARG)), "{argv:?}");
+    }
+
+    #[test]
+    fn an_ordinary_build_busts_nothing() {
+        let argv = build_argv(DEFAULT_DOCKERFILE, false);
+        assert!(!argv.iter().any(|a| a == "--no-cache"), "{argv:?}");
+        assert!(!argv.iter().any(|a| a.starts_with(AGENT_REFRESH_ARG)), "{argv:?}");
     }
 
     #[test]

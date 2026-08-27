@@ -20,7 +20,7 @@ import { Button } from "@/components/ui/Button";
 import { useBackendSettings } from "@/components/settings/Controls";
 import { DockerRebuildFrequencyPicker } from "@/components/DockerRebuildFrequencyPicker";
 import { describeLastBuildDate } from "@/lib/dockerDailyRebuild";
-import { Container, RotateCw, SkipForward, Clock, Infinity as InfinityIcon } from "lucide-react";
+import { Container, RotateCw, SkipForward, Clock } from "lucide-react";
 
 export function DockerRebuildPromptDialog() {
   const prompt = useUI(s => s.dockerRebuildPrompt);
@@ -37,7 +37,7 @@ export function DockerRebuildPromptDialog() {
       open
       onOpenChange={(v) => { if (!v) resolve("skip"); }}
       title="Rebuild the Docker sandbox image?"
-      className="max-w-md"
+      className="max-w-xl"
     >
       <div className="flex flex-col gap-4 pt-1 text-[13.5px] text-[var(--color-fg-dim)] leading-relaxed">
         <p className="flex items-start gap-2.5">
@@ -51,39 +51,35 @@ export function DockerRebuildPromptDialog() {
 
         <div>
           <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--color-fg-faint)]">
-            Nudge me to rebuild
+            Rebuild frequency
           </div>
           <DockerRebuildFrequencyPicker value={frequency} onChange={v => patch({ docker_rebuild_frequency: v })} />
         </div>
       </div>
 
+      {/* Three answers, which is the whole decision: not now, do it without
+          bothering me again, or do it before this launch.
+
+          There is no one-off "in background" button. Wanting the rebuild to
+          not block you once is essentially never a one-time preference, and a
+          fourth button was already overflowing this dialog. "Always" IS the
+          background option, which is also what makes it the answer the
+          feature is actually for: the point is that the image stays current
+          on its own. */}
       <div className="mt-5 flex items-center justify-end gap-2">
         <Button variant="ghost" type="button" onClick={() => resolve("skip")}>
           <SkipForward className="h-3.5 w-3.5" /> Skip for now
         </Button>
-        {/* Build, but do not make this launch wait on it. The rebuild exists
-            to stop an agent running a stale binary, and someone who wants to
-            start working NOW should not have to choose between that and a
-            several-minute wait: the image lands for the NEXT agent instead. */}
-        <Button
-          variant="ghost"
-          type="button"
-          title="Start the rebuild now and launch this agent immediately on the current image. The new one is used by the next agent."
-          onClick={() => resolve("background")}
-        >
-          <Clock className="h-3.5 w-3.5" /> Rebuild in background
-        </Button>
-        {/* Rebuilds now AND stops asking. Hidden when the frequency is
-            "off", where there is no schedule to defer to and the button
-            would promise something it cannot do. */}
+        {/* Hidden on "off": there is no schedule to defer to, so the button
+            would promise something it cannot deliver. */}
         {frequency !== "off" && (
           <Button
             variant="secondary"
             type="button"
-            title="Rebuild now, and from now on rebuild on this schedule without asking. Reversible in Settings → Docker Sandbox."
+            title="Stop asking. From now on the image rebuilds on this schedule in the background: agents launch immediately and pick up the new image next time. Reversible in Settings → Docker Sandbox."
             onClick={() => resolve("always")}
           >
-            <InfinityIcon className="h-3.5 w-3.5" /> Always rebuild
+            <Clock className="h-3.5 w-3.5" /> Always, in background
           </Button>
         )}
         <Button variant="primary" type="button" autoFocus onClick={() => resolve("rebuild")}>

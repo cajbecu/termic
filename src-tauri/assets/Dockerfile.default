@@ -33,6 +33,17 @@ ENV PATH="/root/.local/bin:/root/.grok/bin:${PATH}"
 # this throwaway cage are the user's own mounted worktrees.
 RUN git config --global --add safe.directory '*'
 
+# ── Agent refresh boundary ─────────────────────────────────────────────
+# Docker invalidates a layer and EVERYTHING after it, so a plain --no-cache
+# rebuild also re-runs the base pull and the apt install above, which is the
+# slow half of the build and almost never what changed. Bumping this arg
+# invalidates from here down instead: the agents are re-fetched (they are
+# unpinned, so that is the point) while the base and apt layers stay cached.
+# termic passes a fresh value for "Update agents"; editing the lines above
+# still invalidates them the normal way, by changing their content.
+ARG TERMIC_AGENT_REFRESH=0
+RUN echo "agent refresh: $TERMIC_AGENT_REFRESH" > /dev/null
+
 # ── Agents (one per line, each preceded by its source / docs page) ──────
 # Can't comment inside a `\`-continued RUN, so one install per line.
 # claude (Anthropic, native binary -> ~/.local/bin; npm install is

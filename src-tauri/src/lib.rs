@@ -15110,12 +15110,18 @@ pub struct Settings {
     /// frontend-driven action same as a manual rebuild).
     #[serde(default)]
     pub docker_rebuild_frequency: DockerRebuildFrequency,
-    /// Rebuild on schedule WITHOUT asking first. The prompt exists because a
-    /// rebuild delays the launch you just asked for; once someone has decided
-    /// they always want it, asking every time is the annoyance rather than
-    /// the safeguard. Set from the prompt's own "Always rebuild" button, and
-    /// reversible in Settings -> Docker Sandbox. Has no effect when
-    /// `docker_rebuild_frequency` is "off" - that already means never.
+    /// Rebuild on schedule without asking, IN THE BACKGROUND: the agent
+    /// launches immediately on the current image and the new one is picked up
+    /// by the next agent.
+    ///
+    /// Background is the only automatic mode on purpose. Someone who turns
+    /// the prompt off has said "stop interrupting me"; making that same
+    /// choice silently block the first launch of the day would be the exact
+    /// interruption they opted out of, just without the dialog. Blocking
+    /// stays available as a deliberate, per-launch answer ("Rebuild now").
+    ///
+    /// Has no effect when `docker_rebuild_frequency` is "off" - that already
+    /// means never.
     #[serde(default)]
     pub docker_rebuild_auto: bool,
     /// Per-agent EXTRA directories mounted into that agent's Docker config

@@ -344,8 +344,8 @@ export function DockerSection() {
           agent binaries live in the image, not in that mounted folder. If an agent updates itself mid-session,
           the update lives only in that container's own throwaway filesystem - the container is destroyed as
           soon as its terminal closes, so the next launch starts fresh from the image and the self-update is
-          gone. Rebuilding the image (below) is what actually picks up newer agent versions; "Nudge me to
-          rebuild" controls how often termic offers to do that for you before a launch.
+          gone. Rebuilding the image (below) is what actually picks up newer agent versions; "Rebuild
+          frequency" controls how often that is considered due.
         </div>
       </div>
 
@@ -480,12 +480,12 @@ export function DockerSection() {
               the Rust-side default) since a fresh settings object may not
               carry the field yet. */}
           <Block>
-            <div className="text-[14px] font-medium">Nudge me to rebuild</div>
+            <div className="text-[14px] font-medium">Rebuild frequency</div>
             <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
-              Before a Docker-mode task's agent launches, if the image hasn't been rebuilt on this schedule,
-              termic asks whether to rebuild first (skip is always one click away). This is how agent CLIs
-              baked into the image actually get updated (see "Agent updates" above); without it, an old image
-              can run a stale binary indefinitely.
+              How often the image is considered out of date. When a Docker-mode agent launches and the image
+              has not been rebuilt within this window, termic asks first, or just does it in the background if
+              you tick the box below. This is how agent CLIs baked into the image get updated (see "Agent
+              updates" above); without it, an old image runs a stale binary indefinitely.
             </div>
             <div className="mt-2 max-w-xs">
               <DockerRebuildFrequencyPicker
@@ -504,9 +504,9 @@ export function DockerSection() {
                   onChange={(v: boolean) => patch({ docker_rebuild_auto: v })}
                 />
                 <span className="text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
-                  <span className="font-medium text-[var(--color-fg)]">Rebuild without asking.</span>{" "}
-                  Do it on this schedule and skip the prompt. The rebuild still happens before the
-                  launch, so the first agent of the day waits for it.
+                  <span className="font-medium text-[var(--color-fg)]">Rebuild automatically.</span>{" "}
+                  Keep the image current on this schedule without asking. The rebuild runs in the
+                  background, so agents launch straight away and pick up the new image next time.
                 </span>
               </label>
             )}
