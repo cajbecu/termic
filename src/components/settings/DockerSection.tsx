@@ -741,21 +741,21 @@ function DockerAvailability({ status }: { status: DockerStatus | null }) {
   if (!status) return <div className="mt-1 text-[12.5px] text-[var(--color-fg-faint)]">Checking…</div>;
   if (!status.binary) {
     return (
-      <div className="mt-1 flex items-center gap-1.5 text-[12.5px] text-[var(--color-warn)]">
-        <CircleAlert className="h-3.5 w-3.5" /> `docker` not found on PATH. Install Docker Desktop, OrbStack, or colima.
+      <div className="mt-1 flex items-start gap-1.5 text-[12.5px] leading-snug text-[var(--color-warn)]">
+        <CircleAlert className="h-3.5 w-3.5 shrink-0 mt-0.5" /> `docker` not found on PATH. Install Docker Desktop, OrbStack, or colima.
       </div>
     );
   }
   if (!status.daemon) {
     return (
-      <div className="mt-1 flex items-center gap-1.5 text-[12.5px] text-[var(--color-warn)]">
-        <CircleAlert className="h-3.5 w-3.5" /> Docker is installed but the daemon is not running. Start it to build / run.
+      <div className="mt-1 flex items-start gap-1.5 text-[12.5px] leading-snug text-[var(--color-warn)]">
+        <CircleAlert className="h-3.5 w-3.5 shrink-0 mt-0.5" /> Docker is installed but the daemon is not running. Start it to build / run.
       </div>
     );
   }
   return (
-    <div className="mt-1 flex items-center gap-1.5 text-[12.5px] text-[var(--color-fg-dim)]">
-      <CircleCheck className="h-3.5 w-3.5 text-[var(--color-ok)]" /> Ready{status.version ? ` · ${status.version}` : ""}
+    <div className="mt-1 flex items-start gap-1.5 text-[12.5px] leading-snug text-[var(--color-fg-dim)]">
+      <CircleCheck className="h-3.5 w-3.5 shrink-0 mt-0.5 text-[var(--color-ok)]" /> Ready{status.version ? ` · ${status.version}` : ""}
     </div>
   );
 }
@@ -765,23 +765,23 @@ function ImageStatusLine({ image, dirty }: { image: DockerImageStatus | null; di
   return (
     <div className="mt-1 flex flex-col gap-1 text-[12.5px]">
       {image.available ? (
-        <span className="flex items-center gap-1.5 text-[var(--color-fg-dim)]">
-          <CircleCheck className="h-3.5 w-3.5 text-[var(--color-ok)]" />
-          Built · <code className="font-mono">{image.last_built_tag ?? image.current_tag}</code>
+        <span className="flex items-start gap-1.5 leading-snug text-[var(--color-fg-dim)]">
+          <CircleCheck className="h-3.5 w-3.5 shrink-0 mt-0.5 text-[var(--color-ok)]" />
+          <span>Built · <code className="font-mono">{image.last_built_tag ?? image.current_tag}</code></span>
         </span>
       ) : (
-        <span className="flex items-center gap-1.5 text-[var(--color-fg-faint)]">
-          <CircleAlert className="h-3.5 w-3.5" /> Not built yet. Build it to use Docker mode in a task.
+        <span className="flex items-start gap-1.5 leading-snug text-[var(--color-fg-faint)]">
+          <CircleAlert className="h-3.5 w-3.5 shrink-0 mt-0.5" /> <span>Not built yet. Build it to use Docker mode in a task.</span>
         </span>
       )}
       {(image.stale || dirty) && image.available && (
-        <span className="flex items-center gap-1.5 text-[var(--color-warn)]">
-          <CircleAlert className="h-3.5 w-3.5" />
-          Dockerfile edited since the last build. Rebuild to apply your changes (tasks keep using the last built image until then).
+        <span className="flex items-start gap-1.5 leading-snug text-[var(--color-warn)]">
+          <CircleAlert className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+          <span>Dockerfile edited since the last build. Rebuild to apply your changes (tasks keep using the last built image until then).</span>
         </span>
       )}
       {image.available && !image.stale && !dirty && (
-        <span className="flex items-center gap-1.5 text-[var(--color-fg-faint)]">
+        <span className="flex items-start gap-1.5 leading-snug text-[var(--color-fg-faint)]">
           {describeLastBuildDate(image.last_built_date)}
         </span>
       )}
