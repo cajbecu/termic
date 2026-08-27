@@ -30,7 +30,7 @@ import { DockerRebuildFrequencyPicker } from "@/components/DockerRebuildFrequenc
 import { describeLastBuildDate } from "@/lib/dockerDailyRebuild";
 import { cn, cleanLines } from "@/lib/utils";
 import { formatDockerArgv } from "@/lib/dockerArgv";
-import { Loader2, CircleCheck, CircleAlert, ChevronDown, Lock, X } from "lucide-react";
+import { Loader2, CircleCheck, CircleAlert, ChevronDown, Lock, X, Container } from "lucide-react";
 
 export function DockerSection() {
   const { settings, patch, store } = useBackendSettings();
@@ -226,6 +226,17 @@ export function DockerSection() {
     v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: text } });
   }
 
+  /** First-run path: flip the switch and start the build in one click. The
+   *  setting is persisted BEFORE the build starts, so a build the user
+   *  abandons (or that fails) still leaves Docker enabled with the rest of
+   *  the page visible, rather than reverting and looking like the click did
+   *  nothing. */
+  async function enableAndBuild() {
+    const ok = await patch({ docker_sandbox_enabled: true });
+    if (!ok) return;
+    await build(false);
+  }
+
   async function build(noCache: boolean) {
     // Persist any pending edits first so the build matches the editor.
     // Goes through the same dfBusy flag as the explicit Save button so
@@ -313,18 +324,109 @@ export function DockerSection() {
         </div>
       </div>
 
-      {/* Master toggle */}
+      {/* First run is ONE action, not a toggle plus a hunt. Flipping the
+          boolean alone accomplishes nothing visible - the feature stays
+          unusable until an image exists, and the button that builds one was
+          far below, past four sections the user has no reason to read yet.
+          Once an image exists this becomes the ordinary toggle, because from
+          then on they really are separate decisions: turning Docker off
+          should not throw the image away. */}
       <Block first>
-        <Toggle
-          label="Enable Docker sandbox"
-          hint={"While off, no Docker UI appears anywhere and Docker is never invoked. Turn it on, then build the image below. Once built, \"Docker\" becomes selectable in each task's sandbox dialog."}
-          value={enabled}
-          onChange={v => patch({ docker_sandbox_enabled: v })}
-        />
+        {!enabled && !image?.available ? (
+          <div className="flex flex-col gap-2.5">
+            <div>
+              <div className="text-[14px] font-medium">Docker sandbox</div>
+              <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+                Runs agents inside a container instead of the macOS seatbelt. Needs a one-time image build,
+                a few minutes, and Docker running. Existing tasks are unaffected: you pick Docker per task
+                afterwards.
+              </div>
+            </div>
+            <div>
+              <Button
+                variant="primary"
+                size="lg"
+                disabled={!status?.daemon || building}
+                onClick={enableAndBuild}
+                data-testid="docker-enable-and-build"
+              >
+                {building
+                  ? <><Loader2 className="h-4 w-4 animate-spin" /> Building the image…</>
+                  : <><Container className="h-4 w-4" /> Enable Docker sandboxing and build image</>}
+              </Button>
+              {!status?.binary && (
+                <div className="mt-2 text-[12.5px] text-[var(--color-warn)]">
+                  Docker isn't installed. Install Docker Desktop, then come back.
+                </div>
+              )}
+              {status?.binary && !status?.daemon && (
+                <div className="mt-2 text-[12.5px] text-[var(--color-warn)]">
+                  Docker is installed but not running. Start Docker Desktop, then come back.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <Toggle
+            label="Enable Docker sandbox"
+            hint={"While off, no Docker UI appears anywhere and Docker is never invoked. The built image is kept, so turning it back on costs nothing."}
+            value={enabled}
+            onChange={v => patch({ docker_sandbox_enabled: v })}
+          />
+        )}
       </Block>
 
       {enabled && (
         <>
+          {/* Both halves of "does this work right now" together: whether Docker is
+              reachable, and whether an image exists. The build actions live with the
+              image state they act on, instead of at the far end of the page under the
+              Dockerfile editor. */}
+          <div className="mt-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-fg-faint)]">Status</div>
+          {/* Docker availability */}
+          <Block>
+            <div className="text-[14px] font-medium">Docker status</div>
+            <DockerAvailability status={status} />
+          </Block>
+
+          {/* Image build */}
+          <Block>
+            <div className="text-[14px] font-medium">Image</div>
+            <ImageStatusLine image={image} dirty={dirty} />
+            <div className="mt-3 flex items-center gap-2">
+              <Button
+                variant="primary"
+                disabled={building || dfBusy || !status?.daemon}
+                onClick={() => build(false)}
+              >
+                {building ? <span className="flex items-center gap-1.5"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Building…</span> : "Build image"}
+              </Button>
+              <Button variant="secondary" disabled={building || dfBusy || !status?.daemon} onClick={() => build(true)}>
+                Update agents (rebuild)
+              </Button>
+              {!status?.daemon && (
+                <span className="text-[12px] text-[var(--color-warn)]">Start Docker to build.</span>
+              )}
+              {buildLog.length > 0 && (
+                <Button variant="ghost" onClick={() => setShowLog(s => !s)}>
+                  {showLog ? "Hide log" : "Show log"}
+                </Button>
+              )}
+            </div>
+            {showLog && buildLog.length > 0 && (
+              <pre
+                ref={logRef}
+                className="mt-3 max-h-64 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-3 font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-dim)]"
+              >
+                {buildLog.join("\n")}
+              </pre>
+            )}
+          </Block>
+
+
+          {/* Settings that change what a FUTURE task gets. Nothing here acts on the
+              running system, which is exactly what separates it from Status above. */}
+          <div className="mt-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-fg-faint)]">Configuration</div>
           {/* Rebuild nudge frequency. Undefined reads as "daily" (matching
               the Rust-side default) since a fresh settings object may not
               carry the field yet. */}
@@ -359,12 +461,6 @@ export function DockerSection() {
                 </span>
               </label>
             )}
-          </Block>
-
-          {/* Docker availability */}
-          <Block>
-            <div className="text-[14px] font-medium">Docker status</div>
-            <DockerAvailability status={status} />
           </Block>
 
           {/* Per-agent config dirs: the confirmed built-in list ("Logins"
@@ -475,6 +571,41 @@ export function DockerSection() {
             </div>
           </Block>
 
+
+          {/* The image definition itself. Last because editing it is rare and the
+              shipped default is meant to carry most people. */}
+          <div className="mt-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-fg-faint)]">Advanced</div>
+          {/* Dockerfile editor */}
+          <Block>
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[14px] font-medium">Dockerfile</div>
+                <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+                  One generic image for all agents. Edit the commented regions to add MCP servers, CLI tools, or
+                  baked skills. Personal logins (agent auth, MCP OAuth) are NOT set up here, just run the agent and
+                  log in once inside Docker; those persist via your mounted config directory.
+                </div>
+              </div>
+            </div>
+            <div
+              ref={hostRef}
+              className="mt-2 max-h-[420px] overflow-auto rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg)]"
+            />
+            <div className="mt-3 flex items-center gap-2">
+              <Button variant="primary" disabled={!dirty || dfBusy || building} onClick={saveDockerfile}>
+                {dfBusy ? "Saving…" : "Save"}
+              </Button>
+              <Button variant="secondary" disabled={(image?.is_default && !dirty) || dfBusy || building} onClick={resetDockerfile}>
+                Reset to default
+              </Button>
+              {dirty && <span className="text-[12px] text-[var(--color-fg-faint)]">Unsaved edits</span>}
+            </div>
+          </Block>
+
+
+          {/* A readout of everything above, so it belongs after it. Mid-page it read
+              as another setting rather than the answer to "what will this run". */}
+          <div className="mt-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-fg-faint)]">Verify</div>
           {/* Command preview. The task sandbox dialog has one per task; this
               is the same thing before any task exists, so "what does the cage
               actually do" is answerable while you are configuring the image
@@ -539,66 +670,6 @@ export function DockerSection() {
             )}
           </Block>
 
-          {/* Dockerfile editor */}
-          <Block>
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-[14px] font-medium">Dockerfile</div>
-                <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
-                  One generic image for all agents. Edit the commented regions to add MCP servers, CLI tools, or
-                  baked skills. Personal logins (agent auth, MCP OAuth) are NOT set up here, just run the agent and
-                  log in once inside Docker; those persist via your mounted config directory.
-                </div>
-              </div>
-            </div>
-            <div
-              ref={hostRef}
-              className="mt-2 max-h-[420px] overflow-auto rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg)]"
-            />
-            <div className="mt-3 flex items-center gap-2">
-              <Button variant="primary" disabled={!dirty || dfBusy || building} onClick={saveDockerfile}>
-                {dfBusy ? "Saving…" : "Save"}
-              </Button>
-              <Button variant="secondary" disabled={(image?.is_default && !dirty) || dfBusy || building} onClick={resetDockerfile}>
-                Reset to default
-              </Button>
-              {dirty && <span className="text-[12px] text-[var(--color-fg-faint)]">Unsaved edits</span>}
-            </div>
-          </Block>
-
-          {/* Image build */}
-          <Block>
-            <div className="text-[14px] font-medium">Image</div>
-            <ImageStatusLine image={image} dirty={dirty} />
-            <div className="mt-3 flex items-center gap-2">
-              <Button
-                variant="primary"
-                disabled={building || dfBusy || !status?.daemon}
-                onClick={() => build(false)}
-              >
-                {building ? <span className="flex items-center gap-1.5"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Building…</span> : "Build image"}
-              </Button>
-              <Button variant="secondary" disabled={building || dfBusy || !status?.daemon} onClick={() => build(true)}>
-                Update agents (rebuild)
-              </Button>
-              {!status?.daemon && (
-                <span className="text-[12px] text-[var(--color-warn)]">Start Docker to build.</span>
-              )}
-              {buildLog.length > 0 && (
-                <Button variant="ghost" onClick={() => setShowLog(s => !s)}>
-                  {showLog ? "Hide log" : "Show log"}
-                </Button>
-              )}
-            </div>
-            {showLog && buildLog.length > 0 && (
-              <pre
-                ref={logRef}
-                className="mt-3 max-h-64 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-3 font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-dim)]"
-              >
-                {buildLog.join("\n")}
-              </pre>
-            )}
-          </Block>
         </>
       )}
     </div>
