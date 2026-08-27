@@ -725,7 +725,7 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
             aria-checked={!agent.disabled}
             onClick={() => onPatch({ disabled: !agent.disabled })}
             className={cn(
-              "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out outline-none mr-1.5 items-center",
+              "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out mr-1.5 items-center",
               !agent.disabled ? "bg-[var(--color-ok)]" : "bg-[var(--color-bg-3)]"
             )}
             title={agent.disabled
@@ -893,7 +893,7 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
                 aria-checked={agent.work_done !== false}
                 onClick={() => onPatch({ work_done: agent.work_done === false ? true : false })}
                 className={cn(
-                  "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out outline-none items-center",
+                  "relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out items-center",
                   // bg-2, not bg-3: the band itself is bg-3, so an off switch
                   // tracked in bg-3 would have no track at all.
                   agent.work_done !== false ? "bg-[var(--color-ok)]" : "bg-[var(--color-bg-2)]"
@@ -980,7 +980,7 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
                     aria-checked={!!agent.capabilities?.match_output}
                     onClick={() => onPatchCaps({ match_output: !agent.capabilities?.match_output })}
                     className={cn(
-                      "relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out outline-none items-center", /* allow-shortcut: standard toggle switch, matches the Work-done switch above, not a decorative chip (Orel-approved) */
+                      "relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out items-center", /* allow-shortcut: standard toggle switch, matches the Work-done switch above, not a decorative chip (Orel-approved) */
                       hasSignals ? "cursor-pointer" : "cursor-not-allowed opacity-50",
                       // bg-2, not bg-3: the band itself is bg-3, so an off
                       // switch tracked in bg-3 would have no track at all.

@@ -496,7 +496,7 @@ function TreeNode({ taskId, entry, depth, rel, root, expanded, children_, toggle
         title={rel}
         data-path={rel}
         className={cn(
-          "group flex h-[26px] w-full min-w-0 cursor-pointer items-center gap-2 rounded-sm px-2 text-left text-[13px] transition-colors duration-150 outline-none select-none",
+          "group flex h-[26px] w-full min-w-0 cursor-pointer items-center gap-2 rounded-sm px-2 text-left text-[13px] transition-colors duration-150 select-none",
           rel === revealed && "ring-1 ring-inset ring-[var(--color-accent)]",
           // While this row's context menu is open, keep it visibly marked so
           // it's clear which item the actions apply to (Radix sets

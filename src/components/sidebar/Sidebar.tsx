@@ -1641,7 +1641,6 @@ export function Sidebar({ compact: compactProp }: { compact?: boolean } = {}) {
                         // assigned accent should make one loud. Matches the
                         // Default swatch in the color picker.
                         "flex cursor-pointer items-center gap-1.5 rounded-md py-1 pl-2 pr-2 text-[12px] font-semibold uppercase tracking-[0.06em] text-[var(--color-fg-faint)] transition-colors hover:bg-[var(--color-hover)] hover:text-[var(--color-fg)]",
-                        "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--color-accent)]",
                         // Drop target while a project drag hovers this header.
                         dragOverGroup === name && "bg-[var(--color-accent)]/15 text-[var(--color-accent)] ring-1 ring-inset ring-[var(--color-accent)]",
                         // The folder itself is being dragged.

@@ -227,7 +227,7 @@ function EmptyProjectsCard({ onClick }: { onClick: () => void }) {
     <button
       data-testid="empty-projects-card"
       onClick={onClick}
-      className="flex w-full flex-col items-center gap-3 rounded-lg border border-dashed border-[var(--color-border)] bg-[var(--color-bg-1)] p-8 text-center transition-colors hover:border-[var(--color-accent-soft)] hover:bg-[var(--color-bg-2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-soft)]"
+      className="flex w-full flex-col items-center gap-3 rounded-lg border border-dashed border-[var(--color-border)] bg-[var(--color-bg-1)] p-8 text-center transition-colors hover:border-[var(--color-accent-soft)] hover:bg-[var(--color-bg-2)]"
     >
       <Boxes className="h-8 w-8 text-[var(--color-fg-faint)]" />
       <div>

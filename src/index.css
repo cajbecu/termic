@@ -127,6 +127,32 @@
 
 @layer base {
   * { box-sizing: border-box; }
+
+  /* ── Focus indicator, once, for the whole app ──────────────────────
+     Before this, five components defined their own focus-visible ring and
+     everything else fell back to the browser's default outline: two looks,
+     inconsistently applied, and the default one is drawn OUTSIDE the element
+     so it came out clipped on anything sitting flush against a container
+     edge (the first sandbox card, which a dialog autofocuses on open).
+
+     `outline-offset: -2px` draws it INSIDE the box, so no ancestor can crop
+     it wherever the control sits.
+
+     `:focus-visible`, not `:focus`: a control focused by a mouse click, or
+     programmatically when a dialog opens, gets nothing, while keyboard
+     navigation always shows where it is.
+
+     `:where()` gives this zero specificity, so a component that genuinely
+     needs a different treatment still overrides it by saying so - and a
+     control that sets `outline-none` (text inputs here signal focus with a
+     border instead) keeps winning, which is why those are unaffected. */
+  :where(
+    a[href], button, summary, input, select, textarea,
+    [role="button"], [tabindex]:not([tabindex="-1"])
+  ):focus-visible {
+    outline: 2px solid var(--color-accent-soft);
+    outline-offset: -2px;
+  }
   /* Subpixel anti-aliasing — macOS WKWebView's default. Renders UI text
      heavier and crisper than forced grayscale (matches terax-ai's look).
      The WebGL terminal is a GPU texture and is unaffected by this. */

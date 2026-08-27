@@ -30,7 +30,6 @@ export const Checkbox = forwardRef<HTMLButtonElement, Props>(
       onClick={(e) => { e.stopPropagation(); onChange?.(!checked); }}
       className={cn(
         "flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[5px] border transition-colors",
-        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-soft)]",
         checked
           ? "border-[var(--color-accent-deep)] bg-[var(--color-accent-deep)] text-white hover:brightness-110"
           : "border-[var(--color-border)] bg-[var(--color-bg)] hover:border-[var(--color-accent-soft)]",
