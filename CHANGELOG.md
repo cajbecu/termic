@@ -4,9 +4,9 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [1.0.0] - 2026-08-27
+## [1.0.1] - 2026-08-27
 
-🎉 Termic 1.0 ships the last three headline features: code navigation, pull requests, Docker sandboxing.
+🎉 Termic 1.0.1 ships the last three headline features: code navigation, pull requests, Docker sandboxing.
 
 ### Features
 - **Code navigation across seven languages.** Go to definition, find usages, hover types and diagnostics for TypeScript/JavaScript/TSX, Python, Rust, Go, C/C++/Objective-C, Swift and Ruby. Termic resolves the server your project already has before falling back to its own pinned download, so a repo with `node_modules` or a `.venv` uses that one and nothing gets installed behind your back. Python picks between zuban, ty and basedpyright, and you can override the choice per project or per machine. clangd, sourcekit-lsp and ruby-lsp are PATH-only on purpose: they ship with the Command Line Tools or are one package away, and duplicating a binary you already have is a liability. Double-Shift opens Search everywhere, and you choose when it does. (#174)
@@ -25,6 +25,7 @@ are generated from it. See the `release` skill for how entries are added.
 - **The new-task launcher leads with the project's default CLI** rather than a fixed order, so the agent you actually use for that repo is the first one offered.
 
 ### Bug fixes
+- **Docker CLI detection on macOS.** GUI launches inherit launchd's minimal PATH and missed `/usr/local/bin` and `/opt/homebrew/bin`, causing the Docker probe to report Docker as not installed.
 - **`files_to_copy` reaches multi-repo tasks.** Member worktrees arrived with none of their gitignored files, so keystores, service-account keys and `.env` had to be copied in by hand before anything would build. The list now resolves at three levels: the multi-repo project's own list into the task root, a per-member override beside that member's scripts, and, failing that, the member repo's own committed `.termic.yaml`. Archiving and restoring re-copies all of it. (#264)
 - **A blank line in "Files to copy" no longer copies the whole repo.** An empty glob resolved to the repository root, so a trailing newline recursively copied the entire checkout, `.git` included, into the worktree.
 - **Terminals that go blank behind your back come back.** A Mac driven over Screen Sharing never blurs or hides its window, so none of the existing GPU-context recovery paths ever got to run, and every terminal stayed black until Termic was restarted. There is now a return-from-away rebuild that fires on the first input after a long gap. Thanks to [@MHohlios](https://github.com/MHohlios). (#257)
