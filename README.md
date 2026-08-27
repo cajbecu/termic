@@ -370,15 +370,6 @@ specs and get an issue at the same time. That is the whole promotion path:
   bearer token can finally answer which task is calling and what it may do,
   which is the narrowest grant a sandboxed agent could be given. Design in
   [docs/plans/mcp.md](docs/plans/mcp.md).
-- **Docker-based sandboxing.** ([#231](https://github.com/simion/termic/issues/231))
-  An opt-in, more brutal alternative to Seatbelt: each agent inside a
-  container off an editable Dockerfile, seeing only the paths you mount.
-  Cross-platform for free, and it pairs with per-agent credential injection
-  so secrets need not be mounted at all. This also closes the Linux/Windows
-  sandbox-parity gap, a container is the same isolation boundary on every
-  platform, so there is no separate bubblewrap/landlock or AppContainer
-  backend to build. Design in
-  [docs/plans/docker-sandbox/](docs/plans/docker-sandbox/).
 
 ### Ideas
 
