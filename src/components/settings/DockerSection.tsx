@@ -719,8 +719,15 @@ function AgentDirsRow({ dirs, onChangeExtra, onTogglePersist, dockerEnv, onChang
     setAdding(false);
   }
 
+  // Two columns of equal height: what is KEPT on the left, what the container
+  // RUNS WITH on the right. Stacked, the env box read as an afterthought
+  // below the chips and needed a disclosure to stay out of the way; side by
+  // side both are answerable at a glance for every agent. `items-stretch` is
+  // what makes the textarea match the left column rather than each row
+  // setting its own height.
   return (
-    <div className="flex flex-col gap-1.5 rounded-md border border-[var(--color-border-soft)] px-3 py-2">
+    <div className="grid grid-cols-2 items-stretch gap-x-4 gap-y-1.5 rounded-md border border-[var(--color-border-soft)] px-3 py-2">
+      <div className="flex min-w-0 flex-col gap-1.5">
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="mr-0.5 text-[13px] font-medium">{dirs.display_name}</span>
         {dirs.builtin.map(d => (
@@ -792,30 +799,30 @@ function AgentDirsRow({ dirs, onChangeExtra, onTogglePersist, dockerEnv, onChang
           would risk hiding the binary the image installed.
         </span>
       )}
-      {/* Docker-only environment for this agent, the same field Agents &
-          Terminals shows. A SEPARATE list from the agent's normal one, not a
-          patch on top of it: empty means the normal one is used unchanged. */}
-      <details className="mt-0.5">
-        <summary className="cursor-pointer list-none text-[11px] text-[var(--color-fg-faint)] hover:text-[var(--color-fg-dim)]">
-          Environment (Docker){Object.keys(dockerEnv).length > 0 ? ` · ${Object.keys(dockerEnv).length} set` : ""}
-        </summary>
-        <div className="mt-1.5">
-          <div className="mb-1 text-[11px] leading-snug text-[var(--color-fg-faint)]">
-            One KEY=VALUE per line, used instead of this agent's normal environment when it runs in a
-            container. Empty = the normal one is used as-is. A value naming a path on your Mac does not
-            exist in here, so that is what this is for.
-          </div>
-          <textarea
-            value={Object.entries(dockerEnv).map(([k, v]) => `${k}=${v}`).join("\n")}
-            onChange={e => onChangeDockerEnv(parseDockerEnvLines(e.target.value))}
-            rows={2}
-            spellCheck={false}
-            data-testid={`docker-agent-env-${dirs.agent_id}`}
-            placeholder={"CLAUDE_CONFIG_DIR=/root/.claude"}
-            className="w-full resize-y rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 py-1 font-mono text-[11.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] [field-sizing:content]"
-          />
+      </div>
+
+      {/* Right column: the Docker-only environment, always visible. A
+          SEPARATE list from the agent's normal one, not a patch on top of
+          it - empty means the normal one is used unchanged. */}
+      <div className="flex min-w-0 flex-col gap-1">
+        <div className="text-[11px] text-[var(--color-fg-faint)]">
+          Environment (Docker)
+          {Object.keys(dockerEnv).length > 0 && (
+            <span className="text-[var(--color-fg-dim)]"> · {Object.keys(dockerEnv).length} set</span>
+          )}
         </div>
-      </details>
+        <textarea
+          value={Object.entries(dockerEnv).map(([k, v]) => `${k}=${v}`).join("\n")}
+          onChange={e => onChangeDockerEnv(parseDockerEnvLines(e.target.value))}
+          rows={2}
+          spellCheck={false}
+          data-testid={`docker-agent-env-${dirs.agent_id}`}
+          placeholder={"KEY=VALUE, one per line\nEmpty = this agent's normal environment"}
+          // flex-1 (not field-sizing) so it fills the column and both sides
+          // end level, which is the point of the two-column layout.
+          className="min-h-[3.25rem] w-full flex-1 resize-y rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 py-1 font-mono text-[11.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
+        />
+      </div>
     </div>
   );
 }
