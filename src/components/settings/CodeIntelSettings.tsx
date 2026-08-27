@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, Settings } from "lucide-react";
 import type { Project } from "@/lib/types";
 import { useCodeIntel } from "@/store/codeIntel";
+import { useShallow } from "zustand/react/shallow";
 import { lspOffer, type LspOffer } from "@/lib/lsp/install";
 import { serverGuide, parseRaw, type ServerGuide } from "@/lib/lsp/serverSettings";
 import { SERVABLE_LANGUAGES } from "@/lib/lsp/serverNames";
@@ -234,10 +235,17 @@ function AdvancedSettingsBlock({
  * pause would reindex the repo several times per sentence.
  */
 function RestartNote({ language }: { language: string }) {
-  const armedRoots = useCodeIntel(s =>
+  // `useShallow` is load-bearing, not tidiness: this selector BUILDS an
+  // array, so it returns a new reference on every call. Zustand compares
+  // snapshots with Object.is, so without it every store read looks like a
+  // change, and `useSyncExternalStore` treats a snapshot that never settles
+  // as an infinite loop - React #185, "Maximum update depth exceeded", the
+  // moment this row is expanded. Comparing element-wise makes the snapshot
+  // stable while the roots are unchanged.
+  const armedRoots = useCodeIntel(useShallow(s =>
     Object.entries(s.grants)
       .filter(([key, tasks]) => key.split("\u0000")[1] === language && tasks.length > 0)
-      .map(([key]) => key.split("\u0000")[0]));
+      .map(([key]) => key.split("\u0000")[0])));
   const [restarting, setRestarting] = useState(false);
 
   if (!armedRoots.length) {
