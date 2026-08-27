@@ -2213,7 +2213,7 @@ describe("the route into an issue task", () => {
   });
 
   it("drops back to a blank form, split and all", async () => {
-    await clickByText("Start from a blank task instead");
+    await clickByText("Blank task instead");
     await waitGone('[data-testid="issue-column"]');
     // The dialog stays open on the ordinary form rather than closing under
     // the user: they still wanted a task, just not from an issue.

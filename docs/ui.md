@@ -7,6 +7,7 @@
 - `CliIcon cli={...}` + `CLI_BRAND_COLOR[cli]` for claude/gemini/codex (orange/blue/green).
 - Tooltips default `delay: 0`. Override per-call.
 - `cn()` from `@/lib/utils` for class composition.
+- **Dialog mode switches ride the TITLE line** (`titleAction` on `AppDialog`, spread `dialogTitleAction` onto the control). "Import a worktree", "From a GitHub issue", "Blank task instead" and "New worktree instead" change what KIND of thing the dialog is making, which is chrome, not a field, and as form rows they cost a `gap-4` row each on every open of a dialog most of whose opens have nothing to do with them. The title line is mostly empty, so they are free there. Two rules for anything you put in that slot: it is inside the window drag region, so it must carry the `data-tauri-drag-region="false"` + `WebkitAppRegion: "no-drag"` opt-out that `dialogTitleAction` provides (without it the control is not clickable at all), and the labels stay SHORT because worktree mode can show two switches at once. The row wraps rather than truncating, so the pathological case degrades to the row it used to cost instead of clipping.
 - **Focus indicator: one rule, `src/index.css`, `@layer base`.** A single `:where(a[href], button, summary, input, select, textarea, [role="button"], [tabindex]:not([tabindex="-1"])):focus-visible` gives every control a 2px `--color-accent-soft` outline at `outline-offset: -2px`. The negative offset draws it INSIDE the border box, so a control sitting flush against a container edge cannot have it clipped (the sandbox picker's first card, which its dialog autofocuses, was the case that forced this). `:where()` makes it zero-specificity, so any component overrides it just by saying so. Do NOT add a per-component `focus-visible:ring-*`: `src/lib/focusRing.test.ts` fails if one appears. Text fields opt out with `outline-none` and signal focus with a border instead, as do Radix menu items (`data-highlighted`) and dialog containers (Radix focuses the content on open).
 - All `<input>` and `<textarea>` get `spellCheck={false}` + `autoCorrect="off"` + `autoCapitalize="off"` + `autoComplete="off"`. Developer tool — paths and commands are never English words.
 
@@ -167,8 +168,8 @@ One flow, two doors, and the SAME `NewTaskDialog` behind both:
 - **Command palette → "New task from an issue…"** → the shared project picker
   (`openProjectPicker("issue")`; the placeholder tells you which question you
   are answering) → `openNewTask(projectId, { issueMode: true })`.
-- **Inside the dialog**, the "Start from a GitHub/GitLab issue" link, which is
-  the same `enterIssues()` the seed triggers.
+- **Inside the dialog**, the "From a GitHub/GitLab issue" switch on the title
+  line, which is the same `enterIssues()` the seed triggers.
 
 It is deliberately not a dialog of its own. "Which project" is the first
 question either way, and everything after the issue is picked (task type,

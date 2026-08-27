@@ -7,7 +7,7 @@ import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
 import { usePrefs } from "@/store/prefs";
 import { usePr } from "@/store/pr";
-import { AppDialog } from "@/components/ui/Dialog";
+import { AppDialog, dialogTitleAction } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
@@ -470,7 +470,7 @@ export function NewTaskDialog() {
       setDockerMounts(merge(s.docker_default_extra_mounts));
     }).catch(() => {});
     // Import mode: off by default. We eager-load the project's existing
-    // unopened worktrees so the "Import an existing worktree instead"
+    // unopened worktrees so the "Import a worktree"
     // affordance only appears when there's actually something to import.
     const canImp = (p?.type ?? "single") !== "multi" && !p?.non_git;
     const wantImport = !!seed?.importMode && canImp;
@@ -860,6 +860,56 @@ export function NewTaskDialog() {
       onOpenChange={(v) => { if (!v && !busy) close(); }}
       title={isMulti ? (mode === "repo_root" ? "New multi-repo task in the main checkout" : "New multi-repo task") : importMode ? "Import existing worktree" : mode === "repo_root" ? "New task in the main checkout" : "New task in a worktree"}
       description={undefined}
+      // The four mode switches ride the title line rather than each taking a
+      // `gap-4` form row. They are chrome - "make this a different KIND of
+      // task" - not fields, and the one that shows most often was costing a
+      // whole row on every open of a dialog that usually has nothing to do
+      // with issues. Labels are short because worktree mode can show two of
+      // them at once; the row wraps if a title ever leaves no space.
+      titleAction={
+        <>
+          {/* Import (issue #5): adopt a worktree that already exists on disk
+              instead of branching a fresh one. Only offered when there is
+              actually something to adopt, hence the count. */}
+          {canImport && !importMode && mode === "worktree" && importList.length > 0 && (
+            <button type="button" onClick={enterImport} {...dialogTitleAction}>
+              <FolderGit2 className="h-3.5 w-3.5" />
+              Import a worktree
+              <span className="text-[var(--color-fg-faint)]">({importList.length})</span>
+            </button>
+          )}
+          {/* Start from an issue. Only for repos actually hosted on a forge
+              (the #21/#22 tooling is CLI-backed, so it is real only where
+              gh/glab can reach). Doubles as the discovery point for the CLIs:
+              a GitHub repo whose owner has never installed gh still sees the
+              entry and learns what it would buy them. */}
+          {canIssues && forgeProvider && !issueMode && !importMode && (
+            <button type="button" onClick={enterIssues} {...dialogTitleAction}>
+              <CircleDot className="h-3.5 w-3.5" />
+              From a {forgeProvider === "gitlab" ? "GitLab" : "GitHub"} issue
+              {!forgeCliReady && (
+                <span className="text-[var(--color-fg-faint)]">(needs {forgeCli})</span>
+              )}
+            </button>
+          )}
+          {canIssues && issueMode && (
+            <button type="button" onClick={exitIssues} {...dialogTitleAction}>
+              <Plus className="h-3.5 w-3.5" />
+              Blank task instead
+            </button>
+          )}
+          {canImport && importMode && (
+            <button
+              type="button"
+              onClick={() => { setImportMode(false); setImportSelected(null); setResumeOverride(""); setResumeOpen(false); setErr(null); }}
+              {...dialogTitleAction}
+            >
+              <Plus className="h-3.5 w-3.5" />
+              New worktree instead
+            </button>
+          )}
+        </>
+      }
       // Widen the dialog to fit what's inside. Base width per mode (xl 36rem /
       // 2xl 42rem / 3xl 48rem) sizes the single-column form. Each extra column
       // (sandbox config, issue picker) is equal (flex-1) plus a 2rem (ml-8)
@@ -924,60 +974,6 @@ export function NewTaskDialog() {
             the segmented controls next to the label and put hints on the same
             line as the label — both caused the spacing weirdness + wrapped
             hint text. */}
-        {/* Import affordance (issue #5). Single-repo git projects only.
-            A subtle link that flips the dialog into "adopt an existing
-            worktree" mode, hiding the branch fields. */}
-        {canImport && !importMode && mode === "worktree" && importList.length > 0 && (
-          <button
-            type="button"
-            onClick={enterImport}
-            className="-mb-1 inline-flex items-center gap-1.5 self-start text-[12.5px] text-[var(--color-fg-dim)] hover:text-[var(--color-accent)]"
-          >
-            <FolderGit2 className="h-3.5 w-3.5" />
-            Import an existing worktree instead
-            <span className="text-[var(--color-fg-faint)]">({importList.length})</span>
-          </button>
-        )}
-        {/* Start-from-an-issue affordance. Only for repos actually hosted on
-            a forge (issue #21/#22 tooling is CLI-backed, so it is real only
-            where gh/glab can reach). Doubles as the discovery point for the
-            CLIs: a GitHub repo whose owner has never installed gh still sees
-            the entry and learns what it would buy them. */}
-        {canIssues && forgeProvider && !issueMode && !importMode && (
-          <button
-            type="button"
-            onClick={enterIssues}
-            className="-mb-1 inline-flex items-center gap-1.5 self-start text-[12.5px] text-[var(--color-fg-dim)] hover:text-[var(--color-accent)]"
-          >
-            <CircleDot className="h-3.5 w-3.5" />
-            Start from a {forgeProvider === "gitlab" ? "GitLab" : "GitHub"} issue
-            {!forgeCliReady && (
-              <span className="text-[var(--color-fg-faint)]">(needs {forgeCli})</span>
-            )}
-          </button>
-        )}
-        {canIssues && issueMode && (
-          <button
-            type="button"
-            onClick={exitIssues}
-            className="-mb-1 inline-flex items-center gap-1.5 self-start text-[12.5px] text-[var(--color-fg-dim)] hover:text-[var(--color-accent)]"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            Start from a blank task instead
-          </button>
-        )}
-
-        {canImport && importMode && (
-          <button
-            type="button"
-            onClick={() => { setImportMode(false); setImportSelected(null); setResumeOverride(""); setResumeOpen(false); setErr(null); }}
-            className="-mb-1 inline-flex items-center gap-1.5 self-start text-[12.5px] text-[var(--color-fg-dim)] hover:text-[var(--color-accent)]"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            Create a new worktree instead
-          </button>
-        )}
-
         {/* Worktree picker — replaces the branch fields in import mode. */}
         {importMode && (
           <Field label="Existing worktree" hint="Worktrees of this repo that aren't already open as tasks.">

@@ -2,6 +2,7 @@
 
 import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
+import type React from "react";
 import { type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
@@ -32,10 +33,31 @@ interface Props {
    *  away with everything else on a tall form. Pass the action row (Cancel/
    *  Create, error text, etc.) here for a long dialog — see NewTaskDialog. */
   stickyFooter?: ReactNode;
+  /** Controls that ride the TITLE line, right-aligned, instead of taking a
+   *  row of their own in `children`. For mode switches - "start from an issue
+   *  instead", "import a worktree instead" - which are chrome, not fields: the
+   *  title line is mostly empty, and a 12.5px link was costing a full `gap-4`
+   *  form row on every open of a dialog that mostly has nothing to do with it.
+   *  The row wraps rather than truncating, so a long title plus two switches
+   *  degrades to what it cost before instead of clipping.
+   *
+   *  Anything interactive in here is inside the window drag region, so it must
+   *  opt out the way Dialog.Close below does. `dialogTitleAction` (this file)
+   *  is the class + attributes to spread on such a control. */
+  titleAction?: ReactNode;
   children: ReactNode;
 }
 
-export function AppDialog({ open, onOpenChange, title, description, className, hideClose, overlayClassName, onCloseAutoFocus, onOpenAutoFocus, stickyFooter, children }: Props) {
+/** Spread onto a control passed as `titleAction`: the drag-region opt-out it
+ *  needs to be clickable at all, plus the link styling the switches share. */
+export const dialogTitleAction = {
+  "data-tauri-drag-region": "false",
+  style: { WebkitAppRegion: "no-drag" } as React.CSSProperties,
+  className:
+    "inline-flex items-center gap-1.5 whitespace-nowrap text-[12.5px] text-[var(--color-fg-dim)] hover:text-[var(--color-accent)]",
+} as const;
+
+export function AppDialog({ open, onOpenChange, title, description, className, hideClose, overlayClassName, onCloseAutoFocus, onOpenAutoFocus, stickyFooter, titleAction, children }: Props) {
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -96,7 +118,7 @@ export function AppDialog({ open, onOpenChange, title, description, className, h
             )}
           >
             <div className={cn(stickyFooter && "flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-5")}>
-              {(title || description) && (
+              {(title || description || titleAction) && (
                 // Title strip = drag region. Same affordance as a macOS
                 // window title bar - the user grabs the chrome at the top
                 // of the dialog and drags the window. Close button below
@@ -107,7 +129,15 @@ export function AppDialog({ open, onOpenChange, title, description, className, h
                   style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
                   className="cursor-grab active:cursor-grabbing select-none"
                 >
-                  {title && <Dialog.Title className="text-base font-medium break-words pr-6">{title}</Dialog.Title>}
+                  {/* pr-6 clears the absolutely-positioned close button. It
+                      sits on the ROW, not the title, so title actions clear it
+                      too. gap-y keeps the wrapped case from touching. */}
+                  <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 pr-6">
+                    {title && <Dialog.Title className="min-w-0 text-base font-medium break-words">{title}</Dialog.Title>}
+                    {titleAction && (
+                      <div className="flex shrink-0 items-center gap-3">{titleAction}</div>
+                    )}
+                  </div>
                   {description && <Dialog.Description className="text-xs text-[var(--color-fg-dim)] -mt-1">{description}</Dialog.Description>}
                 </div>
               )}
