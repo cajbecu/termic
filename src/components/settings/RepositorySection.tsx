@@ -1428,12 +1428,12 @@ function MultiMembersEditor({ project, onSaved }: {
       </div>
       <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
         Repos to mount inside every task under this multi-repo project,
-        the <b>Setup / Run / Archive</b> commands to use for each, and the
-        <b> Files</b> each one needs copied from its repo root into its worktree
+        the <b>Setup / Run / Archive</b> commands to use for each, and the{" "}
+        <b>Files</b> each one needs copied from its repo root into its worktree
         (gitignored things a build needs: <code className="font-mono">.env</code>,
         keystores, service-account keys). These live on the multi-repo project,
         independent of the member project's own scripts; leave Files empty and
-        that repo's own committed <code className="font-mono">.termic.yaml</code>
+        that repo's own committed <code className="font-mono">.termic.yaml</code>{" "}
         list applies instead. Edits apply to <b>future</b> tasks; existing ones
         freeze at creation.
       </div>

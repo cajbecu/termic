@@ -300,8 +300,8 @@ export function DockerSection() {
           <b className="text-[var(--color-fg)]">Logins: </b>
           each agent gets one folder that termic manages on your Mac, reused by every Docker task running that
           agent - log in once and it carries over to your next Docker task with that same agent. Different
-          agents don't share a folder with each other, and none of this is your real <code className="font-mono">~/.claude</code>
-          etc: it's a separate, Docker-only copy.
+          agents don't share a folder with each other, and none of it is your real{" "}
+          <code className="font-mono">~/.claude</code>: it is a separate, Docker-only copy.
         </div>
         <div>
           <b className="text-[var(--color-fg)]">Agent updates: </b>
