@@ -77,7 +77,18 @@ export function DockerSection() {
   }
 
   // Dockerfile editor state.
-  const hostRef = useRef<HTMLDivElement>(null);
+  // A callback ref backed by STATE, not a plain ref. The editor mounts in an
+  // effect that needs the host div to exist, and the whole section lives
+  // behind `{enabled && …}`: with Docker off at page load the div does not
+  // exist yet, so the effect ran, found no host, and returned - and since it
+  // was keyed on `dfLoaded` alone it never ran again once the user enabled
+  // Docker and the div appeared. The result was a Dockerfile section with its
+  // Save / Reset buttons and no editor at all. Making the host a state value
+  // means the effect re-runs the moment it mounts, whatever order that
+  // happens in. The new first-run button drives everyone through exactly this
+  // path (open the page with Docker off, click enable), so it went from a
+  // corner to the default.
+  const [host, setHost] = useState<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const themeComp = useRef(new Compartment());
   const [dockerfile, setDockerfile] = useState("");
@@ -119,14 +130,14 @@ export function DockerSection() {
   // editor is built with its real content in one shot, no throwaway
   // empty-doc instance swapped out a tick later) ──────────────────────
   useEffect(() => {
-    if (!dfLoaded || !hostRef.current || viewRef.current) return;
+    if (!dfLoaded || !host || viewRef.current) return;
     let cancelled = false;
     // Dynamic import: @codemirror/legacy-modes is ~150 grammars and this is
     // the only place in the app that wants the Dockerfile one, so it must
     // not join the main chunk (src/lib/languageExts.ts does the same for
     // every legacy-modes grammar; enforced by mainChunkGuard.test.ts).
     import("@codemirror/legacy-modes/mode/dockerfile").then(({ dockerFile }) => {
-      if (cancelled || !hostRef.current || viewRef.current) return;
+      if (cancelled || !host || viewRef.current) return;
       const view = new EditorView({
         state: EditorState.create({
           doc: dockerfile,
@@ -144,7 +155,7 @@ export function DockerSection() {
             }),
           ],
         }),
-        parent: hostRef.current,
+        parent: host,
       });
       viewRef.current = view;
     });
@@ -154,7 +165,7 @@ export function DockerSection() {
       viewRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dfLoaded]);
+  }, [dfLoaded, host]);
 
   useEffect(() => {
     viewRef.current?.dispatch({
@@ -626,7 +637,7 @@ export function DockerSection() {
               </div>
             </div>
             <div
-              ref={hostRef}
+              ref={setHost}
               className="mt-2 max-h-[420px] overflow-auto rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg)]"
             />
             <div className="mt-3 flex items-center gap-2">
