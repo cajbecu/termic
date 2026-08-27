@@ -160,6 +160,70 @@ dialog started gating the member rows on the task type. What a plain-folder
 host really loses is the HOST-level "Branch from" pin (there are no host
 branches to pin); the members keep their own, in the dialog's member list.
 
+## Starting a task from an issue (GH #21/#22)
+
+One flow, two doors, and the SAME `NewTaskDialog` behind both:
+
+- **Command palette → "New task from an issue…"** → the shared project picker
+  (`openProjectPicker("issue")`; the placeholder tells you which question you
+  are answering) → `openNewTask(projectId, { issueMode: true })`.
+- **Inside the dialog**, the "Start from a GitHub/GitLab issue" link, which is
+  the same `enterIssues()` the seed triggers.
+
+It is deliberately not a dialog of its own. "Which project" is the first
+question either way, and everything after the issue is picked (task type,
+branch, CLI, sandbox) is the ordinary New Task form. A second dialog would have
+had to grow all of it back.
+
+The palette row is NOT gated on any project being on a forge: no project is
+chosen at that point, and resolving every project's remote to decide whether to
+draw a row would be a `git remote get-url` per project. A repo that turns out
+not to be on a forge gets told so, by name, in the issue column
+(`unsupported-remote` / `no-remote` / `cli-missing` / `cli-unauthed` each carry
+their own copy) rather than being shown an empty list, which would read as "no
+open issues" and mean something else entirely.
+
+### The issue picker is a COLUMN, not a field
+
+It sits beside the form as a second pane, the same treatment the sandbox config
+gets, and the two compose: with both open the dialog is three columns (see the
+`className` width math in `NewTaskDialog.tsx` - N columns is `N*base - (N-1)*0.5`
+rem, and only literal Tailwind classes survive the source scan, so each width is
+written out). Issues come BEFORE sandbox because picking one writes into the
+fields beside it; the cage is set-and-forget.
+
+It was inline above the form first. That put a 220px scrolling list inside a
+dialog you were already scrolling, and hid the effect of a pick below the fold.
+
+### A pick fills the form; it does not send anything
+
+Picking an issue writes **Name**, **Branch** and **Initial prompt**, all three
+still editable, and Create is still the only thing that acts.
+
+The prompt is the part that changed: there used to be a second seeder in the
+dialog (`seedIssue`) that composed `buildIssuePrompt(issue)` and typed it at the
+agent after create, so the first message an issue task ever sent was one the
+user never saw. It now lands in the Initial prompt box that already existed for
+deep links (GH #192), which makes the box the preview, and lets you add the
+sentence of steering an issue nearly always needs. There is exactly ONE seeder
+in the dialog now (`seedFirstMessage`), which matters beyond tidiness: two of
+them poll the same default tab and write to the same PTY, and `sendMessageToPty`
+writes text then a CR shortly after, so two interleave into one line followed by
+two Enters.
+
+`buildIssuePrompt(issue, maxChars?)` takes a budget because the box caps what it
+will send (`MAX_PROMPT_CHARS`). What gives is the issue BODY, never the tail:
+the instructions are the ask, and the body is context the agent can re-read in
+full with the `gh/glab issue view --comments` command already in the prompt.
+
+The prompt's instruction half is `builtin:work-issue` from the prompt library,
+read live, so editing it there changes every future issue task
+(`src/lib/issuePrompt.ts`).
+
+A plain shell or registry terminal has no prompt box, so the composed prompt has
+nowhere to go: the column says so at the point the issue was chosen rather than
+letting Create drop it silently.
+
 ## Window chrome / drag
 
 macOS overlay title bar, hidden title, 84px reserved left for traffic lights. Three drag mechanisms (each fails differently):

@@ -485,6 +485,13 @@ export function NewTaskDialog() {
     setIssueMode(false);
     setIssueSelected(null);
     setIssueLookup(null);
+    // A seed can ask to open straight into the issue picker (the palette's
+    // "New task from an issue…" row routes through the project picker and
+    // arrives here). Only where issues are a thing at all - `canImp` is the
+    // same single-repo-git test `canIssues` uses. This runs after the resets
+    // above, so it wins; a seed carrying both modes lands on issues, which is
+    // the more specific of the two.
+    if (seed?.issueMode && canImp) enterIssues();
     // Load existing branches so `derived` can auto-number past a collision
     // (#129). Only meaningful for single-repo git projects (worktree mode).
     setExistingBranches([]);
@@ -561,14 +568,18 @@ export function NewTaskDialog() {
   // (lib/seedPrompt); best-effort, so a create never fails over a prompt.
   function seedFirstMessage(taskId: string) {
     if (!canPrompt) return;
-    // Never alongside the issue prompt. Both seeders poll the SAME default
-    // tab and write to the same PTY, and `sendMessageToPty` writes the text
-    // then a CR shortly after - two of them interleave into one input line
-    // followed by two Enters. In issue mode the composed issue prompt IS the
-    // first message, so it wins and the typed box is not sent (it is hidden
-    // there too, so there is normally nothing in it to lose).
-    if (issueSelected) return;
-    seedPromptWhenReady(taskId, prompt.trim());
+    // There used to be a second seeder beside this one that composed and sent
+    // the issue prompt itself, which meant an issue task's first message was
+    // never shown to the user before it went out. Picking an issue now fills
+    // THIS box instead (pickIssue), so there is one seeder, the user sees the
+    // prompt, and they can edit or clear it before Create.
+    //
+    // SETUP_SPAWN_DEADLINE_MS, not the default: the issue seeder used the long
+    // one because a task can sit behind a setup script before its PTY ever
+    // spawns. That was never specific to issues - a typed first message on a
+    // repo with a slow setup script hit the same wall and vanished - so the
+    // patient deadline now covers both.
+    seedPromptWhenReady(taskId, prompt.trim(), SETUP_SPAWN_DEADLINE_MS);
   }
 
   // Adopt an existing worktree. No worktree-add / file-copy / setup
@@ -616,32 +627,34 @@ export function NewTaskDialog() {
 
   function exitIssues() {
     setIssueMode(false);
+    // Drop the composed prompt with it. The name and branch survive because
+    // they are just text the user may well want to keep; a first message that
+    // opens "GitHub issue #266:" is actively wrong on a task that is no longer
+    // about that issue, and "blank task instead" says what it clears.
+    if (issueSelected) setPrompt("");
     setIssueSelected(null);
     setErr(null);
   }
 
-  /** Picking an issue fills the name + branch (both still editable) and arms
-   *  the prompt. It does NOT force worktree mode: an issue task in the main
-   *  checkout is a legitimate thing to want, and silently switching the mode
-   *  under the user would be worse than letting them choose. */
+  /** Picking an issue fills the name, the branch and the first message, all
+   *  three still editable. The prompt is composed into the visible box rather
+   *  than sent behind the user's back at create time: the box is the preview,
+   *  and an issue nearly always needs a sentence of steering added to it.
+   *
+   *  It does NOT force worktree mode: an issue task in the main checkout is a
+   *  legitimate thing to want, and silently switching the mode under the user
+   *  would be worse than letting them choose. */
   function pickIssue(issue: ForgeIssue) {
     setIssueSelected(issue);
     setName(issueTaskName(issue));
     setBranch(uniqueBranch(issueBranch(issue, branchPrefix), existingBranches));
     setBranchEdited(false);
+    // Budgeted so the composed prompt fits what the box will actually send.
+    // Overwrites whatever is in there - same as the name and branch beside it,
+    // and picking a second issue has to replace the first one's prompt or the
+    // agent gets handed two.
+    setPrompt(buildIssuePrompt(issue, MAX_PROMPT_CHARS));
     setErr(null);
-  }
-
-  /** After a create, hand the agent the issue. Best-effort and fire-and-
-   *  forget: the task itself is already created and usable, so a TUI that
-   *  never reaches its input box must not surface as a create failure. */
-  function seedIssue(taskId: string) {
-    if (!issueSelected) return;
-    seedPromptWhenReady(
-      taskId,
-      buildIssuePrompt(issueSelected),
-      SETUP_SPAWN_DEADLINE_MS,
-    );
   }
 
   async function submitImport() {
@@ -665,7 +678,6 @@ export function NewTaskDialog() {
       ));
       await loadAll();
       setActive(w.id);
-      seedIssue(w.id);
       seedFirstMessage(w.id);
       close();
     } catch (e) {
@@ -700,7 +712,6 @@ export function NewTaskDialog() {
       ));
       await loadAll();
       setActive(w.id);
-      seedIssue(w.id);
       seedFirstMessage(w.id);
       close();
     } catch (e) {
@@ -737,7 +748,6 @@ export function NewTaskDialog() {
     // Worktree path: the id is pre-generated, so the seeder can start
     // polling for the agent immediately and simply waits out the setup
     // script (hence the longer deadline).
-    seedIssue(taskId);
     // Clean up any prior unlisteners from a previous (errored) submission
     // before registering new ones.
     for (const u of unlistenRef.current) u();
@@ -851,16 +861,26 @@ export function NewTaskDialog() {
       title={isMulti ? (mode === "repo_root" ? "New multi-repo task in the main checkout" : "New multi-repo task") : importMode ? "Import existing worktree" : mode === "repo_root" ? "New task in the main checkout" : "New task in a worktree"}
       description={undefined}
       // Widen the dialog to fit what's inside. Base width per mode (xl 36rem /
-      // 2xl 42rem / 3xl 48rem) sizes the single-column form. Enabling the
-      // sandbox adds a SECOND, equal (flex-1) column plus a 2rem (ml-8) gutter,
-      // so the dialog is 2*base - 0.5rem (content = 2*(base-2.5) + 2rem gutter,
-      // + 2.5rem padding). Everything is in REM so, whatever the root font-size
-      // (14px here), each flex-1 column resolves to the SAME width as the
-      // single-column form — the left never changes, only the column is added.
+      // 2xl 42rem / 3xl 48rem) sizes the single-column form. Each extra column
+      // (sandbox config, issue picker) is equal (flex-1) plus a 2rem (ml-8)
+      // gutter, so N columns is N*base - (N-1)*0.5rem (content = N*(base-2.5)
+      // + (N-1)*2rem gutter, + 2.5rem padding). Everything is in REM so,
+      // whatever the root font-size (14px here), each flex-1 column resolves to
+      // the SAME width as the single-column form — the left never changes, only
+      // columns are added.
+      //
+      // Only the literals below exist; a computed `max-w-[${n}rem]` would not
+      // survive Tailwind's source scan. The three-column case is only ever
+      // 36rem-based: issue mode is single-repo-git only (no 3xl) and turns
+      // import mode off (no 2xl), so 3*36 - 1 = 107rem is the one width it
+      // needs. That is wider than most screens, which is fine — max-width, so
+      // it shrinks, exactly as the 95.5rem multi+sandbox case already does.
       className={
-        sandbox
-          ? (isMulti ? "max-w-[95.5rem]" : importMode ? "max-w-[83.5rem]" : "max-w-[71.5rem]")
-          : (isMulti ? "max-w-3xl" : importMode ? "max-w-2xl" : "max-w-xl")
+        issueMode && sandbox
+          ? "max-w-[107rem]"
+          : issueMode || sandbox
+            ? (isMulti ? "max-w-[95.5rem]" : importMode ? "max-w-[83.5rem]" : "max-w-[71.5rem]")
+            : (isMulti ? "max-w-3xl" : importMode ? "max-w-2xl" : "max-w-xl")
       }
       // A long worktree form (sandbox panel, multi-repo members, …) can
       // exceed the viewport — pin Cancel/Create to the bottom instead of
@@ -888,10 +908,15 @@ export function NewTaskDialog() {
         onSubmit={(e) => { e.preventDefault(); submit(); }}
         className="mt-1.5 flex flex-col gap-4"
       >
-      {/* Columns row: the left form + the sandbox config as a second column
-          when a cage is enabled. Left is flex-1 (can't overflow); the sandbox
-          column is flex-1 too, and the dialog max-width (below) is sized in REM
-          so each column resolves to the SAME width in both states. */}
+      {/* Columns row: the left form, then up to two more columns — the issue
+          picker when starting from an issue, the sandbox config when a cage is
+          enabled. Left is flex-1 (can't overflow); so is every added column,
+          and the dialog max-width (above) is sized in REM so each column
+          resolves to the SAME width whichever of them are showing.
+
+          Issues sit BEFORE sandbox because picking one writes into the form
+          beside it (name, branch, prompt), so the two want to be adjacent;
+          the cage is set-and-forget. */}
       <div className="flex">
       <div className="flex min-w-0 flex-1 flex-col gap-4">
         {/* Every field uses the same structure: label on its own line, optional
@@ -940,102 +965,6 @@ export function NewTaskDialog() {
             <Plus className="h-3.5 w-3.5" />
             Start from a blank task instead
           </button>
-        )}
-
-        {/* Issue picker. Replaces nothing: it fills the name + branch fields
-            above, which stay editable. */}
-        {issueMode && (
-          <Field
-            label="Issue"
-            hint="Open issues, most recently updated first. The agent starts with the issue and reads the comments itself."
-          >
-            {issueLoading ? (
-              <div className="flex items-center gap-2 px-1 py-4 text-[12.5px] text-[var(--color-fg-faint)]">
-                <Loader2 className="h-4 w-4 animate-spin text-[var(--color-accent)]" /> Loading issues…
-              </div>
-            ) : issueLookup && issueLookup.status !== "ok" ? (
-              <div className="rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] px-3 py-3 text-[12.5px] text-[var(--color-fg-dim)]">
-                {issueLookup.status === "cli-missing" ? (
-                  <>
-                    <div className="text-[var(--color-fg)]">
-                      Issues need the <span className="mono">{forgeCli}</span> CLI
-                    </div>
-                    <div className="mt-1">
-                      Install it with <code className="mono">brew install {forgeCli}</code>, then sign in
-                      with <code className="mono">{forgeCli} auth login</code>. It also powers the PR card and
-                      merge detection.
-                    </div>
-                  </>
-                ) : issueLookup.status === "cli-unauthed" ? (
-                  <>
-                    <div className="text-[var(--color-fg)]">Sign in to load issues</div>
-                    <div className="mt-1">
-                      Run <code className="mono">{forgeCli} auth login</code> in a terminal, then reopen this.
-                    </div>
-                  </>
-                ) : (
-                  <span className="break-words">{issueLookup.message}</span>
-                )}
-              </div>
-            ) : (issueLookup?.issues.length ?? 0) === 0 ? (
-              <div className="rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] px-3 py-4 text-center text-[12px] text-[var(--color-fg-faint)]">
-                No open issues on this repo.
-              </div>
-            ) : (
-              <>
-                <input
-                  value={issueQuery}
-                  onChange={e => setIssueQuery(e.target.value)}
-                  placeholder="Filter by number, title or label"
-                  spellCheck={false} autoCorrect="off" autoCapitalize="off" autoComplete="off"
-                  className="mb-1.5 h-7 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 text-[12.5px] text-[var(--color-fg)] outline-none placeholder:text-[var(--color-fg-faint)] focus:border-[var(--color-accent)]"
-                />
-                <div className="max-h-[220px] overflow-auto rounded-md border border-[var(--color-border-soft)]">
-                  {visibleIssues.map(issue => (
-                    <button
-                      key={issue.number}
-                      type="button"
-                      onClick={() => pickIssue(issue)}
-                      title={issue.title}
-                      className={cn(
-                        "flex w-full items-start gap-2.5 border-b border-[var(--color-border-soft)] px-3 py-2 text-left last:border-b-0 hover:bg-[var(--color-hover)]",
-                        issueSelected?.number === issue.number && "bg-[var(--color-accent-deep)]/10",
-                      )}
-                    >
-                      <CircleDot className={cn(
-                        "mt-px h-4 w-4 shrink-0",
-                        issueSelected?.number === issue.number ? "text-[var(--color-accent)]" : "text-[var(--color-fg-faint)]",
-                      )} />
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-[13px] text-[var(--color-fg)]">
-                          <span className="text-[var(--color-fg-faint)]">#{issue.number}</span> {issue.title}
-                        </div>
-                        <div className="mt-0.5 flex items-center gap-2 text-[11px] text-[var(--color-fg-faint)]">
-                          {issue.author && <span className="truncate">{issue.author}</span>}
-                          {issue.comments > 0 && (
-                            <span className="shrink-0">
-                              {issue.comments} comment{issue.comments === 1 ? "" : "s"}
-                            </span>
-                          )}
-                          {issue.labels.slice(0, 3).map(l => (
-                            <span key={l} className="shrink-0 truncate rounded bg-[var(--color-bg-3)] px-1 text-[10.5px]">{l}</span>
-                          ))}
-                        </div>
-                      </div>
-                      {issueSelected?.number === issue.number && (
-                        <Check className="mt-px h-4 w-4 shrink-0 text-[var(--color-accent)]" />
-                      )}
-                    </button>
-                  ))}
-                  {visibleIssues.length === 0 && (
-                    <div className="px-3 py-4 text-center text-[12px] text-[var(--color-fg-faint)]">
-                      Nothing matches that filter.
-                    </div>
-                  )}
-                </div>
-              </>
-            )}
-          </Field>
         )}
 
         {canImport && importMode && (
@@ -1246,8 +1175,8 @@ export function NewTaskDialog() {
             grows it as the user types, so the hint that used to explain
             "typed once ready, nothing sent until Create" isn't needed to
             justify the extra height; the placeholder carries that now. */}
-        {canPrompt && !issueSelected && (
-          <Field label="Initial prompt">
+        {canPrompt && (
+          <Field label={issueSelected ? "Initial prompt (from the issue)" : "Initial prompt"}>
             <div className="flex flex-col gap-1">
               <textarea
                 ref={promptRef}
@@ -1470,6 +1399,126 @@ export function NewTaskDialog() {
         )}
       </div>
 
+      {/* Issue picker: its own column, not a box wedged into the form. It is a
+          TABLE the user reads and scans (number, title, author, labels), and
+          220px of it above the fields meant scrolling a list inside a dialog
+          you were already scrolling. Same second-pane treatment the sandbox
+          config gets, and mutually compatible with it - both can be open, and
+          the dialog widens to three columns.
+
+          Picking a row fills Name, Branch and Initial prompt on the left, all
+          of which stay editable. That is the whole point of it being beside
+          the form rather than above it: you see what the choice did. */}
+      {issueMode && (
+        <div
+          data-testid="issue-column"
+          data-issue-picked={issueSelected ? String(issueSelected.number) : undefined}
+          className="ml-8 flex min-w-0 flex-1 flex-col gap-3 border-l border-[var(--color-border-soft)] pl-6"
+        >
+          <div className="text-[11.5px] uppercase tracking-[0.1em] text-[var(--color-fg-faint)]">
+            Issue to start from
+          </div>
+          <p className="-mt-1 text-[12px] leading-snug text-[var(--color-fg-dim)]">
+            Open issues, most recently updated first. The agent starts with the
+            issue and reads the comments itself.
+          </p>
+          {issueLoading ? (
+            <div className="flex items-center gap-2 px-1 py-4 text-[12.5px] text-[var(--color-fg-faint)]">
+              <Loader2 className="h-4 w-4 animate-spin text-[var(--color-accent)]" /> Loading issues…
+            </div>
+          ) : issueLookup && issueLookup.status !== "ok" ? (
+            <div className="rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] px-3 py-3 text-[12.5px] text-[var(--color-fg-dim)]">
+              {issueLookup.status === "cli-missing" ? (
+                <>
+                  <div className="text-[var(--color-fg)]">
+                    Issues need the <span className="mono">{forgeCli}</span> CLI
+                  </div>
+                  <div className="mt-1">
+                    Install it with <code className="mono">brew install {forgeCli}</code>, then sign in
+                    with <code className="mono">{forgeCli} auth login</code>. It also powers the PR card and
+                    merge detection.
+                  </div>
+                </>
+              ) : issueLookup.status === "cli-unauthed" ? (
+                <>
+                  <div className="text-[var(--color-fg)]">Sign in to load issues</div>
+                  <div className="mt-1">
+                    Run <code className="mono">{forgeCli} auth login</code> in a terminal, then reopen this.
+                  </div>
+                </>
+              ) : (
+                <span className="break-words">{issueLookup.message}</span>
+              )}
+            </div>
+          ) : (issueLookup?.issues.length ?? 0) === 0 ? (
+            <div className="rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] px-3 py-4 text-center text-[12px] text-[var(--color-fg-faint)]">
+              No open issues on this repo.
+            </div>
+          ) : (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <input
+                value={issueQuery}
+                onChange={e => setIssueQuery(e.target.value)}
+                placeholder="Filter by number, title or label"
+                spellCheck={false} autoCorrect="off" autoCapitalize="off" autoComplete="off"
+                className="mb-1.5 h-7 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 text-[12.5px] text-[var(--color-fg)] outline-none placeholder:text-[var(--color-fg-faint)] focus:border-[var(--color-accent)]"
+              />
+              <div className="min-h-[220px] flex-1 overflow-auto rounded-md border border-[var(--color-border-soft)]">
+                {visibleIssues.map(issue => (
+                  <button
+                    key={issue.number}
+                    type="button"
+                    onClick={() => pickIssue(issue)}
+                    title={issue.title}
+                    className={cn(
+                      "flex w-full items-start gap-2.5 border-b border-[var(--color-border-soft)] px-3 py-2 text-left last:border-b-0 hover:bg-[var(--color-hover)]",
+                      issueSelected?.number === issue.number && "bg-[var(--color-accent-deep)]/10",
+                    )}
+                  >
+                    <CircleDot className={cn(
+                      "mt-px h-4 w-4 shrink-0",
+                      issueSelected?.number === issue.number ? "text-[var(--color-accent)]" : "text-[var(--color-fg-faint)]",
+                    )} />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[13px] text-[var(--color-fg)]">
+                        <span className="text-[var(--color-fg-faint)]">#{issue.number}</span> {issue.title}
+                      </div>
+                      <div className="mt-0.5 flex items-center gap-2 text-[11px] text-[var(--color-fg-faint)]">
+                        {issue.author && <span className="truncate">{issue.author}</span>}
+                        {issue.comments > 0 && (
+                          <span className="shrink-0">
+                            {issue.comments} comment{issue.comments === 1 ? "" : "s"}
+                          </span>
+                        )}
+                        {issue.labels.slice(0, 3).map(l => (
+                          <span key={l} className="shrink-0 truncate rounded bg-[var(--color-bg-3)] px-1 text-[10.5px]">{l}</span>
+                        ))}
+                      </div>
+                    </div>
+                    {issueSelected?.number === issue.number && (
+                      <Check className="mt-px h-4 w-4 shrink-0 text-[var(--color-accent)]" />
+                    )}
+                  </button>
+                ))}
+                {visibleIssues.length === 0 && (
+                  <div className="px-3 py-4 text-center text-[12px] text-[var(--color-fg-faint)]">
+                    Nothing matches that filter.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          {/* A plain shell / registry terminal has no prompt box, so the
+              composed prompt has nowhere to go. Say so here, where the issue
+              was chosen, rather than letting Create silently drop it. */}
+          {issueSelected && !canPrompt && (
+            <p className="text-[12px] leading-snug text-[var(--color-warn)]">
+              {agentLabel} has no prompt box, so the issue won't be handed over.
+              Pick an agent to send it.
+            </p>
+          )}
+        </div>
+      )}
       {/* Right column: sandbox config, an equal-width second pane (flex-1, so
           it matches the left; the dialog is sized to 2x base). Rendered ONLY
           when a cage is enabled, so there's no ghost width/height when off. */}

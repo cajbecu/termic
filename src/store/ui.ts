@@ -75,6 +75,9 @@ export interface NewTaskSeed {
   namePrefix?: string;
   /** Open straight into "import an existing worktree" mode. */
   importMode?: boolean;
+  /** Open straight into the forge issue picker. Ignored for multi-repo and
+   *  non-git projects, which have no issues to pick from. */
+  issueMode?: boolean;
   /** Pre-fills the first-message textarea (GH #192, deep links). Sent to
    *  the agent after create; never auto-submitted from the link itself. */
   prompt?: string;
@@ -176,6 +179,11 @@ interface UIState {
   /** Global fuzzy project picker (⌘N) — search any loaded project and
    *  start a new task for it without scrolling the sidebar. */
   projectPickerOpen: boolean;
+  /** What the picked project is FOR. "task" opens the standard New Task
+   *  dialog; "issue" opens it straight into the forge issue picker. Same
+   *  picker either way, because "which project" is the first question in
+   *  both cases and asking it twice would be the wrong shape. */
+  projectPickerIntent: "task" | "issue";
   /** ⇧⌘P command palette — searchable list of every command / action. */
   commandPaletteOpen: boolean;
   /** ⌥⌘P prompt palette — searchable list of library prompts (title only). */
@@ -296,7 +304,7 @@ interface UIState {
   closeFileFinder: () => void;
   openSearchEverywhere: (taskId: string) => void;
   closeSearchEverywhere: () => void;
-  openProjectPicker: () => void;
+  openProjectPicker: (intent?: "task" | "issue") => void;
   closeProjectPicker: () => void;
   openCommandPalette: () => void;
   closeCommandPalette: () => void;
@@ -424,6 +432,7 @@ export const useUI = create<UIState>(set => ({
   searchEverywhereTaskId: null,
   findInFilesTaskId: null,
   projectPickerOpen: false,
+  projectPickerIntent: "task",
   commandPaletteOpen: false,
   promptPaletteOpen: false,
   syntaxPaletteFor: null,
@@ -491,7 +500,7 @@ export const useUI = create<UIState>(set => ({
   closeFileFinder:   () => set({ fileFinderTaskId: null }),
   openFindInFiles:   (taskId) => set({ findInFilesTaskId: taskId }),
   closeFindInFiles:  () => set({ findInFilesTaskId: null }),
-  openProjectPicker: () => set({ projectPickerOpen: true }),
+  openProjectPicker: (intent = "task") => set({ projectPickerOpen: true, projectPickerIntent: intent }),
   closeProjectPicker:() => set({ projectPickerOpen: false }),
   openCommandPalette: () => set({ commandPaletteOpen: true }),
   closeCommandPalette:() => set({ commandPaletteOpen: false }),

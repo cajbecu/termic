@@ -132,4 +132,50 @@ describe("buildIssuePrompt", () => {
     // of text, so the default has to survive deletion.
     expect(p).toContain(WORK_ISSUE_PROMPT.split("\n")[0]);
   });
+
+  // The composed prompt lands in the New Task dialog's Initial prompt box,
+  // which caps what it sends. Fitting the cap is the composer's job, because
+  // it is the only place that knows which half is expendable.
+  describe("with a character budget", () => {
+    const huge = () => issue({ body: "x".repeat(20_000) });
+
+    it("fits the budget", () => {
+      expect(buildIssuePrompt(huge(), 2000).length).toBeLessThanOrEqual(2000);
+    });
+
+    it("keeps the instructions whole and spends the budget on the body", () => {
+      const p = buildIssuePrompt(huge(), 2000);
+      // The ask survives intact: trimming the tail would leave the agent a
+      // wall of context with nothing telling it what to do.
+      expect(p).toContain("Work on the issue above.");
+      expect(p).toContain("Do not close the issue");
+      // And the identity, which is what makes the task traceable.
+      expect(p).toContain("GitHub issue #21");
+    });
+
+    it("says the body was cut, and how to read the rest", () => {
+      const p = buildIssuePrompt(huge(), 2000);
+      expect(p).toContain("[body truncated");
+      expect(p).toContain("gh issue view 21 --comments");
+    });
+
+    it("still drops the body at the built-in 4000 cap with no budget", () => {
+      // A budget is an extra constraint, never a licence to inline more.
+      expect(buildIssuePrompt(huge()).length).toBeLessThan(6000);
+      expect(buildIssuePrompt(huge())).toContain("[body truncated");
+    });
+
+    it("survives a budget too small for even the instructions", () => {
+      // Degenerate, but it must not throw or emit a negative-length slice.
+      const p = buildIssuePrompt(huge(), 10);
+      expect(p).toContain("Work on the issue above.");
+      expect(p).not.toContain("xxxx");
+    });
+
+    it("leaves a short body alone", () => {
+      const p = buildIssuePrompt(issue(), 8000);
+      expect(p).toBe(buildIssuePrompt(issue()));
+      expect(p).not.toContain("[body truncated");
+    });
+  });
 });

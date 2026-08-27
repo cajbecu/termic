@@ -3,6 +3,14 @@
 // hundreds-of-projects case where scrolling the sidebar to find the `+` is
 // the bottleneck. Selecting a row just calls openNewTask(project.id) —
 // the exact same flow as the sidebar `+` → "New git worktree".
+//
+// Also the front half of "New task from an issue": that palette row opens this
+// same picker with intent "issue", and the chosen project's New Task dialog
+// opens straight into its forge issue picker. Which project comes first either
+// way, so there is one picker, not two. Projects are NOT filtered by whether
+// they are on a forge: resolving that for every project would cost a
+// `git remote get-url` each, and the dialog already says, per project, exactly
+// why a repo has no issues to offer.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
@@ -30,6 +38,7 @@ export function ProjectPickerDialog() {
   const open = useUI(s => s.projectPickerOpen);
   const close = useUI(s => s.closeProjectPicker);
   const openNewTask = useUI(s => s.openNewTask);
+  const intent = useUI(s => s.projectPickerIntent);
   const projects = useApp(s => s.projects);
 
   const [query, setQuery] = useState("");
@@ -79,7 +88,7 @@ export function ProjectPickerDialog() {
     // Close the picker first, then open the New Task dialog so the two
     // modals never stack.
     close();
-    openNewTask(id);
+    openNewTask(id, intent === "issue" ? { issueMode: true } : undefined);
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
@@ -105,6 +114,11 @@ export function ProjectPickerDialog() {
     el?.scrollIntoView({ block: "nearest" });
   }, [activeIdx]);
 
+  const issueIntent = intent === "issue";
+  const placeholder = issueIntent
+    ? "Search a project to pick an issue from"
+    : "Search a project to start a new task";
+
   return (
     <Dialog.Root open={open} onOpenChange={(v) => (v ? null : close())}>
       <Dialog.Portal>
@@ -112,11 +126,13 @@ export function ProjectPickerDialog() {
             data-state instead of a snap, for contrast without flicker. */}
         <Dialog.Overlay className="termic-backdrop fixed inset-0 z-40 bg-black/30" />
         <Dialog.Content
+          data-testid="project-picker"
+          data-intent={intent}
           className="termic-pop fixed left-1/2 top-12 z-50 w-[min(760px,92vw)] -translate-x-1/2 overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-1)] shadow-2xl outline-none"
           onKeyDown={onKeyDown}
         >
-          <Dialog.Title className="sr-only">New task</Dialog.Title>
-          <Dialog.Description className="sr-only">Search a project to start a new task.</Dialog.Description>
+          <Dialog.Title className="sr-only">{issueIntent ? "New task from an issue" : "New task"}</Dialog.Title>
+          <Dialog.Description className="sr-only">{placeholder}.</Dialog.Description>
           <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-3 py-2.5">
             <Search className="h-4 w-4 shrink-0 text-[var(--color-fg-faint)]" />
             <input
@@ -127,7 +143,7 @@ export function ProjectPickerDialog() {
               autoCorrect="off"
               autoCapitalize="off"
               autoComplete="off"
-              placeholder="Search a project to start a new task"
+              placeholder={placeholder}
               className="w-full bg-transparent pl-1 text-[14px] text-[var(--color-fg)] placeholder:text-[var(--color-fg-faint)] focus:outline-none"
             />
           </div>

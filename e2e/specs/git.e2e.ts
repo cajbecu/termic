@@ -2140,3 +2140,84 @@ describe("start a task from an issue", () => {
     );
   });
 });
+
+// The route in: a palette row of its own, the shared project picker, then the
+// standard New Task dialog already showing its issue split. Every step here is
+// real UI. What CANNOT be exercised on this fixture is picking an actual issue
+// (a local bare remote is not a forge, by design of the fixture - see the
+// describe above), so the prompt auto-fill that a pick triggers is covered by
+// src/lib/issuePrompt.test.ts instead.
+describe("the route into an issue task", () => {
+  const dialogOpen = () =>
+    browser.execute(() => !!window.__termic!.useUI.getState().newTaskProjectId);
+
+  /** Click a picker row by name. Not `clickByText`: a row's text is its name
+   *  AND its path, and the name itself is split into per-character <b>s by the
+   *  fuzzy highlighter, so there is no element whose exact text is the name.
+   *  Scoped to the picker so it can never grab a command-palette row, which
+   *  carries the same `data-row` attribute. */
+  const pickProject = (name: string) =>
+    browser.execute((n) => {
+      const picker = document.querySelector('[data-testid="project-picker"]');
+      if (!picker) throw new Error("project picker is not open");
+      const row = [...picker.querySelectorAll("[data-row]")].find(
+        (e) => e.textContent?.includes(n),
+      );
+      if (!row) throw new Error(`no picker row for: ${n}`);
+      (row as HTMLElement).click();
+    }, name);
+
+  after(async () => {
+    await browser.execute(() => {
+      const ui = window.__termic!.useUI.getState();
+      ui.closeCommandPalette?.();
+      ui.closeProjectPicker?.();
+      ui.closeNewTask?.();
+    });
+  });
+
+  it("offers it as its own palette row, not buried in the New Task dialog", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    await browser.execute(() => window.__termic!.useUI.getState().openCommandPalette());
+    // Discovery is the point of the row existing: you should not have to be
+    // creating a task already to find out you can start from an issue.
+    await waitForText("New task from an issue…");
+    await clickByText("New task from an issue…");
+  });
+
+  it("asks which project through the SAME picker, flagged as an issue pick", async () => {
+    // One picker, two intents. The placeholder is how the user can tell which
+    // question they are answering.
+    await waitVisible('[data-testid="project-picker"][data-intent="issue"]');
+    await waitVisible('input[placeholder="Search a project to pick an issue from"]');
+  });
+
+  it("opens the standard New Task dialog straight onto the issue split", async () => {
+    await pickProject("fixture-repo");
+    await browser.waitUntil(dialogOpen, { timeoutMsg: "New Task never opened" });
+    // Not a second dialog: the same one, with one more column.
+    await waitVisible('[data-testid="issue-column"]');
+    // The column's own heading is uppercased in CSS, and innerText returns it
+    // transformed - so assert on the hint below it, which is not.
+    await waitForText("Open issues, most recently updated first.");
+    // And the rest of the form is right there beside it.
+    await waitForText("Task type");
+    await waitForText("Default CLI");
+  });
+
+  it("says why a non-forge repo has no issues instead of showing an empty list", async () => {
+    // The fixture pushes to a local bare repo. An empty list would read as
+    // "no open issues", which is a different and wrong statement.
+    await waitForText("is not a GitHub or GitLab host");
+  });
+
+  it("drops back to a blank form, split and all", async () => {
+    await clickByText("Start from a blank task instead");
+    await waitGone('[data-testid="issue-column"]');
+    // The dialog stays open on the ordinary form rather than closing under
+    // the user: they still wanted a task, just not from an issue.
+    expect(await dialogOpen()).toBe(true);
+    await browser.execute(() => window.__termic!.useUI.getState().closeNewTask());
+  });
+});

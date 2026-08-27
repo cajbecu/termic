@@ -61,11 +61,11 @@ export function issueBranch(
 /** The issue half of the prompt: identity, link, body, and how to read the
  *  discussion. Exported separately so tests can assert it without depending
  *  on the prompt library's state. */
-export function issueContext(issue: ForgeIssue): string {
+export function issueContext(issue: ForgeIssue, bodyMax = BODY_MAX): string {
   const host = issue.provider === "gitlab" ? "GitLab" : "GitHub";
   const body = issue.body.trim();
-  const truncated = body.length > BODY_MAX;
-  const shown = truncated ? `${body.slice(0, BODY_MAX).trimEnd()}\n\n[body truncated, read the rest with the command below]` : body;
+  const truncated = body.length > bodyMax;
+  const shown = truncated ? `${body.slice(0, bodyMax).trimEnd()}\n\n[body truncated, read the rest with the command below]` : body;
   const lines = [
     `${host} issue ${issueRef(issue)}: ${issue.title.trim()}`,
     issue.url,
@@ -87,8 +87,23 @@ export function issueContext(issue: ForgeIssue): string {
  *  live so an edited or disabled builtin is respected; falls back to the
  *  shipped text if the user deleted it outright, because a task created from
  *  an issue with no instructions at all would just be a wall of context. */
-export function buildIssuePrompt(issue: ForgeIssue): string {
+export function buildIssuePrompt(issue: ForgeIssue, maxChars?: number): string {
   const prompt = usePromptLibrary.getState().prompts.find(p => p.id === "builtin:work-issue");
   const instructions = (prompt?.body ?? WORK_ISSUE_PROMPT).trim();
-  return `${issueContext(issue)}\n\n---\n\n${instructions}`;
+  const tail = `\n\n---\n\n${instructions}`;
+  // The composed prompt now lands in the New Task dialog's Initial prompt box,
+  // which caps what it will send (deepLink's MAX_PROMPT_CHARS), so a caller can
+  // ask for a prompt that fits. What gives is the BODY: the instructions are
+  // the actual ask, and the body is context the agent can re-read in full with
+  // the fetch command that is already in the prompt. Trimming the tail instead
+  // would drop the ask and leave a wall of context with no instruction.
+  let bodyMax = BODY_MAX;
+  if (maxChars !== undefined) {
+    // Overhead measured with an empty body, which substitutes the longer
+    // "no description" placeholder - so this errs on the side of a shorter
+    // body rather than overshooting the cap.
+    const overhead = issueContext({ ...issue, body: "" }).length + tail.length;
+    bodyMax = Math.max(0, Math.min(BODY_MAX, maxChars - overhead));
+  }
+  return `${issueContext(issue, bodyMax)}${tail}`;
 }

@@ -13,7 +13,7 @@ import {
   FolderCog, RefreshCw, ScrollText, Bug, SlidersHorizontal, Bot, BookText,
   Check, ChevronLeft, ListTodo, Bell, SquareTerminal, FolderPlus, History, Square,
   Play, Swords, Megaphone, Columns2, Rows2, Clock, UserPen, GitPullRequest, Activity, Code2,
-  NotepadText, Waypoints, type LucideIcon,
+  NotepadText, Waypoints, CircleDot, type LucideIcon,
 } from "lucide-react";
 import { useUI } from "@/store/ui";
 import { copyToClipboard } from "@/lib/clipboard";
@@ -205,6 +205,17 @@ export function CommandPalette() {
       id: "new-task", section: "Task", label: "New task…",
       icon: Plus, shortcutId: "new-task-quick", keywords: "create worktree project",
       run: act(() => useUI.getState().openProjectPicker()),
+    });
+    // Its own row rather than a mode of "New task…": starting from an issue is
+    // a different intent, and burying it as a link inside the dialog meant you
+    // had to already be creating a task to discover it exists. Not gated on
+    // whether any project is on a forge - no project is chosen yet, and
+    // resolving every project's remote to decide whether to show a palette row
+    // would be a lot of git for a row.
+    cmds.push({
+      id: "new-task-issue", section: "Task", label: "New task from an issue…",
+      icon: CircleDot, keywords: "github gitlab ticket bug create worktree",
+      run: act(() => useUI.getState().openProjectPicker("issue")),
     });
     cmds.push({
       id: "new-project", section: "Task", label: "Add project…",
