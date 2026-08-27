@@ -20,7 +20,7 @@ import { Button } from "@/components/ui/Button";
 import { useBackendSettings } from "@/components/settings/Controls";
 import { DockerRebuildFrequencyPicker } from "@/components/DockerRebuildFrequencyPicker";
 import { describeLastBuildDate } from "@/lib/dockerDailyRebuild";
-import { Container, RotateCw, SkipForward, Infinity as InfinityIcon } from "lucide-react";
+import { Container, RotateCw, SkipForward, Clock, Infinity as InfinityIcon } from "lucide-react";
 
 export function DockerRebuildPromptDialog() {
   const prompt = useUI(s => s.dockerRebuildPrompt);
@@ -60,6 +60,18 @@ export function DockerRebuildPromptDialog() {
       <div className="mt-5 flex items-center justify-end gap-2">
         <Button variant="ghost" type="button" onClick={() => resolve("skip")}>
           <SkipForward className="h-3.5 w-3.5" /> Skip for now
+        </Button>
+        {/* Build, but do not make this launch wait on it. The rebuild exists
+            to stop an agent running a stale binary, and someone who wants to
+            start working NOW should not have to choose between that and a
+            several-minute wait: the image lands for the NEXT agent instead. */}
+        <Button
+          variant="ghost"
+          type="button"
+          title="Start the rebuild now and launch this agent immediately on the current image. The new one is used by the next agent."
+          onClick={() => resolve("background")}
+        >
+          <Clock className="h-3.5 w-3.5" /> Rebuild in background
         </Button>
         {/* Rebuilds now AND stops asking. Hidden when the frequency is
             "off", where there is no schedule to defer to and the button

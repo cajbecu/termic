@@ -106,9 +106,11 @@ export async function maybeRebuildDockerImageForLaunch(task: Task): Promise<void
 const REBUILD_EVENT_TIMEOUT_MS = 15 * 60 * 1000;
 
 async function promptAndRebuild(task: Task, lastBuiltDate: string | null, ask: boolean): Promise<void> {
+  let background = false;
   if (ask) {
     const choice = await useUI.getState().askDockerRebuild(task.name, lastBuiltDate);
     if (choice === "skip") return;
+    background = choice === "background";
     if (choice === "always") {
       // Persist BEFORE the build so the answer survives even if the rebuild
       // fails or the app is closed while it runs.
@@ -117,6 +119,26 @@ async function promptAndRebuild(task: Task, lastBuiltDate: string | null, ask: b
         await settingsSave({ ...cur, docker_rebuild_auto: true });
       } catch { /* not worth failing the launch over */ }
     }
+  }
+
+  if (background) {
+    // Start it and get out of the way. This launch proceeds on the CURRENT
+    // image, so the pane is not taken over and nothing is awaited - the whole
+    // point of the choice is that the agent starts now. `inFlight` still
+    // single-flights it, so a second launch will not kick off a rival build.
+    useUI.getState().pushToast(
+      "Rebuilding the Docker sandbox image in the background. The next agent will use it.",
+      "info",
+      { ttlMs: 8000 },
+    );
+    void dockerBuildImage(true).catch(() => {
+      useUI.getState().pushToast(
+        "Docker sandbox image rebuild failed. Check Settings → Docker Sandbox.",
+        "error",
+        { ttlMs: 8000 },
+      );
+    });
+    return;
   }
 
   useUI.getState().pushToast(

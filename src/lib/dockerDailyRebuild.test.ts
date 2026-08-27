@@ -242,3 +242,26 @@ describe("describeLastBuildDate at a realistic time of day", () => {
     expect(isRebuildDue("daily", "2026-08-25", now)).toBe(true);
   });
 });
+
+describe("rebuild in background", () => {
+  it("starts the build and does NOT make the launch wait for it", async () => {
+    // The whole point of the choice: the rebuild exists to stop an agent
+    // running a stale binary, but someone who wants to work NOW should not
+    // have to pick between that and a several-minute wait.
+    mockedSettingsLoad.mockResolvedValue(baseSettings);
+    mockedImageStatus.mockResolvedValue({ ...baseImage, last_built_date: "2020-01-01" });
+    // A build that never signals `done`. If the launch awaited it, this test
+    // would hang rather than fail, which is exactly the bug being prevented.
+    vi.mocked(onDockerBuildDone).mockResolvedValue(() => {});
+    useUI.setState({ dockerRebuildPrompt: null });
+
+    const launch = maybeRebuildDockerImageForLaunch(baseTask as Task);
+    await vi.waitFor(() => expect(useUI.getState().dockerRebuildPrompt).not.toBeNull());
+    useUI.getState().resolveDockerRebuildPrompt("background");
+
+    await launch;                                   // resolves without `done`
+    expect(mockedBuildImage).toHaveBeenCalledWith(true);   // --no-cache
+    expect(useUI.getState().toasts.some(t => /background/i.test(t.msg))).toBe(true);
+  });
+});
+

@@ -229,7 +229,7 @@ interface UIState {
    *  ("rebuild" awaits a fresh --no-cache build; "skip" launches
    *  immediately on whatever image already exists) when the modal closes;
    *  DockerRebuildPromptDialog reads this and renders. */
-  dockerRebuildPrompt: { taskName: string; lastBuiltDate: string | null; resolve: (choice: "rebuild" | "skip" | "always") => void } | null;
+  dockerRebuildPrompt: { taskName: string; lastBuiltDate: string | null; resolve: (choice: "rebuild" | "skip" | "always" | "background") => void } | null;
   /** Tasks whose PTYs are about to be SIGKILL'd because the user
    *  explicitly hit "Save & restart" on a config dialog (Sandbox or
    *  Resume override). The next pty-exit for any PTY belonging to one of
@@ -349,8 +349,8 @@ interface UIState {
   /** Open the Docker sandbox rebuild-nudge prompt. Resolves "rebuild" or
    *  "skip" once the user answers (DockerRebuildPromptDialog). */
   /** "always" = rebuild now AND stop asking (persists docker_rebuild_auto). */
-  askDockerRebuild: (taskName: string, lastBuiltDate: string | null) => Promise<"rebuild" | "skip" | "always">;
-  resolveDockerRebuildPrompt: (choice: "rebuild" | "skip" | "always") => void;
+  askDockerRebuild: (taskName: string, lastBuiltDate: string | null) => Promise<"rebuild" | "skip" | "always" | "background">;
+  resolveDockerRebuildPrompt: (choice: "rebuild" | "skip" | "always" | "background") => void;
   /** Mark a task for auto-restart on the next PTY exit. Called by
    *  dialogs that change spawn-time config and then kill the live agent so
    *  it relaunches with the new settings (the Sandbox dialog before

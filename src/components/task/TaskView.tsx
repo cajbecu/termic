@@ -17,6 +17,7 @@
 // widen this to terminals.
 
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { DockerBuildPane } from "@/components/task/DockerBuildPane";
 import type { Task, Tab, TerminalTab } from "@/lib/types";
 import { useApp, useTaskTabs, useActiveTabId } from "@/store/app";
 import { usePrefs, currentTerminalTheme } from "@/store/prefs";
@@ -401,6 +402,12 @@ export function TaskView({ task }: { task: Task }) {
         {/* hRow: main tab-stack always mounted alongside the task-level
             extra-pane container (visibility-toggled when splitRoot is null). */}
         <div className="relative flex min-h-0 flex-1">
+          {/* Pre-launch image rebuild takes the pane while the agent waits on
+              it, the same way CreatingTaskPane owns the pane of a task that
+              is still being made. Renders nothing unless a build is running
+              FOR THIS TASK, and clears itself the moment one succeeds, so the
+              terminal underneath is untouched the rest of the time. */}
+          <DockerBuildPane taskId={task.id} />
           {/* ── Main pane chrome (always alive, never unmounts). Tab CONTENT
                lives in the flat layer below, not here. Positioned at the main
                leaf's rect in the FULL tree, so main can live in any cell
