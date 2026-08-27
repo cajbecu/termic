@@ -50,7 +50,7 @@ src/                       # React 19 + Vite 8 + TypeScript frontend
 
 src-tauri/                 # Rust + Tauri 2 backend
 ├── Cargo.toml
-├── src/lib.rs             # PTY manager, project/workspace IO, settings, scripts
+├── src/lib.rs             # PTY manager, project/task IO, settings, scripts
 ├── src/sandbox.rs         # seatbelt profile renderer + in-process CONNECT proxy lifecycle
 ├── src/proxy.rs           # the in-process HTTPS CONNECT proxy (regex hostname allowlist)
 ├── tauri.conf.json        # window, bundle, updater config
@@ -65,7 +65,7 @@ Makefile                   # all developer commands
 The architecture deep-dive (PTY plumbing, sandbox model, performance
 foot-guns, every subtle bug we've fixed before) lives in
 [CLAUDE.md](./CLAUDE.md). Read it before touching anything in
-`src-tauri/src/lib.rs` or `src/components/workspace/TerminalPane.tsx`.
+`src-tauri/src/lib.rs` or `src/components/task/TerminalPane.tsx`.
 
 ---
 

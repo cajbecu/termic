@@ -75,10 +75,11 @@ so the in-app updater works the same way: a new release appears as the
 relaunch. Keep the AppImage somewhere writable like `~/Applications/`
 so the updater can replace it in place.
 
-The sandbox is macOS-only, so on Linux the task's Shield
-toggle is disabled and agents run unsandboxed. Everything else
-(worktrees, parallel tabs, find-in-files, themes, in-app diff) works
-the same.
+The Seatbelt sandbox is macOS-only, so on Linux the task's Shield
+toggle is disabled. **Docker mode** is the Linux answer: it is not
+macOS-gated, so wherever Docker runs you can cage an agent in a
+container instead. Everything else (worktrees, parallel tabs,
+find-in-files, themes, in-app diff) works the same.
 
 Wayland note: if fonts render thin, force X11 with `GDK_BACKEND=x11`
 in front of the launch command (or in the `.desktop` file's `Exec=`).
@@ -343,9 +344,10 @@ and the auto-restart-on-edit flow — see [CLAUDE.md](./CLAUDE.md)
   Linux + a Flathub submission are on the roadmap.
 - **Windows:** build-from-source works today (Tauri 2 + WebView2). No
   prebuilt binaries yet — CI matrix entry is on the roadmap.
-- **Sandbox:** macOS-only (`sandbox-exec` is Apple's frontend to
-  Seatbelt). On Linux + Windows the Shield toggle is disabled and
-  agents run unsandboxed.
+- **Sandbox:** the Seatbelt cage is macOS-only (`sandbox-exec` is
+  Apple's frontend to it), so the Shield toggle is disabled on Linux
+  and Windows. **Docker mode** is not macOS-gated, so a container cage
+  is available wherever Docker runs.
 
 ---
 
@@ -358,7 +360,7 @@ The honest pitch — see [termic.dev/vs/conductor](https://termic.dev/vs/conduct
 | License | Open source (AGPL-3.0) | Closed source, proprietary |
 | Price | Free | Paid |
 | Parallel agents in git worktrees | ✓ | ✓ |
-| Attach an agent to the repo root (no worktree) | ✓ | ✗ (worktree per workspace only) |
+| Attach an agent to the repo root (no worktree) | ✓ | ✗ (always a worktree) |
 | Runs `claude` | ✓ | ✓ |
 | Runs `codex` | ✓ | ✓ |
 | Bring your own agent (PTY-based) | ✓ — opencode, aider, ollama, anything that runs in a terminal | ✗ |
