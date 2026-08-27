@@ -6334,13 +6334,38 @@ fn procmon_signal(
 /// `core:window:allow-create` capability has to be granted to the webview.
 /// Sampling is bound to this window's lifetime: closing it drops the
 /// session, and with it every last byte of sampler state.
+/// Focus a window, EXCEPT under the e2e feature.
+///
+/// `set_focus()` on macOS ACTIVATES the app, and activating yanks the user to
+/// whichever Space the window opened on. Each spec file launches its own
+/// instance, so one suite run does that many times over, on the machine of
+/// whoever is running it. Startup was guarded when this was first reported
+/// (f0573dc) but every OTHER focus site was not, and the suite drives them:
+/// `activity.e2e.ts` opens the Activity monitor (which builds a window and
+/// focuses it, twice) and `app.e2e.ts` calls `raise`.
+///
+/// The suite drives the webview through synthetic events and IPC, so it never
+/// needs OS focus; it already runs occluded, which is what this leaves it in.
+/// One helper rather than a `cfg` per call site, so a new one cannot quietly
+/// bring the problem back.
+fn focus_window_unless_e2e(win: &tauri::WebviewWindow) {
+    #[cfg(not(feature = "e2e"))]
+    {
+        let _ = win.set_focus();
+    }
+    #[cfg(feature = "e2e")]
+    {
+        let _ = win;
+    }
+}
+
 #[tauri::command]
 fn procmon_open_window(app: AppHandle) -> Result<(), String> {
     use tauri::Manager;
     if let Some(win) = app.get_webview_window(PROCMON_WINDOW) {
         let _ = win.unminimize();
         let _ = win.show();
-        let _ = win.set_focus();
+        focus_window_unless_e2e(&win);
         return Ok(());
     }
     let win = tauri::WebviewWindowBuilder::new(
@@ -6365,7 +6390,7 @@ fn procmon_open_window(app: AppHandle) -> Result<(), String> {
             docker::reset_history();
         }
     });
-    let _ = win.set_focus();
+    focus_window_unless_e2e(&win);
     Ok(())
 }
 
@@ -17264,7 +17289,7 @@ pub(crate) fn leave_windowless(app: &AppHandle) {
         // entry points disagreed.
         let _ = win.unminimize();
         let _ = win.show();
-        let _ = win.set_focus();
+        focus_window_unless_e2e(&win);
     }
 }
 

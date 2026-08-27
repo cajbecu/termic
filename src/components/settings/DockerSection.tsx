@@ -394,52 +394,32 @@ export function DockerSection() {
                     bare `.claude` chip reads like a path on your Mac and is
                     not one: it names a folder inside the agent's HOME in the
                     CONTAINER, backed by a termic-owned folder on the host. */}
-                <div className="flex flex-col gap-2 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-3 py-2.5 text-[12px] text-[var(--color-fg-dim)]">
+                {/* Three facts, one line each. This was five paragraphs
+                    that nobody would read: the mechanism, a worked path, a
+                    "why /root" aside, a not-your-real-config warning and a
+                    chip legend. What a reader needs is the unit (a container
+                    path), the concrete example, and the reassurance about
+                    `~/.claude`. The rest is in the commit history and the
+                    code comments, which is where it belongs. */}
+                <div className="flex flex-col gap-1.5 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-3 py-2.5 text-[12px] leading-relaxed text-[var(--color-fg-dim)]">
                   <div>
-                    A container starts fresh every launch, so anything written inside it is gone when it
-                    exits. These are the directories kept instead. Each entry is a path{" "}
-                    <b className="text-[var(--color-fg)]">inside the container</b>, not on your Mac. A bare
-                    name is taken as relative to the agent's home there, so{" "}
-                    <code className="font-mono">.claude</code> means{" "}
-                    <code className="font-mono">/root/.claude</code>; write a full path like{" "}
-                    <code className="font-mono">/data/models</code> to keep something outside the home.
-                    Each one is backed by a folder termic owns, one per agent:
-                  </div>
-                  {/* "Why /root?" is the first question this panel raises, and
-                      the honest answer matters: the container does NOT run as
-                      root, so nobody should reason about blast radius from the
-                      path name. */}
-                  <div>
-                    <b className="text-[var(--color-fg)]">Why <code className="font-mono">/root</code>?</b>{" "}
-                    The agent's home inside the container is{" "}
-                    <code className="font-mono">/root</code>, which is where the image installs each agent
-                    and its config. The container itself runs as{" "}
-                    <b className="text-[var(--color-fg)]">your own user, not root</b>: it is started with
-                    your uid and gid so the files it writes into your worktree belong to you. There is no{" "}
-                    <code className="font-mono">sudo</code> in the image, no root password to{" "}
-                    <code className="font-mono">su</code> to, and it runs with every Linux capability
-                    dropped and no-new-privileges set, so nothing inside can elevate. The path is only
-                    where HOME points, not who the process is.
-                  </div>
-                  <div className="font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-faint)]">
-                    {agentDirs[0]?.host_dir
-                      ? <>{agentDirs[0].host_dir.replace(/\/[^/]*$/, "")}/<span className="text-[var(--color-fg)]">&lt;agent&gt;</span>/<span className="text-[var(--color-fg)]">.claude</span></>
-                      : "…/termic/docker-agents/<agent>/.claude"}
-                    {"  \u2192  "}
-                    <span className="text-[var(--color-fg)]">/root/.claude</span>
+                    Kept across container restarts. Each entry is a path{" "}
+                    <b className="text-[var(--color-fg)]">inside the container</b>: a bare name means the
+                    agent's home there, so <code className="font-mono">.claude</code> is{" "}
+                    <code className="font-mono">/root/.claude</code>. Full paths like{" "}
+                    <code className="font-mono">/data/models</code> work too.
                   </div>
                   <div>
-                    That host folder is <b className="text-[var(--color-fg)]">not</b> your real{" "}
-                    <code className="font-mono">~/.claude</code>. It is per agent and shared by every Docker task
-                    running that agent, which is exactly what makes a login done once inside a container still be
-                    there for the next task. A cloned agent gets its own folder, so cloning is all it takes to keep
-                    a work login separate from a personal one.
+                    Backed by a folder termic owns, one per agent, never your real{" "}
+                    <code className="font-mono">~/.claude</code>. Cloning an agent gets it a separate one,
+                    which is how you keep a work login apart from a personal one.
                   </div>
-                  <div>
-                    Locked chips are confirmed to hold real state and can't be removed. Click "+ add" for
-                    anything else worth keeping: a custom skills dir, an MCP server's data, a model cache.
+                  <div className="text-[var(--color-fg-faint)]">
+                    <code className="font-mono">/root</code> is only where HOME points. The container runs
+                    as your own user, with no <code className="font-mono">sudo</code> and no way to elevate.
                   </div>
                 </div>
+
                 {agentDirs.map(d => (
                   <AgentDirsRow
                     key={d.agent_id}
