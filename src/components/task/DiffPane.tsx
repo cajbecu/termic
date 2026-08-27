@@ -9,7 +9,7 @@ import { taskFileDiffSides, taskGitStatus, taskGitCompare, type DiffSides } from
 import { BinaryDiffBody } from "./BinaryDiffBody";
 import { orderedFiles, readView } from "./GitPanel";
 import { Button } from "@/components/ui/Button";
-import { FolderOpen, Columns2, AlignJustify, Eye } from "lucide-react";
+import { FolderOpen, Columns2, AlignJustify, Eye, CircleAlert, X } from "lucide-react";
 import { useApp } from "@/store/app";
 import { useFileViewed, useIsViewed } from "@/store/fileViewed";
 import { usePrefs, resolveTheme } from "@/store/prefs";
@@ -71,6 +71,21 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
   // header's "Viewed" toggle anchors to the same fp the Git panel rows use
   // (GH #42). Empty for a deletion → the toggle is hidden.
   const [fp, setFp] = useState("");
+  // Staleness (GH #266). The pane does not live-update: content moving under
+  // a reader mid-review is worse than content being old. Instead the tab says
+  // it is out of date and re-reads when asked, which is how GitHub handles a
+  // PR that gains commits while you read it.
+  //
+  // `fsRevision` is the task's "files may have changed" tick (bumped when an
+  // agent settles). On its rising edge the CURRENT fingerprint is fetched and
+  // compared with the loaded one, so the banner only appears when this file
+  // actually differs, not merely because the agent touched something.
+  const fsRev = useApp(s => s.fsRevision[task.id] ?? 0);
+  const [stale, setStale] = useState(false);
+  // Read inside an effect that must not re-run when it changes, so a ref
+  // rather than a dependency.
+  const fpRef = useRef("");
+  fpRef.current = fp;
   const viewed = useIsViewed(task.id, tab.path, fp);
   // A History-tab diff (GH #199) compares two REVISIONS: neither side is the
   // working copy. That turns off the two review affordances, which both
@@ -207,10 +222,23 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
   }
 
   useEffect(() => {
+    // Nothing loaded yet, or this pane is showing a pair of committed blobs
+    // (`commit:`), which cannot change under us.
+    if (!fpRef.current || commitSha) return;
+    let alive = true;
+    taskFileDiffSides(task.id, tab.path, tab.scope)
+      .then(next => { if (alive && next.fp !== fpRef.current) setStale(true); })
+      .catch(() => { /* a read that fails is not evidence of a change */ });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fsRev]);
+
+  useEffect(() => {
     let alive = true;
     setErr(null);
     setCommentable(false);
     setBinary(null);
+    setStale(false);
     // Grammars come from CodeMirror's registry now, so resolving one is a
     // chunk fetch. It rides ALONGSIDE the diff read rather than after it, and
     // needs no guard of its own: `alive` already covers the whole load, the
@@ -400,7 +428,7 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
       mergeRef.current?.destroy(); mergeRef.current = null;
       editorRef.current?.destroy(); editorRef.current = null;
     };
-  }, [task.id, tab.path, tab.scope, editorFontSize, mode, editorThemeId, appIsLight]);
+  }, [task.id, tab.path, tab.scope, editorFontSize, mode, editorThemeId, appIsLight, tab.reloadNonce]);
 
   const effectiveMode: Mode = oneSided ? "unified" : mode;
 
@@ -408,7 +436,41 @@ export function DiffPane({ task, tab }: { task: Task; tab: DiffTab }) {
     // bg MUST be opaque: tab swap keeps the codex/claude terminal
     // mounted under us via visibility-toggle, and xterm's WebGL canvas
     // bleeds through any transparent ancestor.
-    <div className="flex h-full flex-col bg-[var(--color-bg)]">
+    <div className="flex h-full flex-col bg-[var(--color-bg)]" data-testid="diff-pane" data-diff-loaded={fp ? "1" : "0"}>
+      {/* Out-of-date notice (GH #266). A strip above the diff rather than
+          anything that moves the content, because the whole point is that
+          the reader decides when the ground shifts. Dismissible: a reader
+          who has decided to finish reading the old state should not have to
+          keep looking at it. */}
+      {stale && (
+        <div
+          data-testid="diff-stale-banner"
+          className="flex shrink-0 items-center gap-2 border-b border-[var(--color-warn)]/30 bg-[var(--color-warn)]/10 px-3 py-1.5 text-[12px] text-[var(--color-fg-dim)]"
+        >
+          <CircleAlert className="h-3.5 w-3.5 shrink-0 text-[var(--color-warn)]" />
+          <span className="min-w-0 flex-1 truncate">
+            This file changed since you opened it.
+          </span>
+          <button
+            type="button"
+            data-testid="diff-stale-refresh"
+            onClick={() => useApp.getState().patchTab(task.id, tab.id, {
+              reloadNonce: (tab.reloadNonce ?? 0) + 1,
+            })}
+            className="shrink-0 rounded bg-[var(--color-bg-3)] px-2 py-0.5 text-[11.5px] font-medium text-[var(--color-fg)] hover:bg-[var(--color-hover)]"
+          >
+            Refresh
+          </button>
+          <button
+            type="button"
+            aria-label="Dismiss"
+            onClick={() => setStale(false)}
+            className="shrink-0 rounded p-0.5 text-[var(--color-fg-faint)] hover:text-[var(--color-fg)]"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
       <div className="flex h-9 shrink-0 items-center justify-between border-b border-[var(--color-border-soft)] bg-[var(--color-bg-1)] px-3">
         {/* Selectable + right-clickable so the path can be copied (GH #44).
             `select-text` overrides the pane's default non-selectable chrome. */}

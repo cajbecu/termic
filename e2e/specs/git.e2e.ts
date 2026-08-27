@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { archiveTask, clickByText, clickMenuItem, createWorktreeTask, ensureActiveTask, openRightTab, flushEditorMeasure, openTask, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitGone, waitVisible } from "../helpers";
+import { archiveTask, clickByText, clickMenuItem, clickWhenVisible, createWorktreeTask, ensureActiveTask, openRightTab, flushEditorMeasure, openTask, requireTermicApi, snap, waitForAppShell, waitForText, waitForTextGone, waitGone, waitVisible } from "../helpers";
 
 // Git integration is central to termic (every task is a worktree/checkout).
 // This guards the Git panel: switching to it shows the working-tree status.
@@ -188,6 +188,58 @@ describe("git dirty tree", () => {
         ),
       { timeout: 8_000, timeoutMsg: "diff tab never opened" },
     );
+  });
+
+  // GH #266: a diff tab must not keep showing content the agent has since
+  // rewritten. It deliberately does NOT live-update - the content moving
+  // under a reader mid-review is worse than it being old - so the contract
+  // is: say it is out of date, and re-read when asked.
+  it("flags an open diff as stale once the file changes underneath it", async () => {
+    const dirty = await browser.execute((id) =>
+      (window.__termic!.useApp.getState().tasks.find((t: any) => t.id === id))!.path as string, taskId);
+    // Wait for the pane to have actually READ the file: staleness is a
+    // fingerprint comparison, so before the first read there is nothing to
+    // compare against and a bump is correctly ignored.
+    await browser.waitUntil(async () => browser.execute(() =>
+      document.querySelector('[data-testid="diff-pane"]')?.getAttribute("data-diff-loaded") === "1"),
+      { timeoutMsg: "the diff never finished loading" });
+    // The tab from the previous case is open on README.md.
+    writeFileSync(path.join(dirty, "README.md"), `# changed by an agent ${Date.now()}\n`);
+    // `fsRevision` is the "files may have changed" tick an agent bumps when
+    // it settles; driving it directly is what a settling agent would do.
+    await browser.execute((id) => window.__termic!.useApp.getState().bumpFsRevision(id), taskId);
+    await waitVisible('[data-testid="diff-stale-banner"]');
+
+    // Refresh clears it, and the tab is re-read rather than reopened: the
+    // nonce is what the pane watches.
+    const before = await browser.execute((id) =>
+      ((window.__termic!.useApp.getState().tabs[id] ?? [])
+        .find((t: any) => t.type === "diff") as any)?.reloadNonce ?? 0, taskId);
+    await clickWhenVisible('[data-testid="diff-stale-refresh"]');
+    await browser.waitUntil(async () => {
+      const after = await browser.execute((id) =>
+        ((window.__termic!.useApp.getState().tabs[id] ?? [])
+          .find((t: any) => t.type === "diff") as any)?.reloadNonce ?? 0, taskId);
+      return (after as number) > (before as number);
+    }, { timeoutMsg: "Refresh did not ask the pane to re-read" });
+    await waitGone('[data-testid="diff-stale-banner"]', 8_000);
+  });
+
+  it("re-reads an already-open diff when the same file is opened again", async () => {
+    // "At minimum, make re-clicking the file in the Git panel reload the
+    // already-open tab instead of just focusing it" - the tab exists, so this
+    // is the branch that used to return the list untouched.
+    const nonceOf = () => browser.execute((id) =>
+      ((window.__termic!.useApp.getState().tabs[id] ?? [])
+        .find((t: any) => t.type === "diff" && t.path === "README.md") as any)?.reloadNonce ?? 0, taskId);
+    const before = await nonceOf() as number;
+    await browser.execute((id) => {
+      window.__termic!.useApp.getState().openPreviewTab(id, {
+        type: "diff", path: "README.md", title: "README.md", scope: "unstaged",
+      });
+    }, taskId);
+    await browser.waitUntil(async () => (await nonceOf() as number) > before,
+      { timeoutMsg: "re-opening the same diff did not re-read it" });
   });
 
   it("collapses the Unstaged section to its header", async () => {

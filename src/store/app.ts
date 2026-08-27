@@ -2173,9 +2173,21 @@ export const useApp = create<AppState>((set, get) => ({
     // jump whose EditorPane effect hasn't run yet when a second, unrelated
     // openPreviewTab call for the same file lands first).
     const withNewRevealOnly = (existing: Tab) => {
-      const patch: { revealAt?: unknown; revealHeading?: unknown } = {};
+      const patch: { revealAt?: unknown; revealHeading?: unknown; reloadNonce?: number } = {};
       if ((data.type === "edit" || data.type === "external") && data.revealAt !== undefined) patch.revealAt = data.revealAt;
       if (data.type === "edit" && data.revealHeading !== undefined) patch.revealHeading = data.revealHeading;
+      // Opening a diff that is ALREADY open re-reads it (GH #266). Clicking
+      // the file in the Git panel used to just focus the tab, so a file the
+      // agent had rewritten kept showing the old content and closing and
+      // reopening the tab was the only way out. Asking for a file again is
+      // the clearest possible statement that you want to see it as it is now.
+      //
+      // Only on this branch, which is a user opening the same file a second
+      // time. A `commit:` diff is exempt: both its sides are committed blobs
+      // and cannot have moved.
+      if (data.type === "diff" && !data.scope?.startsWith("commit:")) {
+        patch.reloadNonce = ((existing as { reloadNonce?: number }).reloadNonce ?? 0) + 1;
+      }
       if (Object.keys(patch).length === 0) return list; // nothing new — leave any pending reveal alone
       return list.map(t => t.id === existing.id ? { ...t, ...patch } as Tab : t);
     };

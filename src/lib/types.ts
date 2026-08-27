@@ -1275,6 +1275,13 @@ export interface DiffTab extends BaseTab {
    *  keeps the review affordances (viewed marks, inline comments).
    *  Absent → HEAD→worktree (the full uncommitted delta). */
   scope?: "unstaged" | "staged" | `commit:${string}` | `base:${string}`;
+  /** Bumped to force an open diff to re-read from disk (GH #266). The pane
+   *  deliberately does NOT live-update: the content shifting mid-review is
+   *  worse than it being stale, so a change surfaces as a banner and the
+   *  re-read happens when the reader asks. Clicking the file again in the
+   *  Git panel is the other way to ask, which is why this lives on the tab
+   *  rather than inside the pane. Transient. */
+  reloadNonce?: number;
 }
 
 /** The complete delta a task produced vs its base (`task_diff`). `diff` folds
