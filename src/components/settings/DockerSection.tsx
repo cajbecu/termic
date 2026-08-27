@@ -341,23 +341,24 @@ export function DockerSection() {
                 value={settings.docker_rebuild_frequency ?? "daily"}
                 onChange={v => patch({ docker_rebuild_frequency: v })}
               />
-              {/* The prompt's "Always rebuild" button writes this; without a
-                  control here it would be a one-way door. Meaningless on
-                  "Off", where there is no schedule to act on. */}
-              {(settings.docker_rebuild_frequency ?? "daily") !== "off" && (
-                <label className="mt-2.5 flex cursor-pointer items-start gap-2 select-none">
-                  <Checkbox
-                    checked={!!settings.docker_rebuild_auto}
-                    onChange={(v: boolean) => patch({ docker_rebuild_auto: v })}
-                  />
-                  <span className="text-[12.5px] text-[var(--color-fg-dim)]">
-                    <span className="font-medium text-[var(--color-fg)]">Rebuild without asking.</span>{" "}
-                    Do it on this schedule and skip the prompt. The rebuild still happens before the
-                    launch, so the first agent of the day waits for it.
-                  </span>
-                </label>
-              )}
             </div>
+            {/* OUTSIDE the max-w-xs above, which exists to keep the three
+                segmented buttons from stretching across the page. A sentence
+                nested in it wrapped at 320px into a narrow column while the
+                paragraph above ran the full width. */}
+            {(settings.docker_rebuild_frequency ?? "daily") !== "off" && (
+              <label className="mt-3 flex cursor-pointer items-start gap-2 select-none">
+                <Checkbox
+                  checked={!!settings.docker_rebuild_auto}
+                  onChange={(v: boolean) => patch({ docker_rebuild_auto: v })}
+                />
+                <span className="text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
+                  <span className="font-medium text-[var(--color-fg)]">Rebuild without asking.</span>{" "}
+                  Do it on this schedule and skip the prompt. The rebuild still happens before the
+                  launch, so the first agent of the day waits for it.
+                </span>
+              </label>
+            )}
           </Block>
 
           {/* Docker availability */}
