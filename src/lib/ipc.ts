@@ -404,6 +404,10 @@ export interface DockerSpec {
   workdir: string;
   env: [string, string][];
   extra_args: string[];
+  /** Values that could not mean what they say inside a container, and what
+   *  termic did about them. Shown by the preview, which is the one place a
+   *  person can see what a launch will actually do. */
+  warnings?: string[];
 }
 export interface DockerCommandPreview {
   spec: DockerSpec;

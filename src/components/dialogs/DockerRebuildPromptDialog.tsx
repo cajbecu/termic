@@ -4,11 +4,15 @@
 // unpinned/always-latest, so without this nudge an old image just keeps
 // running whatever it happened to install last time it was built.
 //
-// Deliberately two big actions, not a confirm-style yes/no: "Rebuild now"
-// (default focus - the common case) and "Skip for now", one click away for
-// someone in a hurry who doesn't want to wait on a rebuild before their
-// agent starts. The frequency selector is inline so changing your mind
-// about how often this should ask doesn't require a trip to Settings.
+// Three actions, not a confirm-style yes/no: "Rebuild now" (default focus -
+// the common case), "Skip for now" one click away for someone in a hurry, and
+// "Always rebuild", which does this one AND stops asking. The last exists
+// because the prompt's whole justification is that a rebuild delays the
+// launch you just asked for; once you have decided you always want it, being
+// asked every time is the annoyance rather than the safeguard. It writes a
+// setting rather than a session flag, and Settings -> Docker Sandbox can undo
+// it. The frequency selector is inline so changing your mind about how often
+// this should ask doesn't require a trip to Settings.
 
 import { useUI } from "@/store/ui";
 import { AppDialog } from "@/components/ui/Dialog";
@@ -16,7 +20,7 @@ import { Button } from "@/components/ui/Button";
 import { useBackendSettings } from "@/components/settings/Controls";
 import { DockerRebuildFrequencyPicker } from "@/components/DockerRebuildFrequencyPicker";
 import { describeLastBuildDate } from "@/lib/dockerDailyRebuild";
-import { Container, RotateCw, SkipForward } from "lucide-react";
+import { Container, RotateCw, SkipForward, Infinity as InfinityIcon } from "lucide-react";
 
 export function DockerRebuildPromptDialog() {
   const prompt = useUI(s => s.dockerRebuildPrompt);
@@ -57,6 +61,19 @@ export function DockerRebuildPromptDialog() {
         <Button variant="ghost" type="button" onClick={() => resolve("skip")}>
           <SkipForward className="h-3.5 w-3.5" /> Skip for now
         </Button>
+        {/* Rebuilds now AND stops asking. Hidden when the frequency is
+            "off", where there is no schedule to defer to and the button
+            would promise something it cannot do. */}
+        {frequency !== "off" && (
+          <Button
+            variant="secondary"
+            type="button"
+            title="Rebuild now, and from now on rebuild on this schedule without asking. Reversible in Settings → Docker Sandbox."
+            onClick={() => resolve("always")}
+          >
+            <InfinityIcon className="h-3.5 w-3.5" /> Always rebuild
+          </Button>
+        )}
         <Button variant="primary" type="button" autoFocus onClick={() => resolve("rebuild")}>
           <RotateCw className="h-3.5 w-3.5" /> Rebuild now
         </Button>

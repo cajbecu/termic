@@ -86,6 +86,12 @@ pub struct DockerSpec {
     /// Working dir inside the container — MUST equal the host cwd (same
     /// absolute path) so the worktree `.git` pointer + session cwd-key line up.
     pub workdir: String,
+    /// Things the user should know about this spec: a value that could not
+    /// mean what it says inside a container, and what termic did about it.
+    /// Surfaced by the command preview, which is the one place a person can
+    /// see what a launch will actually do.
+    #[serde(default)]
+    pub warnings: Vec<String>,
     /// Env injected via `-e` (TERM and config-dir relocation only — NEVER
     /// secrets; credentials arrive via the config-dir mount).
     pub env: Vec<(String, String)>,
@@ -439,6 +445,7 @@ pub fn build_spec(
         ("HOME".to_string(), "/root".to_string()),
         ("USER".to_string(), "agent".to_string()),
     ];
+    let mut relocation: Option<(String, String)> = None;
     if let Some(cfg) = agent_config(base_id, agent_extra_dirs, agent_persist_enabled) {
         let host_cfg = agent_config_host_dir(agent_id).to_string_lossy().into_owned();
         // Create it OURSELVES, as the app user, before it becomes a `-v`
@@ -491,6 +498,7 @@ pub fn build_spec(
         }
         if let Some(var) = cfg.relocation_env {
             env.push((var.to_string(), cfg.container_dir.clone()));
+            relocation = Some((var.to_string(), cfg.container_dir.clone()));
         }
     }
 
@@ -530,7 +538,37 @@ pub fn build_spec(
         env.push((k.clone(), v.clone()));
     }
 
+    // The config-dir relocation var is termic's to set, so it is re-asserted
+    // HERE, after the agent's own env block rather than before it.
+    //
+    // termic mounted that directory; a value pointing anywhere else cannot
+    // work, because nothing else is mounted. A `CLAUDE_CONFIG_DIR` naming a
+    // path on the Mac is the common case (it is right on the host, and people
+    // set it to keep a cloned agent's login separate) and inside the container
+    // it names a path that does not exist, whose parent is root-owned - so the
+    // agent cannot even create it. The symptom is a login that reports success
+    // and is gone a second later, plus "Transcript writes are failing
+    // (permission denied - EACCES)", with the mounted directory sitting empty.
+    //
+    // A value that IS covered by a mount is left alone: that user arranged
+    // somewhere real for it to go, and knows something we do not.
+    let mut warnings: Vec<String> = Vec::new();
+    if let Some((var, want)) = relocation.clone() {
+        if let Some(pos) = env.iter().rposition(|(k, _)| *k == var) {
+            let have = env[pos].1.clone();
+            let mounted = mounts.iter().any(|m| have == m.container
+                || have.starts_with(&format!("{}/", m.container)));
+            if have != want && !mounted {
+                warnings.push(format!(
+                    "{var} was set to {have}, which is not mounted in the container.                      Using {want} instead, which is where termic mounts this agent's                      config. Set it in the agent's Docker environment if you need a                      different path, and add a mount for it."
+                ));
+                env.push((var, want));
+            }
+        }
+    }
+
     DockerSpec {
+        warnings,
         // task id keeps the name recognisable in `docker ps`; the pty id
         // makes it unique per tab. Both are uuids, so the result is always
         // a legal container name.
@@ -1196,6 +1234,44 @@ mod tests {
         a.id = id.to_string();
         a.extends = extends.map(|s| s.to_string());
         a
+    }
+
+    #[test]
+    fn a_host_path_config_dir_cannot_override_the_mounted_one() {
+        // The real failure this prevents: CLAUDE_CONFIG_DIR set to a path on
+        // the Mac (right on the host, and how people keep a cloned agent's
+        // login separate) rides into the container, where that path does not
+        // exist and its parent is root-owned. The agent then cannot write its
+        // login or transcripts at all - EACCES - and the directory termic
+        // mounted for it stays empty.
+        let task = stub_task("t-env", "/tmp/termic-docker-test-does-not-exist");
+        let mut env = std::collections::HashMap::new();
+        env.insert("CLAUDE_CONFIG_DIR".to_string(), "/Users/me/.next-claude".to_string());
+        let spec = with_scratch_data_dir(|| build_spec(&task, "next-claude", "img", &task.path,
+            vec![], &env, &[], false, &[], &[], "pty-env000001", "claude"));
+
+        // LAST value wins with `docker run -e`, so the last one is the one
+        // that counts.
+        let effective = spec.env.iter().rev()
+            .find(|(k, _)| k == "CLAUDE_CONFIG_DIR").map(|(_, v)| v.clone()).unwrap();
+        assert_eq!(effective, "/root/.claude");
+        assert!(spec.warnings.iter().any(|w| w.contains("/Users/me/.next-claude")),
+            "silently correcting it would be its own surprise: {:?}", spec.warnings);
+    }
+
+    #[test]
+    fn a_config_dir_inside_a_mount_is_left_alone() {
+        // Someone who pointed it at a path they actually mounted knows
+        // something we do not; only unmounted paths are overridden.
+        let task = stub_task("t-env2", "/tmp/termic-docker-test-does-not-exist");
+        let mut env = std::collections::HashMap::new();
+        env.insert("CLAUDE_CONFIG_DIR".to_string(), "/root/.claude/alt".to_string());
+        let spec = with_scratch_data_dir(|| build_spec(&task, "claude", "img", &task.path,
+            vec![], &env, &[], false, &[], &[], "pty-env000002", "claude"));
+        let effective = spec.env.iter().rev()
+            .find(|(k, _)| k == "CLAUDE_CONFIG_DIR").map(|(_, v)| v.clone()).unwrap();
+        assert_eq!(effective, "/root/.claude/alt");
+        assert!(spec.warnings.is_empty(), "{:?}", spec.warnings);
     }
 
     #[test]

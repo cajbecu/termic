@@ -4,9 +4,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // Mocks must be declared before the module under test is imported.
 vi.mock("@/lib/ipc", () => ({
   settingsLoad: vi.fn(),
+  settingsSave: vi.fn(),
   dockerImageStatus: vi.fn(),
   dockerBuildImage: vi.fn(),
   onDockerBuildDone: vi.fn(),
+  // The build log is streamed into the pane now, so the rebuild subscribes
+  // to it as well as to `done`. Resolves to an unlisten like the real one.
+  onDockerBuildLog: vi.fn(),
 }));
 
 import {
@@ -14,7 +18,7 @@ import {
   isRebuildDue,
   describeLastBuildDate,
 } from "@/lib/dockerDailyRebuild";
-import { settingsLoad, dockerImageStatus, dockerBuildImage, onDockerBuildDone } from "@/lib/ipc";
+import { settingsLoad, settingsSave, dockerImageStatus, dockerBuildImage, onDockerBuildDone, onDockerBuildLog } from "@/lib/ipc";
 import { useUI } from "@/store/ui";
 import type { Task } from "@/lib/types";
 
@@ -85,6 +89,10 @@ describe("maybeRebuildDockerImageForLaunch", () => {
     mockedImageStatus.mockReset();
     mockedBuildImage.mockReset().mockResolvedValue(undefined);
     mockedOnBuildDone.mockReset();
+    // The log listener is registered like the `done` one and its unlisten is
+    // called in the finally, so it has to resolve to a function.
+    vi.mocked(onDockerBuildLog).mockReset().mockResolvedValue(() => {});
+    vi.mocked(settingsSave).mockReset().mockResolvedValue(undefined as never);
     useUI.setState({ toasts: [], dockerRebuildPrompt: null });
   });
 

@@ -9,9 +9,10 @@
 // PROMPTS (DockerRebuildPromptDialog) so someone in a hurry can skip it for
 // that one launch with a single click.
 
-import { dockerImageStatus, dockerBuildImage, onDockerBuildDone, settingsLoad } from "./ipc";
+import { dockerImageStatus, dockerBuildImage, onDockerBuildDone, onDockerBuildLog, settingsLoad, settingsSave } from "./ipc";
 import type { Task } from "./types";
 import { useUI } from "@/store/ui";
+import { useDockerBuild } from "@/store/dockerBuild";
 
 export type DockerRebuildFrequency = "off" | "daily" | "weekly";
 
@@ -91,7 +92,11 @@ export async function maybeRebuildDockerImageForLaunch(task: Task): Promise<void
   if (!isRebuildDue(frequency, status.last_built_date)) return;
 
   if (inFlight) return inFlight;
-  inFlight = promptAndRebuild(task, status.last_built_date).finally(() => { inFlight = null; });
+  // `docker_rebuild_auto` means the user already answered this question with
+  // "Always rebuild"; asking again is the annoyance, not the safeguard.
+  const ask = !settings.docker_rebuild_auto;
+  inFlight = promptAndRebuild(task, status.last_built_date, ask)
+    .finally(() => { inFlight = null; });
   return inFlight;
 }
 
@@ -100,15 +105,29 @@ export async function maybeRebuildDockerImageForLaunch(task: Task): Promise<void
  *  short enough that a lost event does not strand the launch. */
 const REBUILD_EVENT_TIMEOUT_MS = 15 * 60 * 1000;
 
-async function promptAndRebuild(task: Task, lastBuiltDate: string | null): Promise<void> {
-  const choice = await useUI.getState().askDockerRebuild(task.name, lastBuiltDate);
-  if (choice === "skip") return;
+async function promptAndRebuild(task: Task, lastBuiltDate: string | null, ask: boolean): Promise<void> {
+  if (ask) {
+    const choice = await useUI.getState().askDockerRebuild(task.name, lastBuiltDate);
+    if (choice === "skip") return;
+    if (choice === "always") {
+      // Persist BEFORE the build so the answer survives even if the rebuild
+      // fails or the app is closed while it runs.
+      try {
+        const cur = await settingsLoad();
+        await settingsSave({ ...cur, docker_rebuild_auto: true });
+      } catch { /* not worth failing the launch over */ }
+    }
+  }
 
   useUI.getState().pushToast(
     "Rebuilding the Docker sandbox image before launch...",
     "info",
     { ttlMs: 15000 },
   );
+  // Stream the build into the task's own pane. A toast alone left the pane
+  // empty for minutes with no way to tell a slow build from a wedged one.
+  useDockerBuild.getState().start(task.id);
+  const unlistenLog = await onDockerBuildLog((line: string) => useDockerBuild.getState().append(line));
   // Register the listener BEFORE starting the build, and await the
   // registration. Three things were wrong with doing it the other way:
   // `unlisten` was assigned inside a `.then()`, so a build that rejected
@@ -139,7 +158,13 @@ async function promptAndRebuild(task: Task, lastBuiltDate: string | null): Promi
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     unlisten();
+    unlistenLog();
   }
+  useDockerBuild.getState().finish(success);
+  // Leave a failed build on screen: the log is the only explanation the user
+  // gets, and the agent is about to launch on the old image anyway. A clean
+  // build clears itself, since the terminal is what should be there.
+  if (success) useDockerBuild.getState().clear();
   if (success) {
     useUI.getState().pushToast("Docker sandbox image rebuilt.", "success", { ttlMs: 4000 });
   } else {

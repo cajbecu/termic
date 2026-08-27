@@ -442,6 +442,11 @@ export function TaskSandboxDialog() {
                       <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-dim)]">
                         {formatDockerArgv(dockerPreview.argv)}
                       </pre>
+                      {!!dockerPreview.spec.warnings?.length && (
+                        <div className="mt-2 flex flex-col gap-1 rounded-md border border-[var(--color-warn)]/30 bg-[var(--color-warn)]/10 px-2.5 py-2 text-[11.5px] text-[var(--color-fg-dim)]">
+                          {dockerPreview.spec.warnings!.map((w, i) => <div key={i}>{w}</div>)}
+                        </div>
+                      )}
                       <div className="mt-3 flex flex-col gap-1.5 border-t border-[var(--color-border-soft)] pt-2.5">
                         {dockerPreview.spec.mounts.map((m, i) => (
                           <div key={i} className="flex flex-col gap-0.5">

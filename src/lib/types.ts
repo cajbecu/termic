@@ -634,6 +634,10 @@ export interface Settings {
    *  Defaults to `"daily"` when absent (both the Rust struct's derived
    *  Default AND its serde fallback agree - see `DockerRebuildFrequency`). */
   docker_rebuild_frequency?: "off" | "daily" | "weekly";
+  /** Rebuild on schedule without prompting first. Set from the prompt's
+   *  "Always rebuild" button; reversible in Settings. No effect when
+   *  `docker_rebuild_frequency` is "off". */
+  docker_rebuild_auto?: boolean;
   /** Per-agent EXTRA directories mounted into that agent's Docker config
    *  dir, on top of the confirmed built-in list (Settings → Docker
    *  Sandbox). Keyed by agent id; each entry is a path relative to the

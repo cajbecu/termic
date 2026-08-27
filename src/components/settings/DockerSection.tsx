@@ -10,6 +10,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
+import { Checkbox } from "@/components/ui/Checkbox";
 import { usePrefs, resolveTheme } from "@/store/prefs";
 import { resolveEditorTheme, editorSurfaceTheme } from "@/lib/editorTheme";
 import { EditorView, keymap } from "@codemirror/view";
@@ -340,6 +341,22 @@ export function DockerSection() {
                 value={settings.docker_rebuild_frequency ?? "daily"}
                 onChange={v => patch({ docker_rebuild_frequency: v })}
               />
+              {/* The prompt's "Always rebuild" button writes this; without a
+                  control here it would be a one-way door. Meaningless on
+                  "Off", where there is no schedule to act on. */}
+              {(settings.docker_rebuild_frequency ?? "daily") !== "off" && (
+                <label className="mt-2.5 flex cursor-pointer items-start gap-2 select-none">
+                  <Checkbox
+                    checked={!!settings.docker_rebuild_auto}
+                    onChange={(v: boolean) => patch({ docker_rebuild_auto: v })}
+                  />
+                  <span className="text-[12.5px] text-[var(--color-fg-dim)]">
+                    <span className="font-medium text-[var(--color-fg)]">Rebuild without asking.</span>{" "}
+                    Do it on this schedule and skip the prompt. The rebuild still happens before the
+                    launch, so the first agent of the day waits for it.
+                  </span>
+                </label>
+              )}
             </div>
           </Block>
 
@@ -363,9 +380,10 @@ export function DockerSection() {
               className="flex w-full items-center justify-between gap-3 text-left"
             >
               <div>
-                <div className="text-[14px] font-medium">Per-agent config dirs</div>
+                <div className="text-[14px] font-medium">Per-agent config &amp; environment</div>
                 <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
-                  What gets mounted into each agent's shared config folder (see "Logins" above).
+                  What gets mounted into each agent's shared config folder (see "Logins" above), and the
+                  environment it runs with inside a container.
                 </div>
               </div>
               <ChevronDown className={cn("h-4 w-4 shrink-0 text-[var(--color-fg-faint)] transition-transform", showAgentDirs && "rotate-180")} />
@@ -413,6 +431,11 @@ export function DockerSection() {
                       setAgentDirs(cur => cur.map(a => a.agent_id === d.agent_id ? { ...a, persist_enabled: next } : a));
                       patch({ docker_agent_persist_enabled: { ...(settings.docker_agent_persist_enabled ?? {}), [d.agent_id]: next } });
                     }}
+                    dockerEnv={settings.agents?.find(a => a.id === d.agent_id)?.docker_env ?? {}}
+                    onChangeDockerEnv={next => patch({
+                      agents: (settings.agents ?? []).map(a =>
+                        a.id === d.agent_id ? { ...a, docker_env: next } : a),
+                    })}
                   />
                 ))}
               </div>
@@ -499,6 +522,11 @@ export function DockerSection() {
                       >
                         {formatDockerArgv(preview.argv)}
                       </pre>
+                      {!!preview.spec.warnings?.length && (
+                        <div className="mt-2 flex flex-col gap-1 rounded-md border border-[var(--color-warn)]/30 bg-[var(--color-warn)]/10 px-2.5 py-2 text-[11.5px] text-[var(--color-fg-dim)]">
+                          {preview.spec.warnings!.map((w, i) => <div key={i}>{w}</div>)}
+                        </div>
+                      )}
                       <div className="mt-2 border-t border-[var(--color-border-soft)] pt-2 text-[11.5px] text-[var(--color-fg-faint)]">
                         Your task's worktree is mounted in place of the placeholder path above. Everything else,
                         the mounts, the environment and the hardening flags, is what a real launch uses.
@@ -633,10 +661,31 @@ function ImageStatusLine({ image, dirty }: { image: DockerImageStatus | null; di
  *  that becomes a one-line input. For an agent OUTSIDE the known-safe
  *  built-in set, an opt-in "Persist config in Docker mode" checkbox gates
  *  whether `extra` is mounted at all - see docker.rs's `agent_config`. */
-function AgentDirsRow({ dirs, onChangeExtra, onTogglePersist }: {
+/** `KEY=VALUE` lines to a map. Blank lines and `#` comments dropped; a line
+ *  with no `=` is ignored rather than becoming an empty-valued key, so a
+ *  half-typed line does not silently set something. */
+function parseDockerEnvLines(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq <= 0) continue;
+    out[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+  }
+  return out;
+}
+
+function AgentDirsRow({ dirs, onChangeExtra, onTogglePersist, dockerEnv, onChangeDockerEnv }: {
   dirs: DockerAgentDirs;
   onChangeExtra: (next: string[]) => void;
   onTogglePersist: (next: boolean) => void;
+  /** The agent's Docker-only environment (`Agent.docker_env`), editable here
+   *  as well as in Agents & Terminals: this page is where someone is already
+   *  thinking about what a container gets, and a value naming a path on the
+   *  Mac is the single most common way to break Docker persistence. */
+  dockerEnv: Record<string, string>;
+  onChangeDockerEnv: (next: Record<string, string>) => void;
 }) {
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
@@ -722,6 +771,30 @@ function AgentDirsRow({ dirs, onChangeExtra, onTogglePersist }: {
           would risk hiding the binary the image installed.
         </span>
       )}
+      {/* Docker-only environment for this agent, the same field Agents &
+          Terminals shows. A SEPARATE list from the agent's normal one, not a
+          patch on top of it: empty means the normal one is used unchanged. */}
+      <details className="mt-0.5">
+        <summary className="cursor-pointer list-none text-[11px] text-[var(--color-fg-faint)] hover:text-[var(--color-fg-dim)]">
+          Environment (Docker){Object.keys(dockerEnv).length > 0 ? ` · ${Object.keys(dockerEnv).length} set` : ""}
+        </summary>
+        <div className="mt-1.5">
+          <div className="mb-1 text-[11px] leading-snug text-[var(--color-fg-faint)]">
+            One KEY=VALUE per line, used instead of this agent's normal environment when it runs in a
+            container. Empty = the normal one is used as-is. A value naming a path on your Mac does not
+            exist in here, so that is what this is for.
+          </div>
+          <textarea
+            value={Object.entries(dockerEnv).map(([k, v]) => `${k}=${v}`).join("\n")}
+            onChange={e => onChangeDockerEnv(parseDockerEnvLines(e.target.value))}
+            rows={2}
+            spellCheck={false}
+            data-testid={`docker-agent-env-${dirs.agent_id}`}
+            placeholder={"CLAUDE_CONFIG_DIR=/root/.claude"}
+            className="w-full resize-y rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-1.5 py-1 font-mono text-[11.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)] [field-sizing:content]"
+          />
+        </div>
+      </details>
     </div>
   );
 }

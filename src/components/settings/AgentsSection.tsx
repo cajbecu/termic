@@ -835,7 +835,7 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
         </>}
         <Field
           label="Environment"
-          hint="One KEY=VALUE per line. Merged into the spawn env on top of inherited parent env. A value starting with ~/ expands to your home dir (there is no shell in the spawn, so it would otherwise stay literal). Lines starting with # are ignored. Preserved across Reset."
+          hint="One KEY=VALUE per line, merged on top of the inherited parent env. `~/` expands to your home dir. `#` lines are ignored. Kept across Reset."
         >
           <EnvTextarea
             value={agent.env ?? {}}
@@ -848,7 +848,7 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
         {dockerSandboxOn && (
           <Field
             label="Environment (Docker)"
-            hint="Used INSTEAD of the Environment above when this agent runs in a Docker container. Leave empty to use the same one. Worth setting when a value names a path on your Mac: inside the container that path is not mounted, so the agent writes to a throwaway filesystem and the login is gone next launch. Cloned agents already get their own config folder in Docker, so a config-dir variable is usually not needed here at all."
+            hint="A SEPARATE list, used instead of the one above when this agent runs in a container. Empty = the list above is used as-is. Worth filling in when a value names a path on your Mac, since that path does not exist inside the container."
           >
             <EnvTextarea
               value={agent.docker_env ?? {}}
@@ -1078,8 +1078,8 @@ function EnvTextarea({ value, onChange }: {
         onChange(parseEnvToMap(next));
       }}
       spellCheck={false}
-      rows={4}
-      className="w-full resize-y rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 font-mono text-[12.5px] text-[var(--color-fg)] focus:border-[var(--color-accent-soft)] focus:outline-none"
+      rows={2}
+      className="w-full resize-y rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 font-mono text-[12.5px] text-[var(--color-fg)] focus:border-[var(--color-accent-soft)] focus:outline-none [field-sizing:content]"
       placeholder={"CLAUDE_CODE_NO_FLICKER=1\nHTTPS_PROXY=http://localhost:8080\nANTHROPIC_API_KEY=sk-ant-..."}
     />
   );
@@ -1108,8 +1108,8 @@ function PathsTextarea({ value, onChange, placeholder }: {
         onChange(parsePaths(e.target.value));
       }}
       spellCheck={false}
-      rows={4}
-      className="w-full resize-y rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 font-mono text-[12.5px] text-[var(--color-fg)] focus:border-[var(--color-accent-soft)] focus:outline-none"
+      rows={2}
+      className="w-full resize-y rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 font-mono text-[12.5px] text-[var(--color-fg)] focus:border-[var(--color-accent-soft)] focus:outline-none [field-sizing:content]"
       placeholder={placeholder}
     />
   );

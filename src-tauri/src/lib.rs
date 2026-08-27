@@ -15085,6 +15085,14 @@ pub struct Settings {
     /// frontend-driven action same as a manual rebuild).
     #[serde(default)]
     pub docker_rebuild_frequency: DockerRebuildFrequency,
+    /// Rebuild on schedule WITHOUT asking first. The prompt exists because a
+    /// rebuild delays the launch you just asked for; once someone has decided
+    /// they always want it, asking every time is the annoyance rather than
+    /// the safeguard. Set from the prompt's own "Always rebuild" button, and
+    /// reversible in Settings -> Docker Sandbox. Has no effect when
+    /// `docker_rebuild_frequency` is "off" - that already means never.
+    #[serde(default)]
+    pub docker_rebuild_auto: bool,
     /// Per-agent EXTRA directories mounted into that agent's Docker config
     /// dir, on top of the confirmed built-in list `agent_dirs::state_dirs`
     /// returns (Settings → Docker Sandbox). Keyed by agent id; each entry
@@ -15306,7 +15314,7 @@ pub struct Agent {
     pub env: std::collections::HashMap<String, String>,
     /// Per-agent environment used INSTEAD of `env` when this agent runs in a
     /// Docker container, and ignored entirely otherwise. Empty = use `env`,
-    /// which is the behaviour every existing install already has.
+    /// which is what every existing install already does.
     ///
     /// The two cannot be one list because a value that is meaningful on the
     /// host is often meaningless inside the container: a config-dir
@@ -16135,6 +16143,12 @@ fn docker_env_for(
     agent_id: &str,
     fallback: &std::collections::HashMap<String, String>,
 ) -> std::collections::HashMap<String, String> {
+    // SEPARATE, not merged. Two independent lists is the thing a reader can
+    // hold in their head: what you wrote in the Docker box is exactly what the
+    // container gets. A merge means the effective environment is never written
+    // down anywhere - you would have to diff two boxes in your head to know
+    // what a container actually runs with, and a value you never typed can
+    // still reach it.
     match agents.iter().find(|a| a.id == agent_id) {
         Some(a) if !a.docker_env.is_empty() => a.docker_env.clone(),
         _ => fallback.clone(),
