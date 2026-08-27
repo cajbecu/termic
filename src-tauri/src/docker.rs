@@ -1077,6 +1077,23 @@ fn short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }
 
+/// `docker rm -f` ONE container by name. Used when a PTY goes away: the
+/// container is named per-PTY, so this cannot touch a sibling tab's.
+///
+/// Necessary because killing the PTY only kills the local `docker run`
+/// CLIENT: it is attached in the foreground with no `-d`, so the container
+/// keeps running server-side, and `--rm` only fires on the container's own
+/// clean exit. Without this, closing a tab leaked its container - and since
+/// every container of one agent mounts the SAME config dir, the leaked ones
+/// keep running an agent that fights the live one over anything singleton in
+/// there (Claude Code's Remote Control session, for instance, which reports
+/// "another connection took over" and disconnects).
+///
+/// Off-thread at every call site: it shells out to the daemon.
+pub fn rm_container(name: &str) {
+    let _ = Command::new("docker").args(["rm", "-f", name]).output();
+}
+
 /// `docker rm -f` every termic-labeled container (app quit). Non-fatal.
 pub fn cleanup_all() {
     rm_by_filter(&format!("label={LABEL_KEY}"));

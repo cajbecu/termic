@@ -72,19 +72,27 @@ export function DockerRebuildPromptDialog() {
         </Button>
         {/* Hidden on "off": there is no schedule to defer to, so the button
             would promise something it cannot deliver. */}
+        {/* "Rebuild now" is no longer the accent button. Blocking a launch
+            you already asked for is the costly answer, and the background one
+            reaches the same place without the wait - so the colour should
+            point at the action most people should take, not the most
+            forceful-sounding one. It is also the default configuration, so
+            anyone seeing this dialog turned that off and the button is how
+            they turn it back on. */}
+        <Button variant="secondary" type="button" onClick={() => resolve("rebuild")}>
+          <RotateCw className="h-3.5 w-3.5" /> Rebuild now
+        </Button>
         {frequency !== "off" && (
           <Button
-            variant="secondary"
+            variant="primary"
             type="button"
+            autoFocus
             title="Stop asking. From now on the image rebuilds on this schedule in the background: agents launch immediately and pick up the new image next time. Reversible in Settings → Docker Sandbox."
             onClick={() => resolve("always")}
           >
             <Clock className="h-3.5 w-3.5" /> Always, in background
           </Button>
         )}
-        <Button variant="primary" type="button" autoFocus onClick={() => resolve("rebuild")}>
-          <RotateCw className="h-3.5 w-3.5" /> Rebuild now
-        </Button>
       </div>
     </AppDialog>
   );

@@ -244,6 +244,19 @@ describe("describeLastBuildDate at a realistic time of day", () => {
 });
 
 describe("rebuild in background", () => {
+  // These describes are SIBLINGS of the main one, so its beforeEach does not
+  // reach them: without this the build mock carries call counts across cases
+  // and "was not called" silently sees the previous test's calls.
+  beforeEach(() => {
+    mockedSettingsLoad.mockReset();
+    mockedImageStatus.mockReset();
+    mockedBuildImage.mockReset().mockResolvedValue(undefined);
+    mockedOnBuildDone.mockReset();
+    vi.mocked(onDockerBuildLog).mockReset().mockResolvedValue(() => {});
+    vi.mocked(settingsSave).mockReset().mockResolvedValue(undefined as never);
+    useUI.setState({ toasts: [], dockerRebuildPrompt: null });
+  });
+
   it("starts the build and does NOT make the launch wait for it", async () => {
     // The whole point of the choice: the rebuild exists to stop an agent
     // running a stale binary, but someone who wants to work NOW should not
@@ -262,6 +275,51 @@ describe("rebuild in background", () => {
     await launch;                                   // resolves without `done`
     expect(mockedBuildImage).toHaveBeenCalledWith(true);   // --no-cache
     expect(useUI.getState().toasts.some(t => /background/i.test(t.msg))).toBe(true);
+  });
+});
+
+describe("automatic rebuild (the default)", () => {
+  // These describes are SIBLINGS of the main one, so its beforeEach does not
+  // reach them: without this the build mock carries call counts across cases
+  // and "was not called" silently sees the previous test's calls.
+  beforeEach(() => {
+    mockedSettingsLoad.mockReset();
+    mockedImageStatus.mockReset();
+    mockedBuildImage.mockReset().mockResolvedValue(undefined);
+    mockedOnBuildDone.mockReset();
+    vi.mocked(onDockerBuildLog).mockReset().mockResolvedValue(() => {});
+    vi.mocked(settingsSave).mockReset().mockResolvedValue(undefined as never);
+    useUI.setState({ toasts: [], dockerRebuildPrompt: null });
+  });
+
+  it("does not prompt at all, and rebuilds in the background", async () => {
+    // `docker_rebuild_auto` ships ON: the image staying current is the whole
+    // point, and the background rebuild costs the user nothing because the
+    // agent launches immediately either way. Prompting by default meant
+    // answering the same question daily to reach the same outcome.
+    mockedSettingsLoad.mockResolvedValue({ ...baseSettings, docker_rebuild_auto: true });
+    mockedImageStatus.mockResolvedValue({ ...baseImage, last_built_date: "2020-01-01" });
+    // Never signals `done`. If automatic ever went back to BLOCKING, this
+    // test would hang rather than fail - which is the failure worth catching,
+    // since a silent block is exactly what the user opted out of.
+    vi.mocked(onDockerBuildDone).mockResolvedValue(() => {});
+    useUI.setState({ dockerRebuildPrompt: null, toasts: [] });
+
+    await maybeRebuildDockerImageForLaunch(baseTask as Task);
+
+    expect(useUI.getState().dockerRebuildPrompt).toBeNull();
+    expect(mockedBuildImage).toHaveBeenCalledWith(true);
+  });
+
+  it("still respects an 'off' frequency", async () => {
+    // "off" already means never; automatic must not override an explicit no.
+    mockedSettingsLoad.mockResolvedValue({
+      ...baseSettings, docker_rebuild_auto: true, docker_rebuild_frequency: "off",
+    });
+    mockedImageStatus.mockResolvedValue({ ...baseImage, last_built_date: "2020-01-01" });
+    await maybeRebuildDockerImageForLaunch(baseTask as Task);
+    expect(mockedBuildImage).not.toHaveBeenCalled();
+    expect(useUI.getState().dockerRebuildPrompt).toBeNull();
   });
 });
 

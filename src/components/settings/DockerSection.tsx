@@ -505,8 +505,9 @@ export function DockerSection() {
                 />
                 <span className="text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
                   <span className="font-medium text-[var(--color-fg)]">Rebuild automatically.</span>{" "}
-                  Keep the image current on this schedule without asking. The rebuild runs in the
+                  On by default. Keeps the image current on this schedule without asking, in the
                   background, so agents launch straight away and pick up the new image next time.
+                  Turn it off to be asked before each rebuild instead.
                 </span>
               </label>
             )}

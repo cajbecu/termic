@@ -3292,7 +3292,14 @@ fn pty_spawn(
             sandbox::unregister_root_pid(task, pid);
         }
         let mut map = state_w.lock();
-        map.remove(&id_w);
+        // Same reaping as pty_kill, for the other way a PTY ends: the agent
+        // exited by itself. `--rm` covers the container's own clean exit, but
+        // not the case where the client dies first.
+        if let Some(slot) = map.remove(&id_w) {
+            if let Some(name) = slot.docker_container.clone() {
+                std::thread::spawn(move || docker::rm_container(&name));
+            }
+        }
     });
 
     // Build the truth about how this PTY actually got sandboxed and
@@ -3373,6 +3380,13 @@ fn pty_kill(state: State<'_, PtyManager>, pty_id: String) -> Result<(), String> 
         }
         drop(slot.writer);
         drop(slot.master);
+        // The SIGKILL above only killed the local `docker run` client; the
+        // container it was attached to keeps running. Reap it by NAME, which
+        // is per-PTY, so a sibling tab's container is untouched. Off-thread:
+        // this is a sync command and `docker rm` talks to the daemon.
+        if let Some(name) = slot.docker_container {
+            tauri::async_runtime::spawn_blocking(move || docker::rm_container(&name));
+        }
     }
     Ok(())
 }
@@ -6163,16 +6177,24 @@ fn count_live_agents<'a>(
 /// don't preemptively remove entries here to avoid a race with the
 /// per-PTY emit thread.
 pub(crate) fn kill_task_ptys(manager: &PtyManager, task_id: &str) -> usize {
-    let victims: Vec<Option<u32>> = {
+    let victims: Vec<(Option<u32>, Option<String>)> = {
         let map = manager.inner.lock();
         map.iter()
             .filter(|(_, slot)| slot.task_id.as_deref() == Some(task_id))
-            .map(|(_, slot)| slot.child_pid)
+            .map(|(_, slot)| (slot.child_pid, slot.docker_container.clone()))
             .collect()
     };
     let count = victims.len();
-    for pid in victims.into_iter().flatten() {
-        unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+    for (pid, container) in victims {
+        if let Some(pid) = pid {
+            unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+        }
+        // Killing the client does not stop the container (see
+        // docker::rm_container). Reap by name so this stays correct even
+        // though callers like task_set_docker also sweep the whole task.
+        if let Some(name) = container {
+            std::thread::spawn(move || docker::rm_container(&name));
+        }
     }
     count
 }
@@ -15122,7 +15144,14 @@ pub struct Settings {
     ///
     /// Has no effect when `docker_rebuild_frequency` is "off" - that already
     /// means never.
-    #[serde(default)]
+    ///
+    /// Defaults ON. The whole point of the feature is that the image does not
+    /// go stale, and the background rebuild costs the user nothing: the agent
+    /// launches immediately either way. Prompting by default meant everyone
+    /// answered the same question daily to reach the same outcome. The prompt
+    /// still exists for anyone who deliberately turns this off, which is
+    /// exactly who should be asked.
+    #[serde(default = "default_true")]
     pub docker_rebuild_auto: bool,
     /// Per-agent EXTRA directories mounted into that agent's Docker config
     /// dir, on top of the confirmed built-in list `agent_dirs::state_dirs`

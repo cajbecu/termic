@@ -1747,7 +1747,7 @@ describe("pr card (#21)", () => {
    *
    *  Re-asserting the seed each poll makes the race unlosable without
    *  disabling `refresh`, which other cases in this file legitimately need. */
-  const seedPrAndWaitForText = async (lookup: unknown, text: string) => {
+  const seedPrAndWaitForText = async (lookup: unknown, texts: string[]) => {
     await seedPr(lookup);
     await browser.waitUntil(async () => {
       await browser.execute(
@@ -1756,8 +1756,12 @@ describe("pr card (#21)", () => {
             byTask: { ...s.byTask, [id!]: { lookup: lk, loading: false, fetchedAt: Date.now() } },
           }));
         }, taskId, lookup);
-      return browser.execute((t) => document.body.innerText.includes(t), text);
-    }, { timeoutMsg: `never appeared with the lookup held in place: ${text}` });
+      // ALL of them in one poll. Asserting them one after another let the
+      // seed be clobbered between assertions: the first passed, the card
+      // reverted to the real (card-less) lookup, and the second timed out.
+      return browser.execute(
+        (ts) => ts.every(t => document.body.innerText.includes(t)), texts);
+    }, { timeoutMsg: `never appeared together with the lookup held in place: ${texts.join(", ")}` });
   };
 
   /** Let the card finish its own first lookup, then overwrite it. */
@@ -1836,8 +1840,7 @@ describe("pr card (#21)", () => {
       status: "cli-missing",
       message: "",
       pr: null,
-    }, "need the gh CLI");
-    await waitForText("brew install gh");
+    }, ["need the gh CLI", "brew install gh"]);
   });
 
   it("tells the user to sign in when the CLI is unauthenticated", async () => {
@@ -1847,8 +1850,7 @@ describe("pr card (#21)", () => {
       status: "cli-unauthed",
       message: "glab is not authenticated.",
       pr: null,
-    }, "Sign in to GitLab");
-    await waitForText("glab auth login");
+    }, ["Sign in to GitLab", "glab auth login"]);
   });
 
   it("offers to create one when the branch has no PR", async () => {
