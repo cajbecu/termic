@@ -192,6 +192,51 @@ don't edit it by hand.
 **Copy rule:** no em dashes (—) anywhere in user-visible text, including
 `CHANGELOG.md`. Use a comma, period, parentheses, or colon.
 
+### A fix only counts if the bug SHIPPED
+
+`### Bug fixes` is for things that were broken **in a release a user could
+already be running**. A bug found and fixed inside the same cycle that
+introduces the feature never existed for anybody outside this repo, so listing
+it is noise at best and actively misleading at worst: it makes a feature's
+debut read like a maintenance release for something users have been suffering
+through.
+
+So, for every fix you are about to list, ask: **was the thing it fixes in the
+previous release?**
+
+- **Yes** → it belongs under `### Bug fixes`.
+- **No, the feature debuts in THIS release** → delete the bullet. The feature's
+  own `### Features` entry describes what ships; that it works correctly is not
+  a separate accomplishment. This covers the whole cluster: a new feature's
+  rough edges, its UI polish, its performance work, and the fixes that came out
+  of reviewing it before release.
+
+The same goes for a REGRESSION introduced and repaired between releases: it
+never reached a user, so it is not a fix, it is just development.
+
+Concretely, in the 1.0.0 entry: code navigation, PR/MR integration and Docker
+sandboxing all debuted there, so **none** of their fixes were listed, however
+real the bugs were (a second agent tab killing the first one's container,
+switching a Docker task out of Docker leaving it uncaged, PR polling pinned to
+a closed PR). That cut roughly thirty commits' worth of candidate bullets. What
+survived were only fixes against surfaces that existed in 0.29.0: `files_to_copy`
+on multi-repo tasks, a blank glob copying a whole repo, a retired built-in agent
+that could not be deleted, the sidebar sandbox badge claiming a task was caged
+before it had ever run, five competing focus rings, and a word collision after
+inline code.
+
+Note the last three: each of those changes ALSO touched a debuting feature, and
+the bullet is scoped to the half that shipped. The focus work unified rings that
+existed in 0.29.0, so it counts, but it is not written up as "the sandbox cards
+had a clipped ring" because those cards are new. The `<code>` fix repaired two
+sites; only the multi-repo one shipped, so only that one is named. Ask what a
+0.29.0 user would notice, not which commit the fix rode in on.
+
+Two other things that are not user-facing fixes and never belong in the
+changelog at all: **test/CI work** (a flaky spec, a suite that steals focus)
+and **internal refactors** with no behaviour change. Neither is something a
+user can observe in the app.
+
 ---
 
 ## What CI does (after `git push --tags`)
