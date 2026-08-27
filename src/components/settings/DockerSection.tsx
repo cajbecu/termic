@@ -383,17 +383,26 @@ export function DockerSection() {
               image state they act on, instead of at the far end of the page under the
               Dockerfile editor. */}
           <div className="mt-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-fg-faint)]">Status</div>
-          {/* Docker availability */}
+          {/* One block, two columns: both are one-line readouts of the same
+              question, and stacking them made a short answer occupy a whole
+              screen of vertical space. The build actions stay full width
+              underneath, since they act on the image AND need Docker up -
+              they belong to the row, not to either column. */}
           <Block>
-            <div className="text-[14px] font-medium">Docker status</div>
-            <DockerAvailability status={status} />
-          </Block>
-
-          {/* Image build */}
-          <Block>
-            <div className="text-[14px] font-medium">Image</div>
-            <ImageStatusLine image={image} dirty={dirty} />
-            <div className="mt-3 flex items-center gap-2">
+            <div className="grid grid-cols-2 gap-x-6 gap-y-1">
+              {/* Image first: it is the one the buttons underneath act on,
+                  and the one that changes. Docker's own state is a
+                  precondition you check once and then forget. */}
+              <div className="min-w-0">
+                <div className="text-[14px] font-medium">Image</div>
+                <ImageStatusLine image={image} dirty={dirty} />
+              </div>
+              <div className="min-w-0">
+                <div className="text-[14px] font-medium">Docker status</div>
+                <DockerAvailability status={status} />
+              </div>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
               <Button
                 variant="primary"
                 disabled={building || dfBusy || !status?.daemon}
