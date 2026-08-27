@@ -49,6 +49,42 @@ const openFile = (taskId: string, rel: string) =>
   }, taskId, rel);
 
 
+/**
+ * Upstream's latest TypeScript release tag, or null when the release API did
+ * not answer usefully.
+ *
+ * Deliberately the same conditions `lsp_resolve_asset` applies in `lib.rs`: a
+ * tag, an asset named for THIS platform, and a 64-char sha256 digest on it. A
+ * probe that accepted less would report "the API answered" for a release the
+ * app is right to fall back to the pin on, and the case below would then blame
+ * termic for upstream's change.
+ */
+const latestTypescriptRelease = async (): Promise<string | null> => {
+  const asset = process.arch === "arm64"
+    ? "typescript-darwin-arm64.tgz"
+    : "typescript-darwin-x64.tgz";
+  try {
+    const resp = await fetch("https://api.github.com/repos/microsoft/typescript/releases/latest", {
+      // GitHub rejects an API request with no User-Agent, exactly as the app's
+      // own client sets one.
+      headers: { "User-Agent": "termic-e2e" },
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (!resp.ok) return null;
+    const body = await resp.json() as {
+      tag_name?: string;
+      assets?: { name?: string; browser_download_url?: string; digest?: string }[];
+    };
+    const tag = (body.tag_name ?? "").replace(/^v/, "");
+    const a = (body.assets ?? []).find(x => x.name === asset);
+    const digest = a?.digest?.replace(/^sha256:/, "") ?? "";
+    if (!tag || !a?.browser_download_url || digest.length !== 64) return null;
+    return tag;
+  } catch {
+    return null;
+  }
+};
+
 /** Arm one checkout for one server, through the key EditorPane reads. */
 const armGrant = (root: string, taskId: string, server: string) =>
   browser.execute((r, id, sv) => {
@@ -135,13 +171,67 @@ describe("code intelligence: server downloads", function () {
       await window.__termic!.invoke("lsp_check_update", { language: "typescript" }),
     ) as { installed: string | null; latest: string | null; upgradable: boolean; label: string };
     expect(row.label).toContain("TypeScript");
-    // Installed by the case above, and the release API answered, so both
-    // halves are known and the app can say which.
+    // Installed by the case above, so this half is known whatever the network
+    // did. `.staging` is termic's own bookkeeping and lived in this directory
+    // as the newest entry, which used to be read back here as the installed
+    // version: see rule 20 in docs/lsp.md.
     expect(row.installed).toBeTruthy();
-    expect(row.latest).toBeTruthy();
-    // We just installed the latest, so there is nothing to offer.
+    expect(row.installed!.startsWith(".")).toBe(false);
+
+    // Whatever the network did, this one holds, and it is the one that matters
+    // most: we installed the latest a moment ago, and an app that cannot reach
+    // the API must claim no upgrade rather than offer the user a DOWNGRADE to
+    // whatever constant this build was compiled with.
     expect(row.upgradable).toBe(false);
-    expect(row.installed).toBe(row.latest);
+    if (row.latest) expect(row.installed).toBe(row.latest);
+
+    // The other half is upstream's, and asking for it costs one unauthenticated
+    // GitHub API call. That budget is 60/hour PER IP, and a macOS Actions
+    // runner shares its IP with every other job on the fleet, so a nightly that
+    // asserts "the API answered" is asserting something termic does not
+    // control: this file already spends four calls of that budget itself, and
+    // the run that proved the point flipped from answered to rate-limited 37
+    // minutes apart with no code change in between.
+    //
+    // So probe the same endpoint from here and let the probe decide which
+    // assertion is honest. Same IP, same minute, same rate limiter.
+    const upstream = await latestTypescriptRelease();
+
+    if (!upstream) {
+      // Out of API budget, or upstream is down. Not termic, and the invariants
+      // above already ran. Loud rather than a silent skip, because a quiet one
+      // is how this nightly would stop catching what it exists to catch.
+      console.warn(
+        "[lsp-download] the GitHub release API did not answer (rate limit or outage), so the " +
+        `installed-vs-latest comparison was not exercised. Installed: ${row.installed}.`,
+      );
+      return;
+    }
+
+    if (!row.latest) {
+      // The API answers us but not the app. Usually that IS a termic bug (a
+      // renamed asset, a release that stopped publishing a digest, a resolver
+      // that gave up early), and it is the single most valuable thing this
+      // file can catch. The one innocent explanation is the budget hitting
+      // zero in the gap between the app's call and ours, so re-probe: if the
+      // API has stopped answering us too, that is what happened.
+      if (!(await latestTypescriptRelease())) {
+        console.warn(
+          "[lsp-download] the release API stopped answering between the app's call and this " +
+          "one, so which of the two was rate-limited is not decidable. Not exercised.",
+        );
+        return;
+      }
+      throw new Error(
+        `the release API resolves ${upstream} from this process, but lsp_check_update reported ` +
+        "no latest version. Check that the manifest's asset name still exists on the release " +
+        "and that it still carries a sha256 digest.",
+      );
+    }
+
+    // Both answered, so the comparison is real.
+    expect(row.latest).toBe(upstream);
+    expect(row.installed).toBe(upstream);
   });
 
   it("drives the downloaded TypeScript server against a real error", async () => {

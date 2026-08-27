@@ -476,6 +476,32 @@ scanned directory. That fix moved staging behind a dot and taught one scan to
 ignore it. The rule is the general form: the staging path is not a place, it is
 a name convention, and anything that reads the directory obeys it.
 
+### 21. The release API is a 60-per-hour budget, and a CI runner does not own it
+
+`lsp_resolve_asset` asks GitHub for the latest release of the manifest's repo,
+unauthenticated, because a desktop app has no token to offer. That is 60
+requests per hour PER IP. On a developer's machine it is invisible. On a macOS
+Actions runner the IP is shared with the rest of the fleet, and the nightly
+spends four of those calls itself (three installs plus the update check).
+
+So the answer is not guaranteed, and the app is already right about that: no
+answer means fall back to the pin, report `latest: null`, and claim NO upgrade,
+because claiming one would offer a downgrade to whatever constant this build
+was compiled with. What was wrong was the test, which asserted the API had
+answered and therefore failed on GitHub's rate limiter rather than on anything
+termic did.
+
+`codenav-download.e2e.ts` now probes the same endpoint from the spec process,
+same IP and same minute, and lets the probe pick the assertion. The invariants
+that hold either way (`upgradable` is false right after installing the latest,
+and `installed` equals `latest` whenever both are known) are checked
+unconditionally. The strict installed-vs-upstream comparison runs only when the
+probe got an answer. And the one case worth shouting about, the API answering
+the spec but not the app, fails with the two things to check: whether the
+asset name still exists on the release, and whether it still carries a digest.
+A run that could not exercise the comparison says so on stdout rather than
+passing quietly.
+
 ## What is deliberately not built
 
 The plan this file replaced (`docs/plans/lsp.md`, deleted when the work
