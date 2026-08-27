@@ -12222,10 +12222,28 @@ fn lsp_installed_versions(language: &str) -> Vec<(String, std::time::SystemTime)
     let Ok(base) = data_dir().map(|d| d.join("servers").join(language)) else {
         return vec![];
     };
-    let Ok(entries) = fs::read_dir(&base) else { return vec![] };
+    lsp_versions_in(&base)
+}
+
+/// The version directories under one `servers/<language>/`, newest first.
+///
+/// Dot-prefixed entries are termic's own bookkeeping, never a version, and
+/// skipping them is load-bearing rather than tidiness: `.staging` is a SIBLING
+/// of the version directories, and the rename that moves an unpacked server
+/// out of it bumps its mtime, so it is the newest entry the moment any install
+/// finishes and it outlives that install as an empty directory. Without this
+/// filter the caller reads back ".staging" as the installed version, which
+/// made `lsp_check_update` offer a permanent bogus upgrade (installed
+/// ".staging" != latest "7.0.2"), made `lsp_update` re-download a server that
+/// was already current, and cost the retention prune one of its two slots so
+/// it deleted a real install early. Same reason `lsp_installed_exe` skips
+/// them; this is the other half of that guard.
+fn lsp_versions_in(base: &Path) -> Vec<(String, std::time::SystemTime)> {
+    let Ok(entries) = fs::read_dir(base) else { return vec![] };
     let mut out: Vec<(String, std::time::SystemTime)> = entries
         .flatten()
         .filter(|e| e.path().is_dir())
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
         .map(|e| {
             let when = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
             (e.file_name().to_string_lossy().to_string(), when)
@@ -18209,6 +18227,58 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    // ── installed language-server versions ───────────────────────────────
+    // `.staging` is a sibling of the version directories, and the rename that
+    // moves an unpacked server out of it leaves it behind with the newest
+    // mtime in the directory. It is bookkeeping, not a version, and reading it
+    // back as one is what made the LSP download suite fail with
+    // "installed .staging != latest 7.0.2".
+
+    #[test]
+    fn installed_versions_ignores_the_staging_directory() {
+        let d = tempdir().unwrap();
+        fs::create_dir_all(d.path().join("7.0.1")).unwrap();
+        fs::create_dir_all(d.path().join("7.0.2")).unwrap();
+        // Created last, so it is also the newest: exactly the shape an install
+        // leaves behind, and the one that used to win the sort.
+        fs::create_dir_all(d.path().join(".staging")).unwrap();
+
+        let v: Vec<String> = lsp_versions_in(d.path()).into_iter().map(|(v, _)| v).collect();
+        assert!(!v.iter().any(|v| v.starts_with('.')), "{v:?}");
+        assert_eq!(v.len(), 2, "{v:?}");
+    }
+
+    #[test]
+    fn installed_versions_are_newest_first() {
+        let d = tempdir().unwrap();
+        fs::create_dir_all(d.path().join("0.0.72")).unwrap();
+        // mtime resolution is coarse enough on some filesystems that two
+        // directories created back to back tie, so make the order explicit.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::create_dir_all(d.path().join("0.0.73")).unwrap();
+
+        let v: Vec<String> = lsp_versions_in(d.path()).into_iter().map(|(v, _)| v).collect();
+        assert_eq!(v, vec!["0.0.73".to_string(), "0.0.72".to_string()]);
+    }
+
+    #[test]
+    fn installed_versions_of_a_missing_directory_is_empty() {
+        // Nothing downloaded yet: the caller reports "not installed", never an
+        // error.
+        let d = tempdir().unwrap();
+        assert!(lsp_versions_in(&d.path().join("never-installed")).is_empty());
+    }
+
+    #[test]
+    fn installed_versions_ignores_loose_files() {
+        let d = tempdir().unwrap();
+        fs::create_dir_all(d.path().join("7.0.2")).unwrap();
+        fs::write(d.path().join("README"), "not a version").unwrap();
+
+        let v: Vec<String> = lsp_versions_in(d.path()).into_iter().map(|(v, _)| v).collect();
+        assert_eq!(v, vec!["7.0.2".to_string()]);
+    }
 
     // ── file_read_external (GH #240) ─────────────────────────────────────
     // The ONLY uncontained read in the app. These pin the three bounds that

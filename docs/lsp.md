@@ -449,6 +449,33 @@ nothing reports an error, and the user concludes the feature does not work.
 All five follow rule 15's bar: each was observed on a real checkout, and each
 is described in the words the reader would use, with the command that ends it.
 
+### 20. Everything under `servers/<language>/` that is not a version is bookkeeping, and every scan has to skip it
+
+An install unpacks into `servers/<language>/.staging/<version>/` and then
+renames that directory up one level to `servers/<language>/<version>/`. The
+rename empties `.staging` but leaves it there, and it bumps its mtime, so from
+the moment any install finishes `.staging` is the NEWEST directory next to the
+versions. Both scans of that directory take the newest entry, so both have to
+filter dot-prefixed names, and only one of them did.
+
+`lsp_installed_exe` skipped them. `lsp_installed_versions` did not, so it
+reported the installed version as ".staging": `lsp_check_update` compared that
+against upstream's real tag and offered a permanent bogus upgrade, `lsp_update`
+re-downloaded a server that was already current, and the retention prune
+(`skip(2)`, keep the newest two) spent one of its two slots on an empty
+directory and deleted a real install a version early. Caught by the nightly
+(`codenav-download.e2e.ts`, "reports what is installed and what upstream has"),
+which is exactly the class of thing it exists to catch, and pinned by
+`lsp_versions_in`'s unit tests so the next scan added here starts from a
+filtered helper rather than a fresh `read_dir`.
+
+This is the second time this bug shipped. The first was
+`dir.with_extension("incoming")`, which rewrote everything after the last dot
+and staged `servers/python/0.0.73` at `servers/python/0.0.incoming`, INSIDE the
+scanned directory. That fix moved staging behind a dot and taught one scan to
+ignore it. The rule is the general form: the staging path is not a place, it is
+a name convention, and anything that reads the directory obeys it.
+
 ## What is deliberately not built
 
 The plan this file replaced (`docs/plans/lsp.md`, deleted when the work
