@@ -50,6 +50,15 @@ export function SandboxPicker({
               title={unsupported ? "Sandbox is macOS-only (requires sandbox-exec)." : v.desc}
               className={cn(
                 "flex flex-col items-start gap-1 rounded-md border text-left transition-colors",
+              // The app-wide focus convention (Button, Checkbox), which these
+              // cards never adopted - so they fell back to the browser default
+              // outline. That outline is drawn OUTSIDE the box, and the first
+              // card sits flush against the grid edge, so it came out clipped
+              // down its left side. `focus-visible` also means a dialog opened
+              // with the mouse shows no ring at all, while keyboard users keep
+              // a clear one; `ring-inset` keeps it inside the card so nothing
+              // can crop it wherever the card sits.
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-accent-soft)]",
                 compact ? "px-3 py-2" : "px-3 py-2.5",
                 active ? "bg-[var(--color-bg-2)]" : "border-[var(--color-border)] bg-[var(--color-bg)] hover:border-[var(--color-accent-soft)]",
                 unsupported && "opacity-40 cursor-not-allowed",
@@ -88,6 +97,15 @@ export function SandboxPicker({
             title={title}
             className={cn(
               "flex flex-col items-start gap-1 rounded-md border text-left transition-colors",
+              // The app-wide focus convention (Button, Checkbox), which these
+              // cards never adopted - so they fell back to the browser default
+              // outline. That outline is drawn OUTSIDE the box, and the first
+              // card sits flush against the grid edge, so it came out clipped
+              // down its left side. `focus-visible` also means a dialog opened
+              // with the mouse shows no ring at all, while keyboard users keep
+              // a clear one; `ring-inset` keeps it inside the card so nothing
+              // can crop it wherever the card sits.
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-accent-soft)]",
               compact ? "px-3 py-2" : "px-3 py-2.5",
               active ? "bg-[var(--color-bg-2)]" : "border-[var(--color-border)] bg-[var(--color-bg)] hover:border-[var(--color-accent-soft)]",
               disabled && "opacity-40 cursor-not-allowed",
