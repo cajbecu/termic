@@ -100,6 +100,12 @@ export interface Project {
    *  Existing tasks aren't re-evaluated - their sandbox pin is
    *  captured at creation and immutable thereafter. */
   default_sandbox?: boolean;
+  /** New tasks default to Docker rather than Seatbelt. Mutually exclusive
+   *  with the two Seatbelt defaults in effect. */
+  default_docker?: boolean;
+  /** Project-level default Docker extra mounts, seeded into new tasks ahead
+   *  of the global `Settings.docker_default_extra_mounts`. */
+  docker_extra_mounts?: string[];
   /** Default sandbox MODE for new tasks (off / monitor / enforce).
    *  Additive over `default_sandbox`; when undefined the dialog derives
    *  the default from `default_sandbox` (true → enforce). */

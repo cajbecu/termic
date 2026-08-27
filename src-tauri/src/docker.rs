@@ -162,16 +162,19 @@ pub fn base_agent_id<'a>(agents: &'a [crate::Agent], id: &'a str) -> &'a str {
 /// image at build time silently shadows it, and there is no way to know
 /// in advance whether a given path is safe for an agent this module has
 /// never seen.
-/// `agent_id` names WHERE state is stored (its own host folder, which is what
-/// gives a clone its own separate login). `base_id` names WHAT the agent is:
-/// a clone of claude runs the claude binary and has claude's config shape, so
-/// it must inherit claude's dirs and relocation var. They differ exactly for
-/// a cloned agent, and conflating them is what made clones unusable in Docker
+/// Takes `base_id` (WHAT the agent is), never the agent's own id. An agent id
+/// answers a different question - WHERE its state is stored - and that one is
+/// the caller's, via `agent_config_host_dir`. The two differ exactly for a
+/// cloned agent: a clone of claude runs the claude binary and has claude's
+/// config shape, but must keep its own folder, which is the whole reason to
+/// clone an agent. Conflating them is what made clones unusable in Docker
 /// mode: matching on the clone's own id fell through to the unknown-agent
 /// path, so nothing was mounted, nothing was relocated, and the agent wrote
 /// its login into the container's throwaway filesystem (into `/root`, which
 /// the non-root container user cannot even write - the EACCES a user sees).
-fn agent_config(agent_id: &str, base_id: &str, user_extra_dirs: &[String], persist_enabled: bool) -> Option<AgentConfig> {
+/// The parameter is deliberately named for what it must be, so a future
+/// caller cannot pass the wrong id without noticing.
+fn agent_config(base_id: &str, user_extra_dirs: &[String], persist_enabled: bool) -> Option<AgentConfig> {
     // grok is a PERMANENT exception, not merely "not yet known safe": its
     // binary lives at `~/.grok/bin` inside its own config dir, so the
     // opt-in path below would let a user type ".grok" as an extra dir and
@@ -436,7 +439,7 @@ pub fn build_spec(
         ("HOME".to_string(), "/root".to_string()),
         ("USER".to_string(), "agent".to_string()),
     ];
-    if let Some(cfg) = agent_config(agent_id, base_id, agent_extra_dirs, agent_persist_enabled) {
+    if let Some(cfg) = agent_config(base_id, agent_extra_dirs, agent_persist_enabled) {
         let host_cfg = agent_config_host_dir(agent_id).to_string_lossy().into_owned();
         // Create it OURSELVES, as the app user, before it becomes a `-v`
         // source. A missing bind-mount source is created by the daemon
@@ -1279,7 +1282,7 @@ mod tests {
         // dir), so it has to follow the clone rather than the id.
         let agents = vec![stub_agent("grok", None), stub_agent("my-grok", Some("grok"))];
         assert_eq!(base_agent_id(&agents, "my-grok"), "grok");
-        assert!(agent_config("my-grok", "grok", &[".grok".to_string()], true).is_none());
+        assert!(agent_config("grok", &[".grok".to_string()], true).is_none());
     }
 
     #[test]

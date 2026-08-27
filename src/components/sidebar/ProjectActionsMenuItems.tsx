@@ -10,6 +10,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useApp } from "@/store/app";
+import { projectSandboxDefault } from "@/lib/projectSandboxDefault";
+import { SandboxIcon, DockerSandboxIcon, sandboxPickerLabel } from "@/components/SandboxIcon";
+import { selectionToFields } from "@/lib/types";
 import { useUI } from "@/store/ui";
 import { defaultCliFirst, visibleCliIds } from "@/lib/agents";
 import { importQuickWorktree, readNewTaskMode, writeNewTaskMode, type NewTaskMode } from "@/lib/quickTask";
@@ -86,6 +89,9 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
   const archivedTasks = archivedAll.slice(0, RESUME_LIMIT);
   const hasMoreArchived = archivedAll.length > RESUME_LIMIT;
   const project = useApp(s => s.projects.find(p => p.id === projectId));
+  // One resolver shared with the settings picker and the create path, so the
+  // row cannot claim a cage the created task does not get.
+  const sandboxDefault = projectSandboxDefault(project);
   const isMulti = (project?.type ?? "single") === "multi";
   // Non-git projects (issue #4) have no branches / worktrees — the only way
   // in is the main checkout (agent at the folder root). Force that mode and
@@ -238,6 +244,32 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
                   ? "Host directory with live links to each member's checkout."
                   : "No worktree. Runs in the repo's current branch. Edits land on your real files.")}
           </div>
+
+          {/* What cage this project's new tasks get, stated where the task is
+              actually created. The quick path applies the project default
+              silently otherwise, and on the main checkout that means a cage
+              over your REAL files with nothing on screen having said so. The
+              mode's own icon is used, so this row and the sandbox picker are
+              recognisably the same thing. Hidden when the default is "off":
+              uncaged is the baseline, and a row saying so on every menu open
+              is noise. */}
+          {sandboxDefault !== "off" && (
+            <div
+              data-testid="quick-create-sandbox-note"
+              data-sandbox-default={sandboxDefault}
+              className="mt-1 flex items-center gap-1.5 px-0.5 text-[11.5px] leading-snug text-[var(--color-fg-dim)]"
+            >
+              {sandboxDefault === "docker"
+                ? <DockerSandboxIcon className="h-3 w-3 shrink-0" />
+                : <SandboxIcon mode={selectionToFields(sandboxDefault).mode} className="h-3 w-3 shrink-0" />}
+              <span>
+                Sandboxed:{" "}
+                <span className="text-[var(--color-fg)]">
+                  {sandboxDefault === "docker" ? "Docker" : sandboxPickerLabel(selectionToFields(sandboxDefault).mode)}
+                </span>
+              </span>
+            </div>
+          )}
 
           {/* Where the worktree gets cut from. Doubles as the disclosure: the
               quick path used to silently use the project default (detected as

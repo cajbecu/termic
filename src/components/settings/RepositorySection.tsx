@@ -27,6 +27,9 @@ import { CodeIntelServers } from "./CodeIntelServers";
 import { codeIntelName } from "@/lib/lsp/featureName";
 import { SERVABLE_LANGUAGES } from "@/lib/lsp/serverNames";
 import { usePrefs } from "@/store/prefs";
+import { SandboxPicker } from "@/components/SandboxPicker";
+import { selectionToFields, type SandboxSelection } from "@/lib/types";
+import { dockerImageStatus, settingsLoad, type DockerImageStatus } from "@/lib/ipc";
 
 /** The servers termic can drive, by the id the Rust host knows them by. Not
  *  every language CodeMirror highlights: these are the four something can
@@ -63,6 +66,22 @@ export function RepositorySection({ projectId }: { projectId: string }) {
   // write to the committed .termic.yaml (team-shared) or to projects.json
   // (personal overrides, local only). Reset on project switch.
   const [sandboxTarget, setSandboxTarget] = useState<"yaml" | "personal">("yaml");
+  // Docker is only offerable once it is on globally AND an image exists;
+  // otherwise the card would set a default that cannot launch. Re-probed per
+  // project open, not once per app launch, so enabling Docker in Settings
+  // mid-session is picked up (the same trap NewTaskDialog had).
+  const [dockerImage, setDockerImage] = useState<DockerImageStatus | null>(null);
+  const [dockerGloballyOn, setDockerGloballyOn] = useState(false);
+  useEffect(() => {
+    let dead = false;
+    settingsLoad()
+      .then(s => { if (!dead) setDockerGloballyOn(!!s.docker_sandbox_enabled); })
+      .catch(() => {});
+    dockerImageStatus()
+      .then(v => { if (!dead) setDockerImage(v); })
+      .catch(() => {});
+    return () => { dead = true; };
+  }, [projectId]);
   const [scriptTarget,  setScriptTarget]  = useState<"yaml" | "personal">("yaml");
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [err, setErr] = useState<string | null>(null);
@@ -447,6 +466,26 @@ export function RepositorySection({ projectId }: { projectId: string }) {
   const cliChoices = agents.filter(a => !a.disabled && !isTerminalEntry(a));
   const cliMissing = draft.default_cli !== "shell"
     && !cliChoices.some(a => a.id === draft.default_cli);
+  // The project's default engine, expressed in the picker's own vocabulary.
+  // Reads the same three fields the create paths read, in the same order
+  // NewTaskDialog seeds from, so the two can never disagree about what this
+  // project's default IS.
+  const projectDefaultSelection: SandboxSelection = draft.default_docker
+    ? "docker"
+    : (draft.default_sandbox_mode ?? (draft.default_sandbox ? "enforce" : "off"));
+
+  /** Write a picker choice back onto the three stored fields. Docker and
+   *  Seatbelt are separate booleans on the record (see SandboxSelection), so
+   *  picking one has to clear the other or a task would carry both. */
+  function setProjectDefaultSelection(sel: SandboxSelection) {
+    const { mode, docker } = selectionToFields(sel);
+    patch("default_docker", docker as never);
+    patch("default_sandbox_mode", (docker ? null : mode) as never);
+    patch("default_sandbox", (!docker && mode !== "off") as never);
+  }
+
+  const dockerOffered = dockerGloballyOn && !!dockerImage?.available;
+
   // For single-repo, files-to-copy source depends on which tab is active.
   const filesArr = isMulti || scriptTarget === "personal"
     ? (Array.isArray(draft.files_to_copy) ? draft.files_to_copy : [])
@@ -878,13 +917,51 @@ export function RepositorySection({ projectId }: { projectId: string }) {
             When a task is sandboxed, the agent runs under macOS seatbelt: the filesystem is allow-listed (task + agent state + caches + dirs you list); HTTPS goes through an in-process per-task proxy filtered against the host allowlist. Secrets (<code className="font-mono">~/.ssh</code>, <code className="font-mono">~/.aws</code>, <code className="font-mono">~/.gnupg</code>, <code className="font-mono">~/.netrc</code>, <code className="font-mono">~/.kube</code>, …) and personal data (<code className="font-mono">~/Documents</code>, <code className="font-mono">~/Desktop</code>, <code className="font-mono">~/Downloads</code>, browser data, mail) are denied by default.
           </p>
           <div className="mt-4 flex flex-col gap-5">
-            <label className="inline-flex cursor-pointer items-center gap-2 select-none">
-              <Checkbox
-                checked={!!draft.default_sandbox}
-                onChange={(v) => patch("default_sandbox", v as any)}
+            {/* The SAME picker the New Task dialog uses, so "what a new task
+                gets" is chosen in one vocabulary rather than a checkbox here
+                and five cards there. This is what the quick-create menu in
+                the sidebar applies, which previously had no way to say
+                anything but on/off. */}
+            <div>
+              <div className="text-[13.5px] font-medium">New tasks default to</div>
+              <div className="mt-0.5 mb-2 text-[12.5px] text-[var(--color-fg-dim)]">
+                Applied to every task created for this project, including the quick + menu in the
+                sidebar. The New Task dialog starts here and lets you change it per task.
+              </div>
+              <SandboxPicker
+                compact
+                value={projectDefaultSelection}
+                onChange={setProjectDefaultSelection}
+                dockerOffered={dockerOffered}
+                dockerUnavailableReason={
+                  dockerOffered ? undefined
+                    : "Turn Docker sandboxing on and build the image in Settings → Docker Sandbox first."
+                }
               />
-              <span className="text-[13.5px] font-medium">Sandbox new tasks by default</span>
-            </label>
+            </div>
+
+            {/* Only meaningful for a Docker default; hidden otherwise rather
+                than shown inert. */}
+            {projectDefaultSelection === "docker" && (
+              <div>
+                <div className="text-[13.5px] font-medium">Default extra mounts</div>
+                <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+                  Bind-mounted into every new Docker task of this project, one per line as{" "}
+                  <code className="font-mono">host_path:container_path</code>. Leave empty to use the
+                  global list from Settings → Docker Sandbox. Editing this only affects tasks created
+                  from now on.
+                </div>
+                <textarea
+                  value={(draft.docker_extra_mounts ?? []).join("\n")}
+                  onChange={(e) => patch("docker_extra_mounts", e.target.value.split("\n") as never)}
+                  rows={3}
+                  placeholder={"$HOME/mcp-data:/data/mcp"}
+                  data-testid="project-docker-extra-mounts"
+                  autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck={false}
+                  className="mt-2 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2.5 font-mono text-[12.5px] text-[var(--color-fg)] outline-none focus:border-[var(--color-accent)]"
+                />
+              </div>
+            )}
 
             {/* Storage target tabs — same underline-tab style as the
                 top-level Scripts / Sandbox / More strip. Controls

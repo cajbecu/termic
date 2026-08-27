@@ -1705,3 +1705,94 @@ describe("multi files to copy (GH #264)", () => {
     expect(saved).toEqual(["config/local.json", "gradle.properties"]);
   });
 });
+
+// The quick-create menu says which cage a new task will get.
+//
+// The sidebar + menu applies the project's default silently, and on the main
+// checkout that means a cage over your REAL files with nothing on screen
+// having said so. The row states it, with the mode's own icon, so this and
+// the sandbox picker are recognisably the same thing. It is HIDDEN for a
+// project defaulting to "off", since uncaged is the baseline and a row saying
+// so on every menu open is noise.
+describe("quick-create sandbox note", () => {
+  const NOTE = '[data-testid="quick-create-sandbox-note"]';
+  let projectId = "";
+  let saved: Record<string, unknown> | null = null;
+
+  /** Set the project's default engine through the same IPC Settings uses. */
+  const setDefault = (fields: Record<string, unknown>) => browser.execute(async (id, f) => {
+    const t = window.__termic!;
+    const p = t.useApp.getState().projects.find((p: any) => p.id === id);
+    await t.ipc.projectUpdate({ ...p, ...(f as object) });
+    await t.useApp.getState().loadAll();
+  }, projectId, fields);
+
+  const openMenu = async () => {
+    const trigger = `[data-testid="project-new-task-${projectId}"]`;
+    await waitVisible(trigger);
+    await browser.execute((sel) => {
+      const el = document.querySelector(sel) as HTMLElement;
+      const opts = { bubbles: true, pointerType: "mouse", button: 0 } as any;
+      el.dispatchEvent(new PointerEvent("pointerdown", opts));
+      el.dispatchEvent(new PointerEvent("pointerup", opts));
+      el.click();
+    }, trigger);
+    await waitVisible('[role="menu"]');
+  };
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    const info = await browser.execute(() => {
+      const p = window.__termic!.useApp.getState().projects.find((p: any) => p.name === "fixture-repo")!;
+      return { id: p.id as string, saved: {
+        default_sandbox: p.default_sandbox ?? false,
+        default_sandbox_mode: p.default_sandbox_mode ?? null,
+        default_docker: p.default_docker ?? false,
+      } };
+    });
+    projectId = info.id;
+    saved = info.saved;
+  });
+
+  after(async () => {
+    await browser.keys("Escape");
+    if (saved) await setDefault(saved);
+  });
+
+  it("names the mode, with its icon, when the project defaults to one", async () => {
+    await setDefault({ default_sandbox: true, default_sandbox_mode: "monitor", default_docker: false });
+    await openMenu();
+    await waitVisible(NOTE);
+    const [kind, text] = await browser.execute((sel) => {
+      const el = document.querySelector(sel)!;
+      return [el.getAttribute("data-sandbox-default"), el.textContent ?? ""];
+    }, NOTE) as [string, string];
+    expect(kind).toBe("monitor");
+    expect(text).toContain("Sandboxed");
+    // The icon rides along, so the row is recognisable at a glance rather
+    // than being another line of grey text.
+    const hasIcon = await browser.execute((sel) => !!document.querySelector(`${sel} svg`), NOTE);
+    expect(hasIcon).toBe(true);
+    await browser.keys("Escape");
+  });
+
+  it("follows the project to a different mode", async () => {
+    await setDefault({ default_sandbox: true, default_sandbox_mode: "enforce", default_docker: false });
+    await openMenu();
+    await waitVisible(NOTE);
+    const kind = await browser.execute((sel) =>
+      document.querySelector(sel)!.getAttribute("data-sandbox-default"), NOTE);
+    expect(kind).toBe("enforce");
+    await browser.keys("Escape");
+  });
+
+  it("says nothing at all when the project is uncaged", async () => {
+    await setDefault({ default_sandbox: false, default_sandbox_mode: null, default_docker: false });
+    await openMenu();
+    // The menu is up; the note specifically is not.
+    const present = await browser.execute((sel) => !!document.querySelector(sel), NOTE);
+    expect(present).toBe(false);
+    await browser.keys("Escape");
+  });
+});

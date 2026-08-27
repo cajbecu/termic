@@ -126,6 +126,18 @@ pub struct Project {
     /// tasks to Monitoring.
     #[serde(default)]
     pub default_sandbox_mode: Option<SandboxMode>,
+    /// New tasks of this project default to DOCKER rather than Seatbelt.
+    /// Mutually exclusive with the two above in effect: when this is on, a
+    /// create that does not pin an engine itself resolves to Docker and the
+    /// Seatbelt fields resolve to off, exactly like an explicit pick.
+    #[serde(default)]
+    pub default_docker: bool,
+    /// Project-level default Docker extra mounts (`host_path:container_path`),
+    /// seeded into new tasks ahead of `Settings.docker_default_extra_mounts`.
+    /// The global list is the fallback, so a project only states what is
+    /// specific to it.
+    #[serde(default)]
+    pub docker_extra_mounts: Vec<String>,
     /// Extra writable subpaths beyond the bake-in defaults (task
     /// path, agent config dirs, /private/tmp). Absolute paths; `$HOME`
     /// and `$WORKSPACE` are substituted at render time. List, not a
@@ -3456,6 +3468,8 @@ fn project_add(root_path: String, non_git: Option<bool>) -> Result<Project, Stri
         // project Vec fields are for project-specific extras.
         default_sandbox: false,
         default_sandbox_mode: None,
+        default_docker: false,
+        docker_extra_mounts: Vec::new(),
         sandbox_rw_paths: Vec::new(),
         sandbox_allowed_hosts: Vec::new(),
         // Default to single-repo. project_add_multi is the entry
@@ -3646,6 +3660,8 @@ fn project_add_multi(root_path: String, name: String, members: Vec<ProjectMember
         created: chrono::Utc::now().to_rfc3339(),
         default_sandbox: false,
         default_sandbox_mode: None,
+        default_docker: false,
+        docker_extra_mounts: Vec::new(),
         sandbox_rw_paths: Vec::new(),
         sandbox_allowed_hosts: Vec::new(),
         project_type: ProjectType::Multi,
@@ -4235,7 +4251,12 @@ fn task_import_worktree(
     let sandbox_mode = sandbox_mode.or(proj.default_sandbox_mode)
         .unwrap_or(if sandbox_enabled { SandboxMode::Enforce } else { SandboxMode::Off });
     let sandbox_enabled = sandbox_mode != SandboxMode::Off;
-    let docker_sandbox_enabled = docker_sandbox_enabled.unwrap_or(false);
+    // Same fallback rule the Seatbelt fields above get: a create that does not
+    // pin an engine inherits the project's default. Without this, a project
+    // set to Docker still produced Seatbelt (or uncaged) tasks from every
+    // caller that does not spell the engine out, which is all of them except
+    // the New Task dialog.
+    let docker_sandbox_enabled = docker_sandbox_enabled.unwrap_or(proj.default_docker);
     let (sandbox_mode, sandbox_enabled) = if docker_sandbox_enabled {
         (SandboxMode::Off, false)
     } else {
@@ -4245,8 +4266,16 @@ fn task_import_worktree(
         .unwrap_or_else(|| merge(&globals.sandbox_default_rw_paths, &proj.sandbox_rw_paths));
     let sandbox_allowed_hosts = sandbox_allowed_hosts
         .unwrap_or_else(|| merge(&globals.sandbox_default_allowed_hosts, &proj.sandbox_allowed_hosts));
+    // Project list first, global list as the fallback, so a project states
+    // only what is specific to it rather than restating the global one.
     let docker_extra_mounts = docker_extra_mounts
-        .unwrap_or_else(|| if docker_sandbox_enabled { globals.docker_default_extra_mounts.clone() } else { Vec::new() });
+        .unwrap_or_else(|| if !docker_sandbox_enabled {
+            Vec::new()
+        } else if !proj.docker_extra_mounts.is_empty() {
+            proj.docker_extra_mounts.clone()
+        } else {
+            globals.docker_default_extra_mounts.clone()
+        });
 
     // GH #169 seed; has_resumable_history stays false deliberately, see
     // seeded_session_ids and the task_open_repo note (per-cli seed vs
@@ -22769,6 +22798,29 @@ filename f.rs
         assert_eq!(docker_env_for(&agents, "plain", &host_env), host_env);
         // Unknown agent falls back too rather than dropping the env.
         assert_eq!(docker_env_for(&agents, "nobody", &host_env), host_env);
+    }
+
+    #[test]
+    fn project_docker_default_and_mounts_round_trip() {
+        // The two new project fields have to deserialize as absent on every
+        // record written before they existed, or upgrading would rewrite
+        // every project's cage.
+        let legacy: Project = serde_json::from_str(
+            r#"{"id":"p1","name":"proj","root_path":"/r","default_sandbox":true}"#,
+        ).unwrap();
+        assert!(!legacy.default_docker, "an old project must not become a Docker project");
+        assert!(legacy.docker_extra_mounts.is_empty());
+        assert!(legacy.default_sandbox, "and its existing default must survive");
+
+        let fresh = Project {
+            id: "p2".into(),
+            default_docker: true,
+            docker_extra_mounts: vec!["$HOME/mcp:/data/mcp".into()],
+            ..Default::default()
+        };
+        let back: Project = serde_json::from_str(&serde_json::to_string(&fresh).unwrap()).unwrap();
+        assert!(back.default_docker);
+        assert_eq!(back.docker_extra_mounts, vec!["$HOME/mcp:/data/mcp".to_string()]);
     }
 
     #[test]

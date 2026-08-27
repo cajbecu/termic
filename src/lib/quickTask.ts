@@ -7,7 +7,9 @@
 // and writes, so the toggle, the dialog, and "Advanced…" all agree on the
 // last choice.
 
-import { taskCreate, taskOpenRepo, taskImportWorktree } from "@/lib/ipc";
+import { taskCreate, taskOpenRepo, taskImportWorktree, settingsLoad } from "@/lib/ipc";
+import { projectSandboxDefault, mergeLists } from "@/lib/projectSandboxDefault";
+import { selectionToFields } from "@/lib/types";
 import { useApp } from "@/store/app";
 import { launchSetupTab } from "@/lib/runTabs";
 import { withCreateLock } from "@/lib/createLock";
@@ -66,6 +68,37 @@ export function uniqueBranch(base: string, existing: string[]): string {
   return `${stem}-${n}`;
 }
 
+/** The sandbox argument a quick create should send for `projectId`, or
+ *  `undefined` when the project's default is "off" (send nothing, stay
+ *  uncaged - the historical behaviour of this path).
+ *
+ *  The allow-lists are merged HERE, global + project, because
+ *  `task_open_repo` does not merge them the way `task_create` does: it takes
+ *  what it is given. That is the same merge the New Task dialog performs when
+ *  it seeds its own fields, so a quick main-checkout task and a dialog one
+ *  end up with the same cage. */
+async function quickSandboxArgs(projectId: string) {
+  const project = useApp.getState().projects.find(p => p.id === projectId);
+  const selection = projectSandboxDefault(project);
+  if (selection === "off") return undefined;
+  const { mode, docker } = selectionToFields(selection);
+  const globals = await settingsLoad().catch(() => null);
+  return {
+    enabled: !docker,
+    mode,
+    rwPaths: mergeLists(globals?.sandbox_default_rw_paths, project?.sandbox_rw_paths),
+    allowedHosts: mergeLists(globals?.sandbox_default_allowed_hosts, project?.sandbox_allowed_hosts),
+    docker,
+    // Project list first, global as fallback - the same order task_create
+    // resolves them in on the worktree path.
+    dockerExtraMounts: docker
+      ? (project?.docker_extra_mounts?.length
+          ? project.docker_extra_mounts
+          : globals?.docker_default_extra_mounts ?? [])
+      : undefined,
+  };
+}
+
 /** Map a sandbox mode string ("off" | "monitor" | "enforce" |
  *  "enforce-fs") onto task-create pins. Anything else (absent flag,
  *  unknown string) returns undefined: leave the pins unset so Rust
@@ -115,11 +148,17 @@ export async function createQuickTask(opts: {
   let task: Task;
   if (mode === "repo_root") {
     // Main checkout: no worktree, open the agent/shell/custom in the repo's
-    // live checkout (same IPC the "Run in repo" rows have always used). The
-    // quick path stays uncaged (no sandbox arg); the advanced dialog is where
-    // you opt into one.
-    task = await withCreateLock(() =>
-      taskOpenRepo(projectId, cli, trimmedName, undefined, command),
+    // live checkout (same IPC the "Run in repo" rows have always used).
+    //
+    // The project's default cage is applied HERE rather than in Rust:
+    // `task_open_repo` deliberately never falls back to it, so that legacy
+    // callers and the CLI, which pass nothing, are not surprised by a cage.
+    // Passing it explicitly gives the quick path the same behaviour as the
+    // New Task dialog (which has always sent its picker's value) without
+    // changing that contract for anyone else. A project defaulting to "off"
+    // still sends nothing, so the uncaged path is untouched.
+    task = await withCreateLock(async () =>
+      taskOpenRepo(projectId, cli, trimmedName, await quickSandboxArgs(projectId), command),
     );
   } else {
     task = await withCreateLock(() =>
