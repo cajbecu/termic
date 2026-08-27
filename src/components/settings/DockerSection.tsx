@@ -226,6 +226,20 @@ export function DockerSection() {
     v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: text } });
   }
 
+  // What the single build button should do, from the state it can see.
+  // `image.stale` means the Dockerfile's hash no longer matches the built
+  // tag; `dirty` means the editor has unsaved edits. Either way a cached
+  // build is the right one, because the changed layers are invalidated by the
+  // change itself. Only for an image that is current AND unedited does the
+  // cached build become pointless, and --no-cache the sole useful action.
+  const imageNeedsBuilding = !image?.available || !!image?.stale || dirty;
+  const buildNeedsNoCache = !imageNeedsBuilding;
+  const buildLabel = !image?.available
+    ? "Build image"
+    : imageNeedsBuilding
+      ? "Rebuild image"
+      : "Update agents";
+
   /** First-run path: flip the switch and start the build in one click. The
    *  setting is persisted BEFORE the build starts, so a build the user
    *  abandons (or that fails) still leaves Docker enabled with the rest of
@@ -402,16 +416,31 @@ export function DockerSection() {
                 <DockerAvailability status={status} />
               </div>
             </div>
+            {/* ONE button, because the two were only ever one real choice.
+                "Build image" was a CACHED build and "Update agents" the same
+                build with --no-cache; the Dockerfile installs agents unpinned,
+                so a cached build of an unchanged Dockerfile replays identical
+                layers and updates nothing at all. Two buttons where one is a
+                no-op is a question the user has to answer with knowledge of
+                Docker's layer cache, which is not knowledge this page should
+                require. The state decides instead:
+
+                  no image        build it (cache is empty anyway)
+                  Dockerfile edited / stale   rebuild, cache handles the rest
+                  current + clean the only useful action is --no-cache, which
+                                  is what actually picks up newer agents */}
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Button
                 variant="primary"
                 disabled={building || dfBusy || !status?.daemon}
-                onClick={() => build(false)}
+                onClick={() => build(buildNeedsNoCache)}
+                title={buildNeedsNoCache
+                  ? "Rebuilds from scratch, which is what picks up newer agent versions: the image installs them unpinned, so a cached rebuild would change nothing."
+                  : "Builds the image from the Dockerfile, reusing any layers that have not changed."}
               >
-                {building ? <span className="flex items-center gap-1.5"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Building…</span> : "Build image"}
-              </Button>
-              <Button variant="secondary" disabled={building || dfBusy || !status?.daemon} onClick={() => build(true)}>
-                Update agents (rebuild)
+                {building
+                  ? <span className="flex items-center gap-1.5"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Building…</span>
+                  : buildLabel}
               </Button>
               {!status?.daemon && (
                 <span className="text-[12px] text-[var(--color-warn)]">Start Docker to build.</span>
@@ -652,11 +681,20 @@ export function DockerSection() {
                     ))}
                   </select>
                 </div>
+                {/* The previous argv stays on screen while the next one
+                    loads. Swapping it for a one-line "Loading…" collapsed the
+                    panel, the page got shorter, and the browser moved the
+                    scroll position - so changing the agent threw the reader
+                    somewhere else on the page. Only the very first load has
+                    nothing to show, and that one cannot move anything because
+                    the panel was closed a moment ago. */}
                 <div className="mt-2 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg)] p-3">
-                  {previewLoading && <div className="text-[12px] text-[var(--color-fg-faint)]">Loading…</div>}
+                  {previewLoading && !preview && (
+                    <div className="text-[12px] text-[var(--color-fg-faint)]">Loading…</div>
+                  )}
                   {previewErr && <div className="text-[12px] text-[var(--color-err)]">{previewErr}</div>}
-                  {preview && !previewLoading && (
-                    <>
+                  {preview && (
+                    <div className={cn("transition-opacity", previewLoading && "opacity-50")}>
                       <pre
                         data-testid="docker-preview-argv"
                         className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-dim)]"
@@ -672,7 +710,7 @@ export function DockerSection() {
                         Your task's worktree is mounted in place of the placeholder path above. Everything else,
                         the mounts, the environment and the hardening flags, is what a real launch uses.
                       </div>
-                    </>
+                    </div>
                   )}
                 </div>
               </div>
