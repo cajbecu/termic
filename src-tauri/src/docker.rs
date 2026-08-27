@@ -200,21 +200,27 @@ fn agent_config(base_id: &str, user_extra_dirs: &[String], persist_enabled: bool
             "codex" => Some("CODEX_HOME"),
             _ => None,
         };
+        // `state_dirs` entries are home-relative names; `sanitized` entries
+        // are already full container paths (they may point outside HOME).
         let extra_dirs = rest
             .iter()
-            .map(|d| format!("/root/{d}"))
-            .chain(sanitized.iter().map(|d| format!("/root/{d}")))
+            .map(|d| format!("{CONTAINER_HOME}/{d}"))
+            .chain(sanitized.iter().cloned())
             .collect();
-        return Some(AgentConfig { container_dir: format!("/root/{first}"), relocation_env, extra_dirs });
+        return Some(AgentConfig {
+            container_dir: format!("{CONTAINER_HOME}/{first}"),
+            relocation_env,
+            extra_dirs,
+        });
     }
     if !persist_enabled {
         return None;
     }
     let (first, rest) = sanitized.split_first()?;
     Some(AgentConfig {
-        container_dir: format!("/root/{first}"),
+        container_dir: first.clone(),
         relocation_env: None,
-        extra_dirs: rest.iter().map(|d| format!("/root/{d}")).collect(),
+        extra_dirs: rest.to_vec(),
     })
 }
 
@@ -227,10 +233,63 @@ fn agent_config(base_id: &str, user_extra_dirs: &[String], persist_enabled: bool
 /// like one.
 fn sanitize_extra_dir(d: &str) -> Option<String> {
     let d = d.trim();
-    if d.is_empty() || d.starts_with('/') || d.contains("..") || d.contains('\0') {
+    if d.is_empty() || d.contains("..") || d.contains('\0') {
         return None;
     }
-    Some(d.trim_start_matches("./").to_string())
+    // An ABSOLUTE path is taken as the container path verbatim, so a
+    // directory can be persisted anywhere, not only under the agent's home.
+    // A bare name is still accepted and means what it always did - the
+    // agent's home - because `.claude` reads better than `/root/.claude` and
+    // is what every existing entry looks like.
+    let container = if d.starts_with('/') {
+        d.trim_end_matches('/').to_string()
+    } else {
+        format!("{CONTAINER_HOME}/{}", d.trim_start_matches("./").trim_end_matches('/'))
+    };
+    // `/` alone, or anything that normalised away to nothing.
+    if container.is_empty() || container == CONTAINER_HOME { return None; }
+    if !persist_target_allowed(&container) { return None; }
+    Some(container)
+}
+
+/// Roots an empty persist mount must never land on or inside: shadowing any
+/// of these with a fresh directory either breaks the container outright or
+/// hides something privilege-relevant the image put there.
+const PERSIST_FORBIDDEN_ROOTS: &[&str] = &[
+    "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/proc", "/sys", "/dev", "/boot",
+];
+
+/// Roots a persist entry MAY live under. `/root` is the agent's home and the
+/// common case; the rest are the conventional places a program keeps data it
+/// would like to survive a restart. Anything else is refused rather than
+/// guessed at - the cost of a wrong guess is a container that will not boot,
+/// and the user can always pick a path under one of these.
+const PERSIST_ALLOWED_ROOTS: &[&str] = &[
+    "/root", "/home", "/opt", "/srv", "/mnt", "/data", "/workspace", "/var", "/tmp",
+];
+
+fn persist_target_allowed(container: &str) -> bool {
+    let under = |root: &str| container == root || container.starts_with(&format!("{root}/"));
+    if PERSIST_FORBIDDEN_ROOTS.iter().any(|r| under(r)) { return false; }
+    // Never a bare root itself, even an allowed one: mounting over all of
+    // `/var` or `/home` is not what anyone means by persisting a directory.
+    if PERSIST_ALLOWED_ROOTS.iter().any(|r| container == *r) { return false; }
+    PERSIST_ALLOWED_ROOTS.iter().any(|r| under(r))
+}
+
+/// HOME inside the container. Bare persist entries resolve against it.
+pub const CONTAINER_HOME: &str = "/root";
+
+/// Where a container path is stored on the host, under this agent's own
+/// folder. The container path is MIRRORED (`/opt/cache` ->
+/// `<agent>/opt/cache`) so two entries can never collide, and a leading dot
+/// on a home-relative entry is dropped to keep the layout every existing
+/// install already has (`.antigravity` -> `<agent>/antigravity`).
+fn host_subpath_for(container: &str) -> String {
+    let rel = container.strip_prefix(&format!("{CONTAINER_HOME}/"))
+        .map(|r| r.strip_prefix('.').unwrap_or(r).to_string())
+        .unwrap_or_else(|| container.trim_start_matches('/').to_string());
+    rel
 }
 
 /// Container paths a task-level extra mount can never target: everything
@@ -479,10 +538,8 @@ pub fn build_spec(
             // The separate leading-dot strip keeps the host layout it has
             // always had (`.antigravity` -> `<agent>/antigravity`), so this
             // fix does not orphan anyone's existing state.
-            let rel = extra.strip_prefix("/root/").unwrap_or(extra);
-            let rel = rel.strip_prefix('.').unwrap_or(rel);
             let sub = PathBuf::from(&host_cfg)
-                .join(rel)
+                .join(host_subpath_for(extra))
                 .to_string_lossy()
                 .into_owned();
             // Same reasoning as the config dir above: ours to create, not
@@ -1492,18 +1549,62 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_extra_dir_accepts_plain_relative_paths() {
-        assert_eq!(sanitize_extra_dir(".mytool"), Some(".mytool".to_string()));
-        assert_eq!(sanitize_extra_dir(".config/mytool"), Some(".config/mytool".to_string()));
-        assert_eq!(sanitize_extra_dir("./.mytool"), Some(".mytool".to_string()));
-        assert_eq!(sanitize_extra_dir("  .mytool  "), Some(".mytool".to_string()));
+    fn a_bare_persist_entry_resolves_against_the_container_home() {
+        // `.claude` reads better than `/root/.claude` and is what every
+        // existing entry looks like, so a bare name still means HOME.
+        assert_eq!(sanitize_extra_dir(".mytool"), Some("/root/.mytool".to_string()));
+        assert_eq!(sanitize_extra_dir(".config/mytool"), Some("/root/.config/mytool".to_string()));
+        assert_eq!(sanitize_extra_dir("./.mytool"), Some("/root/.mytool".to_string()));
+        assert_eq!(sanitize_extra_dir("  .mytool  "), Some("/root/.mytool".to_string()));
+        assert_eq!(sanitize_extra_dir(".mytool/"), Some("/root/.mytool".to_string()));
     }
 
     #[test]
-    fn sanitize_extra_dir_rejects_escapes_and_absolutes() {
-        for bad in ["", "   ", "/etc", "../../etc", ".foo/../../etc", "/root/.claude"] {
+    fn an_absolute_persist_entry_is_taken_verbatim() {
+        // Persisting outside HOME is the point of accepting these: a cache or
+        // a data dir an agent keeps somewhere else has the same "gone on every
+        // restart" problem as its config.
+        assert_eq!(sanitize_extra_dir("/opt/cache"), Some("/opt/cache".to_string()));
+        assert_eq!(sanitize_extra_dir("/opt/cache/"), Some("/opt/cache".to_string()));
+        assert_eq!(sanitize_extra_dir("/root/.claude"), Some("/root/.claude".to_string()));
+    }
+
+    #[test]
+    fn a_persist_entry_cannot_shadow_the_system() {
+        // An empty dir mounted over these either stops the container booting
+        // or hides something the image put there on purpose.
+        for bad in ["/etc", "/etc/ssl", "/usr/bin", "/bin", "/lib/x", "/proc", "/dev/shm", "/boot"] {
+            assert_eq!(sanitize_extra_dir(bad), None, "expected {bad:?} to be refused");
+        }
+        // Nor a bare root, even an allowed one: mounting over all of /var is
+        // not what anyone means by persisting a directory.
+        for bad in ["/var", "/home", "/opt", "/tmp"] {
+            assert_eq!(sanitize_extra_dir(bad), None, "expected {bad:?} to be refused");
+        }
+        // But somewhere under them is exactly the point.
+        assert_eq!(sanitize_extra_dir("/var/cache/mytool"), Some("/var/cache/mytool".to_string()));
+        assert_eq!(sanitize_extra_dir("/data/models"), Some("/data/models".to_string()));
+    }
+
+    #[test]
+    fn sanitize_extra_dir_still_rejects_escapes_and_nonsense() {
+        // `..` stays banned however it is spelled: it is the one thing that
+        // could resolve a mount TARGET somewhere neither side intended.
+        for bad in ["", "   ", "/", "/root", "../../etc", ".foo/../../etc", "/opt/../etc"] {
             assert_eq!(sanitize_extra_dir(bad), None, "expected {bad:?} to be rejected");
         }
+    }
+
+    #[test]
+    fn a_persist_entry_maps_to_a_collision_free_host_folder() {
+        // The container path is mirrored under the agent's folder, so two
+        // entries can never land on the same host dir...
+        assert_eq!(host_subpath_for("/opt/cache"), "opt/cache");
+        // ...and a home-relative entry keeps the dotless layout every existing
+        // install already has on disk.
+        assert_eq!(host_subpath_for("/root/.antigravity"), "antigravity");
+        assert_eq!(host_subpath_for("/root/.config/opencode"), "config/opencode");
+        assert_ne!(host_subpath_for("/opt/cache"), host_subpath_for("/root/.cache"));
     }
 
     #[test]

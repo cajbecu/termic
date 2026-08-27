@@ -380,10 +380,9 @@ export function DockerSection() {
               className="flex w-full items-center justify-between gap-3 text-left"
             >
               <div>
-                <div className="text-[14px] font-medium">Per-agent config &amp; environment</div>
+                <div className="text-[14px] font-medium">Persisted directories &amp; environment</div>
                 <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
-                  What gets mounted into each agent's shared config folder (see "Logins" above), and the
-                  environment it runs with inside a container.
+                  Directories that survive a container restart, per agent, and the environment it runs with.
                 </div>
               </div>
               <ChevronDown className={cn("h-4 w-4 shrink-0 text-[var(--color-fg-faint)] transition-transform", showAgentDirs && "rotate-180")} />
@@ -396,9 +395,30 @@ export function DockerSection() {
                     CONTAINER, backed by a termic-owned folder on the host. */}
                 <div className="flex flex-col gap-2 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-3 py-2.5 text-[12px] text-[var(--color-fg-dim)]">
                   <div>
-                    Each entry is a folder NAME, not a path on your Mac. It is mounted at that name inside the
-                    container's home (<code className="font-mono">/root</code>), and backed by a folder termic
-                    owns, one per agent:
+                    A container starts fresh every launch, so anything written inside it is gone when it
+                    exits. These are the directories kept instead. Each entry is a path{" "}
+                    <b className="text-[var(--color-fg)]">inside the container</b>, not on your Mac. A bare
+                    name is taken as relative to the agent's home there, so{" "}
+                    <code className="font-mono">.claude</code> means{" "}
+                    <code className="font-mono">/root/.claude</code>; write a full path like{" "}
+                    <code className="font-mono">/data/models</code> to keep something outside the home.
+                    Each one is backed by a folder termic owns, one per agent:
+                  </div>
+                  {/* "Why /root?" is the first question this panel raises, and
+                      the honest answer matters: the container does NOT run as
+                      root, so nobody should reason about blast radius from the
+                      path name. */}
+                  <div>
+                    <b className="text-[var(--color-fg)]">Why <code className="font-mono">/root</code>?</b>{" "}
+                    The agent's home inside the container is{" "}
+                    <code className="font-mono">/root</code>, which is where the image installs each agent
+                    and its config. The container itself runs as{" "}
+                    <b className="text-[var(--color-fg)]">your own user, not root</b>: it is started with
+                    your uid and gid so the files it writes into your worktree belong to you. There is no{" "}
+                    <code className="font-mono">sudo</code> in the image, no root password to{" "}
+                    <code className="font-mono">su</code> to, and it runs with every Linux capability
+                    dropped and no-new-privileges set, so nothing inside can elevate. The path is only
+                    where HOME points, not who the process is.
                   </div>
                   <div className="font-mono text-[11.5px] leading-relaxed text-[var(--color-fg-faint)]">
                     {agentDirs[0]?.host_dir
@@ -415,8 +435,8 @@ export function DockerSection() {
                     a work login separate from a personal one.
                   </div>
                   <div>
-                    Locked chips are confirmed to hold real state and can't be removed. Click "+ add" to mount
-                    something else there too (a custom skills dir, an extra MCP config location).
+                    Locked chips are confirmed to hold real state and can't be removed. Click "+ add" for
+                    anything else worth keeping: a custom skills dir, an MCP server's data, a model cache.
                   </div>
                 </div>
                 {agentDirs.map(d => (
@@ -738,7 +758,7 @@ function AgentDirsRow({ dirs, onChangeExtra, onTogglePersist, dockerEnv, onChang
               if (e.key === "Enter") commit();
               if (e.key === "Escape") { setDraft(""); setAdding(false); }
             }}
-            placeholder=".mytool"
+            placeholder=".mytool or /data/cache"
             spellCheck={false}
             className="w-24 rounded border border-[var(--color-accent-soft)] bg-[var(--color-bg)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--color-fg)] outline-none"
           />
