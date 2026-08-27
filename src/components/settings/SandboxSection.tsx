@@ -4,6 +4,7 @@
 // files" in General. See docs/sandbox.md for what the cage actually does.
 
 import { useEffect, useRef, useState } from "react";
+import { useApp } from "@/store/app";
 import { settingsSave, sandboxAvailable, dockerImageStatus, type DockerImageStatus } from "@/lib/ipc";
 import type { Settings } from "@/lib/types";
 import { Button } from "@/components/ui/Button";
@@ -83,6 +84,7 @@ export function SandboxSection() {
         </div>
         <div className="mt-3">
           <SandboxPicker
+          onEnableDocker={() => { useApp.getState().openSettings("docker"); }}
             value={globalDefaultSandboxKind}
             onChange={setGlobalDefaultSandboxKind}
             seatbeltUnavailable={osSandboxOk === false}

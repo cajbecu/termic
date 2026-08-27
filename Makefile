@@ -356,14 +356,15 @@ reset: ## DESTRUCTIVE: wipe every byte of termic state on this Mac (config, cach
 nuke-data: reset
 .PHONY: nuke-data
 
-reset_dev: ## DESTRUCTIVE (dev profile only): wipe ~/Library/Application Support/termic_dev + ~/termic_dev (metadata + throwaway dev worktrees). Production 'termic' data is untouched. No prompt.
+reset_dev: ## DESTRUCTIVE (dev profile only): wipe ~/Library/Application Support/termic_dev + ~/termic_dev + the dev webview's localStorage. Production 'termic' data is untouched. No prompt.
 	@DEV_DATA="$$HOME/Library/Application Support/termic_dev"; \
 	DEV_HOME="$$HOME/termic_dev"; \
+	DEV_WEBKIT="$$HOME/Library/WebKit/termic"; \
 	echo "→ Quitting any running dev instance (best-effort)"; \
 	pkill -f "target/debug/termic" 2>/dev/null || true; \
 	pkill -f "node scripts/dev.mjs" 2>/dev/null || true; \
 	sleep 1; \
-	for d in "$$DEV_DATA" "$$DEV_HOME"; do \
+	for d in "$$DEV_DATA" "$$DEV_HOME" "$$DEV_WEBKIT"; do \
 	    if [ -e "$$d" ]; then echo "→ Removing $$d"; rm -rf "$$d"; else echo "  (absent) $$d"; fi; \
 	done; \
 	echo "✓ Dev profile reset. Production 'termic' data untouched."

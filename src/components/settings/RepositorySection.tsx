@@ -929,6 +929,7 @@ export function RepositorySection({ projectId }: { projectId: string }) {
                 sidebar. The New Task dialog starts here and lets you change it per task.
               </div>
               <SandboxPicker
+          onEnableDocker={() => { useApp.getState().openSettings("docker"); }}
                 compact
                 value={projectDefaultSelection}
                 onChange={setProjectDefaultSelection}

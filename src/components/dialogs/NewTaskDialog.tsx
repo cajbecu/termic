@@ -1448,6 +1448,7 @@ export function NewTaskDialog() {
         {canSandbox && (
         <Field label="Sandbox" hint="Cage the agent's filesystem + network access. Pinned at creation.">
           <SandboxPicker
+          onEnableDocker={() => { close(); useApp.getState().openSettings("docker"); }}
             value={selection}
             onChange={setSelection}
             seatbeltUnavailable={osSandboxOk === false}

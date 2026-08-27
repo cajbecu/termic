@@ -392,6 +392,7 @@ export function TaskSandboxDialog() {
             just what makes the two read as ONE choice instead of Docker
             being a separate control bolted on beneath the mode grid. */}
         <SandboxPicker
+          onEnableDocker={() => { close(); useApp.getState().openSettings("docker"); }}
           value={selection}
           onChange={choose}
           seatbeltUnavailable={osSandboxOk === false}

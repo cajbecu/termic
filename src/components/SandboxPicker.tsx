@@ -15,7 +15,8 @@ import { SANDBOX_VISUALS, sandboxPickerLabel, SandboxIcon, DockerSandboxIcon, DO
 const ORDER: SandboxMode[] = ["off", "enforce-fs", "monitor", "enforce"];
 
 export function SandboxPicker({
-  value, onChange, seatbeltUnavailable = false, dockerOffered, dockerUnavailableReason, compact = false,
+  value, onChange, seatbeltUnavailable = false, dockerOffered, dockerUnavailableReason,
+  onEnableDocker, compact = false,
 }: {
   value: SandboxSelection;
   onChange: (s: SandboxSelection) => void;
@@ -24,8 +25,13 @@ export function SandboxPicker({
   /** Docker card enabled only once Settings -> Docker Sandbox is on AND an
    *  image is built - there's nothing for it to do otherwise. */
   dockerOffered: boolean;
-  /** Tooltip shown on the disabled Docker card explaining why. */
+  /** Tooltip shown on the disabled Docker card explaining why, and the label
+   *  of the set-up link below it when `onEnableDocker` is given. */
   dockerUnavailableReason?: string;
+  /** Called from a link under the picker when Docker is not offered. Takes
+   *  the user to Settings -> Docker Sandbox; without it the disabled card is
+   *  a dead end that names a feature and no way to reach it. */
+  onEnableDocker?: () => void;
   compact?: boolean;
 }) {
   return (
@@ -98,6 +104,22 @@ export function SandboxPicker({
           </button>
         );
       })()}
+
+      {/* A disabled card with a tooltip is not a route anywhere: it says the
+          option exists and leaves the reader to guess where to turn it on,
+          and a tooltip is invisible to anyone who does not hover a control
+          that looks dead. When Docker is not offered, the way to fix that is
+          a click here. */}
+      {!dockerOffered && onEnableDocker && (
+        <button
+          type="button"
+          onClick={onEnableDocker}
+          data-testid="sandbox-picker-enable-docker"
+          className="self-start rounded text-left text-[11.5px] text-[var(--color-fg-faint)] underline decoration-dotted underline-offset-2 hover:text-[var(--color-accent)]"
+        >
+          {dockerUnavailableReason ?? "Set up Docker sandboxing…"}
+        </button>
+      )}
     </div>
   );
 }
