@@ -22,7 +22,7 @@
 </div>
 
 Termic is a free, open-source desktop app that runs your AI coding-agent CLIs
-side by side, each isolated in its own git worktree, with an optional per-workspace
+side by side, each isolated in its own git worktree, with an optional per-task
 macOS sandbox cage. It spawns the **real** `claude`, `codex`, `agy` (Antigravity),
 `copilot` and `grok` binaries (not the vendor SDKs), so inference rides on the Pro / Max plan you
 already pay for. Spin up four agents on the same branch, broadcast one prompt to
@@ -75,7 +75,7 @@ so the in-app updater works the same way: a new release appears as the
 relaunch. Keep the AppImage somewhere writable like `~/Applications/`
 so the updater can replace it in place.
 
-The sandbox feature is macOS-only on Linux: the workspace's Shield
+The sandbox is macOS-only, so on Linux the task's Shield
 toggle is disabled and agents run unsandboxed. Everything else
 (worktrees, parallel tabs, find-in-files, themes, in-app diff) works
 the same.
@@ -206,32 +206,38 @@ there's nothing between you and the CLI. No vendor SDK (which bills against a
 separate credit pool as of [June 2026](https://thenewstack.io/anthropic-agent-sdk-credits/)),
 no metered markup, no backend daemon. Here's what the window gives you on top:
 
-- **Parallel worktrees.** Each workspace is a git worktree under
-  `~/termic/workspaces/<project>/<name>/`. Run N agents against the same
+- **Parallel worktrees.** Each task is a git worktree under
+  `~/termic/tasks/<project>/<name>/`. Run N agents against the same
   branch across tabs; attach to repo root when you don't want a worktree;
   duplicate a worktree to spin up a parallel attempt off the same tip.
-- **Command palette (⌘K).** Search and run any action — new workspace, file
+- **Command palette (⌘K).** Search and run any action — new task, file
   picker, find-in-files, rename, archive, YOLO, sandbox, theme, sidebars,
   settings — from one place, each with its shortcut inline. ⌘N is a quick
-  project picker: fuzzy-find any repo and start a workspace without touching
+  project picker: fuzzy-find any repo and start a task without touching
   the sidebar.
-- **Multi-repo workspaces.** Group N repos (backend, frontend, infra) under
-  one workspace with a shared CLAUDE.md and per-member dev-server ports. File
+- **Multi-repo tasks.** Group N repos (backend, frontend, infra) under
+  one task with a shared CLAUDE.md and per-member dev-server ports. File
   finder, find-in-files, and the diff view span every member.
-- **Broadcast & Brainstorm.** Send a single prompt to every agent in a workspace concurrently (⇧⌘B). Perfect for multi-agent code reviews, architectural brainstorming, or getting four "second opinions" on a complex bug in seconds.
+- **Broadcast & Brainstorm.** Send a single prompt to every agent in a task concurrently (⇧⌘B). Perfect for multi-agent code reviews, architectural brainstorming, or getting four "second opinions" on a complex bug in seconds.
 - **Config as Code (`.termic.yaml`).** Persist all project-specific settings—setup scripts, run commands, preview URLs, and sandbox allowlists—into a `.termic.yaml` file. Commit it to your repo so your whole team gets the same optimized agent environment instantly.
-- **Per-workspace sandbox** (macOS). Filesystem + network cage via
+- **Per-task sandbox** (macOS). Filesystem + network cage via
   `sandbox-exec` and an in-process HTTPS CONNECT proxy with a hostname
   allowlist. Lets the agent run with `--dangerously-skip-permissions`
-  safely — the cage is the boundary, not the prompt.
-- **Sidebar Cockpit.** Expand any workspace in the sidebar to see all its active agents, their live work-done indicators, and their agent-managed titles at a glance.
+  safely — the cage is the boundary, not the prompt. Or cage it in a
+  container instead: **Docker mode** is an alternative isolation backend
+  with a stronger filesystem boundary (experimental; network egress is not
+  restricted the way the proxy restricts the seatbelt's).
+- **Sidebar Cockpit.** Expand any task in the sidebar to see all its active agents, their live work-done indicators, and their agent-managed titles at a glance.
 - **Work-done indicator** that's actually reliable. Per-CLI title classifier (Claude spinner, etc.) plus OSC 9;4, gated by byte-quiet and content-hash checks. This reliability enabled **opt-in desktop notifications** that only fire when an agent actually finishes a turn.
 - **Message Queues.** Built on top of work-done detection: queue N messages (with optional repeats) to run autonomous "Ralph loop" sessions.
-- **Auto-Resume Everything.** Termic auto-resumes sessions even for repo-root workspaces. The latest update now auto-resumes ALL agent tabs in a workspace, not just the primary one.
+- **Auto-Resume Everything.** Termic auto-resumes sessions even for repo-root tasks, and resumes ALL agent tabs in a task, not just the primary one.
 - **Spotlight.** Mirror one worktree's changes — committed, uncommitted, and untracked — into your repo root in real time, so your editor, dev server, and browser see the agent's work live. It runs on a detached HEAD and never commits to your branch; disabling it cleanly restores the checkout. (Conductor checkpoints your branch; Spotlight doesn't touch it.)
-- **Find + edit in-app.** ⌘P fuzzy file finder, ⇧⌘F find-in-files
-  (`git grep`, .gitignore-aware, streams live). CodeMirror 6 editor with
-  side-by-side / unified diffs and **Markdown preview** (including inline **Mermaid diagrams**).
+- **Find + edit in-app.** ⌘P fuzzy file finder, ⇧⌘F find-in-files (on
+  `ripgrep` when you have it, `git grep` otherwise, .gitignore-aware,
+  streams live). CodeMirror 6 editor with side-by-side / unified diffs,
+  highlighting for ~150 languages, inline git blame, scratchpad tabs that
+  survive a relaunch, and **Markdown preview** (including inline
+  **Mermaid diagrams**).
 - **Code navigation** ([#174](https://github.com/simion/termic/issues/174)).
   ⌘-click or F12 to go to a definition, ⇧F12 for usages, ⌘F12 for a file
   outline, hover for types, double-⇧ to search symbols across the repo.
@@ -240,11 +246,25 @@ no metered markup, no backend daemon. Here's what the window gives you on top:
   it on for a project and agree to what it costs. Pick a different server per
   language or per project, or point it at a binary of your own. Type checking
   is a separate, experimental switch.
-- **Fork-style Git UI.** A dedicated staging area inspired by the Fork app. Stage, unstage, and commit without dropping to a terminal.
-- **AI review**: open the Review dialog, pick an agent, it gets the diff
-  + a review prompt and starts streaming. Or leave **GitHub-style inline
-  comments** on the diff yourself — they batch into one message and fire to
-  the agent on send.
+- **Fork-style Git UI.** A dedicated staging area inspired by the Fork app:
+  stage, unstage and commit without dropping to a terminal. Plus **History**,
+  a full commit graph with lanes, ref chips and message search that git runs
+  (so a match ten pages back still comes up first), and **Compare**, every
+  path that differs between any ref and your working tree in one tree, with
+  mark-as-viewed and inline comments still live.
+- **Pull requests.** Open a GitHub PR or GitLab MR from the task you built
+  it in, then watch it from the right panel: checks, review state, and
+  comments handed to the agent working in that worktree. Or start a task
+  FROM an issue, with the composed prompt dropped into the first-message box
+  for you to read before anything is sent. Self-hosted GitHub Enterprise and
+  GitLab work too, via `gh` / `glab`.
+- **Agent races.** Fire one prompt at several agents at once, each in its own
+  fresh worktree, then compare their diffs N-up when they finish and adopt
+  the winner into your main checkout.
+- **Inline review comments.** Leave **GitHub-style inline comments** on the
+  diff, or on any file you are just reading — they batch into one message and
+  fire to the agent on send. The Review prompt in the prompt library does the
+  other direction: hand an agent the diff and let it review you.
 - **Prompt library.** Save reusable prompts and fire them at a running or
   fresh agent from the top menu. Ships with Review, Write tests, Security
   review, Explain changes, and Commit; queues automatically if the agent is
@@ -253,13 +273,22 @@ no metered markup, no backend daemon. Here's what the window gives you on top:
   Drop in aider, ollama, a shell script — 30 seconds. Claude, Codex,
   Antigravity, Copilot, Grok, and opencode ship as built-ins.
 - **Keyboard-first.** ⌘K command palette, ⌘1..9 swaps tabs, ⌥↑/↓ walks the
-  visible sidebar tree, ⌥⌘↑/↓ hops workspace-only, ⌘D / ⇧⌘D split right /
+  visible sidebar tree, ⌥⌘↑/↓ hops task-only, ⌘D / ⇧⌘D split right /
   bottom, ⌘T spawns a new tab, ⌘W closes one. Every shortcut is rebindable in
   Settings → Shortcuts (⌘/ for the searchable cheat sheet). Seven themes
   (System, Light, Claude, Dark+, Solarized Dark, Cobalt, Matrix), each
   re-themes both chrome and the terminal pane. Or bring your own: drop a
   JSON file in the themes folder and it appears in the picker as a
   first-class theme — see [docs/themes.md](docs/themes.md).
+- **Drive it from outside.** The `termic` CLI creates tasks, prompts agents,
+  waits for one to go quiet and reads back what it produced, from any shell,
+  and an agent inside a task can do the same to fan work out to others. An
+  **MCP endpoint** (experimental) exposes the same verbs as tools for clients
+  like Claude Desktop. `termic://` links open a pre-filled New Task dialog
+  that a human still has to press Create on.
+- **Activity.** A process monitor scoped to Termic: every agent, shell and run
+  script grouped by project and task, with CPU, memory, output rate and
+  uptime, so "which agent is eating my machine" is a glance, not a hunt.
 - **Terminal niceties.** xterm.js + WebGL, OSC 52 clipboard (copy out of a
   container or over SSH), optional copy-on-select, inline images, clickable
   links, and drag-and-drop file paths.
@@ -268,9 +297,9 @@ no metered markup, no backend daemon. Here's what the window gives you on top:
 
 ## Sandbox
 
-Optional per-workspace macOS Seatbelt (`sandbox-exec`) + an in-process
-HTTPS CONNECT proxy per workspace. Configured per project, pinned per
-workspace at creation (editable later from the workspace's Shield icon),
+Optional per-task macOS Seatbelt (`sandbox-exec`) + an in-process
+HTTPS CONNECT proxy per task. Configured per project, pinned per
+task at creation (editable later from the task's Shield icon),
 enforced from the moment the agent spawns.
 
 The cage:
@@ -288,6 +317,16 @@ The cage:
   boundary, so the agent's own permission prompts are skipped. The toolbar
   lightning icon turns red when YOLO is on *without* a sandbox (intentional
   danger signal — agents can `rm -rf $HOME` at that point).
+
+**Docker mode** is the alternative backend: the agent runs inside a
+container rather than a seatbelt profile, for a stronger filesystem
+boundary and a blast radius that ends at the container. One generic image,
+editable as a plain Dockerfile in Settings, built by an explicit action;
+each agent's config folder is mounted separately so logins survive and
+cloning an agent keeps a work login apart from a personal one. Containers
+run as your host user, drop every Linux capability, and cap PID
+exhaustion. Marked experimental: network egress is not yet restricted the
+way the proxy restricts the seatbelt's.
 
 For the full sandbox design — including the recent-denies debug panel
 and the auto-restart-on-edit flow — see [CLAUDE.md](./CLAUDE.md)
@@ -323,13 +362,13 @@ The honest pitch — see [termic.dev/vs/conductor](https://termic.dev/vs/conduct
 | Runs `claude` | ✓ | ✓ |
 | Runs `codex` | ✓ | ✓ |
 | Bring your own agent (PTY-based) | ✓ — opencode, aider, ollama, anything that runs in a terminal | ✗ |
-| Multi-repo workspaces | ✓ — N repos under one wrapper, shared CLAUDE.md, per-member ports | ✗ |
+| Multi-repo tasks | ✓ — N repos under one wrapper, shared CLAUDE.md, per-member ports | ✗ |
 | Sync a worktree into the repo root live | ✓ — Spotlight, detached HEAD, never commits to your branch | ◐ Checkpoints onto your branch |
 | Command palette + fuzzy project / file switch | ✓ — ⌘K / ⌘N / ⌘P | varies |
 | Uses Claude Pro / Max subscription quota | ✓ — spawns the interactive `claude` CLI directly | ◐ Routes through the Claude Agent SDK |
 | Monthly Claude cost on top of your Pro / Max plan | $0 — same quota as running `claude` in iTerm | Capped by the separate SDK credit ($20 / $100 / $200) |
 | Local-only, no vendor backend in the loop | ✓ | ✗ — vendor-hosted services |
-| Per-workspace macOS sandbox (filesystem + network) | ✓ — Seatbelt + in-process network allowlist | ✗ |
+| Per-task macOS sandbox (filesystem + network) | ✓ — Seatbelt + in-process network allowlist | ✗ |
 | Work-done indicator from real PTY signals | ✓ — OSC 9;4 + per-CLI title classifier, no idle guessing | ✗ |
 | Side-by-side ⇄ unified diff with syntax highlighting | ✓ | varies |
 | Platforms | macOS + Linux today (signed AppImage); Windows on the way | macOS |
@@ -400,9 +439,11 @@ specs and get an issue at the same time. That is the whole promotion path:
   but two large theme ecosystems already exist and neither is ours. Scan
   both directories, translate, and let people pick from the library they
   already collected.
-- **Linear + GitHub PR integration.** Paste an issue or PR URL, get a task
-  seeded with its title and body; create the PR from the app via `gh`. No
-  OAuth.
+- **Linear integration.** GitHub and GitLab already ship: start a task from
+  an issue, open the PR from the app, watch its checks and reviews from the
+  right panel. Linear is the same shape and is not built.
+- **Wider Linux reach.** ARM Linux builds and a Flathub submission. The
+  Status section above already promises both.
 - **Opt-in usage telemetry.** Anonymous, off by default, one toggle: which
   features are used and how often, plus crash reports. No code, no prompts,
   no file paths, no agent output, no project names.
