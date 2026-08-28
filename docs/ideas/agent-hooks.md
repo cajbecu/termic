@@ -67,8 +67,22 @@ already matches, 22ms after the block:
 
 So **hooks are essential for Claude and marginal for Codex.** For Claude they are
 the only signal that does not lie. For Codex they buy 10ms and a `tool_name`.
-That asymmetry should drive the phasing: a Claude-only v1 delivers most of the
-value.
+
+Measuring the other two first-class agents turned that pair into a four-way
+spread, and the spread, not the event tables, is what should drive the plan:
+
+| agent | attention signal today | what hooks add |
+|---|---|---|
+| Claude | title LIES (paints idle), OSC 9 notify 6.0s late | the whole thing |
+| Codex | title says `Action Required`, +22ms | ~10ms and a `tool_name` |
+| opencode | nothing at all (static title) | the whole thing, cleanest API, and the only `attention cleared` edge |
+| Antigravity | nothing at all (no OSC whatsoever) | nothing: it loads hooks and never runs them |
+
+The value is concentrated in Claude and opencode, and those two happen to be the
+two cheapest to build: Claude needs no IPC at all (`terminalSequence`), opencode
+is already in-process. Codex, the agent the previous draft ranked second, is the
+one with the least to gain and the highest install cost (a blocking trust modal
+that re-prompts on every hook-set change).
 
 Codex's real defect was elsewhere and was not a hook problem at all: it dropped
 the status words its built-in title patterns were written for, so its idle title
@@ -198,6 +212,61 @@ null and the demoters downgrade their verdict from `done` to `attention`.
 Antigravity is therefore the one agent where hooks would add the most and the one
 where they currently work the least.
 
+## opencode 1.17.11: the cleanest surface of the four
+
+Not a spawned hook at all: a JS/TS module loaded in-process, exporting an async
+function that returns handlers. That makes it the odd one out architecturally and
+the best one behaviourally. Measured with a project-local plugin, so nothing of
+the user's config was touched.
+
+The full blocked cycle, which no other agent gives completely:
+
+```
+ 34.172  tool.execute.before
+ 34.178  event.permission.asked      <- attention, +6ms
+122.673  user answers (89s blocked)
+123.271  event.permission.replied    <- attention CLEARED, +9ms
+123.277  tool.execute.after
+131.428  event.session.idle          <- done
+```
+
+| termic edge | event | measured |
+|---|---|---|
+| working | `chat.message` | +23ms after submit |
+| attention | `event.permission.asked` | +6ms after `tool.execute.before` |
+| attention cleared | `event.permission.replied` | +9ms after the answer |
+| done | `event.session.idle` | precise, once per turn |
+
+`permission.replied` is the one thing every other agent lacks. Claude and Codex
+force us to infer "the user answered" from the next tool call or the next busy
+title; opencode says it. Also available and unmeasured here: `session.error`,
+`session.compacted`, `session.status`, `file.edited`, `todo.updated`.
+
+opencode emits **no busy/idle OSC**: its title is a constant (`OpenCode`) that
+later becomes the session name (`OC | Create out.txt containing hi`). It is not in
+`BUILTIN_TITLE_SIGNALS`, so `classifyAgentTitle` returns null, `senderStateRef`
+stays null, and termic falls back to byte-quiet with `fallbackReason` of
+`attention`. So like Claude, and unlike Codex, a plugin is a large upgrade here.
+
+Three implementation notes that cost real time to find:
+
+- **Both `.opencode/plugin` and `.opencode/plugins` are loaded.** Installing to
+  both double-fires every event. Measured, not guessed. Use `plugins` (the
+  documented spelling) and never write both.
+- Global is `~/.config/opencode/plugins/`, which on a real machine already holds
+  `package.json`, `node_modules` and `opencode.jsonc`. An installer has to live
+  alongside those, not own the directory.
+- The plugin runs **in-process**, so the safety model inverts. There is no
+  timeout and no exit code: a throw inside `tool.execute.before` blocks the tool
+  (that is opencode's own documented example for it), and an unhandled throw
+  anywhere lands inside opencode's runtime rather than in a child process we can
+  ignore. Every handler must be individually wrapped, and none may be async in a
+  way that opencode awaits before proceeding.
+
+Being in-process is also an opportunity the spawned agents do not have: the
+plugin can hold one open connection rather than paying a process spawn per
+event.
+
 ## Interrupts: why OSC stays authoritative
 
 Escape during an active turn produced **no `Stop`** on either agent. Claude's
@@ -286,12 +355,15 @@ Copy rule: no em dashes.
    `last_assistant_message` for auto-titles, `background_tasks` for the
    done-vs-still-working split, `PermissionRequest.tool_name` for the three-way
    attention state.
-3. Codex, only if 1 and 2 prove out, and only with the trust modal surfaced
-   honestly. Needs a real transport.
-4. Everything else. Antigravity is measured and currently unusable (above).
-   Gemini, Copilot, Cursor, Grok and opencode remain entirely unmeasured; the old
-   vendor-doc table was wrong often enough for the three agents that WERE
-   measured that it should not be trusted for any of them.
+3. **opencode**, via its plugin API. Second-largest gain, no config-file merge
+   problem, and the only agent that reports `permission.replied`, so it is where
+   the attention state can be made exactly right rather than approximately.
+4. Codex last, not second, and only with the trust modal surfaced honestly. It
+   gains the least and costs the most to install.
+5. Antigravity is measured and currently unusable (above). Gemini, Copilot,
+   Cursor and Grok remain entirely unmeasured; the old vendor-doc table was wrong
+   often enough for the four agents that WERE measured that it should not be
+   trusted for any of them.
 
 ## Still unknown
 
@@ -305,4 +377,7 @@ Copy rule: no em dashes.
   request resolves, is probably needed.
 - Why `agy` loads a hook config it never invokes, and whether a newer build or
   the Antigravity IDE runs them.
-- Gemini, Copilot, Cursor, Grok and opencode: entirely unmeasured.
+- Gemini, Copilot, Cursor and Grok: entirely unmeasured.
+- opencode's `session.error`, `session.compacted` and `session.status`, and
+  whether an in-process plugin can hold one open connection rather than paying a
+  spawn per event.
