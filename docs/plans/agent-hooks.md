@@ -282,6 +282,29 @@ opencode has no OSC busy/idle signal (its title is a constant, later the session
 name), so it needs a real transport. Being in-process, the plugin can hold one
 open connection rather than paying a spawn per event.
 
+## Phase 3: Antigravity, then Grok
+
+Both only after phases 1 and 2 prove out in the field.
+
+**Antigravity (`agy`).** Config at `~/.gemini/config/hooks.json`, never
+`~/.gemini/antigravity-cli/`. Heterogeneous schema (see the appendix): tool
+events take a `{matcher, hooks}` group, `PreInvocation` / `PostInvocation` /
+`Stop` take handlers directly. Register `PreInvocation` for working and `Stop`
+for done; there is no attention event, so needs-you stays on the existing
+byte-quiet fallback. Verify with `agy -p "/hooks"` that every registered event
+resolved a non-empty command before assuming an install worked.
+
+The gain is larger than it looks: agy emits no OSC whatsoever, so today every
+turn ends in a byte-quiet orange bell rather than a done. `Stop.fullyIdle`
+replaces that with a real answer.
+
+**Grok.** Needs its title patterns and its `Notification` hook to land in the
+SAME change, never separately. Its title freezes on a busy spinner while it is
+blocked (measured at 217s on one frame), so adding busy/idle patterns alone
+would recreate the Codex latch, and `Notification` is the only signal for that
+state. Until then the phase 1 guard keeps termic silent inside Grok, which is
+correct and needs no further work.
+
 ## Testing
 
 All three are required before this lands, per `CLAUDE.md`.
