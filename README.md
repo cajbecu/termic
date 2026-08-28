@@ -412,6 +412,14 @@ specs and get an issue at the same time. That is the whole promotion path:
   in 1.0.0; the per-task bearer token that answers which task is calling and
   what it may do, the narrowest grant a sandboxed agent could be given, is
   what is left. Design in [docs/plans/mcp.md](docs/plans/mcp.md).
+- **Know the moment an agent is waiting on you.**
+  ([#269](https://github.com/simion/termic/issues/269)) Claude paints its idle
+  glyph while it is blocked on a permission prompt, a question or plan
+  approval, so termic reads "waiting for you" as "finished" and says so a
+  second before it corrects itself. One hook fixes it, reported over the
+  terminal the agent already owns, so nothing changes for sandboxed or Docker
+  tasks. Off by default. Spec in
+  [docs/plans/agent-hooks.md](docs/plans/agent-hooks.md).
 
 ### Ideas
 
@@ -420,12 +428,6 @@ specs and get an issue at the same time. That is the whole promotion path:
   and branch on the exit code. What is missing is intent, and an opinion
   about shape (fan out, queue behind, supervisor and workers).
   [docs/ideas/agent-orchestration.md](docs/ideas/agent-orchestration.md).
-- **Agent lifecycle hooks, measured against OSC detection.** Termic infers
-  "the agent finished" from the terminal stream, which needs no config and
-  survives the sandbox. Every supported CLI now also exposes hooks that say
-  it outright. Whether that earns a place in a user's agent config is an
-  open question, and the first step is measurement, not implementation.
-  [docs/ideas/agent-hooks.md](docs/ideas/agent-hooks.md).
 - **Windows support, then Windows prebuilts.** Linux AppImage CI is live;
   the Windows MSI is the matching matrix entry, and it depends on the app
   compiling on Windows at all. The audit in
