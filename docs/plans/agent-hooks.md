@@ -40,7 +40,7 @@ entirely.
 | opencode | **yes, phase 2** | No busy/idle OSC at all, and the only agent that reports `permission.replied`. |
 | Codex | no | Its title already says `Action Required` at +22ms. Hooks add 10ms and cost a blocking trust modal that re-prompts on every hook-set change. |
 | Grok | guard only | Reads our Claude file (see Grok guard). Its own adapter is later. |
-| Antigravity | no | Loads a hook config and never invokes it. |
+| Antigravity (`agy`) | **yes, phase 3** | All five events fire. No attention event exists, but it emits no OSC at all, so hooks are its only precise working/done signal. |
 | Gemini, Copilot, Cursor | no | Unmeasured. Do not write adapters from their docs. |
 
 ## Phase 1: Claude, exactly one hook
@@ -243,7 +243,7 @@ Settings → Notifications:
 - Off by default. Flip only once field data shows it stable.
 - List the exact files **before** writing, not after.
 - Show per-agent state the way Settings → Coding Agents lists detected CLIs.
-  An agent detected but unsupported (Antigravity) must say so, not appear wired.
+  An agent detected but not yet wired must say so, not appear wired.
 - "Remove" is always available even when the toggle is off, so a user who
   uninstalls termic mid-experiment can still clean up.
 - Wizard: `WelcomeDialog.tsx` is currently three steps (`type Step = 0 | 1 | 2`,
@@ -335,6 +335,12 @@ longer produces a "done" badge one second before the "needs you".
 - **Interrupts fire no hook at all.** ESC mid-turn produced no `Stop` on either
   agent, only an OSC title change. OSC stays authoritative; hooks add precision,
   never correctness.
+- **A hook config can LOAD and still never run.** Antigravity accepts one at
+  `~/.gemini/antigravity-cli/hooks.json`, logs `loaded 1 named hooks`, and
+  executes nothing, because that path is desynchronised from its backend; the
+  live path is `~/.gemini/config/hooks.json`. Never treat "the agent parsed my
+  config" as "the agent will run it". Ask the agent what it resolved
+  (`agy -p "/hooks"`) and check the command column is non-empty.
 - **The prose-question gap closes on no agent.** Asked to pose a question and
   stop, both Claude and Codex fire `Stop` alone, paint the idle glyph, and emit
   nothing for 20s afterwards. Hooks fix the *tool-mediated* asks
@@ -398,18 +404,63 @@ Its work-state problem was a title-pattern problem and is already fixed
 
 ### Antigravity 1.1.22
 
-Loads a hook config and never invokes it. `loaded 1 named hooks from 1 hooks.json
-file(s)` and zero fires, across both config locations, both inner-key spellings
-(`handlers` and `hooks`), matcher `"*"` and `""`, headless and TUI, and turns
-with and without tools. An invalid handler `type` drew no complaint either,
-though the binary carries `unsupported hook type`.
+**Works.** An earlier revision of this doc said it loaded hooks and never ran
+them. That was wrong, and the way it was wrong is the useful part.
 
-Doc errors found: the global path is `~/.gemini/antigravity-cli/hooks.json`, not
-the documented `~/.gemini/config/`; and `Stop`'s `decision` is a strict enum
-`stop|continue|block`, not "any value other than continue". Both `PreToolUse` and
-`Stop` require a `decision`, so an adapter there can never be a pure observer.
+All five events fire: `PreInvocation`, `PreToolUse`, `PostToolUse`,
+`PostInvocation`, `Stop`. The `Stop` payload is the done edge and is a good one:
 
-Emits no OSC at all.
+```json
+{"conversationId": "...", "executionNum": 0, "fullyIdle": true,
+ "terminationReason": "NO_TOOL_CALL", "error": "", "modelName": "...",
+ "transcriptPath": "...", "workspacePaths": []}
+```
+
+Two things have to be right at once, and getting either wrong looks exactly like
+"hooks are broken":
+
+1. **The config path is `~/.gemini/config/hooks.json`.** The binary also contains
+   `~/.gemini/antigravity-cli/hooks.json`, and a config placed there LOADS
+   (`loaded 1 named hooks from 1 hooks.json file(s)`) but never executes. That
+   path is a bug they already fixed: *"Fixed a bug where the `/hooks` command
+   wrote configurations to `~/.gemini/antigravity-cli/hooks.json` instead of the
+   shared `~/.gemini/config/hooks.json`, ensuring hooks remain synchronized
+   between the TUI and the backend."* Loaded-but-never-fired is precisely what
+   desynchronised means.
+2. **The schema is heterogeneous.** Tool events take a matcher group; the
+   matcher-less events take handlers DIRECTLY:
+
+```json
+{
+  "termic-lab": {
+    "enabled": true,
+    "PreToolUse":     [{ "matcher": "*", "hooks": [ {"type":"command","command":"..."} ] }],
+    "PostToolUse":    [{ "matcher": "*", "hooks": [ {"type":"command","command":"..."} ] }],
+    "PreInvocation":  [ {"type":"command","command":"..."} ],
+    "PostInvocation": [ {"type":"command","command":"..."} ],
+    "Stop":           [ {"type":"command","command":"..."} ]
+  }
+}
+```
+
+Wrap the last three in `{matcher, hooks}` and they register with an EMPTY
+command: visible in the listing, silently inert.
+
+**Use `agy -p "/hooks"` as the ground truth.** It answers non-interactively and
+prints the command it resolved per event, so an empty command column tells you
+the shape is wrong before you spend a turn wondering why nothing fired. There is
+also `--output-format json` for the structured version.
+
+`decision` is documented as required on `PreToolUse` and `Stop`, but a hook that
+returns NOTHING is handled safely and the turn completes normally (measured;
+their changelog records the fix: *"safely handling empty decision strings
+returned by pre-tool hooks"*). So a passive observer is viable here after all.
+Still never emit a decision deliberately.
+
+What agy does NOT have is any attention or notification event, so hooks give it
+working and done but not needs-you. Since it emits **no OSC at all**, that is
+still a large upgrade: today termic falls back to byte-quiet with a
+`fallbackReason` of `attention`, so every agy turn ends in an orange bell.
 
 ### Grok 1.0.5
 
