@@ -39,7 +39,7 @@ entirely.
 | Claude Code | **yes, phase 1** | Only signal that does not lie. See above. |
 | opencode | **yes, phase 2** | No busy/idle OSC at all, and the only agent that reports `permission.replied`. |
 | Codex | no | Its title already says `Action Required` at +22ms. Hooks add 10ms and cost a blocking trust modal that re-prompts on every hook-set change. |
-| Grok | guard only | Reads our Claude file (see Grok guard). Its own adapter is later. |
+| Grok | **guard now, phase 3 adapter** | Reads our Claude file, so the guard is mandatory from day one. Separately it has the most complete event set of the five, including the only interrupt hook. |
 | Antigravity (`agy`) | **yes, phase 3** | All five events fire. No attention event exists, but it emits no OSC at all, so hooks are its only precise working/done signal. |
 | Gemini, Copilot, Cursor | no | Unmeasured. Do not write adapters from their docs. |
 
@@ -229,6 +229,19 @@ Also measured: if both a Claude file and a project-local `.grok/hooks/*.json`
 exist, **every event fires twice** (24 from `global/settings`, 24 from
 `project/termic-lab`). Never install both.
 
+The blast radius is wider than just `~/.claude/settings.json`. Grok's shipped doc
+lists every compatible source it scans: `~/.claude/settings.json` AND
+`settings.local.json`, the project-level `.claude/settings.json` and
+`settings.local.json`, and the same pair for `~/.cursor/hooks.json`. Termic
+symlinks repo-root `.claude` into each worktree, so a project-level install would
+travel too. Install globally only, and keep the script's own gate as the real
+defence.
+
+There IS a documented opt-out, worth putting in the Settings copy so a user who
+does not want this has an answer: `[compat.<vendor>] hooks = false` in
+`~/.grok/config.toml`, or the equivalent environment variable. It is not a
+substitute for the gate, because it only helps users who go and set it.
+
 ## Settings and wizard
 
 Settings → Notifications:
@@ -298,12 +311,28 @@ The gain is larger than it looks: agy emits no OSC whatsoever, so today every
 turn ends in a byte-quiet orange bell rather than a done. `Stop.fullyIdle`
 replaces that with a real answer.
 
-**Grok.** Needs its title patterns and its `Notification` hook to land in the
-SAME change, never separately. Its title freezes on a busy spinner while it is
-blocked (measured at 217s on one frame), so adding busy/idle patterns alone
-would recreate the Codex latch, and `Notification` is the only signal for that
-state. Until then the phase 1 guard keeps termic silent inside Grok, which is
-correct and needs no further work.
+**Grok.** The most complete event set measured, and the only agent that reports
+an interrupt:
+
+| termic edge | event | measured |
+|---|---|---|
+| working | `UserPromptSubmit` | carries the prompt, wrapped in `<user_query>` |
+| done | `Stop` | `reason="end_turn"` |
+| interrupted | `StopCancelled` | `reason="user_interrupt"`, 435ms after ESC. Nothing else has this. |
+| attention | `Notification` | `notificationType="permission_prompt"`, plus `permissionMode` and `level` |
+
+Its title patterns and its `Notification` hook must land in the SAME change,
+never separately: the title freezes on a busy spinner while blocked (measured at
+217s on one frame), so patterns alone would recreate the Codex latch, and
+`Notification` is the only signal for that state.
+
+Read `~/.grok/docs/user-guide/10-hooks.md` before writing the adapter. It ships
+with the binary, so it is version-matched to what is installed, and it is
+markedly better than the website: it carries the full event table, a
+"differences from Claude" section, and the exit-code semantics. Two things from
+it that a Claude-shaped reader gets wrong: the field is `notificationType`
+(camelCase), and `idle_prompt` fires on ANY turn end including interrupted ones,
+so it reports state rather than attention and is not a needs-you signal.
 
 ## Testing
 
@@ -355,9 +384,11 @@ longer produces a "done" badge one second before the "needs you".
   `background_tasks`, `session_crons`, `effort`, `permission_mode`.
 - **Neither Claude nor Codex emits `OSC 9;4` any more**, across ten captures
   including a 150s run. Do not restore anything that depends on it.
-- **Interrupts fire no hook at all.** ESC mid-turn produced no `Stop` on either
-  agent, only an OSC title change. OSC stays authoritative; hooks add precision,
-  never correctness.
+- **Interrupts fire no hook on Claude or Codex.** ESC mid-turn produced no
+  `Stop` on either, only an OSC title change, so OSC stays authoritative for
+  those two: hooks add precision, never correctness. **Grok is the exception**
+  and has a dedicated `StopCancelled` (measured, `reason="user_interrupt"`,
+  435ms after the key). Do not generalise either way across agents.
 - **A hook config can LOAD and still never run.** Antigravity accepts one at
   `~/.gemini/antigravity-cli/hooks.json`, logs `loaded 1 named hooks`, and
   executes nothing, because that path is desynchronised from its backend; the
@@ -487,11 +518,36 @@ still a large upgrade: today termic falls back to byte-quiet with a
 
 ### Grok 1.0.5
 
-Reads the global `~/.claude/settings.json` (see the Grok guard). Its own
-`Notification` fires the moment it blocks, with
-`message="Plan approval requested"` and no 6-second delay.
+**Read `~/.grok/docs/user-guide/10-hooks.md` first.** It ships with the binary,
+so it is version-matched, and it is far better than the website. Everything below
+was measured against 1.0.5 after that doc corrected an earlier, wrong reading.
 
-Its titles are rich but must not be trusted alone:
+Measured events:
+
+| termic edge | event | payload |
+|---|---|---|
+| working | `UserPromptSubmit` | `prompt`, wrapped in `<user_query>` tags |
+| done | `Stop` | `reason="end_turn"` |
+| interrupted | `StopCancelled` | `reason="user_interrupt"`, 435ms after ESC |
+| attention | `Notification` | `notificationType="permission_prompt"`, `message`, `permissionMode`, `level` |
+
+`StopCancelled` is unique across the five agents: it also covers a declined
+permission prompt, `--max-turns`, and a no-progress bail-out, each with its own
+`reason`. Claude and Codex fire nothing at all on an interrupt.
+
+Payloads are **camelCase** (`hookEventName`, `sessionId`, `cwd`,
+`workspaceRoot`, `transcriptPath`, `permissionMode`), and the event value inside
+is snake_case (`"hookEventName": "notification"`) even though the config key is
+PascalCase. `permissionMode` values are `default`, `auto`, `plan`,
+`bypassPermissions`; Claude's `acceptEdits` and `dontAsk` have no equivalent, so
+a check for those never matches.
+
+Do not use `idle_prompt` as an attention signal: the shipped doc states it fires
+on ANY turn end, interrupted or errored included, because it reports a state
+rather than an outcome. Match `notificationType`, never `message`, which is
+display text that changes between releases.
+
+**Its titles are rich but must not be trusted alone:**
 
 ```
 grok                                       idle
@@ -502,14 +558,15 @@ Exact One Word Pong Reply Request - grok   idle, with a summary
 ```
 
 `Waiting for response...` means waiting for the model, so reusing codex's
-`\b(Waiting|Action Required)\b` attention pattern would badge needs-you every
-turn. Worse, **when grok blocks on plan approval its title freezes on a busy
-spinner**: measured at 217 seconds on one frame with no idle transition. Adding
-busy/idle title patterns without also taking grok's `Notification` hook would
-recreate the Codex latch. **The two must land together or neither.**
+`\b(Waiting|Action Required)\b` pattern would badge needs-you every turn. And
+**when grok blocks on plan approval its title freezes on a busy spinner**:
+measured at 217 seconds on one frame with no idle transition. Title patterns
+without the `Notification` hook would recreate the Codex latch, so the two land
+together or neither does.
 
-Today grok is signal-silent to termic, so byte-quiet fires with `fallbackReason`
-of `attention`: imprecise, never stuck, and accidentally right while blocked.
+Today grok is signal-silent to termic (not in `BUILTIN_TITLE_SIGNALS`), so
+byte-quiet fires with `fallbackReason` of `attention`: imprecise, never stuck,
+and accidentally right while blocked.
 
 ### opencode 1.17.11
 
