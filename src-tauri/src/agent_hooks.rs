@@ -144,6 +144,15 @@ impl Signal {
 ///   ignored unless we were working.
 pub fn hooks_for(agent: &str) -> &'static [(&'static str, Signal)] {
     match agent {
+        // opencode's plugin sees all four edges in-process. It is the only
+        // agent that reports permission.replied, so its attention can be
+        // cleared exactly rather than waiting for the next busy signal.
+        "opencode" => &[
+            ("chat.message", Signal::Working),
+            ("permission.asked", Signal::Attention),
+            ("permission.replied", Signal::Working),
+            ("session.idle", Signal::Done),
+        ],
         "claude" => &[("PermissionRequest", Signal::Attention)],
         "grok" => &[("Notification", Signal::Attention)],
         "agy" => &[("PreInvocation", Signal::Working), ("Stop", Signal::Done)],
@@ -166,6 +175,10 @@ fn uses_terminal_sequence(agent: &str) -> bool {
 /// Config schema. They are not variations on one shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Schema {
+    /// Not a config file at all: a JS module dropped into the plugin
+    /// directory. Install is a file write, removal a delete, and there is
+    /// nothing of the user's to merge with or preserve.
+    OpencodePlugin,
     /// `hooks.<Event>[] = { hooks: [handler] }`. claude and grok both use it,
     /// which is not a coincidence: grok reads claude's file on purpose.
     ClaudeCompatible,
@@ -178,6 +191,7 @@ enum Schema {
 
 fn schema_for(agent: &str) -> Schema {
     match agent {
+        "opencode" => Schema::OpencodePlugin,
         "agy" => Schema::AntigravityNamed,
         _ => Schema::ClaudeCompatible,
     }
@@ -239,6 +253,64 @@ pub fn script_body(agent: &str, sig: Signal) -> String {
 
 {emit}
 exit 0
+"#
+    )
+}
+
+/// opencode's plugin, which is a JS module rather than a spawned hook.
+///
+/// It runs IN-PROCESS inside opencode, so the safety model inverts: there is no
+/// timeout and no exit code, and a throw inside `tool.execute.before` blocks
+/// the tool (opencode's own documented example for it). Every handler is
+/// therefore individually wrapped, and the module does nothing at all outside a
+/// termic pty.
+///
+/// Being in-process is also why it writes with `fs` rather than spawning
+/// anything: no process per event.
+fn opencode_plugin_body() -> String {
+    let attention = Signal::Attention.payload();
+    let working = Signal::Working.payload();
+    let done = Signal::Done.payload();
+    format!(
+        r#"// termic agent hook for opencode (generated, schema v{SCHEMA_VERSION}). Safe to delete.
+//
+// Reports opencode's state to termic by writing one OSC sequence to the
+// terminal termic handed it ($TERMIC_PTY). opencode emits no busy/idle OSC of
+// its own, so without this every turn ends in termic's byte-quiet fallback.
+//
+// Runs IN-PROCESS: no timeout, no exit code, and a throw in a tool handler
+// blocks the tool. Every handler below is wrapped for that reason.
+import {{ writeFileSync }} from "fs";
+
+const PTY = process.env.TERMIC_PTY;
+// Not spawned by a termic pty (this file is installed globally, so it also
+// loads under a plain `opencode` in any terminal). Do nothing there.
+const ACTIVE = Boolean(PTY && process.env.TERMIC_TASK_ID);
+
+const send = (payload) => {{
+  if (!ACTIVE) return;
+  try {{ writeFileSync(PTY, `\x1b]${{payload}}\x07`); }} catch {{ /* never throw into opencode */ }}
+}};
+
+const ATTENTION = "{attention}";
+const WORKING   = "{working}";
+const DONE      = "{done}";
+
+export const TermicStatus = async () => ({{
+  // One per turn, on submit.
+  "chat.message": async () => {{ try {{ send(WORKING); }} catch {{}} }},
+  event: async ({{ event }}) => {{
+    try {{
+      switch (event?.type) {{
+        // The only agent measured that reports the block AND its release, so
+        // attention here can be cleared exactly rather than inferred.
+        case "permission.asked":   send(ATTENTION); break;
+        case "permission.replied": send(WORKING);   break;
+        case "session.idle":       send(DONE);      break;
+      }}
+    }} catch {{ /* never throw into opencode */ }}
+  }},
+}});
 "#
     )
 }
@@ -427,6 +499,10 @@ pub fn config_dir(target: &Target) -> Result<PathBuf, String> {
 /// removal a delete rather than a merge-back).
 fn settings_rel(agent: &str) -> &'static str {
     match agent {
+        // The plugin itself. `.opencode/plugin` AND `.opencode/plugins` are
+        // BOTH loaded (measured: writing both double-fires every event), so
+        // only ever the documented plural.
+        "opencode" => "plugins/termic.js",
         // grok reads every *.json under hooks/, so it gets a file of its own
         // and removal is a delete rather than a merge-back.
         "grok" => "hooks/termic.json",
@@ -530,6 +606,15 @@ pub fn status(target: &Target) -> HookStatus {
         out.error = Some("could not resolve the agent config directory".into());
         return out;
     };
+    if schema_for(&agent) == Schema::OpencodePlugin {
+        // A JS file, not JSON: presence IS the install.
+        out.installed = settings.exists();
+        out.schema_version = std::fs::read_to_string(script.join(MANIFEST_NAME))
+            .ok()
+            .and_then(|s| serde_json::from_str::<Manifest>(&s).ok())
+            .map(|m| m.schema_version);
+        return out;
+    }
     let root = match read_settings(&settings) {
         Ok(v) => v,
         Err(e) => { out.error = Some(e); return out; }
@@ -553,6 +638,10 @@ pub fn status(target: &Target) -> HookStatus {
             })
         }
         Schema::AntigravityNamed => root.get(AGY_HOOK_NAME).is_some(),
+        // Handled by the early return above: the plugin is one file we write
+        // whole, so there is no config to inspect or merge. Spelled out rather
+        // than a catch-all so a NEW schema still fails to compile here.
+        Schema::OpencodePlugin => unreachable!("opencode returns before this"),
     };
     out.schema_version = std::fs::read_to_string(script.join(MANIFEST_NAME))
         .ok()
@@ -599,6 +688,24 @@ pub fn install(target: &Target) -> Result<(), String> {
         std::fs::copy(&settings, &backup).map_err(|e| format!("back up the config: {e}"))?;
     }
 
+    // opencode is a single JS module, not a set of scripts plus a config
+    // merge. Nothing of the user's is touched, so there is nothing to back up
+    // or merge back.
+    if schema_for(&agent) == Schema::OpencodePlugin {
+        std::fs::create_dir_all(settings.parent().ok_or("no plugin dir")?)
+            .map_err(|e| format!("create plugin dir: {e}"))?;
+        write_atomic(&settings, opencode_plugin_body().as_bytes())?;
+        let manifest = Manifest {
+            schema_version: SCHEMA_VERSION,
+            command: settings.to_string_lossy().into_owned(),
+            installed_at: chrono::Utc::now().to_rfc3339(),
+        };
+        return write_atomic(
+            &dir.join(MANIFEST_NAME),
+            serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?.as_bytes(),
+        );
+    }
+
     let mut commands: Vec<(&str, String)> = Vec::new();
     for (event, sig) in hooks {
         let script = script_for(&dir, *sig);
@@ -622,6 +729,10 @@ pub fn install(target: &Target) -> Result<(), String> {
             acc
         }
         Schema::AntigravityNamed => agy_merge(&root, &commands),
+        // Handled by the early return above: the plugin is one file we write
+        // whole, so there is no config to inspect or merge. Spelled out rather
+        // than a catch-all so a NEW schema still fails to compile here.
+        Schema::OpencodePlugin => unreachable!("opencode returns before this"),
     };
     let mut bytes = serde_json::to_vec_pretty(&merged).map_err(|e| e.to_string())?;
     bytes.push(b'\n');
@@ -646,6 +757,18 @@ pub fn remove(target: &Target) -> Result<(), String> {
     let dir = script_dir(target)?;
     let prefix = command_prefix(target)?;
 
+    // Deleting a file we wrote whole. Nothing to unmerge.
+    if schema_for(&agent) == Schema::OpencodePlugin {
+        if settings.exists() {
+            std::fs::remove_file(&settings)
+                .map_err(|e| format!("remove {}: {e}", settings.display()))?;
+        }
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| format!("remove {}: {e}", dir.display()))?;
+        }
+        return Ok(());
+    }
+
     let root = read_settings(&settings)?;
     let stripped = match schema_for(&agent) {
         Schema::ClaudeCompatible => {
@@ -660,6 +783,10 @@ pub fn remove(target: &Target) -> Result<(), String> {
             if touched { Some(acc) } else { None }
         }
         Schema::AntigravityNamed => agy_unmerge(&root),
+        // Handled by the early return above: the plugin is one file we write
+        // whole, so there is no config to inspect or merge. Spelled out rather
+        // than a catch-all so a NEW schema still fails to compile here.
+        Schema::OpencodePlugin => unreachable!("opencode returns before this"),
     };
 
     if let Some(stripped) = stripped {
@@ -697,7 +824,7 @@ pub fn remove(target: &Target) -> Result<(), String> {
 /// row can say "not supported yet" rather than offering a button that fails.
 /// Agents this build can wire. Each needs a measured event AND a transport
 /// that reaches termic; see `event_for` / `uses_terminal_sequence`.
-pub const SUPPORTED: &[&str] = &["claude", "grok", "agy"];
+pub const SUPPORTED: &[&str] = &["claude", "grok", "agy", "opencode"];
 
 fn check_supported(agent_id: &str) -> Result<(), String> {
     if SUPPORTED.contains(&agent_id) {
@@ -1049,6 +1176,43 @@ mod tests {
         // agy is not grok and must not carry grok's provenance gate.
         assert!(!done.contains("GROK_HOOK_EVENT"));
         assert!(done.contains(r#"[ -n "$TERMIC_TASK_ID" ] || exit 0"#));
+    }
+
+    // ── opencode ────────────────────────────────────────────────────
+    #[test]
+    fn opencode_is_a_plugin_not_a_config_merge() {
+        assert_eq!(schema_for("opencode"), Schema::OpencodePlugin);
+        // The documented plural ONLY. `.opencode/plugin` and
+        // `.opencode/plugins` are both loaded, and writing both double-fires
+        // every event (measured).
+        assert_eq!(settings_rel("opencode"), "plugins/termic.js");
+        assert!(!settings_rel("opencode").contains("plugin/"));
+    }
+
+    #[test]
+    fn opencode_reports_all_four_edges_including_the_release() {
+        let h = hooks_for("opencode");
+        assert!(h.iter().any(|(e, s)| *e == "permission.asked" && *s == Signal::Attention));
+        // The edge no other agent has: attention CLEARED, rather than inferred
+        // from the next busy signal.
+        assert!(h.iter().any(|(e, s)| *e == "permission.replied" && *s == Signal::Working));
+        assert!(h.iter().any(|(e, s)| *e == "session.idle" && *s == Signal::Done));
+        assert!(h.iter().any(|(e, s)| *e == "chat.message" && *s == Signal::Working));
+    }
+
+    #[test]
+    fn the_opencode_plugin_can_never_throw_into_its_host() {
+        let js = opencode_plugin_body();
+        // In-process: no timeout, no exit code, and a throw in a tool handler
+        // blocks the tool. Every handler must be wrapped.
+        assert!(js.matches("try {").count() >= 3, "every handler needs its own try");
+        assert!(js.contains("catch"), "and a catch that swallows");
+        // Silent outside a termic pty, same rule as the shell scripts.
+        assert!(js.contains("TERMIC_PTY") && js.contains("TERMIC_TASK_ID"));
+        assert!(js.contains(Signal::Attention.payload()));
+        assert!(js.contains("133;C") && js.contains("133;D"));
+        // No raw control bytes in a generated source file.
+        assert!(!js.contains('\u{1b}') && !js.contains('\u{7}'));
     }
 
     #[test]

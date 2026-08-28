@@ -25,7 +25,6 @@ const UNSUPPORTED_REASON: Record<string, string> = {
   codex: "not needed, its terminal already reports this",
   gemini: "not supported yet",
   copilot: "not supported yet",
-  opencode: "not supported yet",
 };
 
 export function AgentHooksBlock() {
