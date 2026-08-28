@@ -36,21 +36,118 @@ use std::path::{Path, PathBuf};
 /// it rather than appending a second entry.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// The event each agent reports "blocked on you" through. Deliberately ONE per
-/// agent: termic already has working and done at the same instant or better
-/// from the terminal, so anything else would buy nothing and cost a process
-/// spawn per turn. Per-tool-call events are never registered.
+/// Directory we create inside the agent's config dir. Also the prefix that
+/// identifies our entries for removal, which is why it must never be renamed
+/// without a `SCHEMA_VERSION` bump and a migration.
+const SCRIPT_DIR: &str = "termic-hooks";
+const MANIFEST_NAME: &str = "manifest.json";
+const BACKUP_NAME: &str = "config.termic-backup";
+
+/// Where a given install writes. Host is the user's own config dir; Docker is
+/// the termic-owned dir that gets bind-mounted into the container, which is why
+/// a Docker install mutates nothing of the user's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// Carries the agent id, so one call site can serve every agent.
+    Host(String),
+    /// Carries the agent's OWN id (a clone keeps its own folder), not the base
+    /// id. `docker.rs` documents why conflating the two makes clones unusable.
+    Docker(String),
+}
+
+impl Target {
+    /// The agent id this target is for. Docker keys on the agent's OWN id while
+    /// the config SHAPE comes from the base id, which is why `command_path`
+    /// resolves the base separately.
+    pub fn agent(&self) -> &str {
+        match self {
+            Target::Host(a) | Target::Docker(a) => a,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Manifest {
+    pub schema_version: u32,
+    /// Absolute path we wrote into the config. Host or container form.
+    pub command: String,
+    pub installed_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct HookStatus {
+    pub installed: bool,
+    /// The config file we would write, so the UI can name it BEFORE writing.
+    pub settings_path: String,
+    pub script_dir: String,
+    /// True when the user has set `disableAllHooks`. An install is then a no-op
+    /// and the UI must say so rather than report success.
+    pub disabled_all: bool,
+    /// Set when the config could not be read or parsed. Install is refused.
+    pub error: Option<String>,
+    pub schema_version: Option<u32>,
+}
+
+/// What a hook tells termic. Each maps onto an OSC the terminal already
+/// understands, so nothing new has to be parsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    /// Blocked on the user. OSC 777 `notify`, whose TITLE field marks it as
+    /// termic's own (see `lib/agentHooks.ts`: a user's `attention` list is an
+    /// ALLOW-LIST and would otherwise filter ours out).
+    Attention,
+    /// Turn started. OSC 133;C, which `TerminalPane` maps to `goWorking`.
+    Working,
+    /// Turn genuinely over. OSC 133;D, which `TerminalPane` maps to
+    /// `goIdle(reason, 0)`: a hard done with no settle wait. It only fires
+    /// when we were working, which is why an agent using it needs `Working`
+    /// registered too.
+    Done,
+}
+
+impl Signal {
+    /// The OSC payload, without introducer or terminator.
+    fn payload(self) -> &'static str {
+        match self {
+            Signal::Attention => "777;notify;termic;agent needs your input",
+            Signal::Working => "133;C",
+            Signal::Done => "133;D",
+        }
+    }
+    /// Filename stem for the generated script, so one agent's scripts do not
+    /// collide and a reader can tell what each one is for.
+    fn stem(self) -> &'static str {
+        match self {
+            Signal::Attention => "attention",
+            Signal::Working => "working",
+            Signal::Done => "done",
+        }
+    }
+}
+
+/// Which events an agent gets, and what each one reports. Deliberately minimal:
+/// termic already has anything the terminal tells it, so a hook is only
+/// registered for a state the terminal gets WRONG or cannot express. Per-tool-
+/// call events are never registered, on any agent.
 ///
-/// claude: `PermissionRequest` fires +20ms after the block (its `Notification`
-///   is a +6.0s nudge, measured, so it is the wrong one).
-/// grok:   `Notification` with `notificationType=permission_prompt`. grok has
-///   no `PermissionRequest` at all, and its title FREEZES on a busy spinner
-///   while blocked (measured at 217s on one frame), so this hook is the only
-///   signal that state has.
-fn event_for(agent: &str) -> &'static str {
+/// claude: `PermissionRequest` at +20ms. Its title claims IDLE while blocked,
+///   so this is a correction, not an addition. (`Notification` is a +6.0s
+///   nudge, measured, so it is the wrong event.)
+/// grok: `Notification` (`notificationType=permission_prompt`). grok has no
+///   `PermissionRequest`, and its title FREEZES on a busy spinner while
+///   blocked, measured at 217s on one frame, so this is the only signal that
+///   state has.
+/// agy: `Stop` plus `PreInvocation`. agy emits NO OSC whatsoever, so today
+///   every turn ends in the byte-quiet fallback's orange bell rather than a
+///   done. It has no attention-shaped event at all, so needs-you stays on the
+///   fallback. `Working` is required for `Done` to fire, since a hard idle is
+///   ignored unless we were working.
+pub fn hooks_for(agent: &str) -> &'static [(&'static str, Signal)] {
     match agent {
-        "grok" => "Notification",
-        _ => "PermissionRequest",
+        "claude" => &[("PermissionRequest", Signal::Attention)],
+        "grok" => &[("Notification", Signal::Attention)],
+        "agy" => &[("PreInvocation", Signal::Working), ("Stop", Signal::Done)],
+        _ => &[],
     }
 }
 
@@ -66,58 +163,28 @@ fn uses_terminal_sequence(agent: &str) -> bool {
     agent == "claude"
 }
 
-/// Directory we create inside the agent's config dir. Also the prefix that
-/// identifies our entries for removal, which is why it must never be renamed
-/// without a `SCHEMA_VERSION` bump and a migration.
-const SCRIPT_DIR: &str = "termic-hooks";
-const SCRIPT_NAME: &str = "permission-request.sh";
-const MANIFEST_NAME: &str = "manifest.json";
-const BACKUP_NAME: &str = "settings.json.termic-backup";
-
-/// Where a given install writes. Host is the user's real `~/.claude`; Docker is
-/// the termic-owned config dir that gets bind-mounted into the container, which
-/// is why a Docker install needs no consent (it mutates nothing of the user's).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Target {
-    /// Carries the agent id, so one call site can serve every agent.
-    Host(String),
-    /// Carries the agent's OWN id (a clone keeps its own folder), not the base
-    /// id. `docker.rs` documents why conflating the two makes clones unusable.
-    Docker(String),
+/// Config schema. They are not variations on one shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Schema {
+    /// `hooks.<Event>[] = { hooks: [handler] }`. claude and grok both use it,
+    /// which is not a coincidence: grok reads claude's file on purpose.
+    ClaudeCompatible,
+    /// `<name> = { enabled, <Event>: ... }`, and HETEROGENEOUS: tool events take
+    /// a `{matcher, hooks}` group while `PreInvocation` / `PostInvocation` /
+    /// `Stop` take handlers DIRECTLY. Wrap the latter and they register with an
+    /// EMPTY command: visible in `agy -p "/hooks"`, silently inert. Measured.
+    AntigravityNamed,
 }
 
-impl Target {
-    /// The agent id this target is for. Docker keys on the agent's OWN id (a
-    /// clone keeps its own folder) while the config SHAPE comes from the base
-    /// id, which is why `command_path` resolves the base separately.
-    pub fn agent(&self) -> &str {
-        match self {
-            Target::Host(a) | Target::Docker(a) => a,
-        }
+fn schema_for(agent: &str) -> Schema {
+    match agent {
+        "agy" => Schema::AntigravityNamed,
+        _ => Schema::ClaudeCompatible,
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct Manifest {
-    pub schema_version: u32,
-    /// Absolute path we wrote into `settings.json`. Host or container form.
-    pub command: String,
-    pub installed_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct HookStatus {
-    pub installed: bool,
-    /// `settings.json` we would write, so the UI can name it BEFORE writing.
-    pub settings_path: String,
-    pub script_dir: String,
-    /// True when the user has set `disableAllHooks`. An install is then a no-op
-    /// and the UI must say so rather than report success.
-    pub disabled_all: bool,
-    /// Set when the config could not be read or parsed. Install is refused.
-    pub error: Option<String>,
-    pub schema_version: Option<u32>,
-}
+/// Top-level key we own in the Antigravity config. Removal deletes exactly this.
+const AGY_HOOK_NAME: &str = "termic";
 
 // ─────────────────────────── The script ────────────────────────────────
 
@@ -125,24 +192,21 @@ pub struct HookStatus {
 /// never touches the backslashes: the escape and bell reach Claude as the JSON
 /// escapes `` / ``, never as raw control bytes, which keeps the file
 /// greppable and diffable.
-pub fn script_body(agent: &str) -> String {
-    // OSC 777 is what TerminalPane already handles, and its TITLE field is how
-    // termic tells a signal it installed itself from one the agent chose to
-    // send (see lib/agentHooks.ts: a user's `attention` list is an ALLOW-LIST
-    // and would otherwise filter ours out).
-    let esc_seq = "\\u001b]777;notify;termic;agent needs your input\\u0007";
-    let raw_seq = "\\033]777;notify;termic;agent needs your input\\007";
+pub fn script_body(agent: &str, sig: Signal) -> String {
+    let payload = sig.payload();
 
     // claude parses our stdout and writes the sequence itself. Safest option:
     // it lands at a sane point in claude's own render loop.
     let emit = if uses_terminal_sequence(agent) {
-        format!("printf '%s' '{{\"terminalSequence\":\"{esc_seq}\"}}'")
+        format!(
+            "printf '%s' '{{\"terminalSequence\":\"\\u001b]{payload}\\u0007\"}}'"
+        )
     } else {
         // Everyone else writes straight to the terminal termic handed them.
         // `/dev/tty` is NOT a fallback: hooks run with no controlling terminal
         // (measured on grok, rc=1). Opening the slave BY NAME needs no ctty.
         format!(
-            "[ -n \"$TERMIC_PTY\" ] || exit 0\nprintf '{raw_seq}' > \"$TERMIC_PTY\" 2>/dev/null"
+            "[ -n \"$TERMIC_PTY\" ] || exit 0\nprintf '\\033]{payload}\\007' > \"$TERMIC_PTY\" 2>/dev/null"
         )
     };
 
@@ -152,16 +216,19 @@ pub fn script_body(agent: &str) -> String {
     // grok's own script wants the opposite test.
     let provenance = if agent == "grok" {
         "# Only meaningful when grok is the caller; this file is grok's own.\n[ -n \"$GROK_HOOK_EVENT\" ] || exit 0"
-    } else {
+    } else if agent == "claude" {
         "# grok reads ~/.claude/settings.json too, with a camelCase payload and\n# no terminalSequence field. The user never opted grok in here.\n[ -z \"$GROK_HOOK_EVENT\" ] || exit 0"
+    } else {
+        "# This file is only read by its own agent."
     };
 
+    let what = sig.stem();
     format!(
         r#"#!/bin/sh
-# termic agent hook for {agent} (generated, schema v{SCHEMA_VERSION}). Safe to delete.
+# termic agent hook for {agent} ({what}, schema v{SCHEMA_VERSION}). Safe to delete.
 #
-# Tells termic the agent is blocked on you, by putting one OSC sequence on the
-# agent's own terminal. No network, no files, no arguments, no stdin parsing.
+# Puts one OSC sequence on the agent's own terminal so termic knows its state.
+# No network, no files, no arguments, no stdin parsing.
 # Exits 0 on every path: a hook must never be why an agent stalls.
 
 # Not spawned by a termic PTY (this file is installed globally, so it also runs
@@ -271,6 +338,45 @@ pub fn unmerge(existing: &Value, prefix: &str, event: &str) -> Option<Value> {
     Some(root)
 }
 
+/// Antigravity's config, which is a different shape and needs its own pair.
+/// One named entry we own outright, so install is a set and removal a delete.
+///
+/// The heterogeneity is the trap: tool events take a `{matcher, hooks}` group
+/// while `PreInvocation` / `PostInvocation` / `Stop` take handlers DIRECTLY.
+/// Wrapping the latter registers them with an EMPTY command, which `agy -p
+/// "/hooks"` will show and which fires nothing. Measured.
+fn agy_entry(commands: &[(&str, String)]) -> Value {
+    let mut obj = Map::new();
+    obj.insert("enabled".into(), Value::Bool(true));
+    for (event, command) in commands {
+        let handler = serde_json::json!({
+            "type": "command", "command": command, "timeout": 5,
+        });
+        let is_tool_event = matches!(*event, "PreToolUse" | "PostToolUse");
+        let v = if is_tool_event {
+            serde_json::json!([{ "matcher": "*", "hooks": [handler] }])
+        } else {
+            serde_json::json!([handler])
+        };
+        obj.insert((*event).to_string(), v);
+    }
+    Value::Object(obj)
+}
+
+fn agy_merge(existing: &Value, commands: &[(&str, String)]) -> Value {
+    let mut root = if existing.is_object() { existing.clone() } else { Value::Object(Map::new()) };
+    root.as_object_mut()
+        .expect("root is an object")
+        .insert(AGY_HOOK_NAME.into(), agy_entry(commands));
+    root
+}
+
+fn agy_unmerge(existing: &Value) -> Option<Value> {
+    let mut root = existing.clone();
+    let removed = root.as_object_mut()?.remove(AGY_HOOK_NAME).is_some();
+    if removed { Some(root) } else { None }
+}
+
 /// Whether the user has switched every hook off. Install must respect it and
 /// say so, rather than writing a file that will never fire.
 pub fn disable_all_hooks(root: &Value) -> bool {
@@ -321,39 +427,40 @@ pub fn config_dir(target: &Target) -> Result<PathBuf, String> {
 /// removal a delete rather than a merge-back).
 fn settings_rel(agent: &str) -> &'static str {
     match agent {
+        // grok reads every *.json under hooks/, so it gets a file of its own
+        // and removal is a delete rather than a merge-back.
         "grok" => "hooks/termic.json",
+        // Antigravity's LIVE path. `~/.gemini/antigravity-cli/hooks.json` also
+        // parses and logs "loaded 1 named hooks", and then executes nothing:
+        // their own changelog records that path as a bug they fixed because it
+        // was desynchronised from the backend. Measured; do not "simplify" this
+        // to the other one.
+        "agy" => "config/hooks.json",
         _ => "settings.json",
     }
 }
 
-/// The `command` string written INTO the config. For Docker this must be the
-/// path as the CONTAINER sees it, not the host path: the config dir is
-/// bind-mounted at `CONTAINER_HOME`, so a host path would not resolve inside
-/// the cage.
-pub fn command_path(target: &Target) -> Result<String, String> {
+/// Directory prefix every script of ours lives under, as the CONFIG should
+/// name it. Everything under this is ours, which is how removal identifies our
+/// entries without needing a marker key (Codex's schema rejects a whole file
+/// over one unknown key, and a path survives the user reformatting the config).
+///
+/// For Docker this must be the path as the CONTAINER sees it, not the host
+/// path: the config dir is bind-mounted at `CONTAINER_HOME`, so a host path
+/// would not resolve inside the cage.
+pub fn command_prefix(target: &Target) -> Result<String, String> {
     Ok(match target {
-        Target::Host(_) => config_dir(target)?
-            .join(SCRIPT_DIR)
-            .join(SCRIPT_NAME)
-            .to_string_lossy()
-            .into_owned(),
+        Target::Host(_) => format!(
+            "{}/",
+            config_dir(target)?.join(SCRIPT_DIR).to_string_lossy()
+        ),
         Target::Docker(agent_id) => format!(
-            "{}/{}/{}/{}",
+            "{}/{}/{}/",
             crate::docker::CONTAINER_HOME,
             state_dir(crate::docker::base_agent_id_str(agent_id))?,
-            SCRIPT_DIR,
-            SCRIPT_NAME
+            SCRIPT_DIR
         ),
     })
-}
-
-/// Everything under this prefix is ours. Used for removal matching.
-pub fn command_prefix(target: &Target) -> Result<String, String> {
-    let full = command_path(target)?;
-    Ok(full
-        .strip_suffix(SCRIPT_NAME)
-        .map(str::to_string)
-        .unwrap_or(full))
 }
 
 fn settings_path(target: &Target) -> Result<PathBuf, String> {
@@ -404,17 +511,12 @@ fn read_settings(path: &Path) -> Result<Value, String> {
 }
 
 pub fn status(target: &Target) -> HookStatus {
+    let agent = target.agent().to_string();
     let settings = settings_path(target);
     let script = script_dir(target);
     let (settings_path_s, script_dir_s) = (
-        settings
-            .as_ref()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        script
-            .as_ref()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default(),
+        settings.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+        script.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
     );
     let mut out = HookStatus {
         installed: false,
@@ -425,33 +527,33 @@ pub fn status(target: &Target) -> HookStatus {
         schema_version: None,
     };
     let (Ok(settings), Ok(script)) = (settings, script) else {
-        out.error = Some("could not resolve the claude config directory".into());
+        out.error = Some("could not resolve the agent config directory".into());
         return out;
     };
     let root = match read_settings(&settings) {
         Ok(v) => v,
-        Err(e) => {
-            out.error = Some(e);
-            return out;
-        }
+        Err(e) => { out.error = Some(e); return out; }
     };
     out.disabled_all = disable_all_hooks(&root);
-    let Ok(prefix) = command_prefix(target) else {
-        return out;
-    };
-    // Installed means the settings entry is present. A stray script directory
-    // without the entry is not an install; removal cleans both anyway.
-    out.installed = root
-        .get("hooks")
-        .and_then(|h| h.get(event_for(target.agent())))
-        .and_then(Value::as_array)
-        .is_some_and(|groups| {
-            groups.iter().any(|g| {
-                g.get("hooks")
+    let Ok(prefix) = command_prefix(target) else { return out };
+
+    out.installed = match schema_for(&agent) {
+        // Every registered event must be present, or a partial install would
+        // report as done and quietly miss a signal.
+        Schema::ClaudeCompatible => {
+            let hooks = hooks_for(&agent);
+            !hooks.is_empty() && hooks.iter().all(|(event, _)| {
+                root.get("hooks")
+                    .and_then(|h| h.get(*event))
                     .and_then(Value::as_array)
-                    .is_some_and(|l| l.iter().any(|e| is_ours(e, &prefix)))
+                    .is_some_and(|groups| groups.iter().any(|g| {
+                        g.get("hooks").and_then(Value::as_array)
+                            .is_some_and(|l| l.iter().any(|e| is_ours(e, &prefix)))
+                    }))
             })
-        });
+        }
+        Schema::AntigravityNamed => root.get(AGY_HOOK_NAME).is_some(),
+    };
     out.schema_version = std::fs::read_to_string(script.join(MANIFEST_NAME))
         .ok()
         .and_then(|s| serde_json::from_str::<Manifest>(&s).ok())
@@ -459,11 +561,25 @@ pub fn status(target: &Target) -> HookStatus {
     out
 }
 
+/// One script per (agent, signal). A bare absolute path with no arguments, so
+/// there is no quoting hazard inside JSON-inside-config on any agent.
+fn script_for(dir: &Path, sig: Signal) -> PathBuf {
+    dir.join(format!("{}.sh", sig.stem()))
+}
+
+/// Same, as the path the CONFIG should name. Docker needs the container view.
+fn command_for(target: &Target, sig: Signal) -> Result<String, String> {
+    Ok(format!("{}{}.sh", command_prefix(target)?, sig.stem()))
+}
+
 pub fn install(target: &Target) -> Result<(), String> {
+    let agent = target.agent().to_string();
+    let hooks = hooks_for(&agent);
+    if hooks.is_empty() {
+        return Err(format!("hooks are not supported for {agent} yet"));
+    }
     let settings = settings_path(target)?;
     let dir = script_dir(target)?;
-    let command = command_path(target)?;
-    let prefix = command_prefix(target)?;
 
     // Refuse rather than clobber a config we could not parse.
     let root = read_settings(&settings)?;
@@ -480,26 +596,40 @@ pub fn install(target: &Target) -> Result<(), String> {
     let backup = dir.join(BACKUP_NAME);
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     if !backup.exists() && settings.exists() {
-        std::fs::copy(&settings, &backup).map_err(|e| format!("back up settings.json: {e}"))?;
+        std::fs::copy(&settings, &backup).map_err(|e| format!("back up the config: {e}"))?;
     }
 
-    let script = dir.join(SCRIPT_NAME);
-    write_atomic(&script, script_body(target.agent()).as_bytes())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("chmod hook script: {e}"))?;
+    let mut commands: Vec<(&str, String)> = Vec::new();
+    for (event, sig) in hooks {
+        let script = script_for(&dir, *sig);
+        write_atomic(&script, script_body(&agent, *sig).as_bytes())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .map_err(|e| format!("chmod hook script: {e}"))?;
+        }
+        commands.push((event, command_for(target, *sig)?));
     }
 
-    let merged = merge(&root, &command, &prefix, event_for(target.agent()));
+    let prefix = command_prefix(target)?;
+    let merged = match schema_for(&agent) {
+        Schema::ClaudeCompatible => {
+            let mut acc = root;
+            for (event, command) in &commands {
+                acc = merge(&acc, command, &prefix, event);
+            }
+            acc
+        }
+        Schema::AntigravityNamed => agy_merge(&root, &commands),
+    };
     let mut bytes = serde_json::to_vec_pretty(&merged).map_err(|e| e.to_string())?;
     bytes.push(b'\n');
     write_atomic(&settings, &bytes)?;
 
     let manifest = Manifest {
         schema_version: SCHEMA_VERSION,
-        command,
+        command: commands.first().map(|(_, c)| c.clone()).unwrap_or_default(),
         installed_at: chrono::Utc::now().to_rfc3339(),
     };
     write_atomic(
@@ -511,12 +641,28 @@ pub fn install(target: &Target) -> Result<(), String> {
 }
 
 pub fn remove(target: &Target) -> Result<(), String> {
+    let agent = target.agent().to_string();
     let settings = settings_path(target)?;
     let dir = script_dir(target)?;
     let prefix = command_prefix(target)?;
 
     let root = read_settings(&settings)?;
-    if let Some(stripped) = unmerge(&root, &prefix, event_for(target.agent())) {
+    let stripped = match schema_for(&agent) {
+        Schema::ClaudeCompatible => {
+            let mut acc = root.clone();
+            let mut touched = false;
+            for (event, _) in hooks_for(&agent) {
+                if let Some(next) = unmerge(&acc, &prefix, event) {
+                    acc = next;
+                    touched = true;
+                }
+            }
+            if touched { Some(acc) } else { None }
+        }
+        Schema::AntigravityNamed => agy_unmerge(&root),
+    };
+
+    if let Some(stripped) = stripped {
         // If what remains matches the pre-install backup, restore the backup's
         // BYTES: that is the only way "removal leaves the file byte-identical"
         // survives our own pretty-printer reformatting the user's spacing.
@@ -533,10 +679,14 @@ pub fn remove(target: &Target) -> Result<(), String> {
             }
         }
     }
-    // Remove our directory whether or not the settings entry was there: a user
-    // who hand-deleted the entry still wants the scripts gone.
+    // Remove our directory whether or not the config entry was there: a user
+    // who hand-deleted the entry still wants the scripts gone. grok's config is
+    // a file we own outright, so that goes too.
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| format!("remove {}: {e}", dir.display()))?;
+    }
+    if settings_rel(&agent).starts_with("hooks/") && settings.exists() {
+        std::fs::remove_file(&settings).map_err(|e| format!("remove {}: {e}", settings.display()))?;
     }
     Ok(())
 }
@@ -547,7 +697,7 @@ pub fn remove(target: &Target) -> Result<(), String> {
 /// row can say "not supported yet" rather than offering a button that fails.
 /// Agents this build can wire. Each needs a measured event AND a transport
 /// that reaches termic; see `event_for` / `uses_terminal_sequence`.
-pub const SUPPORTED: &[&str] = &["claude", "grok"];
+pub const SUPPORTED: &[&str] = &["claude", "grok", "agy"];
 
 fn check_supported(agent_id: &str) -> Result<(), String> {
     if SUPPORTED.contains(&agent_id) {
@@ -609,7 +759,7 @@ mod tests {
     use super::*;
 
     const P: &str = "/home/u/.claude/termic-hooks/";
-    const C: &str = "/home/u/.claude/termic-hooks/permission-request.sh";
+    const C: &str = "/home/u/.claude/termic-hooks/attention.sh";
     /// The tests below all exercise the claude shape. grok's differs only in
     /// which event key it writes under, which `grok_writes_its_own_event` pins.
     const EVENT: &str = "PermissionRequest";
@@ -751,10 +901,10 @@ mod tests {
 
     #[test]
     fn docker_writes_the_container_path_not_the_host_path() {
-        let host = command_path(&Target::Host("claude".into())).unwrap();
-        let docker = command_path(&Target::Docker("claude".into())).unwrap();
+        let host = command_prefix(&Target::Host("claude".into())).unwrap();
+        let docker = command_prefix(&Target::Docker("claude".into())).unwrap();
         assert!(docker.starts_with(crate::docker::CONTAINER_HOME), "{docker}");
-        assert!(docker.ends_with(SCRIPT_NAME));
+        assert!(docker.ends_with("termic-hooks/"));
         assert_ne!(host, docker, "a host path would not resolve inside the cage");
         // The host FILE still lands in the termic-owned docker-agents dir.
         let dir = config_dir(&Target::Docker("claude".into())).unwrap();
@@ -768,14 +918,14 @@ mod tests {
         assert_ne!(a, b, "clones keep their own login state");
         // ...but both write claude's container path, because the SHAPE is claude's.
         assert_eq!(
-            command_path(&Target::Docker("claude".into())).unwrap(),
-            command_path(&Target::Docker("claude-review".into())).unwrap()
+            command_prefix(&Target::Docker("claude".into())).unwrap(),
+            command_prefix(&Target::Docker("claude-review".into())).unwrap()
         );
     }
 
     #[test]
     fn the_script_gates_on_both_env_vars_and_always_exits_zero() {
-        let s = script_body("claude");
+        let s = script_body("claude", Signal::Attention);
         assert!(s.starts_with("#!/bin/sh\n"));
         assert!(s.contains(r#"[ -n "$TERMIC_TASK_ID" ] || exit 0"#));
         assert!(s.contains(r#"[ -z "$GROK_HOOK_EVENT" ] || exit 0"#));
@@ -797,8 +947,8 @@ mod tests {
     fn grok_writes_its_own_event_and_its_own_file() {
         // grok has NO PermissionRequest. Its attention edge is Notification
         // with notificationType=permission_prompt, measured.
-        assert_eq!(event_for("grok"), "Notification");
-        assert_eq!(event_for("claude"), "PermissionRequest");
+        assert_eq!(hooks_for("grok"), &[("Notification", Signal::Attention)]);
+        assert_eq!(hooks_for("claude"), &[("PermissionRequest", Signal::Attention)]);
         // grok scans every *.json under hooks/, so it gets a file of its own:
         // removal is then a delete rather than a merge-back into a file the
         // user also owns.
@@ -810,12 +960,12 @@ mod tests {
     fn grok_writes_to_the_pty_because_it_has_no_terminal_sequence() {
         assert!(uses_terminal_sequence("claude"));
         assert!(!uses_terminal_sequence("grok"));
-        let g = script_body("grok");
+        let g = script_body("grok", Signal::Attention);
         assert!(g.contains("$TERMIC_PTY"), "grok must write to the injected pty");
         assert!(!g.contains("terminalSequence"), "grok's runtime ignores that field");
         // /dev/tty is NOT a fallback: hooks run with no controlling terminal.
         assert!(!g.contains("/dev/tty"));
-        let c = script_body("claude");
+        let c = script_body("claude", Signal::Attention);
         assert!(c.contains("terminalSequence"));
         assert!(!c.contains("$TERMIC_PTY"));
     }
@@ -825,25 +975,80 @@ mod tests {
         // grok reads ~/.claude/settings.json too, so claude's script must stay
         // silent when grok is the caller or a claude install silently rewires
         // grok. grok's own script wants exactly the opposite test.
-        assert!(script_body("claude").contains(r#"[ -z "$GROK_HOOK_EVENT" ] || exit 0"#));
-        assert!(script_body("grok").contains(r#"[ -n "$GROK_HOOK_EVENT" ] || exit 0"#));
+        assert!(script_body("claude", Signal::Attention).contains(r#"[ -z "$GROK_HOOK_EVENT" ] || exit 0"#));
+        assert!(script_body("grok", Signal::Attention).contains(r#"[ -n "$GROK_HOOK_EVENT" ] || exit 0"#));
         // Both still refuse to speak outside a termic PTY.
         for a in ["claude", "grok"] {
-            assert!(script_body(a).contains(r#"[ -n "$TERMIC_TASK_ID" ] || exit 0"#));
-            assert!(script_body(a).trim_end().ends_with("exit 0"));
-            assert!(!script_body(a).contains('\u{1b}'), "no raw ESC in {a}'s script");
+            assert!(script_body(a, Signal::Attention).contains(r#"[ -n "$TERMIC_TASK_ID" ] || exit 0"#));
+            assert!(script_body(a, Signal::Attention).trim_end().ends_with("exit 0"));
+            assert!(!script_body(a, Signal::Attention).contains('\u{1b}'), "no raw ESC in {a}'s script");
         }
     }
 
     #[test]
     fn every_supported_agent_has_an_event_and_a_state_dir() {
         for a in SUPPORTED {
-            assert!(!event_for(a).is_empty());
+            assert!(!hooks_for(a).is_empty(), "{a} is listed as supported but has no events");
             assert!(state_dir(a).is_ok(), "{a} has no state dir, so nowhere to install");
             // Install targets must be global or termic-owned, never a repo.
             let host = config_dir(&Target::Host((*a).into())).unwrap();
             assert!(!host.to_string_lossy().contains("worktree"), "{a}: {host:?}");
         }
+    }
+
+    // ── Antigravity ─────────────────────────────────────────────────
+    // Its config is a different SHAPE, not a variation on claude's, and the
+    // heterogeneity below is the thing that silently produced empty commands.
+
+    #[test]
+    fn agy_reports_done_and_working_because_it_has_no_attention_event() {
+        let h = hooks_for("agy");
+        assert_eq!(h, &[("PreInvocation", Signal::Working), ("Stop", Signal::Done)]);
+        // Working is not optional here: `goIdle(reason, 0)` is ignored unless
+        // we were working, so Done alone would never fire.
+        assert!(h.iter().any(|(_, s)| *s == Signal::Working));
+    }
+
+    #[test]
+    fn agy_wraps_tool_events_but_not_the_others() {
+        let cmds = vec![
+            ("PreInvocation", "/h/pre.sh".to_string()),
+            ("Stop", "/h/stop.sh".to_string()),
+            ("PreToolUse", "/h/tool.sh".to_string()),
+        ];
+        let out = agy_merge(&serde_json::json!({}), &cmds);
+        let e = &out[AGY_HOOK_NAME];
+        assert_eq!(e["enabled"], true);
+        // Matcher-less events take handlers DIRECTLY. Wrapping them registers
+        // an EMPTY command: visible in `agy -p "/hooks"`, and it fires nothing.
+        assert_eq!(e["Stop"][0]["command"], "/h/stop.sh");
+        assert_eq!(e["PreInvocation"][0]["command"], "/h/pre.sh");
+        assert!(e["Stop"][0].get("hooks").is_none(), "Stop must NOT be wrapped");
+        // Tool events do take the matcher group.
+        assert_eq!(e["PreToolUse"][0]["hooks"][0]["command"], "/h/tool.sh");
+        assert_eq!(e["PreToolUse"][0]["matcher"], "*");
+    }
+
+    #[test]
+    fn agy_removal_is_a_delete_of_one_named_key() {
+        let before = serde_json::json!({ "someone-elses-hook": { "enabled": true } });
+        let after = agy_merge(&before, &[("Stop", "/h/stop.sh".to_string())]);
+        assert!(after.get(AGY_HOOK_NAME).is_some());
+        let back = agy_unmerge(&after).expect("ours to remove");
+        assert_eq!(back, before, "another author's hook survives untouched");
+        assert!(agy_unmerge(&before).is_none(), "nothing of ours, nothing to do");
+    }
+
+    #[test]
+    fn agy_and_grok_both_write_to_the_pty_with_their_own_sequences() {
+        let done = script_body("agy", Signal::Done);
+        assert!(done.contains("$TERMIC_PTY"));
+        assert!(done.contains("133;D"), "hard done, no settle wait");
+        let working = script_body("agy", Signal::Working);
+        assert!(working.contains("133;C"));
+        // agy is not grok and must not carry grok's provenance gate.
+        assert!(!done.contains("GROK_HOOK_EVENT"));
+        assert!(done.contains(r#"[ -n "$TERMIC_TASK_ID" ] || exit 0"#));
     }
 
     #[test]

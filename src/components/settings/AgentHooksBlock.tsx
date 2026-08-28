@@ -23,7 +23,6 @@ import type { AgentHookStatus } from "@/lib/types";
  *  mistake the competing implementation makes in the other direction. */
 const UNSUPPORTED_REASON: Record<string, string> = {
   codex: "not needed, its terminal already reports this",
-  agy: "not supported yet",
   gemini: "not supported yet",
   copilot: "not supported yet",
   opencode: "not supported yet",
