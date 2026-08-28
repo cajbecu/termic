@@ -31,11 +31,12 @@ import { loadTerminalRenderer, awaitTerminalFonts } from "@/lib/terminalRenderer
 import { resyncViewportAfterReveal } from "@/lib/xtermViewportSync";
 import { IS_MAC, bindingMatches, type ShortcutId } from "@/lib/shortcuts";
 import { registerTerminalDropTarget } from "@/lib/terminalDrop";
+import { imageFromClipboard, pastePathText } from "@/lib/clipboardImage";
 import { setupImeReplacementBridge } from "@/lib/ime";
 import { deliverMessage, sendMessageToPty } from "@/lib/agentSend";
 import { failCliQueuedPrompts, reportCliPromptDelivery } from "@/lib/cliPromptReports";
 import type { TerminalTab, Task, SandboxMode } from "@/lib/types";
-import { effectiveSandboxMode, isSandboxEnforced, isTaskCaged } from "@/lib/types";
+import { effectiveSandboxMode, isTaskCaged } from "@/lib/types";
 import { SandboxIcon, SANDBOX_VISUALS, DockerSandboxIcon } from "@/components/SandboxIcon";
 import { TerminalExitedBanner } from "@/components/task/TerminalExitedBanner";
 import * as ipc from "@/lib/ipc";
@@ -780,12 +781,69 @@ const captureArmedRef = useRef(false);
       taskId: task.id,
       // Caged tabs are the task's primary process (agents + custom-
       // command tasks); plain shells and registry "custom terminal"
-      // entries are always uncaged (see the spawn gating). Only ENFORCING
-      // denies reads (MONITORING just logs), so stage drops only for a caged
-      // tab. A dropped path is otherwise readable directly.
-      sandboxed: () => isSandboxEnforced(effectiveSandboxMode(task))
+      // entries are always uncaged (see the spawn gating). A dropped path is
+      // otherwise readable directly.
+      //
+      // `isTaskCaged`, not `isSandboxEnforced`: a DOCKER task cannot read
+      // `~/Desktop/shot.png` either (nothing outside the mounts exists in
+      // there), and it used to get the raw path inserted anyway - the file
+      // looked present and every read failed. Only Seatbelt ENFORCING denies
+      // reads (MONITORING just logs), and `isTaskCaged` already folds both
+      // engines' answers together.
+      sandboxed: () => isTaskCaged(task)
         && tab.cli !== "shell" && !isTerminalCli(tab.cli),
     });
+
+    // Image paste, DOCKER TASKS ONLY.
+    //
+    // Everywhere else this must not fire at all. Outside a container the
+    // agent reads the Mac clipboard ITSELF (claude shells out to `osascript
+    // -e 'the clipboard as «class PNGf»'`) and gets the real bytes with no
+    // help, so intercepting would be a downgrade: the user would get a file
+    // path where they used to get an image. Inside a container it cannot:
+    // the agent is a Linux process whose clipboard path shells out to
+    // xclip / wl-paste, with no route to the Mac's pasteboard, so ⌘V with a
+    // screenshot silently did nothing at all.
+    //
+    // What we send is the file's path, and it goes through `term.paste()`
+    // rather than a raw `ptyWrite` - which is the difference between working
+    // and not. Measured against claude's own TUI: typed, the path is echoed
+    // as literal text; sent as a PASTE (xterm wraps it in the bracketed
+    // paste markers `\x1b[200~`/`\x1b[201~` when the app has that mode on),
+    // claude runs its pasted-image-path branch, READS the file and renders
+    // `[Image #1]` - the same attachment a native paste produces. So the
+    // agent ends up with the actual image, not a path to talk about.
+    //
+    // Capture phase, because xterm's own paste handler sits on the textarea
+    // underneath and would otherwise consume the event first. Text pastes
+    // fall straight through (`imageFromClipboard` returns null), so the
+    // common path is untouched.
+    const onPaste = (e: ClipboardEvent) => {
+      // Live read, not the captured `task`: toggling Docker restarts the PTY
+      // but does not necessarily re-run this effect, and a stale answer here
+      // would either break a native paste or silently drop a caged one.
+      const live = useApp.getState().tasks.find(t => t.id === task.id);
+      if (!live?.docker_sandbox_enabled) return;
+      const file = imageFromClipboard(e.clipboardData);
+      if (!file) return;
+      e.preventDefault();
+      e.stopPropagation();
+      file.arrayBuffer()
+        .then(buf => ipc.clipboardImageSave(new Uint8Array(buf)))
+        .then(path => {
+          // Still Docker, and still a live PTY: this lands an IPC round trip
+          // after the gesture, and either could have changed in between.
+          const now = useApp.getState().tasks.find(t => t.id === task.id);
+          if (!now?.docker_sandbox_enabled || !ptyRef.current) return;
+          term.paste(pastePathText(path));
+        })
+        .catch(err => {
+          // Silence here would read as "paste is broken": the image is gone
+          // from the prompt either way, so say why.
+          useUI.getState().pushToast(`Could not paste that image: ${String(err)}`, "error");
+        });
+    };
+    host.addEventListener("paste", onPaste, true);
 
     // Shift+Enter → newline-without-submit.
     //
@@ -844,6 +902,42 @@ const captureArmedRef = useRef(false);
         e.stopPropagation();
         return false;
       }
+      // ctrl+V inside a DOCKER task: attach the clipboard image, the way the
+      // agent would if it could reach the pasteboard.
+      //
+      // On macOS this is not a paste event at all - it is byte 0x16 going
+      // down the PTY, and it is the gesture claude binds its own
+      // "attach the clipboard image" action to. Inside a container that
+      // action always fails ("no image in clipboard"): the agent is a Linux
+      // process asking xclip about a pasteboard that is not there. So termic
+      // reads the pasteboard natively (`clipboard_image_capture`, no webview
+      // permission and no user gesture needed) and pastes the saved path,
+      // which claude turns into a real `[Image #N]` attachment.
+      //
+      // Swallow FIRST, decide after: the handler has to answer synchronously
+      // and the read is async. If there is no image, the original 0x16 is
+      // forwarded verbatim, so a ctrl+V with text on the clipboard reaches
+      // the agent exactly as it does today. Outside Docker this whole branch
+      // is skipped and ctrl+V is never touched - there the agent reads the
+      // Mac clipboard itself and gets the real image unaided.
+      if (
+        e.type === "keydown" && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey
+        && (e.key === "v" || e.key === "V")
+        && useApp.getState().tasks.find(t => t.id === task.id)?.docker_sandbox_enabled
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        ipc.clipboardImageCapture()
+          .then(path => { term.paste(pastePathText(path)); })
+          .catch(() => {
+            // No image on the clipboard (or the read failed): hand the agent
+            // the keystroke it was going to get anyway and let it answer.
+            const pid = ptyRef.current;
+            if (pid) ipc.ptyWrite(pid, [0x16]).catch(() => {});
+          });
+        return false;
+      }
+
       // Linux/Windows terminal copy/paste. macOS keeps native ⌘C / ⌘V (this
       // whole block is skipped), so standard Mac behavior is untouched. Defaults
       // are Ctrl+Shift+C / Ctrl+Shift+V — the Shift keeps plain Ctrl+C as SIGINT
@@ -1266,8 +1360,18 @@ const captureArmedRef = useRef(false);
       // beating our 4 s/6 s heuristic thresholds.
       if (state) senderStateRef.current = state;
       if (state === "idle") {
-        if (lastTitleState === "busy" || lastTitleState === "attention") {
+        // Same submit gate as the busy branch below, and for the same reason.
+        // Codex paints its Braille spinner during startup, then settles on a
+        // wordless idle title; without this gate that startup busy→idle pair
+        // fires a settle on a tab the user has never typed into, and 5s later
+        // a fresh Codex tab shows a "done" badge for a turn that never
+        // happened. `lastTitleState` is recorded even when the busy branch is
+        // suppressed, so gating only the busy side is not enough.
+        if (submittedSinceSpawnRef.current
+            && (lastTitleState === "busy" || lastTitleState === "attention")) {
           goIdle(`title busy→idle`);
+        } else if (!submittedSinceSpawnRef.current) {
+          wdlog(`title idle suppressed (no submit since spawn)`);
         }
       } else if (state === "attention") {
         goAttention(`title attention`);
@@ -2087,6 +2191,7 @@ const captureArmedRef = useRef(false);
       disposeLinkOpener();
       disposePathLinks.dispose();
       unregisterDrop();
+      host.removeEventListener("paste", onPaste, true);
       disposeImeBridge();
       unlistenDataRef.current?.();
       unlistenExitRef.current?.();

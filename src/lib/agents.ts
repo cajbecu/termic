@@ -306,8 +306,24 @@ export const BUILTIN_TITLE_SIGNALS: Record<string, Required<SignalPatterns>> = {
   },
   codex: {
     attention: ["\\b(Waiting|Action Required)\\b"],
-    busy: ["\\b(Working|Thinking)\\b", "^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]"],
-    idle: ["\\bReady\\b"],
+    // Braille frames as a RANGE, not the ten-frame list this used to spell out:
+    // a spinner alphabet is not a stable contract, and a missed busy is the
+    // worse failure (it ends the turn early). Same reasoning as claude's
+    // catch-all busy pattern above.
+    busy: ["\\b(Working|Thinking)\\b", "^\\s*[\\u2800-\\u28FF]"],
+    // `Ready` is kept for older Codex builds that put a status WORD in the
+    // title. Codex 0.142.5 does not: measured, its title is exactly the cwd
+    // basename when idle ("proj") and a spinner frame plus the basename when
+    // working ("⠋ proj"). With `Ready` as the only idle pattern nothing ever
+    // classified as idle, and because `classifyAgentTitle` returning null
+    // leaves TerminalPane's `senderStateRef` untouched, one spinner frame
+    // latched it to "busy" for the rest of the PTY session. Every demoter
+    // (byte-quiet, scrollback-stable, the 90s hard ceiling) is gated on
+    // `!senderBusy`, so a Codex tab went to "working" on its first turn and
+    // could never come back. The second pattern is the general form: a title
+    // whose first non-space character is not a spinner frame is idle. Busy is
+    // evaluated first, so this cannot steal a spinner title.
+    idle: ["\\bReady\\b", "^\\s*[^\\s\\u2800-\\u28FF]"],
     pending: [],
   },
 };

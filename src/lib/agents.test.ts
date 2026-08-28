@@ -562,6 +562,32 @@ describe("classifyAgentTitle", () => {
     expect(classifyAgentTitle("claude", "✳ Ready", [])).toBe("idle");
   });
 
+  // Codex 0.142.5 puts NO status word in its title: it is the cwd basename,
+  // with a Braille spinner frame prepended while working. Measured off a real
+  // PTY capture (scratchpad/agent-hooks-measurements.md). The old built-in only
+  // had `\bReady\b` for idle, so the idle title classified as null; null does
+  // not update TerminalPane's `senderStateRef`, so one spinner frame latched it
+  // to "busy" for the whole PTY session and every demoter (byte-quiet,
+  // scrollback-stable, the 90s ceiling) is gated on `!senderBusy`. A Codex tab
+  // went "working" on its first turn and never came back.
+  it("classifies codex's wordless idle title as idle, not null", () => {
+    expect(classifyAgentTitle("codex", "proj", [])).toBe("idle");
+    expect(classifyAgentTitle("codex", "some-worktree-name", [])).toBe("idle");
+    // The exact ten frames observed in the capture, plus the wider Braille
+    // block the pattern now covers so a new frame cannot read as idle.
+    for (const f of ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "⠿", "⢿"]) {
+      expect(classifyAgentTitle("codex", `${f} proj`, [])).toBe("busy");
+    }
+    // Older builds that DO carry a status word keep working.
+    expect(classifyAgentTitle("codex", "Ready", [])).toBe("idle");
+    expect(classifyAgentTitle("codex", "Working", [])).toBe("busy");
+    expect(classifyAgentTitle("codex", "Waiting", [])).toBe("attention");
+    // Precedence: attention and busy still outrank the new catch-all idle.
+    expect(classifyAgentTitle("codex", "Action Required", [])).toBe("attention");
+    expect(classifyAgentTitle("codex", "Thinking about proj", [])).toBe("busy");
+    expect(classifyAgentTitle("codex", "   ", [])).toBe(null);
+  });
+
   // Per-field fallback. Setting one field used to replace the WHOLE built-in
   // set, which is a quiet footgun: narrowing claude's busy pattern also deleted
   // its `^\s*✳` idle pattern, and because goIdle only fires on a busy→idle
