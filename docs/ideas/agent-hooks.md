@@ -310,6 +310,47 @@ paint the idle glyph while blocked. That is the claim to make, and it is narrowe
 than "hooks tell us when the agent needs you". opencode is the only agent
 measured that reports both the block and its release outright.
 
+## Grok: unmeasured, but it reads Claude's config
+
+`grok` is not installed on the machine the rest of this doc was measured on, so
+none of the following is verified. It is recorded because one line of its
+documentation bears directly on the Claude-only v1, whether or not termic ever
+supports Grok.
+
+Per [the xAI docs](https://docs.x.ai/build/features/hooks), Grok's hook config
+lives at `~/.grok/hooks/*.json` and `<project>/.grok/hooks/*.json`, and it
+**also reads `.claude/settings.json` and `.cursor/hooks.json`**.
+
+That is a hazard for us, not a feature. If it includes the GLOBAL
+`~/.claude/settings.json` (the doc writes the path without a `~/`, so this is
+genuinely ambiguous and is the thing to measure first), then installing hooks for
+Claude silently installs them for Grok too, on every machine where both are
+present. Consequences, in order of how much they would hurt:
+
+- Our callback would be invoked by an agent whose payload is **camelCase**
+  (`hookEventName`, `sessionId`, `cwd`, `workspaceRoot`, `toolName`,
+  `toolInput`), not Claude's snake_case. A normaliser written against Claude
+  alone reads every field as undefined.
+- Our Claude transport is `terminalSequence`, a Claude-specific output key.
+  Grok's documented output contract is `{"decision": ..., "reason": ...}` with
+  exit 0 allow / exit 2 deny. An unrecognised key is *probably* ignored, but
+  "probably" is doing a lot of work in a path that can block a tool call.
+- The user consented to termic writing Claude's config. They did not consent to
+  it changing Grok's behaviour, and the Settings pane would not list Grok as
+  installed.
+
+The clean discriminator already exists: Grok exports `GROK_HOOK_EVENT`,
+`GROK_HOOK_NAME`, `GROK_SESSION_ID` and `GROK_WORKSPACE_ROOT` into the hook
+process. A callback should check for those and bail rather than assume it was
+called by Claude. That check is cheap and should go in from the start, before
+anyone confirms whether the global file is read.
+
+Two further notes if Grok is ever measured properly. It has **no
+`PermissionRequest`**, only `PermissionDenied` and `Notification`, so its
+attention edge would rest on `Notification`, which on Claude we measured as a
+6.0s-late nudge rather than an edge. And `PreToolUse` is documented as "the only
+blocking event", which is a safer contract than Antigravity's.
+
 ## Interrupts: why OSC stays authoritative
 
 Escape during an active turn produced **no `Stop`** on either agent. Claude's
@@ -407,8 +448,9 @@ Copy rule: no em dashes.
    problem, and the only agent that reports `permission.replied`, so it is where
    the attention state can be made exactly right rather than approximately.
 4. Codex: **not planned.** See "Decision: Codex is out of scope" above.
-5. Antigravity is measured and currently unusable (above). Gemini, Copilot,
-   Cursor and Grok remain entirely unmeasured; the old vendor-doc table was wrong
+5. Antigravity is measured and currently unusable (above). Grok is unmeasured
+   but carries a hazard the Claude work must handle from day one (above).
+   Gemini, Copilot and Cursor remain entirely unmeasured; the old vendor-doc table was wrong
    often enough for the four agents that WERE measured that it should not be
    trusted for any of them.
 
@@ -424,7 +466,10 @@ Copy rule: no em dashes.
   request resolves, is probably needed.
 - Why `agy` loads a hook config it never invokes, and whether a newer build or
   the Antigravity IDE runs them.
-- Gemini, Copilot, Cursor and Grok: entirely unmeasured.
+- Whether Grok reads the GLOBAL `~/.claude/settings.json` or only a project-local
+  `.claude/settings.json`. This decides whether a Claude install silently becomes
+  a Grok install. Needs `grok` on a machine to answer.
+- Gemini, Copilot and Cursor: entirely unmeasured.
 - opencode's `session.error`, `session.compacted` and `session.status`, and
   whether an in-process plugin can hold one open connection rather than paying a
   spawn per event.
