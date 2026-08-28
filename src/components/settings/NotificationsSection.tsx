@@ -10,6 +10,7 @@ import { Block, SectionTitle, Toggle } from "./Controls";
 import { cn } from "@/lib/utils";
 import { taskLabel } from "@/lib/taskLabel";
 import { COMPLETION_SOUND_OPTIONS, COMPLETION_SOUND_SUPPORTED } from "@/lib/notificationSounds";
+import { AgentHooksBlock } from "./AgentHooksBlock";
 
 export function NotificationsSection() {
   const desktopNotifications = usePrefs(s => s.desktopNotifications);
@@ -118,6 +119,7 @@ export function NotificationsSection() {
           onChange={setWorkingIndicator}
         />
       </Block>
+      <AgentHooksBlock />
     </div>
   );
 }

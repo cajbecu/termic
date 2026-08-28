@@ -1450,3 +1450,30 @@ export interface RepoConfig {
    *  Every new task gets a unique port per name, frozen at create. */
   extra_named_ports: string[];
 }
+
+/** One install target's state. `settings_path` / `script_dir` are shown in the
+ *  UI BEFORE writing, so a user always knows what is about to change. */
+export interface HookTargetStatus {
+  installed: boolean;
+  settings_path: string;
+  script_dir: string;
+  /** The user set `disableAllHooks`, so an install would never fire. Say so
+   *  rather than reporting success. */
+  disabled_all: boolean;
+  /** Config unreadable or malformed. Install is refused rather than clobbering
+   *  a file we could not parse. */
+  error: string | null;
+  schema_version: number | null;
+}
+
+/** Per-agent hook state. One toggle governs both targets (see
+ *  docs/plans/agent-hooks.md): a user who declines for an agent must not find
+ *  hooks installed for that agent inside Docker. */
+export interface AgentHookStatus {
+  agent_id: string;
+  /** False for agents this build cannot wire yet. The row says "not supported
+   *  yet" instead of offering a button that fails. */
+  supported: boolean;
+  host: HookTargetStatus;
+  docker: HookTargetStatus;
+}

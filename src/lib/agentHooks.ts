@@ -1,0 +1,61 @@
+// The OSC sequence termic's agent hook writes, and the pieces needed to reason
+// about it on this side of the PTY.
+//
+// The hook itself is generated in Rust (`src-tauri/src/agent_hooks.rs`), which
+// is where the file actually gets written. This module exists because the BODY
+// text is load-bearing on the TypeScript side too: it has to survive
+// `notificationWantsAttention`, and if it ever starts matching
+// `BUILTIN_NOTIFY_IGNORE.claude` the whole feature dies silently, with the hook
+// firing correctly and termic dropping it on the floor.
+//
+// KEEP IN SYNC with `agent_hooks::script_body()`. Both sides pin the literal in
+// their own test, because a string cannot be shared across the language
+// boundary; `agentHooks.test.ts` and the Rust
+// `the_script_gates_on_both_env_vars_and_always_exits_zero` are the two halves.
+
+/** OSC 777's `notify` title field. Identifies the sender, not the message. */
+export const HOOK_OSC_TITLE = "termic";
+
+/** The body `TerminalPane`'s OSC 777 handler ends up passing to
+ *  `notificationWantsAttention`. Deliberately does NOT contain "is waiting for
+ *  your input", which is claude's ignore pattern for its own 60s idle nudge. */
+export const HOOK_OSC_BODY = "agent needs your input";
+
+/** The OSC payload without its introducer or terminator: what you would put
+ *  between `ESC ]` and `BEL`. Control characters are never written as raw bytes
+ *  in this file, only as escapes, so the source stays greppable and a stray
+ *  literal cannot creep in unnoticed (it already did once). */
+export function hookOscPayload(body: string = HOOK_OSC_BODY): string {
+  return `777;notify;${HOOK_OSC_TITLE};${body}`;
+}
+
+/** What xterm hands the OSC 777 handler: the payload minus the leading `777;`,
+ *  since the parser strips the id before dispatching. */
+export function hookOscHandlerData(body: string = HOOK_OSC_BODY): string {
+  return hookOscPayload(body).slice("777;".length);
+}
+
+/** The full sequence the hook emits, ESC and BEL included. Used by tests and
+ *  the e2e spec to feed a PTY exactly what claude would write. */
+export function hookOscSequence(body: string = HOOK_OSC_BODY): string {
+  return `\x1b]${hookOscPayload(body)}\x07`;
+}
+
+/** Parse an OSC 777 payload the way `TerminalPane`'s handler does, so a test can
+ *  assert the end-to-end chain rather than just the constant. `data` is
+ *  everything after the `777;` introducer, which is what xterm hands the
+ *  handler.
+ *
+ *  Returns null for anything that is not a `notify`, matching the handler's own
+ *  early return. */
+export function parseNotifyBody(data: string): string | null {
+  const parts = data.split(";");
+  if (parts[0] !== "notify") return null;
+  return parts.slice(2).join(";") || parts[1] || "";
+}
+
+/** OSC ids claude's hook runtime will actually write for us. Quoted from the
+ *  binary: "only OSC 0/1/2/9/99/777 and BEL are permitted, and OSC 9 bodies may
+ *  not begin with a digit unless in the 9;4 progress form". Anything outside
+ *  this is dropped with no error, so a future change of channel has to check. */
+export const CLAUDE_TERMINAL_SEQUENCE_ALLOWLIST = [0, 1, 2, 9, 99, 777] as const;

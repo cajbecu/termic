@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
+pub mod agent_hooks;
 mod sandbox;
 mod proxy;
 mod repo_config;
@@ -18100,6 +18101,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            agent_hooks::agent_hooks_status,
+            agent_hooks::agent_hooks_install,
+            agent_hooks::agent_hooks_remove,
             perf_boot_elapsed_ms,
             deep_link_take_pending,
             projects_list, project_add, project_add_multi, project_set_members, project_update, project_remove, project_reorder, project_set_group,
