@@ -37,7 +37,7 @@ The previous draft was wrong on five points that mattered:
 The doc's two settled constraints survived and are now evidence-backed: OSC stays
 authoritative, and hook-derived state must not latch.
 
-## The headline result: the two agents fail in opposite directions
+## The headline result: every agent fails differently
 
 This is the finding the whole design turns on, and neither vendor doc implies it.
 
@@ -74,7 +74,7 @@ spread, and the spread, not the event tables, is what should drive the plan:
 | agent | attention signal today | what hooks add |
 |---|---|---|
 | Claude | title LIES (paints idle), OSC 9 notify 6.0s late | the whole thing |
-| Codex | title says `Action Required`, +22ms | ~10ms and a `tool_name` |
+| Codex | title says `Action Required`, +22ms | nothing it does not already have (see below) |
 | opencode | nothing at all (static title) | the whole thing, cleanest API, and the only `attention cleared` edge |
 | Antigravity | nothing at all (no OSC whatsoever) | nothing: it loads hooks and never runs them |
 
@@ -139,7 +139,10 @@ we did not run (compaction, rate limit); do not assume they are dead.
 | `PostToolUse` | - | `duration_ms` (undocumented) |
 | `Stop` | - | `background_tasks`, `session_crons`, `effort`, `permission_mode` |
 
-## Codex 0.142.5
+## Codex 0.142.5 (measured, then dropped)
+
+Kept for reference only; see the decision below.
+
 
 | termic edge | event | measured |
 |---|---|---|
@@ -267,6 +270,46 @@ Being in-process is also an opportunity the spawned agents do not have: the
 plugin can hold one open connection rather than paying a process spawn per
 event.
 
+## Decision: Codex is out of scope
+
+Dropped on the evidence, not to save effort. Three measurements, and the
+third is the one that settles it.
+
+**Tool-mediated blocks are already covered.** Codex sets
+`[ ! ] Action Required | proj` 22ms after blocking, which
+`BUILTIN_TITLE_SIGNALS.codex` already matches. `PermissionRequest` beats it by
+10ms and adds a `tool_name` nobody has asked for.
+
+**Prose questions are covered by nothing, including hooks.** Asked to pose a
+clarifying question and stop, Codex's title goes to the bare idle form and stays
+there. No `Action Required`, and no hook can rescue it: Codex has no ask-tool, so
+no `PermissionRequest` fires, and its `Stop` carries `last_assistant_message` and
+`stop_hook_active` with nothing marking the message as a question. Installing
+hooks would not close the one gap Codex still has.
+
+**The install cost is the highest of any agent.** A blocking trust modal keyed on
+a hash of the hook definition, so every revision re-prompts every user; visible
+`• Running SessionStart hook` noise in the TUI on every turn; and a schema strict
+enough that one unknown key rejects the whole file.
+
+So Codex is the only agent measured where hooks cost the most and close nothing.
+Its work-state detection is a title-pattern problem, and that problem is fixed
+(`lib/agents.ts`, `docs/gotchas.md`).
+
+### The gap hooks do not close, on any agent
+
+Claude behaves identically in the prose case: asked to ask a question and stop, it
+fired `Stop` alone, painted its idle glyph, and produced no `PermissionRequest`
+and no `Notification` for the 20 seconds that followed. The only handle is that
+`last_assistant_message` happens to end in a question mark, which is a heuristic,
+not a protocol.
+
+What hooks fix for Claude is the **tool-mediated** case, which is genuinely broken
+today: `AskUserQuestion`, `ExitPlanMode` and ordinary permission prompts all
+paint the idle glyph while blocked. That is the claim to make, and it is narrower
+than "hooks tell us when the agent needs you". opencode is the only agent
+measured that reports both the block and its release outright.
+
 ## Interrupts: why OSC stays authoritative
 
 Escape during an active turn produced **no `Stop`** on either agent. Claude's
@@ -337,12 +380,17 @@ Off by default, one toggle, explicit uninstall, files listed before writing, not
 after. Per-agent state shown the way Settings → Coding Agents already lists
 detected CLIs.
 
-The wizard step the maintainer wants must say the Codex part out loud: a Codex
-trust prompt is coming, inside Codex, and until the user clears it the hooks do
-nothing. Xirp's step promises "hooks wired up" for Claude, Codex and Gemini with
-no such caveat, which cannot be true for Codex. Being honest about it is the
-differentiator, along with being opt-in, merging rather than clobbering, and
-uninstalling cleanly.
+The wizard step lists only the agents it can actually deliver, which after the
+measurement is Claude and opencode. Xirp's equivalent step promises "hooks wired
+up" for Claude, Codex and Gemini; for Codex that cannot be true without the user
+clearing a trust modal inside Codex first, and Codex gains nothing from hooks
+anyway. Listing an agent we did not wire, or wired ineffectively, is the failure
+mode to avoid here.
+
+Say what is being installed and where, before writing rather than after, and
+show per-agent state the way Settings → Coding Agents already lists detected
+CLIs. An agent that is installed but detected as unsupported (Antigravity today)
+should say so rather than appear wired.
 
 Copy rule: no em dashes.
 
@@ -358,8 +406,7 @@ Copy rule: no em dashes.
 3. **opencode**, via its plugin API. Second-largest gain, no config-file merge
    problem, and the only agent that reports `permission.replied`, so it is where
    the attention state can be made exactly right rather than approximately.
-4. Codex last, not second, and only with the trust modal surfaced honestly. It
-   gains the least and costs the most to install.
+4. Codex: **not planned.** See "Decision: Codex is out of scope" above.
 5. Antigravity is measured and currently unusable (above). Gemini, Copilot,
    Cursor and Grok remain entirely unmeasured; the old vendor-doc table was wrong
    often enough for the four agents that WERE measured that it should not be
