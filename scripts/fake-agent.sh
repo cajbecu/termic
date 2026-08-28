@@ -65,6 +65,7 @@ set_title "✳ ${name}"
 #   #osc9 TEXT  emit an OSC 9 notification with a verbatim body, the way claude
 #               asks for the user. BEL-terminated, as claude sends it.
 #   #bel        emit a REAL bell, distinct from the BEL that terminates an OSC.
+#   #iip        emit an inline PNG, then Pi's alternate-screen redraw.
 osc9()   { printf '\033]9;%s\007' "$1"; }
 spin()   { for f in 0 1 2; do set_title "${SPINNER[$f]} ${name}"; sleep 0.15; done; }
 
@@ -110,6 +111,29 @@ while IFS= read -r line; do
       continue ;;
     "#bel")
       printf '\007'
+      continue ;;
+    "#iip")
+      # Match Pi's IIP redraw: clear the screen, reserve image rows, emit the
+      # image from the last reserved row, then repeat after a layout shift.
+      rows=$(stty size <&0 2>/dev/null | cut -d' ' -f1)
+      rows=${rows:-24}
+      printf '\033[?1049h'
+      for top in 1 2; do
+        printf '\033[?2026h\033[2J'
+        image_row=$((top + 20))
+        for ((row = 1; row <= rows; row++)); do
+          printf '\033[%s;1H\033[2K' "$row"
+          if ((row == image_row)); then
+            printf '\033[20A'
+            cat "$(dirname "$0")/../e2e/fixtures/iip/termic-icon.iip"
+          elif ((row == image_row + 1)); then
+            printf 'Pi redraw %s' "$top"
+          fi
+        done
+        printf '\033[?2026l'
+        sleep 0.1
+      done
+      set_title "✳ ${name} iip-after"
       continue ;;
   esac
   spin

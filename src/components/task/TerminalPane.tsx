@@ -25,6 +25,7 @@ import { Osc52Base64 } from "@/lib/osc52";
 import { makeCtrlSniffer } from "@/lib/ctrlSniffer";
 import { attachCopyOnSelect } from "@/lib/terminalSelection";
 import { ImageAddon } from "@xterm/addon-image";
+import { preserveImagesOnErase } from "@/lib/terminalImagePersistence";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { SearchAddon } from "@xterm/addon-search";
 import { loadTerminalRenderer, awaitTerminalFonts } from "@/lib/terminalRenderer";
@@ -628,6 +629,9 @@ const captureArmedRef = useRef(false);
     term.loadAddon(searchAddon);
     searchAddonRef.current = searchAddon;
     term.loadAddon(new ImageAddon());
+    const imagePersistence = /(?:^|\/)pi$/.test(spawnCommandForCli(tab.cli)) || (import.meta.env.VITE_E2E && tab.cli === "fakeagent")
+      ? preserveImagesOnErase(term)
+      : null;
     const unicode11 = new Unicode11Addon();
     term.loadAddon(unicode11);
     term.unicode.activeVersion = "11";
@@ -2209,6 +2213,7 @@ const captureArmedRef = useRef(false);
       // closure — we must clear it here rather than in cancelSettle() because
       // the new effect's cancelSettle is a different closure instance.
       if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
+      imagePersistence?.dispose();
       try { rendererAddon?.dispose(); } catch {}
       term.dispose();
       termRef.current = null;

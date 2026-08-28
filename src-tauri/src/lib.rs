@@ -2789,7 +2789,28 @@ const RESERVED_PORT_NAMES: &[&str] = &[
     "TERMIC_CLI", "TERMIC_CLI_HELP", "CONDUCTOR_PORT", "CONDUCTOR_WORKSPACE_NAME",
     "PORT", "PATH", "HOME", "SHELL", "USER", "TMPDIR", "PWD", "TERM", "LANG",
     "COLORFGBG", "COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION",
+    "TMUX", "STY", "ZELLIJ", "KITTY_WINDOW_ID", "GHOSTTY_RESOURCES_DIR",
+    "WEZTERM_PANE", "WARP_SESSION_ID", "WARP_TERMINAL_SESSION_UUID", "WT_SESSION",
 ];
+
+// A PTY created by Termic is not still inside the terminal emulator that
+// launched Termic. Clear inherited host markers before advertising the
+// protocol Termic actually implements; otherwise Pi launched from Ghostty,
+// for example, emits Kitty graphics instead of iTerm2 IIP.
+const FOREIGN_TERMINAL_ENV: &[&str] = &[
+    "TMUX", "STY", "ZELLIJ", "KITTY_WINDOW_ID", "GHOSTTY_RESOURCES_DIR",
+    "WEZTERM_PANE", "WARP_SESSION_ID", "WARP_TERMINAL_SESSION_UUID", "WT_SESSION",
+];
+
+fn configure_terminal_env(cmd: &mut CommandBuilder) {
+    for key in FOREIGN_TERMINAL_ENV {
+        cmd.env_remove(key);
+    }
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("TERM_PROGRAM", "iTerm.app");
+    cmd.env("TERM_PROGRAM_VERSION", "3.5.0");
+}
 
 /// A usable extra-named-port env var name: a POSIX env key
 /// (shell_env::is_env_key), not reserved, and not in the
@@ -3096,8 +3117,6 @@ fn pty_spawn(
             );
         }
     }
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("COLORTERM", "truecolor");
     // Claim iTerm2 compatibility so agents that gate "fancy" OSC
     // emission on a known host (Claude Code's OSC 9 / OSC 9;4
     // progress, OSC 133 shell-integration, OSC 1337 attention)
@@ -3108,8 +3127,7 @@ fn pty_spawn(
     // 1337) — see TerminalPane's registerOscHandler calls — so the
     // claim is honest. Version string is high enough to clear common
     // feature-gate checks in agents that look for "iTerm2 ≥ 3.x".
-    cmd.env("TERM_PROGRAM", "iTerm.app");
-    cmd.env("TERM_PROGRAM_VERSION", "3.5.0");
+    configure_terminal_env(&mut cmd);
 
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| {
         let s = e.to_string();
@@ -22821,6 +22839,21 @@ filename f.rs
                   "TERMIC_CLI_HELP"] {
             assert!(!valid_port_name(n), "{n} must be reserved");
         }
+    }
+
+    #[test]
+    fn terminal_env_drops_inherited_host_identity() {
+        let mut cmd = CommandBuilder::new("true");
+        for key in FOREIGN_TERMINAL_ENV {
+            cmd.env(key, "inherited");
+        }
+
+        configure_terminal_env(&mut cmd);
+
+        for key in FOREIGN_TERMINAL_ENV {
+            assert!(cmd.get_env(key).is_none(), "{key} must not leak into the PTY");
+        }
+        assert_eq!(cmd.get_env("TERM_PROGRAM"), Some(std::ffi::OsStr::new("iTerm.app")));
     }
 
     #[test]
