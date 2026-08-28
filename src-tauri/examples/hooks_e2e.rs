@@ -8,7 +8,8 @@ use termic_lib::agent_hooks::{self, Target};
 
 fn main() {
     let arg = std::env::args().nth(1).unwrap_or_else(|| "status".into());
-    let t = Target::Host;
+    let agent = std::env::args().nth(2).unwrap_or_else(|| "claude".into());
+    let t = Target::Host(agent);
     match arg.as_str() {
         "install" => match agent_hooks::install(&t) {
             Ok(()) => println!("installed"),

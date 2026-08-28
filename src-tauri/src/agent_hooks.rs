@@ -36,11 +36,35 @@ use std::path::{Path, PathBuf};
 /// it rather than appending a second entry.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// The single event we register. See the plan for why `UserPromptSubmit`,
-/// `Stop` and `SessionStart` are all deliberately absent: termic already has
-/// each of those signals at the same instant or better, so registering them
-/// would buy nothing and cost a process spawn per turn.
-const EVENT: &str = "PermissionRequest";
+/// The event each agent reports "blocked on you" through. Deliberately ONE per
+/// agent: termic already has working and done at the same instant or better
+/// from the terminal, so anything else would buy nothing and cost a process
+/// spawn per turn. Per-tool-call events are never registered.
+///
+/// claude: `PermissionRequest` fires +20ms after the block (its `Notification`
+///   is a +6.0s nudge, measured, so it is the wrong one).
+/// grok:   `Notification` with `notificationType=permission_prompt`. grok has
+///   no `PermissionRequest` at all, and its title FREEZES on a busy spinner
+///   while blocked (measured at 217s on one frame), so this hook is the only
+///   signal that state has.
+fn event_for(agent: &str) -> &'static str {
+    match agent {
+        "grok" => "Notification",
+        _ => "PermissionRequest",
+    }
+}
+
+/// How the hook gets its OSC onto the terminal.
+///
+/// claude returns a `terminalSequence` and writes it itself, which is safest:
+/// it lands at a sane point in claude's own render loop. No other agent has
+/// that field, and a hook cannot fall back to `/dev/tty` because hooks run with
+/// no controlling terminal (measured on grok: rc=1). Those agents write to
+/// `$TERMIC_PTY`, the slave path termic injects at spawn (`lib.rs`), which
+/// works because opening a tty BY NAME needs no ctty.
+fn uses_terminal_sequence(agent: &str) -> bool {
+    agent == "claude"
+}
 
 /// Directory we create inside the agent's config dir. Also the prefix that
 /// identifies our entries for removal, which is why it must never be renamed
@@ -55,10 +79,22 @@ const BACKUP_NAME: &str = "settings.json.termic-backup";
 /// is why a Docker install needs no consent (it mutates nothing of the user's).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
-    Host,
+    /// Carries the agent id, so one call site can serve every agent.
+    Host(String),
     /// Carries the agent's OWN id (a clone keeps its own folder), not the base
     /// id. `docker.rs` documents why conflating the two makes clones unusable.
     Docker(String),
+}
+
+impl Target {
+    /// The agent id this target is for. Docker keys on the agent's OWN id (a
+    /// clone keeps its own folder) while the config SHAPE comes from the base
+    /// id, which is why `command_path` resolves the base separately.
+    pub fn agent(&self) -> &str {
+        match self {
+            Target::Host(a) | Target::Docker(a) => a,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -89,17 +125,42 @@ pub struct HookStatus {
 /// never touches the backslashes: the escape and bell reach Claude as the JSON
 /// escapes `` / ``, never as raw control bytes, which keeps the file
 /// greppable and diffable.
-pub fn script_body() -> String {
-    // OSC 777 is what TerminalPane already handles. The body must NOT match
-    // `BUILTIN_NOTIFY_IGNORE.claude` (`["is waiting for your input"]`) or
-    // `notificationWantsAttention` filters it out and the whole feature dies
-    // silently. `src/lib/agentHooks.test.ts` pins that.
-    let seq = "\\u001b]777;notify;termic;agent needs your input\\u0007";
+pub fn script_body(agent: &str) -> String {
+    // OSC 777 is what TerminalPane already handles, and its TITLE field is how
+    // termic tells a signal it installed itself from one the agent chose to
+    // send (see lib/agentHooks.ts: a user's `attention` list is an ALLOW-LIST
+    // and would otherwise filter ours out).
+    let esc_seq = "\\u001b]777;notify;termic;agent needs your input\\u0007";
+    let raw_seq = "\\033]777;notify;termic;agent needs your input\\007";
+
+    // claude parses our stdout and writes the sequence itself. Safest option:
+    // it lands at a sane point in claude's own render loop.
+    let emit = if uses_terminal_sequence(agent) {
+        format!("printf '%s' '{{\"terminalSequence\":\"{esc_seq}\"}}'")
+    } else {
+        // Everyone else writes straight to the terminal termic handed them.
+        // `/dev/tty` is NOT a fallback: hooks run with no controlling terminal
+        // (measured on grok, rc=1). Opening the slave BY NAME needs no ctty.
+        format!(
+            "[ -n \"$TERMIC_PTY\" ] || exit 0\nprintf '{raw_seq}' > \"$TERMIC_PTY\" 2>/dev/null"
+        )
+    };
+
+    // grok is the one agent that reads ANOTHER agent's config (it scans
+    // ~/.claude/settings.json too), so claude's script must stay silent when
+    // grok is the caller or a claude install would silently rewire grok.
+    // grok's own script wants the opposite test.
+    let provenance = if agent == "grok" {
+        "# Only meaningful when grok is the caller; this file is grok's own.\n[ -n \"$GROK_HOOK_EVENT\" ] || exit 0"
+    } else {
+        "# grok reads ~/.claude/settings.json too, with a camelCase payload and\n# no terminalSequence field. The user never opted grok in here.\n[ -z \"$GROK_HOOK_EVENT\" ] || exit 0"
+    };
+
     format!(
         r#"#!/bin/sh
-# termic agent hook (generated, schema v{SCHEMA_VERSION}). Safe to delete.
+# termic agent hook for {agent} (generated, schema v{SCHEMA_VERSION}). Safe to delete.
 #
-# Tells termic the agent is blocked on you, by writing one OSC sequence to the
+# Tells termic the agent is blocked on you, by putting one OSC sequence on the
 # agent's own terminal. No network, no files, no arguments, no stdin parsing.
 # Exits 0 on every path: a hook must never be why an agent stalls.
 
@@ -107,12 +168,9 @@ pub fn script_body() -> String {
 # in iTerm, Ghostty and CI). Stay silent there.
 [ -n "$TERMIC_TASK_ID" ] || exit 0
 
-# Grok reads ~/.claude/settings.json too, with a camelCase payload and an output
-# contract that has no terminalSequence. Emitting ours there is useless, and the
-# user never opted Grok in. Measured; see docs/plans/agent-hooks.md.
-[ -z "$GROK_HOOK_EVENT" ] || exit 0
+{provenance}
 
-printf '%s' '{{"terminalSequence":"{seq}"}}'
+{emit}
 exit 0
 "#
     )
@@ -137,12 +195,12 @@ fn is_ours(entry: &Value, prefix: &str) -> bool {
 
 /// Strip every entry of ours from `hooks.<EVENT>`, dropping groups and keys
 /// that become empty. Returns true when anything was removed.
-fn strip_ours(root: &mut Value, prefix: &str) -> bool {
+fn strip_ours(root: &mut Value, prefix: &str, event: &str) -> bool {
     let mut removed = false;
     let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
         return false;
     };
-    if let Some(groups) = hooks.get_mut(EVENT).and_then(Value::as_array_mut) {
+    if let Some(groups) = hooks.get_mut(event).and_then(Value::as_array_mut) {
         for group in groups.iter_mut() {
             if let Some(list) = group.get_mut("hooks").and_then(Value::as_array_mut) {
                 let before = list.len();
@@ -158,7 +216,7 @@ fn strip_ours(root: &mut Value, prefix: &str) -> bool {
                 .is_none_or(|l| !l.is_empty())
         });
         if groups.is_empty() {
-            hooks.remove(EVENT);
+            hooks.remove(event);
         }
     }
     if hooks.is_empty() {
@@ -169,13 +227,13 @@ fn strip_ours(root: &mut Value, prefix: &str) -> bool {
 
 /// Insert our entry, replacing any older one of ours. Every unknown key at
 /// every level is preserved: we only ever touch `hooks.<EVENT>`.
-pub fn merge(existing: &Value, command: &str, prefix: &str) -> Value {
+pub fn merge(existing: &Value, command: &str, prefix: &str, event: &str) -> Value {
     let mut root = if existing.is_object() {
         existing.clone()
     } else {
         Value::Object(Map::new())
     };
-    strip_ours(&mut root, prefix);
+    strip_ours(&mut root, prefix, event);
 
     let entry = serde_json::json!({
         "type": "command",
@@ -192,7 +250,7 @@ pub fn merge(existing: &Value, command: &str, prefix: &str) -> Value {
         *hooks = Value::Object(Map::new());
     }
     let hooks = hooks.as_object_mut().expect("hooks is an object");
-    let groups = hooks.entry(EVENT).or_insert_with(|| Value::Array(vec![]));
+    let groups = hooks.entry(event).or_insert_with(|| Value::Array(vec![]));
     if !groups.is_array() {
         *groups = Value::Array(vec![]);
     }
@@ -205,9 +263,9 @@ pub fn merge(existing: &Value, command: &str, prefix: &str) -> Value {
 
 /// Remove our entry. Returns `None` when there was nothing of ours to remove,
 /// so the caller can leave the file completely untouched.
-pub fn unmerge(existing: &Value, prefix: &str) -> Option<Value> {
+pub fn unmerge(existing: &Value, prefix: &str, event: &str) -> Option<Value> {
     let mut root = existing.clone();
-    if !strip_ours(&mut root, prefix) {
+    if !strip_ours(&mut root, prefix, event) {
         return None;
     }
     Some(root)
@@ -223,59 +281,69 @@ pub fn disable_all_hooks(root: &Value) -> bool {
 
 // ─────────────────────────── Paths ─────────────────────────────────────
 
-/// Host config dir for claude (`~/.claude`), from the same table Seatbelt and
-/// Docker read, so the three cannot drift.
+/// The agent's own config dir on the host, from the same table Seatbelt and
+/// Docker read so the three cannot drift.
 ///
 /// The e2e build lets `TERMIC_E2E_AGENT_HOME` stand in for `$HOME`. Without it
 /// the suite's only way to exercise install/remove would be to write into the
-/// developer's REAL `~/.claude/settings.json`, which is not a test, it is a
-/// hazard. Feature-gated so no release binary can be pointed anywhere but the
-/// user's own home. Indexed in `docs/tech-debt.md`.
-fn host_config_dir() -> Result<PathBuf, String> {
+/// developer's REAL config, which is not a test, it is a hazard. Feature-gated
+/// so no release binary can be pointed anywhere but the user's own home.
+/// Indexed in `docs/tech-debt.md`.
+fn agent_home() -> Result<PathBuf, String> {
     #[cfg(feature = "e2e")]
-    let home = match std::env::var_os("TERMIC_E2E_AGENT_HOME") {
-        Some(v) => PathBuf::from(v),
-        None => dirs::home_dir().ok_or_else(|| "no home directory".to_string())?,
-    };
-    #[cfg(not(feature = "e2e"))]
-    let home = dirs::home_dir().ok_or_else(|| "no home directory".to_string())?;
-    let first = crate::agent_dirs::state_dirs("claude")
+    {
+        if let Some(v) = std::env::var_os("TERMIC_E2E_AGENT_HOME") {
+            return Ok(PathBuf::from(v));
+        }
+    }
+    dirs::home_dir().ok_or_else(|| "no home directory".to_string())
+}
+
+/// Home-relative directory holding the agent's config.
+fn state_dir(agent: &str) -> Result<&'static str, String> {
+    crate::agent_dirs::state_dirs(agent)
         .first()
-        .ok_or_else(|| "claude has no known state dir".to_string())?;
-    Ok(home.join(first))
+        .copied()
+        .ok_or_else(|| format!("{agent} has no known state dir"))
 }
 
 /// The directory we write into, on the host filesystem, for a given target.
 pub fn config_dir(target: &Target) -> Result<PathBuf, String> {
     match target {
-        Target::Host => host_config_dir(),
+        Target::Host(agent) => Ok(agent_home()?.join(state_dir(agent)?)),
         Target::Docker(agent_id) => Ok(crate::docker::agent_config_host_dir(agent_id)),
     }
 }
 
-/// The `command` string written INTO settings.json. For Docker this must be the
+/// The config FILE we merge into, which is not the same shape per agent:
+/// claude keeps hooks in `settings.json` alongside everything else, grok reads
+/// every `*.json` under `hooks/` so it gets a file of its own (which also makes
+/// removal a delete rather than a merge-back).
+fn settings_rel(agent: &str) -> &'static str {
+    match agent {
+        "grok" => "hooks/termic.json",
+        _ => "settings.json",
+    }
+}
+
+/// The `command` string written INTO the config. For Docker this must be the
 /// path as the CONTAINER sees it, not the host path: the config dir is
-/// bind-mounted at `CONTAINER_HOME/.claude`, so a host path would not resolve
-/// inside the cage.
+/// bind-mounted at `CONTAINER_HOME`, so a host path would not resolve inside
+/// the cage.
 pub fn command_path(target: &Target) -> Result<String, String> {
     Ok(match target {
-        Target::Host => config_dir(target)?
+        Target::Host(_) => config_dir(target)?
             .join(SCRIPT_DIR)
             .join(SCRIPT_NAME)
             .to_string_lossy()
             .into_owned(),
-        Target::Docker(_) => {
-            let first = crate::agent_dirs::state_dirs("claude")
-                .first()
-                .ok_or_else(|| "claude has no known state dir".to_string())?;
-            format!(
-                "{}/{}/{}/{}",
-                crate::docker::CONTAINER_HOME,
-                first,
-                SCRIPT_DIR,
-                SCRIPT_NAME
-            )
-        }
+        Target::Docker(agent_id) => format!(
+            "{}/{}/{}/{}",
+            crate::docker::CONTAINER_HOME,
+            state_dir(crate::docker::base_agent_id_str(agent_id))?,
+            SCRIPT_DIR,
+            SCRIPT_NAME
+        ),
     })
 }
 
@@ -289,7 +357,7 @@ pub fn command_prefix(target: &Target) -> Result<String, String> {
 }
 
 fn settings_path(target: &Target) -> Result<PathBuf, String> {
-    Ok(config_dir(target)?.join("settings.json"))
+    Ok(config_dir(target)?.join(settings_rel(target.agent())))
 }
 
 fn script_dir(target: &Target) -> Result<PathBuf, String> {
@@ -375,7 +443,7 @@ pub fn status(target: &Target) -> HookStatus {
     // without the entry is not an install; removal cleans both anyway.
     out.installed = root
         .get("hooks")
-        .and_then(|h| h.get(EVENT))
+        .and_then(|h| h.get(event_for(target.agent())))
         .and_then(Value::as_array)
         .is_some_and(|groups| {
             groups.iter().any(|g| {
@@ -416,7 +484,7 @@ pub fn install(target: &Target) -> Result<(), String> {
     }
 
     let script = dir.join(SCRIPT_NAME);
-    write_atomic(&script, script_body().as_bytes())?;
+    write_atomic(&script, script_body(target.agent()).as_bytes())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -424,7 +492,7 @@ pub fn install(target: &Target) -> Result<(), String> {
             .map_err(|e| format!("chmod hook script: {e}"))?;
     }
 
-    let merged = merge(&root, &command, &prefix);
+    let merged = merge(&root, &command, &prefix, event_for(target.agent()));
     let mut bytes = serde_json::to_vec_pretty(&merged).map_err(|e| e.to_string())?;
     bytes.push(b'\n');
     write_atomic(&settings, &bytes)?;
@@ -448,7 +516,7 @@ pub fn remove(target: &Target) -> Result<(), String> {
     let prefix = command_prefix(target)?;
 
     let root = read_settings(&settings)?;
-    if let Some(stripped) = unmerge(&root, &prefix) {
+    if let Some(stripped) = unmerge(&root, &prefix, event_for(target.agent())) {
         // If what remains matches the pre-install backup, restore the backup's
         // BYTES: that is the only way "removal leaves the file byte-identical"
         // survives our own pretty-printer reformatting the user's spacing.
@@ -477,7 +545,9 @@ pub fn remove(target: &Target) -> Result<(), String> {
 
 /// Agents this build can wire. Phase 1 is claude alone; the UI reads this so a
 /// row can say "not supported yet" rather than offering a button that fails.
-pub const SUPPORTED: &[&str] = &["claude"];
+/// Agents this build can wire. Each needs a measured event AND a transport
+/// that reaches termic; see `event_for` / `uses_terminal_sequence`.
+pub const SUPPORTED: &[&str] = &["claude", "grok"];
 
 fn check_supported(agent_id: &str) -> Result<(), String> {
     if SUPPORTED.contains(&agent_id) {
@@ -501,7 +571,7 @@ pub struct AgentHookStatus {
 pub fn agent_hooks_status(agent_id: String) -> AgentHookStatus {
     AgentHookStatus {
         supported: SUPPORTED.contains(&agent_id.as_str()),
-        host: status(&Target::Host),
+        host: status(&Target::Host(agent_id.clone())),
         docker: status(&Target::Docker(agent_id.clone())),
         agent_id,
     }
@@ -513,11 +583,11 @@ pub fn agent_hooks_status(agent_id: String) -> AgentHookStatus {
 #[tauri::command]
 pub fn agent_hooks_install(agent_id: String) -> Result<AgentHookStatus, String> {
     check_supported(&agent_id)?;
-    install(&Target::Host)?;
+    install(&Target::Host(agent_id.clone()))?;
     // A Docker failure must not leave the host half installed and the UI lying,
     // so roll the host back and report the real error.
     if let Err(e) = install(&Target::Docker(agent_id.clone())) {
-        let _ = remove(&Target::Host);
+        let _ = remove(&Target::Host(agent_id.clone()));
         return Err(format!("installed for the host but not for Docker, so nothing was kept: {e}"));
     }
     Ok(agent_hooks_status(agent_id))
@@ -528,7 +598,7 @@ pub fn agent_hooks_install(agent_id: String) -> Result<AgentHookStatus, String> 
 /// still be able to clean up.
 #[tauri::command]
 pub fn agent_hooks_remove(agent_id: String) -> Result<AgentHookStatus, String> {
-    let host = remove(&Target::Host);
+    let host = remove(&Target::Host(agent_id.clone()));
     let docker = remove(&Target::Docker(agent_id.clone()));
     host.and(docker)?;
     Ok(agent_hooks_status(agent_id))
@@ -540,6 +610,9 @@ mod tests {
 
     const P: &str = "/home/u/.claude/termic-hooks/";
     const C: &str = "/home/u/.claude/termic-hooks/permission-request.sh";
+    /// The tests below all exercise the claude shape. grok's differs only in
+    /// which event key it writes under, which `grok_writes_its_own_event` pins.
+    const EVENT: &str = "PermissionRequest";
 
     fn ours_count(v: &Value) -> usize {
         v.get("hooks")
@@ -558,7 +631,7 @@ mod tests {
 
     #[test]
     fn installs_into_an_empty_config() {
-        let out = merge(&serde_json::json!({}), C, P);
+        let out = merge(&serde_json::json!({}), C, P, EVENT);
         assert_eq!(ours_count(&out), 1);
         let entry = &out["hooks"][EVENT][0]["hooks"][0];
         assert_eq!(entry["type"], "command");
@@ -581,7 +654,7 @@ mod tests {
                 ]
             }
         });
-        let after = merge(&before, C, P);
+        let after = merge(&before, C, P, EVENT);
         assert_eq!(after["model"], "opus", "unknown top-level keys preserved");
         assert_eq!(after["hooks"]["Stop"], before["hooks"]["Stop"], "other events untouched");
         assert_eq!(
@@ -593,8 +666,8 @@ mod tests {
 
     #[test]
     fn install_is_idempotent() {
-        let once = merge(&serde_json::json!({}), C, P);
-        let twice = merge(&once, C, P);
+        let once = merge(&serde_json::json!({}), C, P, EVENT);
+        let twice = merge(&once, C, P, EVENT);
         assert_eq!(ours_count(&twice), 1, "no duplicate entry");
         assert_eq!(once, twice);
     }
@@ -606,7 +679,7 @@ mod tests {
                 { "hooks": [{ "type": "command", "command": format!("{P}old-name.sh"), "timeout": 1 }] }
             ]}
         });
-        let out = merge(&stale, C, P);
+        let out = merge(&stale, C, P, EVENT);
         assert_eq!(ours_count(&out), 1);
         assert_eq!(out["hooks"][EVENT][0]["hooks"][0]["command"], C);
     }
@@ -617,15 +690,15 @@ mod tests {
             "model": "opus",
             "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "/x" }] }] }
         });
-        let after = merge(&before, C, P);
-        let back = unmerge(&after, P).expect("something of ours to remove");
+        let after = merge(&before, C, P, EVENT);
+        let back = unmerge(&after, P, EVENT).expect("something of ours to remove");
         assert_eq!(back, before, "byte-identical after a round trip");
     }
 
     #[test]
     fn removal_from_a_config_that_was_empty_leaves_it_empty() {
-        let after = merge(&serde_json::json!({}), C, P);
-        let back = unmerge(&after, P).unwrap();
+        let after = merge(&serde_json::json!({}), C, P, EVENT);
+        let back = unmerge(&after, P, EVENT).unwrap();
         assert_eq!(back, serde_json::json!({}), "our own hooks key is cleaned up");
     }
 
@@ -634,7 +707,7 @@ mod tests {
         let theirs = serde_json::json!({
             "hooks": { EVENT: [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/audit" }] }] }
         });
-        assert!(unmerge(&theirs, P).is_none(), "left completely alone");
+        assert!(unmerge(&theirs, P, EVENT).is_none(), "left completely alone");
     }
 
     #[test]
@@ -645,7 +718,7 @@ mod tests {
                 { "hooks": [{ "type": "command", "command": C, "timeout": 99, "note": "mine now" }] }
             ]}
         });
-        assert_eq!(unmerge(&edited, P).unwrap(), serde_json::json!({}));
+        assert_eq!(unmerge(&edited, P, EVENT).unwrap(), serde_json::json!({}));
     }
 
     #[test]
@@ -658,14 +731,14 @@ mod tests {
                 ]}
             ]}
         });
-        let back = unmerge(&mixed, P).unwrap();
+        let back = unmerge(&mixed, P, EVENT).unwrap();
         assert_eq!(ours_count(&back), 0);
         assert_eq!(back["hooks"][EVENT][0]["hooks"][0]["command"], "/usr/local/bin/audit");
     }
 
     #[test]
     fn a_non_object_root_does_not_panic() {
-        let out = merge(&serde_json::json!([1, 2, 3]), C, P);
+        let out = merge(&serde_json::json!([1, 2, 3]), C, P, EVENT);
         assert_eq!(ours_count(&out), 1);
     }
 
@@ -678,7 +751,7 @@ mod tests {
 
     #[test]
     fn docker_writes_the_container_path_not_the_host_path() {
-        let host = command_path(&Target::Host).unwrap();
+        let host = command_path(&Target::Host("claude".into())).unwrap();
         let docker = command_path(&Target::Docker("claude".into())).unwrap();
         assert!(docker.starts_with(crate::docker::CONTAINER_HOME), "{docker}");
         assert!(docker.ends_with(SCRIPT_NAME));
@@ -702,7 +775,7 @@ mod tests {
 
     #[test]
     fn the_script_gates_on_both_env_vars_and_always_exits_zero() {
-        let s = script_body();
+        let s = script_body("claude");
         assert!(s.starts_with("#!/bin/sh\n"));
         assert!(s.contains(r#"[ -n "$TERMIC_TASK_ID" ] || exit 0"#));
         assert!(s.contains(r#"[ -z "$GROK_HOOK_EVENT" ] || exit 0"#));
@@ -714,6 +787,63 @@ mod tests {
         // The body must not match BUILTIN_NOTIFY_IGNORE.claude or the
         // notification is filtered out and the feature dies silently.
         assert!(!s.contains("is waiting for your input"));
+    }
+
+    // ── grok ────────────────────────────────────────────────────────
+    // grok is the second agent, and almost every difference from claude is
+    // load-bearing rather than cosmetic.
+
+    #[test]
+    fn grok_writes_its_own_event_and_its_own_file() {
+        // grok has NO PermissionRequest. Its attention edge is Notification
+        // with notificationType=permission_prompt, measured.
+        assert_eq!(event_for("grok"), "Notification");
+        assert_eq!(event_for("claude"), "PermissionRequest");
+        // grok scans every *.json under hooks/, so it gets a file of its own:
+        // removal is then a delete rather than a merge-back into a file the
+        // user also owns.
+        assert_eq!(settings_rel("grok"), "hooks/termic.json");
+        assert_eq!(settings_rel("claude"), "settings.json");
+    }
+
+    #[test]
+    fn grok_writes_to_the_pty_because_it_has_no_terminal_sequence() {
+        assert!(uses_terminal_sequence("claude"));
+        assert!(!uses_terminal_sequence("grok"));
+        let g = script_body("grok");
+        assert!(g.contains("$TERMIC_PTY"), "grok must write to the injected pty");
+        assert!(!g.contains("terminalSequence"), "grok's runtime ignores that field");
+        // /dev/tty is NOT a fallback: hooks run with no controlling terminal.
+        assert!(!g.contains("/dev/tty"));
+        let c = script_body("claude");
+        assert!(c.contains("terminalSequence"));
+        assert!(!c.contains("$TERMIC_PTY"));
+    }
+
+    #[test]
+    fn the_two_scripts_gate_on_grok_in_opposite_directions() {
+        // grok reads ~/.claude/settings.json too, so claude's script must stay
+        // silent when grok is the caller or a claude install silently rewires
+        // grok. grok's own script wants exactly the opposite test.
+        assert!(script_body("claude").contains(r#"[ -z "$GROK_HOOK_EVENT" ] || exit 0"#));
+        assert!(script_body("grok").contains(r#"[ -n "$GROK_HOOK_EVENT" ] || exit 0"#));
+        // Both still refuse to speak outside a termic PTY.
+        for a in ["claude", "grok"] {
+            assert!(script_body(a).contains(r#"[ -n "$TERMIC_TASK_ID" ] || exit 0"#));
+            assert!(script_body(a).trim_end().ends_with("exit 0"));
+            assert!(!script_body(a).contains('\u{1b}'), "no raw ESC in {a}'s script");
+        }
+    }
+
+    #[test]
+    fn every_supported_agent_has_an_event_and_a_state_dir() {
+        for a in SUPPORTED {
+            assert!(!event_for(a).is_empty());
+            assert!(state_dir(a).is_ok(), "{a} has no state dir, so nowhere to install");
+            // Install targets must be global or termic-owned, never a repo.
+            let host = config_dir(&Target::Host((*a).into())).unwrap();
+            assert!(!host.to_string_lossy().contains("worktree"), "{a}: {host:?}");
+        }
     }
 
     #[test]

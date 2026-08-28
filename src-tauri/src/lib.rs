@@ -2874,6 +2874,37 @@ fn pty_attached(state: State<'_, PtyManager>, id: String) {
     slot.out_buf.1.notify_all();
 }
 
+
+/// Resolve the slave device path (`/dev/ttysNNN`) for a pty master, so it can be
+/// handed to agent hooks as `TERMIC_PTY`.
+///
+/// `ptsname` returns a pointer to a STATIC buffer and has no `_r` variant on
+/// macOS, so two concurrent spawns could otherwise read each other's result.
+/// The lock is held across the call and the copy, which is the whole critical
+/// section.
+#[cfg(unix)]
+fn pty_slave_path(master: &Box<dyn portable_pty::MasterPty + Send>) -> Option<String> {
+    use std::os::unix::io::RawFd;
+    static PTSNAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let fd: RawFd = master.as_raw_fd()?;
+    let _guard = PTSNAME_LOCK.lock().ok()?;
+    // SAFETY: `fd` is a live pty master owned by the caller for the duration of
+    // this call, and the returned pointer is copied before the lock is dropped.
+    unsafe {
+        let p = libc::ptsname(fd);
+        if p.is_null() {
+            return None;
+        }
+        Some(std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned())
+    }
+}
+
+#[cfg(not(unix))]
+fn pty_slave_path(_master: &Box<dyn portable_pty::MasterPty + Send>) -> Option<String> {
+    None
+}
+
+
 #[tauri::command]
 fn pty_spawn(
     app: AppHandle,
@@ -3129,6 +3160,22 @@ fn pty_spawn(
     // claim is honest. Version string is high enough to clear common
     // feature-gate checks in agents that look for "iTerm2 ≥ 3.x".
     configure_terminal_env(&mut cmd);
+
+    // The slave path of THIS pty, so an agent hook can report state by writing
+    // an OSC to the terminal it is already running in.
+    //
+    // Claude's hooks can return a `terminalSequence` and let claude write it,
+    // but no other agent has that field, and a hook subprocess cannot fall back
+    // to /dev/tty: measured on grok 1.0.5, hooks run with NO controlling
+    // terminal and the write fails with rc=1. Handing over the path works
+    // because opening a tty by name needs no ctty. Measured end to end: a grok
+    // Notification hook wrote here and the OSC reached the parser.
+    //
+    // This grants nothing new. The agent already owns this terminal and can
+    // write anything it likes to it; the hook is the same process tree.
+    if let Some(path) = pty_slave_path(&pair.master) {
+        cmd.env("TERMIC_PTY", path);
+    }
 
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| {
         let s = e.to_string();

@@ -26,7 +26,6 @@ const UNSUPPORTED_REASON: Record<string, string> = {
   agy: "not supported yet",
   gemini: "not supported yet",
   copilot: "not supported yet",
-  grok: "not supported yet",
   opencode: "not supported yet",
 };
 

@@ -139,6 +139,17 @@ pub fn persist_offerable(agent_id: &str) -> bool {
 /// The agent id whose Docker SHAPE applies: an agent's own id, unless it is a
 /// clone, in which case the agent it extends. Follows the chain (a clone of a
 /// clone) with a hop cap, so a cycle in `extends` cannot spin here.
+/// `base_agent_id` for callers that do not already hold the registry. Loads it
+/// and returns an owned-by-'static id, since every base we care about is a
+/// built-in name. Falls back to the id itself when the registry cannot be read,
+/// which is the same answer `base_agent_id` gives for an unknown agent.
+pub fn base_agent_id_str(id: &str) -> &'static str {
+    const BUILTINS: &[&str] = &["claude", "codex", "copilot", "agy", "antigravity", "opencode", "pi", "grok", "gemini"];
+    let agents = crate::load_settings_inner().agents;
+    let base = base_agent_id(&agents, id);
+    BUILTINS.iter().copied().find(|b| *b == base).unwrap_or("claude")
+}
+
 pub fn base_agent_id<'a>(agents: &'a [crate::Agent], id: &'a str) -> &'a str {
     let mut cur = id;
     for _ in 0..8 {

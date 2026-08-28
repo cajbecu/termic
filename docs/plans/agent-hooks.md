@@ -39,7 +39,7 @@ entirely.
 | Claude Code | **yes, phase 1** | Only signal that does not lie. See above. |
 | opencode | **yes, phase 2** | No busy/idle OSC at all, and the only agent that reports `permission.replied`. |
 | Codex | no | Its title already says `Action Required` at +22ms. Hooks add 10ms and cost a blocking trust modal that re-prompts on every hook-set change. |
-| Grok | **guard now, phase 3 adapter** | Reads our Claude file, so the guard is mandatory from day one. Separately it has the most complete event set of the five, including the only interrupt hook. |
+| Grok | **yes, shipped** | Its title FREEZES on a busy spinner while blocked (measured, 217s on one frame), so `Notification` is the only signal that state has. The guard against our claude hook firing under grok is still mandatory. |
 | Antigravity (`agy`) | **yes, phase 3** | All five events fire. No attention event exists, but it emits no OSC at all, so hooks are its only precise working/done signal. |
 | Gemini, Copilot, Cursor | no | Unmeasured. Do not write adapters from their docs. |
 
@@ -105,6 +105,49 @@ identically unsandboxed, under Seatbelt and in Docker.
 
 **Constraint, measured: it requires a synchronous hook.** With `"async": true`
 the sequence is silently dropped and no OSC arrives at all. Do not set `async`.
+
+### The transport for every agent that is not claude
+
+`terminalSequence` is claude's alone. No other agent has such a field, so the
+hook has to put the sequence on the terminal itself, and the obvious route does
+not work:
+
+- **`/dev/tty` fails.** Measured on grok 1.0.5: the hook fires, and the write
+  returns `rc=1`. Hooks run with no controlling terminal, so there is no
+  `/dev/tty` to open. Do not "fix" this by retrying or by using `tty`.
+
+What does work is handing over the path. termic owns the pty, so it resolves the
+slave device with `ptsname(master_fd)` and injects it as **`TERMIC_PTY`** at
+spawn (`lib.rs`, next to the `TERM_PROGRAM` spoof). The hook then writes:
+
+```sh
+[ -n "$TERMIC_PTY" ] || exit 0
+printf '\033]777;notify;termic;agent needs your input\007' > "$TERMIC_PTY" 2>/dev/null
+```
+
+Opening a tty BY NAME needs no controlling terminal, which is exactly why this
+works where `/dev/tty` does not. Measured end to end: a grok `Notification` hook
+wrote here and the OSC reached termic's parser.
+
+This grants nothing new. The agent already owns that terminal and can write
+anything it likes to it; the hook is in the same process tree.
+
+`ptsname` returns a pointer to a static buffer and has no `_r` variant on macOS,
+so the call and the copy are both taken under a mutex. Two concurrent spawns
+would otherwise read each other's device name, which is the kind of bug that
+appears once a month on a busy machine and never in a test.
+
+**claude stays on `terminalSequence`** rather than being moved to the shared
+path: claude writes the sequence itself, at a sane point in its own render loop,
+where a hook writing concurrently to the pty could in principle interleave with
+a frame. Same OSC, same handler, one fewer moving part for the agent that does
+not need it.
+
+Docker is the known gap. The container gets its own pty, so a host `TERMIC_PTY`
+names a device that does not exist inside the cage; the redirect fails and the
+script exits 0. claude keeps working there (its transport is its own stdout),
+every other agent silently loses its hook, and that is the honest state until
+someone plumbs a container-side path.
 
 ### Which OSC to emit
 
