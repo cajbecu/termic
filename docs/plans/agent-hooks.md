@@ -43,6 +43,35 @@ entirely.
 | Antigravity (`agy`) | **yes, phase 3** | All five events fire. No attention event exists, but it emits no OSC at all, so hooks are its only precise working/done signal. |
 | Gemini, Copilot, Cursor | no | Unmeasured. Do not write adapters from their docs. |
 
+## Global installs only. No exceptions.
+
+**termic never writes a project-level hook config, for any agent, ever.** Every
+install target below is a global, per-user path (or, for Docker, a termic-owned
+per-agent path). This is a rule, not a default, and every reason for it was
+measured:
+
+- **Double-firing.** Grok with both a global Claude file and a project
+  `.grok/hooks/*.json` fired every event exactly twice (24 and 24). opencode
+  loads BOTH `.opencode/plugin` and `.opencode/plugins`, so writing both
+  double-fires there too. Two config layers is two of every signal.
+- **It pollutes the user's repo.** `.claude/settings.json`, `.grok/hooks/`,
+  `.agents/hooks.json` and `.opencode/plugins/` are not reliably gitignored, so
+  they surface as untracked files in termic's own diff pane on every task.
+- **Symlinks defeat the scoping anyway.** termic symlinks repo-root `.claude`
+  and friends into each new worktree, so a write into a worktree's `.claude`
+  travels back into the user's real repo.
+- **It does not cover every task.** Repo-root tasks and non-git projects have no
+  worktree to scope to, so the global path is needed regardless. Two mechanisms,
+  one of which is the dangerous one, is worse than one.
+- **Project scope is unreliable.** Antigravity's `<workspace>/.agents/hooks.json`
+  and Grok's project sources both require the folder to be trusted first, so a
+  project install silently does nothing until the user clears an unrelated
+  prompt.
+
+Docker is not an exception to this. Its target is
+`<data_dir>/docker-agents/<agent_id>/`, which is per-AGENT and termic-owned, not
+per-project.
+
 ## Phase 1: Claude, exactly one hook
 
 ### Why only one
@@ -192,10 +221,12 @@ maintainer's own machine already has a `hooks` key.
 
 - **Seatbelt**: nothing to grant, by construction (see "Where the script lives").
   The control socket stays denied, as `docs/plans/cli.md` settled.
-- **Docker**: a **separate install target**. The agent config dir is
-  `<data_dir>/docker-agents/<agent_id>/` (`docker.rs:349`), which termic owns, so
-  writing there mutates nothing of the user's and needs no consent step. It can
-  be on by default.
+- **Docker**: a **separate install target**, same agent, same toggle. The config
+  dir is `<data_dir>/docker-agents/<agent_id>/` (`docker.rs:349`), which termic
+  owns, so writing there mutates nothing of the user's and needs no SEPARATE
+  consent. It still follows the agent's switch: a user who declined hooks for
+  Claude must not find them installed for Claude-in-Docker. One toggle per
+  agent, both targets.
   - The path written into that `settings.json` must be the **container** path
     (`/root/.claude/termic-hooks/...`), not the host path. The dir is mounted at
     `CONTAINER_HOME`, so it is deterministic.
@@ -244,26 +275,70 @@ substitute for the gate, because it only helps users who go and set it.
 
 ## Settings and wizard
 
-Settings → Notifications:
+### Per agent, not one master switch
 
-> **Exact needs-you detection**
-> Installs a small hook into your Claude config so termic knows the moment
-> Claude is waiting on you, instead of guessing from the terminal. Off by
-> default.
-> Files changed: `~/.claude/settings.json`, `~/.claude/termic-hooks/`
-> [Install] [Remove]
+One toggle per agent, never a single "install hooks" button. Not for
+granularity's own sake: the consent question is genuinely different per agent.
 
-- Off by default. Flip only once field data shows it stable.
-- List the exact files **before** writing, not after.
-- Show per-agent state the way Settings → Coding Agents lists detected CLIs.
-  An agent detected but not yet wired must say so, not appear wired.
-- "Remove" is always available even when the toggle is off, so a user who
-  uninstalls termic mid-experiment can still clean up.
-- Wizard: `WelcomeDialog.tsx` is currently three steps (`type Step = 0 | 1 | 2`,
-  line 30). Step 0 already detects installed CLIs, so the hooks step can list
-  exactly the detected ones rather than a hardcoded list. Adding a step means
-  updating the `Step` type, the dot indicators, and the "N of 4" copy.
-- Copy rule: **no em dashes** anywhere in this UI.
+- **Claude**: a shell script in `~/.claude/termic-hooks/` plus an entry in a
+  config file the user already owns. Reversible, inspectable, inert if it fails.
+- **opencode**: a JS module that runs IN-PROCESS inside opencode, with no
+  timeout and no exit code, where a throw in `tool.execute.before` blocks the
+  tool.
+
+Those are not the same ask, and a user can reasonably want the first and not the
+second. A single switch would hide the difference.
+
+Each agent's toggle covers BOTH its targets (host and Docker). Off by default.
+
+### The row
+
+Settings, next to `SignalInspector.tsx`, which is already where a user goes when
+state detection looks wrong. Four states, and an agent that is installed but not
+wired must say so rather than appear wired:
+
+```
+claude      Hooks: not installed                             [Install]
+opencode    Hooks: installed                                 [Remove]
+codex       Hooks: not needed (its terminal already reports this)
+agy         Hooks: not supported yet
+```
+
+Rules for the pane:
+
+- Name the exact files BEFORE writing, not after.
+- "Remove" stays available even when the toggle is off, so a user who uninstalls
+  termic mid-experiment can still clean up.
+- `disableAllHooks` set in the Claude config means an install would never fire:
+  say that instead of reporting success.
+- Grok stays out of this list in phase 1. It is not an install, it is a
+  suppression, and a row saying "we made sure nothing happens here" invites more
+  confusion than it removes. Mention the `[compat.grok] hooks = false` opt-out in
+  the help text for users who do not want termic's Claude hook visible to Grok
+  at all.
+
+### Wizard
+
+`WelcomeDialog.tsx` is three steps today (`type Step = 0 | 1 | 2`, line 30).
+Step 0 already detects installed CLIs, so the hooks step lists exactly the
+detected ones rather than a hardcoded set. Adding a step means updating the
+`Step` type, the dot indicators, and the "N of 4" copy.
+
+List only agents the step can actually deliver. Xirp's equivalent promises
+"hooks wired up" for Claude, Codex and Gemini; for Codex that cannot be true
+without the user first clearing a trust modal inside Codex. Claiming an agent we
+did not wire is the failure to avoid.
+
+### Later: the earned prompt
+
+Do not nag on install. If a proactive prompt is wanted, make termic earn it: the
+false done has an exact signature we can already see, a `done` followed by an
+`attention` on the same tab within ~10s. Count it per agent, and after a few
+occurrences offer the fix once, with the evidence ("Claude reported finished 4
+times today when it was actually waiting for you"). That is a fix offered when
+the bug bites rather than a feature advertised. Phase 3 at the earliest.
+
+Copy rule: **no em dashes** anywhere in this UI.
 
 ## Phase 2: opencode
 
@@ -311,8 +386,8 @@ The gain is larger than it looks: agy emits no OSC whatsoever, so today every
 turn ends in a byte-quiet orange bell rather than a done. `Stop.fullyIdle`
 replaces that with a real answer.
 
-**Grok.** The most complete event set measured, and the only agent that reports
-an interrupt:
+**Grok.** Global install only, at `~/.grok/hooks/*.json`. The most complete
+event set measured, and the only agent that reports an interrupt:
 
 | termic edge | event | measured |
 |---|---|---|
@@ -350,6 +425,9 @@ All three are required before this lands, per `CLAUDE.md`.
 - unknown top-level keys round-trip unchanged
 - Docker target writes the CONTAINER path, host target writes the host path
 - a cloned agent resolves its own dir but claude's schema shape
+- every install target resolves to a GLOBAL or termic-owned path: no target may
+  ever resolve under a task's worktree or repo root (the one test that pins the
+  "global installs only" rule mechanically rather than by review)
 
 **TS unit tests**: the emitted OSC body does not match
 `BUILTIN_NOTIFY_IGNORE.claude`, and `notificationWantsAttention("claude", body)`
@@ -363,6 +441,27 @@ Add the row to `docs/e2e-coverage.md`.
 
 **Manual**, because no suite catches it: confirm that a real permission prompt no
 longer produces a "done" badge one second before the "needs you".
+
+## Before writing any adapter: ask the binary, not the website
+
+This plan was corrected three times because a vendor website was trusted over
+the installed CLI. The order that actually works:
+
+1. **Look for shipped docs.** Grok carries a 42KB
+   `~/.grok/docs/user-guide/10-hooks.md`, version-matched to the binary, with a
+   full event table and a "differences from Claude" section. It is far better
+   than the website and reading it would have saved hours.
+2. **Ask the CLI what it resolved.** `agy -p "/hooks"` prints the command it
+   resolved per event, so an empty column tells you the schema is wrong before
+   you spend a turn wondering why nothing fired. Codex has `/hooks` too.
+3. **Read the changelog.** `agy changelog` is what revealed that
+   `~/.gemini/antigravity-cli/hooks.json` is a path they FIXED, which is why a
+   config there loads and never executes.
+4. **Only then** the website, and only as a hypothesis to test.
+
+The failure mode is not "docs lie". It is subtler: a config that PARSES is not a
+config that RUNS, and both Antigravity and Grok will happily report a hook as
+loaded while it is inert or pointed at a dead path.
 
 ## Traps, all measured
 
@@ -407,9 +506,13 @@ longer produces a "done" badge one second before the "needs you".
 2. A permission prompt raises attention with no preceding false done.
 3. A hook fired outside termic (no `TERMIC_TASK_ID`) emits nothing.
 4. A hook fired by Grok emits nothing.
-5. Sandboxed and Docker tasks behave identically to unsandboxed ones.
-6. `npm test`, `cargo test`, `make e2e` green; `docs/e2e-coverage.md` updated.
-7. This plan is deleted and anything still true is folded into
+5. No project-level config is written, for any agent, ever. Grep a task's repo
+   after an install: it must be untouched.
+6. Each agent has its own toggle, and it covers that agent's host AND Docker
+   targets together.
+7. Sandboxed and Docker tasks behave identically to unsandboxed ones.
+8. `npm test`, `cargo test`, `make e2e` green; `docs/e2e-coverage.md` updated.
+9. This plan is deleted and anything still true is folded into
    `docs/gotchas.md`, per the docs-tree rule in `CLAUDE.md`.
 
 ## Appendix: what was measured
