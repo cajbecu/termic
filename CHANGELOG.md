@@ -4,9 +4,9 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [1.0.1] - 2026-08-27
+## [1.0.2] - 2026-08-28
 
-🎉 Termic 1.0.1 ships the last three headline features: code navigation, pull requests, Docker sandboxing.
+🎉 Termic 1.0 ships the last three headline features: code navigation, pull requests, Docker sandboxing.
 
 ### Features
 - **Code navigation across seven languages.** Go to definition, find usages, hover types and diagnostics for TypeScript/JavaScript/TSX, Python, Rust, Go, C/C++/Objective-C, Swift and Ruby. Termic resolves the server your project already has before falling back to its own pinned download, so a repo with `node_modules` or a `.venv` uses that one and nothing gets installed behind your back. Python picks between zuban, ty and basedpyright, and you can override the choice per project or per machine. clangd, sourcekit-lsp and ruby-lsp are PATH-only on purpose: they ship with the Command Line Tools or are one package away, and duplicating a binary you already have is a liability. Double-Shift opens Search everywhere, and you choose when it does. (#174)
