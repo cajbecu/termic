@@ -153,6 +153,51 @@ Three things the vendor doc does not tell you, each of which changes the design:
 No `SessionEnd`, `PreCompact`, `PostCompact`, `SubagentStart` or `SubagentStop`
 fired in any scenario.
 
+## Antigravity 1.1.22: documented, loaded, never invoked
+
+Measured because `agy` is a first-class agent here and its hook doc reads as the
+most capable of the three. The result is a warning about the whole "just add an
+adapter" plan.
+
+`agy` **loads** a hook config and then never runs it. Across six attempts it
+logged `loaded 1 named hooks from 1 hooks.json file(s)` and fired nothing:
+
+- both config locations: `<workspace>/.agents/hooks.json` and the global path
+- both inner-key spellings: `handlers` and `hooks`
+- matcher `"*"` and `""`
+- headless `--print` and the interactive TUI
+- turns that used tools and turns that did not
+
+A deliberately invalid handler `type` drew no complaint either, even though the
+binary carries `unsupported hook type: %q`. So the outer object parses and the
+handler entries never reach the type check. The most likely reading is that hooks
+are an Antigravity IDE feature whose config the CLI loads for parity without
+executing, but that is inference, not measurement. Worth a re-test on a newer
+`agy`, or a check by someone running the IDE.
+
+Two documentation errors found on the way, both verifiable in the binary:
+
+- The global config path is `~/.gemini/antigravity-cli/hooks.json`, not the
+  documented `~/.gemini/config/`. Workspace-local `<workspace>/.agents/hooks.json`
+  is real but only loads for a trusted folder.
+- `Stop`'s `decision` is a strict enum, `stop|continue|block`, described in the
+  binary as "'stop' to allow termination, 'continue' or 'block' to continue
+  execution". The published doc says any value other than `continue` allows the
+  stop, which would make a passive observer that returns nothing a coin flip.
+  `PreToolUse` is `allow|deny|ask|force_ask|deny_unless_prior_grant`.
+
+Both `PreToolUse` and `Stop` document `decision` as **required**, so an adapter
+here can never be a pure observer: it has to assert `allow` and `stop` on every
+call, and a hook that crashes or times out is then deciding agent behaviour by
+omission. That alone makes Antigravity a poor second agent even if the CLI starts
+honouring hooks.
+
+`agy` also emits **no OSC at all**: no title, no `9;4`, no `133`. It is the
+signal-silent case `TerminalPane` already names, where `senderStateRef` stays
+null and the demoters downgrade their verdict from `done` to `attention`.
+Antigravity is therefore the one agent where hooks would add the most and the one
+where they currently work the least.
+
 ## Interrupts: why OSC stays authoritative
 
 Escape during an active turn produced **no `Stop`** on either agent. Claude's
@@ -243,9 +288,10 @@ Copy rule: no em dashes.
    attention state.
 3. Codex, only if 1 and 2 prove out, and only with the trust modal surfaced
    honestly. Needs a real transport.
-4. Everything else. Gemini, Antigravity, Copilot, Cursor, Grok, opencode remain
-   entirely unmeasured; the old vendor-doc table for them was wrong often enough
-   for Claude and Codex that it should not be trusted for any of them.
+4. Everything else. Antigravity is measured and currently unusable (above).
+   Gemini, Copilot, Cursor, Grok and opencode remain entirely unmeasured; the old
+   vendor-doc table was wrong often enough for the three agents that WERE
+   measured that it should not be trusted for any of them.
 
 ## Still unknown
 
@@ -257,4 +303,6 @@ Copy rule: no em dashes.
   fired and then auto-resolved in 3s with no human involved. Claude's auto mode
   is likely the same. A short debounce before raising attention, cancelled if the
   request resolves, is probably needed.
-- Every agent other than Claude and Codex.
+- Why `agy` loads a hook config it never invokes, and whether a newer build or
+  the Antigravity IDE runs them.
+- Gemini, Copilot, Cursor, Grok and opencode: entirely unmeasured.
