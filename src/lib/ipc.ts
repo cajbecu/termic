@@ -541,6 +541,24 @@ export const taskFileRead = (id: string, path: string) => invoke<string>("task_f
  *  file, so a binary or a directory surfaces as an error the caller can fall
  *  back on rather than a hung read. There is deliberately NO write twin. */
 export const fileReadExternal = (path: string) => invoke<string>("file_read_external", { path });
+/** Write an image pasted into a terminal to termic's clipboard dir and get
+ *  its absolute path back, to type in the image's place.
+ *
+ *  The bytes go over as the RAW request body (Tauri sends a Uint8Array as
+ *  one), not as a JSON array of numbers, which for a 3 MB screenshot is the
+ *  difference between one copy and several million. The backend sniffs the
+ *  format from the magic bytes, so there is no extension to pass or to get
+ *  wrong. The same directory is mounted read-only into every Docker
+ *  container at the identical path, so the path this returns is valid inside
+ *  the cage as well as outside it. */
+export const clipboardImageSave = (bytes: Uint8Array) => invoke<string>("clipboard_image_save", bytes);
+/** Read an image straight off the Mac's clipboard, save it, and get its path.
+ *  The ctrl+V twin of `clipboardImageSave`: ctrl+V is not a paste event at
+ *  all (it is byte 0x16 down the PTY, and the gesture claude binds its own
+ *  image-attach action to), so there are no bytes to hand over and the
+ *  pasteboard has to be read natively. Rejects when the clipboard holds no
+ *  image, which the caller treats as "forward the keystroke", not an error. */
+export const clipboardImageCapture = () => invoke<string>("clipboard_image_capture");
 /** Read a task image or PDF as base64, for the markdown preview's inline
  *  images or the file-tree preview pane (image/PDF extensions, 20 MB cap).
  *  Member-aware + worktree-contained, same checks as taskFileRead. Pass the

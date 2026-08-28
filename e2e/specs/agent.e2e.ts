@@ -38,6 +38,150 @@ const quietFor = (taskId: string) =>
     return Date.now() - (t.lastOutputAt ?? 0);
   }, taskId);
 
+// Pasting an image into an agent terminal.
+//
+// This is the one gesture that cannot reach an agent as text: xterm.js sends
+// bytes down the PTY and nothing else, and in Docker mode the agent is a
+// Linux process with no route to the Mac's pasteboard, so its own clipboard
+// reader finds nothing. termic writes the bytes to a file and types the path
+// instead. Two halves, both covered here: the backend actually persisting a
+// file (sniffing the format from the bytes, not from a claimed name), and the
+// capture-phase listener on the terminal actually consuming an image paste
+// while leaving an ordinary text paste alone.
+describe("image paste", () => {
+  let taskId!: string;
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+  });
+
+  const PNG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4];
+
+  type Pastes = { image: boolean; text: boolean };
+
+  /** Put the task in (or out of) Docker mode and wait for the store to agree.
+   *  The paste listener reads the LIVE task on every event, so this is the
+   *  only state the two cases below differ by. */
+  const setDocker = async (id: string, on: boolean) => {
+    await browser.execute(async (taskId, enabled) => {
+      const t = window.__termic!;
+      await t.ipc.taskSetDocker(taskId, enabled, [], []);
+      await t.useApp.getState().loadAll();
+    }, id, on);
+    await browser.waitUntil(
+      async () => (await browser.execute((taskId) =>
+        !!window.__termic!.useApp.getState().tasks.find((t: { id: string }) => t.id === taskId)?.docker_sandbox_enabled,
+      id)) === on,
+      { timeoutMsg: `the task never settled to docker=${on}` },
+    );
+  };
+
+  /** Fire a synthetic image paste and a synthetic text paste at the task's
+   *  terminal, and report which of them was CONSUMED. That is the
+   *  deterministic signal for whether the capture-phase listener stepped in:
+   *  xterm paints to a canvas, so the pasted path itself is not in the DOM.
+   *  The three fields are exactly what a real ClipboardEvent carries. */
+  const firePastes = (id: string) => browser.execute((taskId) => {
+    const host = document.querySelector(`[data-task-id="${taskId}"] [data-terminal-host]`);
+    if (!host) return "no terminal host";
+    const fire = (data: Record<string, unknown>) => {
+      const ev = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(ev, "clipboardData", { value: data });
+      return !host.dispatchEvent(ev);
+    };
+    const file = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "shot.png", { type: "image/png" });
+    return {
+      image: fire({ types: ["Files"], files: [file], items: [] }),
+      text: fire({ types: ["text/plain"], files: [], items: [] }),
+    };
+  }, id) as Promise<Pastes | string>;
+
+  it("writes a pasted image to disk and names it for its real format", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    const path = await browser.execute(async (bytes) =>
+      window.__termic!.ipc.clipboardImageSave(new Uint8Array(bytes as number[])), PNG) as string;
+    // Under the shared clipboard dir, which Docker mode mounts read-only at
+    // this same absolute path, so what gets typed resolves in both worlds.
+    expect(path).toContain("/clipboard/");
+    expect(path).toMatch(/\/pasted-\d+-[0-9a-f]{8}\.png$/);
+  });
+
+  it("refuses bytes that are not an image, rather than writing a fake .png", async () => {
+    const err = await browser.execute(async () => {
+      try {
+        await window.__termic!.ipc.clipboardImageSave(new TextEncoder().encode("just some text"));
+        return null;
+      } catch (e) { return String(e); }
+    });
+    expect(err).toBeTruthy();
+  });
+
+  it("reads an image straight off the Mac clipboard for ctrl+V", async () => {
+    // ctrl+V is not a paste event (it is byte 0x16 down the PTY, and the
+    // gesture claude binds its own image-attach to), so there are no bytes to
+    // hand over and the pasteboard is read natively. That read is the part
+    // worth covering; the keystroke that triggers it is one `if`.
+    //
+    // This does clobber the clipboard, so whatever text was on it is put back
+    // afterwards. An image cannot be restored, which is the honest cost of
+    // covering a clipboard feature at all.
+    const { execFileSync } = await import("node:child_process");
+    const before = execFileSync("pbpaste", { encoding: "utf8" });
+    const png = "/tmp/termic-e2e-clipboard.png";
+    execFileSync("/usr/bin/python3", ["-c",
+      `import base64,pathlib;pathlib.Path(${JSON.stringify(png)}).write_bytes(base64.b64decode(` +
+      `"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))`]);
+    try {
+      execFileSync("osascript", ["-e", `set the clipboard to (read (POSIX file "${png}") as «class PNGf»)`]);
+      const path = await browser.execute(async () => {
+        try { return await window.__termic!.ipc.clipboardImageCapture(); }
+        catch (e) { return "ERR " + String(e); }
+      }) as string;
+      expect(path).toMatch(/\/pasted-\d+-[0-9a-f]{8}\.png$/);
+
+      // Text on the clipboard is an ordinary refusal, not a crash: the caller
+      // forwards the keystroke to the agent and lets it answer for itself.
+      execFileSync("osascript", ["-e", 'set the clipboard to "not an image"']);
+      const err = await browser.execute(async () => {
+        try { await window.__termic!.ipc.clipboardImageCapture(); return null; }
+        catch (e) { return String(e); }
+      });
+      expect(err).toBeTruthy();
+    } finally {
+      execFileSync("pbcopy", { input: before });
+    }
+  });
+
+  it("leaves a paste alone in a terminal that is NOT in Docker", async () => {
+    // The important half. Outside a container the agent reads the Mac
+    // clipboard itself and gets the real image, so stepping in would hand it
+    // a file path instead - strictly worse. This task is an ordinary one, so
+    // BOTH pastes must reach xterm untouched.
+    taskId = await openTask("e2e-image-paste");
+    await waitForAgentReady(taskId);
+    // Pin the mode rather than trusting the fixture's default. A new task
+    // inherits the profile's global sandbox selection, which an earlier spec
+    // may have left on Docker - that is exactly how this case passed on one
+    // run and failed on the next.
+    await setDocker(taskId, false);
+    const r = await firePastes(taskId);
+    expect(typeof r).not.toBe("string");
+    expect((r as Pastes).image).toBe(false);
+    expect((r as Pastes).text).toBe(false);
+  });
+
+  it("consumes an image paste once the task runs in Docker, but still lets text through", async () => {
+    await setDocker(taskId, true);
+
+    const r = await firePastes(taskId);
+    expect(typeof r).not.toBe("string");
+    expect((r as Pastes).image).toBe(true);
+    // The common paste must still reach xterm untouched, in either mode.
+    // Swallowing this one would break every ordinary ⌘V in the app.
+    expect((r as Pastes).text).toBe(false);
+  });
+});
+
 // P0: after a real submit, termic must SHOW the agent as working. Work
 // detection is gated on the tab having been submitted-to since spawn (guards
 // against cold-start false positives), which is exactly why the submit goes in

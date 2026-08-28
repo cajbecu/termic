@@ -3,7 +3,8 @@
 ## Directories
 
 Three directories, different owners:
-- `~/Library/Application Support/termic/` — app-owned: `projects.json`, `tasks/`, `scratch/`, `settings.json`. Path via `dirs::data_local_dir().join("termic")` in `lib.rs#data_dir()`.
+- `~/Library/Application Support/termic/` — app-owned: `projects.json`, `tasks/`, `scratch/`, `settings.json`. Docker mode adds three more here: `docker/` (the editable Dockerfile + build metadata), `docker-agents/<agent>/` (one container config dir per agent, so a login survives `--rm`) and `docker-forge/{gh,glab}/` (the gh / glab login, SHARED by every agent and task, see [sandbox.md](sandbox.md)). Path via `dirs::data_local_dir().join("termic")` in `lib.rs#data_dir()`.
+- `$TMPDIR/termic-attachments/` — files handed to an agent as FILES rather than as text: `<task_id>/` for a staged drop, `clipboard/` for an image pasted into a terminal (`clipboard_image_save`, pruned after 7 days). Deliberately NOT under the app data dir, which the Seatbelt profile ends by denying outright (CLI token); `$TMPDIR` is on `builtin_runtime_paths` and is mounted read-only into every Docker container at the same absolute path. `lib.rs#attachments_dir()`.
 - `~/Library/Application Support/com.simion.termic/` — tauri-plugin-window-state owned (window position/size). Path from `tauri.conf.json#identifier`.
 - `~/.config/termic/themes/` — user-owned, hand-authored custom theme files ([docs/themes.md](themes.md)). `$XDG_CONFIG_HOME` respected; shared by release + dev builds (no `termic_dev` split). Path via `lib.rs#themes_dir_path()`.
 

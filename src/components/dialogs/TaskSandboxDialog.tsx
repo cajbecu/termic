@@ -22,6 +22,7 @@ import { effectiveSandboxMode, type SandboxMode, type SandboxSelection, type Set
 import { AlertTriangle, Shield, Zap, Save, RotateCw } from "lucide-react";
 import { SandboxPicker, DockerEngineNote } from "@/components/SandboxPicker";
 import { SANDBOX_PRESETS } from "@/lib/sandboxPresets";
+import { dockerToggleMessage, leaveDockerMessage } from "@/lib/sandboxSwitchCopy";
 
 export function TaskSandboxDialog() {
   const taskId = useUI(s => s.sandboxForTaskId);
@@ -169,9 +170,7 @@ export function TaskSandboxDialog() {
     if (!task || dockerBusy) return;
     const ok = await useUI.getState().askConfirm({
       title: next ? `Run "${task.name}" in Docker?` : `Stop running "${task.name}" in Docker?`,
-      message: next
-        ? "The agent will run inside a Docker container instead of the Seatbelt cage. Any agent currently running in this task will be terminated and relaunched inside the container."
-        : "Any agent currently running in this task will be terminated and relaunched outside the container.",
+      message: dockerToggleMessage(next),
       confirmLabel: next ? "Run in Docker" : "Stop using Docker",
     });
     if (!ok) return;
@@ -316,9 +315,7 @@ export function TaskSandboxDialog() {
     if (!task || dockerBusy) return;
     const ok = await useUI.getState().askConfirm({
       title: `Switch "${taskLabel(task, useBranchAsTaskName)}" out of Docker?`,
-      message: next === "off"
-        ? "The container will be stopped and the agent relaunched on your Mac with NO sandbox. Any agent currently running in this task will be terminated and relaunched."
-        : "The container will be stopped and the agent relaunched under the Seatbelt sandbox instead. Any agent currently running in this task will be terminated and relaunched.",
+      message: leaveDockerMessage(next === "off" ? "off" : "seatbelt"),
       confirmLabel: next === "off" ? "Stop using Docker" : "Switch to Seatbelt",
     });
     if (!ok) return;

@@ -663,6 +663,14 @@ export interface Settings {
    *  `docker_agent_extra_dirs`, an extra mount's use case isn't tied to
    *  which agent is running. */
   docker_default_extra_mounts?: string[];
+  /** Config dirs mounted into EVERY Docker container, for every agent, from
+   *  one shared host dir each (Settings -> Docker Sandbox -> "Shared config
+   *  dirs"). Home-relative names (`.config/gh`) or absolute container paths.
+   *  Seeded with `.config/gh` + `.config/glab-cli`: a forge token belongs to
+   *  the user, not to an agent vendor, so a per-agent copy would mean logging
+   *  in once per agent AND per clone. A list of named dirs rather than all of
+   *  `~/.config` on purpose - see `docker::build_spec` step 4b. */
+  docker_shared_config_dirs?: string[];
   /** Personal (this-machine) glob patterns hidden from the "All files"
    *  tree across every project. Unioned with each project's committed
    *  `.termic.yaml` `exclude`. `.git` is always hidden regardless. */

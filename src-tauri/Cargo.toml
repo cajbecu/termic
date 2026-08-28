@@ -56,6 +56,10 @@ glob = "0.3"
 # (workspace_file_read_base64). Already in the dependency tree transitively,
 # so pinning it direct doesn't change resolution.
 base64 = "0.22"
+# PNG encoder for `clipboard_image_capture`: the clipboard plugin hands back
+# raw RGBA, and every agent wants a file it can sniff. Already in the tree via
+# arboard/tauri, so this adds no build time.
+png = "0.17"
 # Decode the url-encoded task id + relative path in the `taskpdf:` URI-scheme
 # handler (native PDF preview). Already in the tree via tauri/url, so pinning
 # it direct doesn't change resolution.

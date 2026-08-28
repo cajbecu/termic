@@ -43,6 +43,9 @@ export function DockerSection() {
   // build_spec/render_argv the real spawn uses, against a placeholder task,
   // so it can't drift from what actually runs.
   const [showPreview, setShowPreview] = useState(false);
+  // Collapsed by default: see the Dockerfile block's comment - it is the
+  // one section on this page whose mere presence costs something.
+  const [showDockerfile, setShowDockerfile] = useState(false);
   const [previewAgent, setPreviewAgent] = useState("");
   const [preview, setPreview] = useState<DockerCommandPreview | null>(null);
   const [previewErr, setPreviewErr] = useState<string | null>(null);
@@ -216,6 +219,10 @@ export function DockerSection() {
     const def = await dockerDefaultDockerfile();
     setEditorDoc(def);
     setDockerfile(def);
+    // Deliberately NOT saved here: reset fills the editor, Save commits it,
+    // same as any other edit. The status line reads "unsaved edits" until
+    // then, which is the honest answer - the file on disk is still the old
+    // one, and so is the image that would be built from it.
   }
 
   // Refetch on open and on agent change. Keyed on the agent id (a string),
@@ -311,43 +318,36 @@ export function DockerSection() {
     <div className="flex flex-col gap-7">
       <SectionTitle title="Docker Sandbox" badge="Experimental" />
       <p className="text-[12.5px] text-[var(--color-fg-dim)]">
-        This isn't a separate set of agents. It's a containerized way of running the SAME agents you configure
-        in Settings → Agents &amp; Terminals: an alternative to the Seatbelt sandbox, where the agent runs inside
-        a Docker container instead of under macOS sandbox-exec. One image is shared by every Docker task; pick
-        Docker per task from its sandbox dialog.
+        The same agents you configure in Settings → Agents &amp; Terminals, run inside a container instead of
+        under Seatbelt. One image serves all of them; pick Docker per task from its sandbox dialog.
       </p>
 
-      {/* Always-visible FAQ block, not a <details>: the sandbox dialog tried
-          collapsing similar material once and users missed what was already
-          answered, leading them to re-litigate it in the "Extra" fields (see
-          the comment on the removed <details> in TaskSandboxDialog.tsx). The
-          two questions people actually ask - "is my login shared?" and "why
-          did my agent revert after it updated itself?" - are answered here
-          in full rather than hinted at. */}
-      <div className="flex flex-col gap-2.5 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-3.5 py-3 text-[12.5px] text-[var(--color-fg-dim)]">
+      {/* Always visible, not a <details>: the sandbox dialog tried collapsing
+          similar material once and users missed what was already answered,
+          then re-litigated it in the "Extra" fields (see the comment on the
+          removed <details> in TaskSandboxDialog.tsx).
+
+          Three lines, one per thing that differs from what a reader expects.
+          It was four paragraphs, and a wall nobody reads answers nothing:
+          the long "Logins" explanation is the same thing the Persisted
+          directories box says at greater length, and "Agent updates" now
+          lives in the Rebuild frequency description, which is the control it
+          is actually about. What has to survive any further trim is the
+          NETWORK line - it is the one place this page admits the cage is
+          weaker than Seatbelt's. */}
+      <div className="flex flex-col gap-2 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-3.5 py-3 text-[12.5px] text-[var(--color-fg-dim)]">
         <div>
           <b className="text-[var(--color-fg)]">Filesystem: </b>
-          the agent can only touch what termic mounts (the worktree and its git metadata). Everything else on
-          your Mac is invisible to it.
+          only what termic mounts (the worktree and its git metadata). The rest of your Mac is invisible.
         </div>
         <div>
           <b className="text-[var(--color-fg)]"><u>Network: unrestricted for now</u></b>, unlike Seatbelt's host
-          allowlist (a network allow-list for Docker mode is planned once this is stable).
+          allowlist. An allow-list for Docker mode is planned.
         </div>
         <div>
           <b className="text-[var(--color-fg)]">Logins: </b>
-          each agent gets one folder that termic manages on your Mac, reused by every Docker task running that
-          agent - log in once and it carries over to your next Docker task with that same agent. Different
-          agents don't share a folder with each other, and none of it is your real{" "}
-          <code className="font-mono">~/.claude</code>: it is a separate, Docker-only copy.
-        </div>
-        <div>
-          <b className="text-[var(--color-fg)]">Agent updates: </b>
-          agent binaries live in the image, not in that mounted folder. If an agent updates itself mid-session,
-          the update lives only in that container's own throwaway filesystem - the container is destroyed as
-          soon as its terminal closes, so the next launch starts fresh from the image and the self-update is
-          gone. Rebuilding the image (below) is what actually picks up newer agent versions; "Rebuild
-          frequency" controls how often that is considered due.
+          kept per agent, so you log in once rather than once per task. Never your real{" "}
+          <code className="font-mono">~/.claude</code>.
         </div>
       </div>
 
@@ -405,30 +405,112 @@ export function DockerSection() {
 
       {enabled && (
         <>
-          {/* Both halves of "does this work right now" together: whether Docker is
-              reachable, and whether an image exists. The build actions live with the
-              image state they act on, instead of at the far end of the page under the
-              Dockerfile editor. */}
-          <div className="mt-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-fg-faint)]">Status</div>
+          {/* EVERYTHING about the image, in one group: whether Docker is
+              reachable and an image exists, the buttons that build it, how
+              often it goes stale, the Dockerfile it is built from, and the
+              command a launch will actually run. These were four separate
+              groups spread down the page (Status / Configuration / Advanced /
+              Verify) and answering "is my image right?" meant visiting all
+              four. The two long ones collapse, so the landing view stays the
+              short answer and the detail is one click away.  */}
+          <div className="mt-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-fg-faint)]">Image</div>
           {/* One block, two columns: both are one-line readouts of the same
               question, and stacking them made a short answer occupy a whole
               screen of vertical space. The build actions stay full width
               underneath, since they act on the image AND need Docker up -
               they belong to the row, not to either column. */}
           <Block>
-            <div className="grid grid-cols-2 gap-x-6 gap-y-1">
-              {/* Image first: it is the one the buttons underneath act on,
-                  and the one that changes. Docker's own state is a
-                  precondition you check once and then forget. */}
+            {/* Reads left to right the way the thing works: the RECIPE, the
+                IMAGE built from it, and whether Docker itself is up. The
+                daemon is last and smallest on purpose - it is a precondition
+                you check once and then forget, not something you act on here.
+                The Dockerfile is a shortcut as well as a status: whether it
+                is still the shipped file is exactly the question you ask
+                before opening the editor, and clicking it opens the editor
+                below rather than making you go find it.
+
+                Widths follow the content, not the count: the image tag is the
+                longest string on the row and must not wrap, while "Default"
+                and "Ready · 29.4.0" need almost nothing. */}
+            <div className="grid grid-cols-[0.8fr_1.5fr_0.8fr] gap-x-5 gap-y-1">
+              <button
+                type="button"
+                data-testid="docker-dockerfile-status"
+                onClick={() => setShowDockerfile(v => !v)}
+                title={showDockerfile ? "Hide the Dockerfile" : "Edit the Dockerfile"}
+                className="group min-w-0 text-left"
+              >
+                <div className="flex items-center gap-1 text-[14px] font-medium">
+                  Dockerfile
+                  <ChevronDown className={cn(
+                    "h-3.5 w-3.5 shrink-0 text-[var(--color-fg-faint)] transition-transform group-hover:text-[var(--color-fg-dim)]",
+                    showDockerfile && "rotate-180",
+                  )} />
+                </div>
+                <DockerfileStatusLine isDefault={!!image?.is_default} dirty={dirty} />
+              </button>
               <div className="min-w-0">
                 <div className="text-[14px] font-medium">Image</div>
-                <ImageStatusLine image={image} dirty={dirty} />
+                <ImageStatusLine image={image} />
               </div>
               <div className="min-w-0">
-                <div className="text-[14px] font-medium">Docker status</div>
+                <div className="text-[14px] font-medium">Docker</div>
                 <DockerAvailability status={status} />
               </div>
             </div>
+            {/* A Dockerfile saved before gh / glab shipped has no idea they
+                exist, and the mounted login dir for them is wired up either
+                way, so the failure a user would otherwise hit is `gh: command
+                not found` inside a container with a perfectly good login
+                sitting next to it. OUTSIDE the collapse: a warning nobody can
+                see until they open the thing it is warning about is not a
+                warning. Keyed on the apt repo line rather than on the word
+                "gh", which appears in ordinary prose all over this page. */}
+            {!!savedDockerfile && !dockerfile.includes("cli.github.com") && (
+              <div className="mt-3 flex items-start gap-1.5 text-[12.5px] leading-snug text-[var(--color-warn)]">
+                <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>
+                  This Dockerfile does not install the GitHub / GitLab CLIs. Agents in a container will not have{" "}
+                  <code className="font-mono">gh</code> or <code className="font-mono">glab</code>. Reset to default
+                  to pick them up, or add them yourself.
+                </span>
+              </div>
+            )}
+
+            {/* The editor opens HERE, under the column that toggles it, rather
+                than in a section of its own further down the page - which is
+                where it used to live, and meant clicking "Dockerfile" scrolled
+                you somewhere else to find what you just asked for.
+                It stays collapsed by default because it is the one expensive
+                thing on this page: CodeMirror plus a dynamic import of the
+                dockerfile grammar used to mount on EVERY visit, for something
+                most visits never open. Closed, the ref is null and the init
+                effect's cleanup destroys the view, so the editor exists only
+                while it is on screen. Its Save / Reset sit with it, and the
+                image-level build button stays below: one edits the recipe,
+                the other acts on it. */}
+            {showDockerfile && (
+              <div className="mt-3 border-t border-[var(--color-border-soft)] pt-3">
+                <div className="text-[12.5px] text-[var(--color-fg-dim)]">
+                  One generic image for all agents. Edit the commented regions to add MCP servers, CLI tools, or
+                  baked skills. Personal logins (agent auth, MCP OAuth) are NOT set up here, just run the agent and
+                  log in once inside Docker; those persist via your mounted config directory.
+                </div>
+                <div
+                  ref={setHost}
+                  className="mt-2 max-h-[420px] overflow-auto rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg)]"
+                />
+                <div className="mt-3 flex items-center gap-2">
+                  <Button variant="primary" disabled={!dirty || dfBusy || building} onClick={saveDockerfile}>
+                    {dfBusy ? "Saving…" : "Save"}
+                  </Button>
+                  <Button variant="secondary" disabled={(image?.is_default && !dirty) || dfBusy || building} onClick={resetDockerfile}>
+                    Reset to default
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {/* ONE button, because the two were only ever one real choice.
                 "Build image" was a CACHED build and "Update agents" the same
                 build with --no-cache; the Dockerfile installs agents unpinned,
@@ -458,6 +540,16 @@ export function DockerSection() {
               {!status?.daemon && (
                 <span className="text-[12px] text-[var(--color-warn)]">Start Docker to build.</span>
               )}
+              {/* The reason to press the button, beside the button. In the
+                  Image column it was a three-line paragraph that pushed the
+                  row out of shape to say something the button already implies
+                  the moment you read it here. */}
+              {(image?.stale || dirty) && image?.available && status?.daemon && (
+                <span className="flex items-center gap-1.5 text-[12px] text-[var(--color-warn)]">
+                  <CircleAlert className="h-3.5 w-3.5 shrink-0" />
+                  Dockerfile changed since this image was built.
+                </span>
+              )}
               {buildLog.length > 0 && (
                 <Button variant="ghost" onClick={() => setShowLog(s => !s)}>
                   {showLog ? "Hide log" : "Show log"}
@@ -475,9 +567,6 @@ export function DockerSection() {
           </Block>
 
 
-          {/* Settings that change what a FUTURE task gets. Nothing here acts on the
-              running system, which is exactly what separates it from Status above. */}
-          <div className="mt-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-fg-faint)]">Configuration</div>
           {/* Rebuild nudge frequency. Undefined reads as "daily" (matching
               the Rust-side default) since a fresh settings object may not
               carry the field yet. */}
@@ -486,8 +575,9 @@ export function DockerSection() {
             <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
               How often the image is considered out of date. When a Docker-mode agent launches and the image
               has not been rebuilt within this window, termic asks first, or just does it in the background if
-              you tick the box below. This is how agent CLIs baked into the image get updated (see "Agent
-              updates" above); without it, an old image runs a stale binary indefinitely.
+              you tick the box below. Rebuilding is the only thing that updates an agent CLI: binaries live in
+              the image, and a container is destroyed when its terminal closes, so an agent that updates itself
+              mid-session loses that update on the next launch.
             </div>
             <div className="mt-2 max-w-xs">
               <DockerRebuildFrequencyPicker
@@ -515,149 +605,6 @@ export function DockerSection() {
             )}
           </Block>
 
-          {/* Per-agent config dirs: the confirmed built-in list ("Logins"
-              above) is read-only - it's what makes login/session sharing
-              actually work - plus whatever extra dirs the user wants
-              mounted alongside it (a custom skills dir, an extra MCP
-              config location, etc). Collapsed by default: this is a
-              "look it up when you need it" reference, not something
-              every visit to this page needs to see. */}
-          <Block>
-            <button
-              type="button"
-              onClick={() => setShowAgentDirs(s => !s)}
-              className="flex w-full items-center justify-between gap-3 text-left"
-            >
-              <div>
-                <div className="text-[14px] font-medium">Persisted directories &amp; environment</div>
-                <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
-                  Directories that survive a container restart, per agent, and the environment it runs with.
-                </div>
-              </div>
-              <ChevronDown className={cn("h-4 w-4 shrink-0 text-[var(--color-fg-faint)] transition-transform", showAgentDirs && "rotate-180")} />
-            </button>
-            {showAgentDirs && (
-              <div className="mt-3 flex flex-col gap-2">
-                {/* "Relative to WHAT?" answered before the list, because a
-                    bare `.claude` chip reads like a path on your Mac and is
-                    not one: it names a folder inside the agent's HOME in the
-                    CONTAINER, backed by a termic-owned folder on the host. */}
-                {/* Three facts, one line each. This was five paragraphs
-                    that nobody would read: the mechanism, a worked path, a
-                    "why /root" aside, a not-your-real-config warning and a
-                    chip legend. What a reader needs is the unit (a container
-                    path), the concrete example, and the reassurance about
-                    `~/.claude`. The rest is in the commit history and the
-                    code comments, which is where it belongs. */}
-                <div className="flex flex-col gap-1.5 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-3 py-2.5 text-[12px] leading-relaxed text-[var(--color-fg-dim)]">
-                  <div>
-                    Kept across container restarts. Each entry is a path{" "}
-                    <b className="text-[var(--color-fg)]">inside the container</b>: a bare name means the
-                    agent's home there, so <code className="font-mono">.claude</code> is{" "}
-                    <code className="font-mono">/root/.claude</code>. Full paths like{" "}
-                    <code className="font-mono">/data/models</code> work too.
-                  </div>
-                  <div>
-                    Backed by a folder termic owns, one per agent, never your real{" "}
-                    <code className="font-mono">~/.claude</code>. Cloning an agent gets it a separate one,
-                    which is how you keep a work login apart from a personal one.
-                  </div>
-                  <div className="text-[var(--color-fg-faint)]">
-                    <code className="font-mono">/root</code> is only where HOME points. The container runs
-                    as your own user, with no <code className="font-mono">sudo</code> and no way to elevate.
-                  </div>
-                </div>
-
-                {agentDirs.map(d => (
-                  <AgentDirsRow
-                    key={d.agent_id}
-                    dirs={d}
-                    onChangeExtra={next => {
-                      setAgentDirs(cur => cur.map(a => a.agent_id === d.agent_id ? { ...a, extra: next } : a));
-                      patch({ docker_agent_extra_dirs: { ...(settings.docker_agent_extra_dirs ?? {}), [d.agent_id]: next } });
-                    }}
-                    onTogglePersist={next => {
-                      setAgentDirs(cur => cur.map(a => a.agent_id === d.agent_id ? { ...a, persist_enabled: next } : a));
-                      patch({ docker_agent_persist_enabled: { ...(settings.docker_agent_persist_enabled ?? {}), [d.agent_id]: next } });
-                    }}
-                    dockerEnv={settings.agents?.find(a => a.id === d.agent_id)?.docker_env ?? {}}
-                    onChangeDockerEnv={next => patch({
-                      agents: (settings.agents ?? []).map(a =>
-                        a.id === d.agent_id ? { ...a, docker_env: next } : a),
-                    })}
-                  />
-                ))}
-              </div>
-            )}
-          </Block>
-
-          {/* Default extra mounts: the Settings-level companion to a
-              task's own "Extra mounts" field (Sandbox dialog / New task
-              dialog). Same host_path:container_path shape - these are
-              UNIONED into a new Docker-sandboxed task's mounts at
-              creation, then owned by the task from then on: the user can
-              edit, remove, or add to them per task with no effect back
-              here. Global rather than per-agent, unlike "Per-agent config
-              dirs" above: an extra mount's use case (persisting an MCP
-              server's own data dir, say) isn't tied to which agent runs. */}
-          <Block>
-            <div className="text-[14px] font-medium">Default extra mounts</div>
-            <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
-              Bind-mount these host directories into every NEW Docker-sandboxed task by default, one per line as{" "}
-              <code className="font-mono">host_path:container_path</code> (same field and format as a task's own
-              "Extra mounts"). The user can edit, remove, or add to them per task afterward - editing this list only
-              affects tasks created from now on.
-            </div>
-            <div className="mt-3">
-              <ListField
-                label="Extra mounts"
-                placeholder={"$HOME/mcp-data:/data/mcp"}
-                value={defaultMounts}
-                onChange={setDefaultMounts}
-              />
-            </div>
-            <div className="mt-3">
-              <Button variant="primary" disabled={!defaultMountsDirty || mountsBusy} onClick={saveDefaultMounts}>
-                {mountsBusy ? "Saving…" : "Save"}
-              </Button>
-            </div>
-          </Block>
-
-
-          {/* The image definition itself. Last because editing it is rare and the
-              shipped default is meant to carry most people. */}
-          <div className="mt-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-fg-faint)]">Advanced</div>
-          {/* Dockerfile editor */}
-          <Block>
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-[14px] font-medium">Dockerfile</div>
-                <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
-                  One generic image for all agents. Edit the commented regions to add MCP servers, CLI tools, or
-                  baked skills. Personal logins (agent auth, MCP OAuth) are NOT set up here, just run the agent and
-                  log in once inside Docker; those persist via your mounted config directory.
-                </div>
-              </div>
-            </div>
-            <div
-              ref={setHost}
-              className="mt-2 max-h-[420px] overflow-auto rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg)]"
-            />
-            <div className="mt-3 flex items-center gap-2">
-              <Button variant="primary" disabled={!dirty || dfBusy || building} onClick={saveDockerfile}>
-                {dfBusy ? "Saving…" : "Save"}
-              </Button>
-              <Button variant="secondary" disabled={(image?.is_default && !dirty) || dfBusy || building} onClick={resetDockerfile}>
-                Reset to default
-              </Button>
-              {dirty && <span className="text-[12px] text-[var(--color-fg-faint)]">Unsaved edits</span>}
-            </div>
-          </Block>
-
-
-          {/* A readout of everything above, so it belongs after it. Mid-page it read
-              as another setting rather than the answer to "what will this run". */}
-          <div className="mt-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-fg-faint)]">Verify</div>
           {/* Command preview. The task sandbox dialog has one per task; this
               is the same thing before any task exists, so "what does the cage
               actually do" is answerable while you are configuring the image
@@ -730,11 +677,162 @@ export function DockerSection() {
               </div>
             )}
           </Block>
+          {/* What a task gets, rather than what the image contains. Nothing
+              here acts on the running system, which is what separates it from
+              Image above. */}
+          <div className="mt-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--color-fg-faint)]">Configuration</div>
+          {/* Per-agent config dirs: the confirmed built-in list ("Logins"
+              above) is read-only - it's what makes login/session sharing
+              actually work - plus whatever extra dirs the user wants
+              mounted alongside it (a custom skills dir, an extra MCP
+              config location, etc). Collapsed by default: this is a
+              "look it up when you need it" reference, not something
+              every visit to this page needs to see. */}
+          <Block>
+            <button
+              type="button"
+              onClick={() => setShowAgentDirs(s => !s)}
+              className="flex w-full items-center justify-between gap-3 text-left"
+            >
+              <div>
+                <div className="text-[14px] font-medium">Persisted directories &amp; environment</div>
+                <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+                  Directories that survive a container restart, shared or per agent, and the environment each one runs with.
+                </div>
+              </div>
+              <ChevronDown className={cn("h-4 w-4 shrink-0 text-[var(--color-fg-faint)] transition-transform", showAgentDirs && "rotate-180")} />
+            </button>
+            {showAgentDirs && (
+              <div className="mt-3 flex flex-col gap-2">
+                {/* "Relative to WHAT?" answered before the list, because a
+                    bare `.claude` chip reads like a path on your Mac and is
+                    not one: it names a folder inside the agent's HOME in the
+                    CONTAINER, backed by a termic-owned folder on the host. */}
+                {/* Three facts, one line each. This was five paragraphs
+                    that nobody would read: the mechanism, a worked path, a
+                    "why /root" aside, a not-your-real-config warning and a
+                    chip legend. What a reader needs is the unit (a container
+                    path), the concrete example, and the reassurance about
+                    `~/.claude`. The rest is in the commit history and the
+                    code comments, which is where it belongs. */}
+                <div className="flex flex-col gap-1.5 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-3 py-2.5 text-[12px] leading-relaxed text-[var(--color-fg-dim)]">
+                  <div>
+                    Kept across container restarts. Each entry is a path{" "}
+                    <b className="text-[var(--color-fg)]">inside the container</b>: a bare name means the
+                    agent's home there, so <code className="font-mono">.claude</code> is{" "}
+                    <code className="font-mono">/root/.claude</code>. Full paths like{" "}
+                    <code className="font-mono">/data/models</code> work too.
+                  </div>
+                  <div>
+                    Backed by a folder termic owns, never your real{" "}
+                    <code className="font-mono">~/.claude</code>. Per-agent by default, so cloning an agent
+                    gets it a separate one and a work login stays apart from a personal one; the{" "}
+                    <b className="text-[var(--color-fg)]">All agents</b> row is the exception, one folder
+                    every agent shares.
+                  </div>
+                  <div className="text-[var(--color-fg-faint)]">
+                    <code className="font-mono">/root</code> is only where HOME points. The container runs
+                    as your own user, with no <code className="font-mono">sudo</code> and no way to elevate.
+                  </div>
+                </div>
+
+                {/* Shared first: it is the one row that applies to everything
+                    below it, and reading it after seven per-agent cards made
+                    it look like an eighth agent. */}
+                <SharedDirsRow
+                  dirs={settings.docker_shared_config_dirs ?? []}
+                  onChange={next => patch({ docker_shared_config_dirs: next })}
+                />
+
+                {agentDirs.map(d => (
+                  <AgentDirsRow
+                    key={d.agent_id}
+                    dirs={d}
+                    onChangeExtra={next => {
+                      setAgentDirs(cur => cur.map(a => a.agent_id === d.agent_id ? { ...a, extra: next } : a));
+                      patch({ docker_agent_extra_dirs: { ...(settings.docker_agent_extra_dirs ?? {}), [d.agent_id]: next } });
+                    }}
+                    onTogglePersist={next => {
+                      setAgentDirs(cur => cur.map(a => a.agent_id === d.agent_id ? { ...a, persist_enabled: next } : a));
+                      patch({ docker_agent_persist_enabled: { ...(settings.docker_agent_persist_enabled ?? {}), [d.agent_id]: next } });
+                    }}
+                    dockerEnv={settings.agents?.find(a => a.id === d.agent_id)?.docker_env ?? {}}
+                    onChangeDockerEnv={next => patch({
+                      agents: (settings.agents ?? []).map(a =>
+                        a.id === d.agent_id ? { ...a, docker_env: next } : a),
+                    })}
+                  />
+                ))}
+              </div>
+            )}
+          </Block>
+
+          {/* Default extra mounts: the Settings-level companion to a
+              task's own "Extra mounts" field (Sandbox dialog / New task
+              dialog). Same host_path:container_path shape - these are
+              UNIONED into a new Docker-sandboxed task's mounts at
+              creation, then owned by the task from then on: the user can
+              edit, remove, or add to them per task with no effect back
+              here. Global rather than per-agent, unlike "Per-agent config
+              dirs" above: an extra mount's use case (persisting an MCP
+              server's own data dir, say) isn't tied to which agent runs. */}
+          <Block>
+            <div className="text-[14px] font-medium">Default extra mounts</div>
+            <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+              Bind-mount these host directories into every NEW Docker-sandboxed task by default, one per line as{" "}
+              <code className="font-mono">host_path:container_path</code> (same field and format as a task's own
+              "Extra mounts"). The user can edit, remove, or add to them per task afterward - editing this list only
+              affects tasks created from now on.
+            </div>
+            <div className="mt-3">
+              <ListField
+                label="Extra mounts"
+                placeholder={"$HOME/mcp-data:/data/mcp"}
+                value={defaultMounts}
+                onChange={setDefaultMounts}
+              />
+            </div>
+            <div className="mt-3">
+              <Button variant="primary" disabled={!defaultMountsDirty || mountsBusy} onClick={saveDefaultMounts}>
+                {mountsBusy ? "Saving…" : "Save"}
+              </Button>
+            </div>
+          </Block>
+
+
 
         </>
       )}
     </div>
   );
+}
+
+/** The Dockerfile's own one-line state, next to the image and the daemon:
+ *  shipped default, edited, or edited-and-not-yet-saved. Three states rather
+ *  than two because "modified" and "modified but not written to disk" build
+ *  different images, and the second one is the reason a rebuild can look like
+ *  it ignored your change. */
+function DockerfileStatusLine({ isDefault, dirty }: { isDefault: boolean; dirty: boolean }) {
+  if (dirty) {
+    return (
+      <div className="mt-1 flex items-start gap-1.5 text-[12.5px] leading-snug text-[var(--color-warn)]">
+        <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" /> <span>Unsaved edits</span>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-1 flex items-start gap-1.5 text-[12.5px] leading-snug text-[var(--color-fg-faint)]">
+      <CircleCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--color-ok)]" />
+      <span>{isDefault ? "Default" : "Customized"}</span>
+    </div>
+  );
+}
+
+/** "Docker version 29.4.0, build 9d7ad9f" -> "29.4.0". The build hash is
+ *  noise in a column whose whole job is to say yes or no; the full string
+ *  stays as the title, so nothing is actually lost. */
+function shortDockerVersion(v: string): string {
+  return v.replace(/^Docker version /i, "").replace(/,\s*build.*$/i, "").trim() || v;
 }
 
 function DockerAvailability({ status }: { status: DockerStatus | null }) {
@@ -755,12 +853,16 @@ function DockerAvailability({ status }: { status: DockerStatus | null }) {
   }
   return (
     <div className="mt-1 flex items-start gap-1.5 text-[12.5px] leading-snug text-[var(--color-fg-dim)]">
-      <CircleCheck className="h-3.5 w-3.5 shrink-0 mt-0.5 text-[var(--color-ok)]" /> Ready{status.version ? ` · ${status.version}` : ""}
+      <CircleCheck className="h-3.5 w-3.5 shrink-0 mt-0.5 text-[var(--color-ok)]" />
+      <span title={status.version ?? undefined}>Ready{status.version ? ` · ${shortDockerVersion(status.version)}` : ""}</span>
     </div>
   );
 }
 
-function ImageStatusLine({ image, dirty }: { image: DockerImageStatus | null; dirty: boolean }) {
+/** What EXISTS: the built tag and when. Deliberately not the "rebuild to
+ *  apply your edits" warning, which is an instruction rather than a state and
+ *  now sits next to the button that carries it out. */
+function ImageStatusLine({ image }: { image: DockerImageStatus | null }) {
   if (!image) return null;
   return (
     <div className="mt-1 flex flex-col gap-1 text-[12.5px]">
@@ -774,13 +876,7 @@ function ImageStatusLine({ image, dirty }: { image: DockerImageStatus | null; di
           <CircleAlert className="h-3.5 w-3.5 shrink-0 mt-0.5" /> <span>Not built yet. Build it to use Docker mode in a task.</span>
         </span>
       )}
-      {(image.stale || dirty) && image.available && (
-        <span className="flex items-start gap-1.5 leading-snug text-[var(--color-warn)]">
-          <CircleAlert className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-          <span>Dockerfile edited since the last build. Rebuild to apply your changes (tasks keep using the last built image until then).</span>
-        </span>
-      )}
-      {image.available && !image.stale && !dirty && (
+      {image.available && (
         <span className="flex items-start gap-1.5 leading-snug text-[var(--color-fg-faint)]">
           {describeLastBuildDate(image.last_built_date)}
         </span>
@@ -809,6 +905,123 @@ function parseDockerEnvLines(text: string): Record<string, string> {
   return out;
 }
 
+/** The chip list every persisted-dirs row uses: a name, any locked built-in
+ *  dirs, the editable ones as removable chips, and a "+ add" that becomes a
+ *  one-line input. Shared by the per-agent rows and the all-agents row so the
+ *  two cannot drift into looking like different features - which is exactly
+ *  what a separate "Shared config dirs" section did. */
+function DirChips({ label, sub, locked = [], dirs, onChange, canAdd = true, placeholder = ".mytool or /data/cache" }: {
+  label: string;
+  sub?: string;
+  locked?: string[];
+  dirs: string[];
+  onChange: (next: string[]) => void;
+  canAdd?: boolean;
+  placeholder?: string;
+}) {
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  function commit() {
+    const v = draft.trim();
+    if (v && !dirs.includes(v)) onChange([...dirs, v]);
+    setDraft("");
+    setAdding(false);
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span className="mr-0.5 text-[13px] font-medium">{label}</span>
+      {sub && <span className="mr-0.5 text-[11px] text-[var(--color-fg-faint)]">{sub}</span>}
+      {locked.map(d => (
+        <span
+          key={d}
+          title="Built-in - confirmed to hold real state, can't be removed"
+          className="flex items-center gap-1 rounded bg-[var(--color-bg-2)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--color-fg-dim)]"
+        >
+          <Lock className="h-2.5 w-2.5 text-[var(--color-fg-faint)]" />
+          {d}
+        </span>
+      ))}
+      {dirs.map(d => (
+        <span
+          key={d}
+          className="flex items-center gap-1 rounded bg-[var(--color-accent)]/10 px-1.5 py-0.5 font-mono text-[11px] text-[var(--color-fg-dim)]"
+        >
+          {d}
+          <button
+            type="button"
+            onClick={() => onChange(dirs.filter(x => x !== d))}
+            aria-label={`Remove ${d}`}
+            className="text-[var(--color-fg-faint)] hover:text-[var(--color-err)]"
+          >
+            <X className="h-2.5 w-2.5" />
+          </button>
+        </span>
+      ))}
+      {adding ? (
+        <input
+          autoFocus
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={e => {
+            if (e.key === "Enter") commit();
+            if (e.key === "Escape") { setDraft(""); setAdding(false); }
+          }}
+          placeholder={placeholder}
+          spellCheck={false}
+          className="w-24 rounded border border-[var(--color-accent-soft)] bg-[var(--color-bg)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--color-fg)] outline-none"
+        />
+      ) : canAdd ? (
+        <button
+          type="button"
+          onClick={() => setAdding(true)}
+          className="rounded border border-dashed border-[var(--color-border)] px-1.5 py-0.5 text-[11px] text-[var(--color-fg-faint)] hover:border-[var(--color-accent-soft)] hover:text-[var(--color-fg)]"
+        >
+          + add
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/** The all-agents row: the same persisted dirs, mounted into EVERY container
+ *  instead of one agent's. It sits at the top of the same list rather than in
+ *  a section of its own, because "shared config dirs" and "persisted
+ *  directories" were two names for one idea and the reader had to work out
+ *  that they were the same mechanism on a different axis.
+ *
+ *  No environment column: env is per agent by definition. The right half
+ *  explains WHY this row is shared, which is the question the row raises. */
+function SharedDirsRow({ dirs, onChange }: { dirs: string[]; onChange: (next: string[]) => void }) {
+  return (
+    <div className="grid grid-cols-2 items-stretch gap-x-4 gap-y-1.5 rounded-md border border-[var(--color-accent-soft)] bg-[var(--color-accent)]/[0.04] px-3 py-2">
+      <div className="flex min-w-0 flex-col gap-1.5">
+        <DirChips
+          label="All agents"
+          dirs={dirs}
+          onChange={onChange}
+          placeholder=".config/gh"
+        />
+        {dirs.length === 0 && (
+          <span className="text-[11px] text-[var(--color-fg-faint)]">
+            Nothing shared. Agents in a container will have no <code className="font-mono">gh</code> /{" "}
+            <code className="font-mono">glab</code> login.
+          </span>
+        )}
+      </div>
+      <div className="flex min-w-0 flex-col justify-center text-[11px] leading-relaxed text-[var(--color-fg-faint)]">
+        <span>
+          Mounted into every container, for every agent, one folder each. A GitHub token is yours rather than
+          any one agent's, so <code className="font-mono">gh auth login</code> once inside any Docker task
+          covers them all. Your own <code className="font-mono">~/.config/gh</code> is never mounted.
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function AgentDirsRow({ dirs, onChangeExtra, onTogglePersist, dockerEnv, onChangeDockerEnv }: {
   dirs: DockerAgentDirs;
   onChangeExtra: (next: string[]) => void;
@@ -820,16 +1033,7 @@ function AgentDirsRow({ dirs, onChangeExtra, onTogglePersist, dockerEnv, onChang
   dockerEnv: Record<string, string>;
   onChangeDockerEnv: (next: Record<string, string>) => void;
 }) {
-  const [adding, setAdding] = useState(false);
-  const [draft, setDraft] = useState("");
   const canAdd = dirs.is_builtin || dirs.persist_enabled;
-
-  function commit() {
-    const v = draft.trim();
-    if (v && !dirs.extra.includes(v)) onChangeExtra([...dirs.extra, v]);
-    setDraft("");
-    setAdding(false);
-  }
 
   // Two columns of equal height: what is KEPT on the left, what the container
   // RUNS WITH on the right. Stacked, the env box read as an afterthought
@@ -840,58 +1044,13 @@ function AgentDirsRow({ dirs, onChangeExtra, onTogglePersist, dockerEnv, onChang
   return (
     <div className="grid grid-cols-2 items-stretch gap-x-4 gap-y-1.5 rounded-md border border-[var(--color-border-soft)] px-3 py-2">
       <div className="flex min-w-0 flex-col gap-1.5">
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="mr-0.5 text-[13px] font-medium">{dirs.display_name}</span>
-        {dirs.builtin.map(d => (
-          <span
-            key={d}
-            title="Built-in - confirmed to hold real state, can't be removed"
-            className="flex items-center gap-1 rounded bg-[var(--color-bg-2)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--color-fg-dim)]"
-          >
-            <Lock className="h-2.5 w-2.5 text-[var(--color-fg-faint)]" />
-            {d}
-          </span>
-        ))}
-        {dirs.extra.map(d => (
-          <span
-            key={d}
-            className="flex items-center gap-1 rounded bg-[var(--color-accent)]/10 px-1.5 py-0.5 font-mono text-[11px] text-[var(--color-fg-dim)]"
-          >
-            {d}
-            <button
-              type="button"
-              onClick={() => onChangeExtra(dirs.extra.filter(x => x !== d))}
-              aria-label={`Remove ${d}`}
-              className="text-[var(--color-fg-faint)] hover:text-[var(--color-err)]"
-            >
-              <X className="h-2.5 w-2.5" />
-            </button>
-          </span>
-        ))}
-        {adding ? (
-          <input
-            autoFocus
-            value={draft}
-            onChange={e => setDraft(e.target.value)}
-            onBlur={commit}
-            onKeyDown={e => {
-              if (e.key === "Enter") commit();
-              if (e.key === "Escape") { setDraft(""); setAdding(false); }
-            }}
-            placeholder=".mytool or /data/cache"
-            spellCheck={false}
-            className="w-24 rounded border border-[var(--color-accent-soft)] bg-[var(--color-bg)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--color-fg)] outline-none"
-          />
-        ) : canAdd ? (
-          <button
-            type="button"
-            onClick={() => setAdding(true)}
-            className="rounded border border-dashed border-[var(--color-border)] px-1.5 py-0.5 text-[11px] text-[var(--color-fg-faint)] hover:border-[var(--color-accent-soft)] hover:text-[var(--color-fg)]"
-          >
-            + add
-          </button>
-        ) : null}
-      </div>
+      <DirChips
+        label={dirs.display_name}
+        locked={dirs.builtin}
+        dirs={dirs.extra}
+        onChange={onChangeExtra}
+        canAdd={canAdd}
+      />
       {!dirs.is_builtin && dirs.persist_offerable && (
         <label className="flex items-center gap-1.5 text-[11px] text-[var(--color-fg-faint)]">
           <input

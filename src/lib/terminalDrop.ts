@@ -36,9 +36,11 @@ import { showDragGhost, moveDragGhost, hideDragGhost } from "@/lib/dragGhost";
 // picked up at drop time without the component having to re-register.
 //   ptyId     — the terminal's CURRENT pty id, or null when the PTY has exited.
 //   taskId      — owning task (used to stage files into a per-task temp dir).
-//   sandboxed — whether THIS terminal's process runs under the seatbelt. Only
-//               the agent PTY is sandboxed; the scratch shell never is, so it
-//               always inserts the raw path with no prompt.
+//   sandboxed — whether THIS terminal's process runs inside a cage, EITHER
+//               engine: the seatbelt denies ~/Desktop and friends, and a
+//               Docker container simply has no such path. Only the agent PTY
+//               is caged; the scratch shell never is, so it always inserts
+//               the raw path with no prompt.
 interface DropTarget {
   ptyId: () => string | null;
   taskId: string;

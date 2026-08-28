@@ -1,7 +1,8 @@
-// Prompt shown when a file is dropped onto a SANDBOXED agent terminal.
+// Prompt shown when a file is dropped onto a CAGED agent terminal.
 //
-// The agent runs under the macOS seatbelt, which hard-denies ~/Desktop,
-// ~/Downloads, ~/Documents, ~/Pictures (see sandbox.rs). So inserting the
+// Either cage has the same problem. Under the macOS seatbelt ~/Desktop,
+// ~/Downloads, ~/Documents and ~/Pictures are hard-denied (see sandbox.rs);
+// in a Docker task nothing outside the mounts exists at all. Inserting the
 // dropped file's raw path would let the agent see the path but fail to read
 // the file — looking broken. We ask the user how to share it instead.
 
@@ -58,7 +59,7 @@ export function TerminalDropDialog() {
                 Copy to a temp folder <span className="text-[11px] font-normal text-[var(--color-accent)]">recommended</span>
               </div>
               <div className="text-[12px] text-[var(--color-fg-faint)]">
-                Copies the file somewhere the sandbox already allows and inserts that path. Works immediately, no restart, no permanent access.
+                Copies the file somewhere the agent can already read and inserts that path. Works immediately, no restart, no permanent access.
               </div>
             </div>
           </button>
@@ -73,7 +74,7 @@ export function TerminalDropDialog() {
             <div>
               <div className="font-medium text-[var(--color-fg)]">Allow the folder</div>
               <div className="text-[12px] text-[var(--color-fg-faint)] break-all">
-                Adds <code className="font-mono">{folderHint}</code> to this task's sandbox allow-list. Inserts the real path. Takes effect after the agent restarts.
+                Adds <code className="font-mono">{folderHint}</code> to this task's allowed paths. Inserts the real path. Takes effect after the agent restarts.
               </div>
             </div>
           </button>

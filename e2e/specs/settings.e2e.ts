@@ -2646,6 +2646,60 @@ describe("docker command preview", () => {
     expect(argv).toContain("/path/to/your/task-worktree");
   });
 
+  it("mounts the Dockerfile editor only while its section is open", async () => {
+    // Collapsed by default, and not merely hidden: CodeMirror plus a dynamic
+    // import of the dockerfile grammar used to mount on every visit to this
+    // page for a section most visits never open. The reopen half matters as
+    // much as the collapse - the init effect bails when a view already
+    // exists, so a destroy that did not clear the ref would leave the second
+    // open with an empty box and no way back short of leaving the page.
+    const editors = () => browser.execute(() =>
+      document.querySelectorAll(".cm-content").length);
+    expect(await editors()).toBe(0);
+
+    // One control, in the Image row: it answers "is this still the shipped
+    // file?" and opens the editor directly underneath. There used to be a
+    // second toggle in a section further down, which is exactly the split
+    // this replaced.
+    await clickWhenVisible('[data-testid="docker-dockerfile-status"]');
+    await browser.waitUntil(async () => (await editors()) > 0,
+      { timeoutMsg: "the Dockerfile editor never mounted after expanding" });
+    // Its real content, not an empty box swapped in a tick later.
+    const text = await browser.execute(() =>
+      document.querySelector(".cm-content")?.textContent ?? "");
+    expect(text).toContain("FROM");
+
+    await clickWhenVisible('[data-testid="docker-dockerfile-status"]');
+    await browser.waitUntil(async () => (await editors()) === 0,
+      { timeoutMsg: "the editor stayed mounted after collapsing" });
+
+    await clickWhenVisible('[data-testid="docker-dockerfile-status"]');
+    await browser.waitUntil(async () => (await editors()) > 0,
+      { timeoutMsg: "the editor did not come back on a second open" });
+    await clickWhenVisible('[data-testid="docker-dockerfile-status"]');
+  });
+
+  it("wires the shared gh / glab login into every container", async () => {
+    // The forge CLIs are only useful if their config dir survives `--rm`,
+    // and the preview is the one place that claim is checkable without
+    // running a container. Asserted through the real argv rather than the
+    // Rust unit test alone, because the mount has to reach the spawn path,
+    // not just build_spec.
+    const argv = await browser.execute(() =>
+      document.querySelector('[data-testid="docker-preview-argv"]')?.textContent ?? "");
+    expect(argv).toContain("/root/.config/gh");
+    expect(argv).toContain("/root/.config/glab-cli");
+    expect(argv).toContain("GH_CONFIG_DIR=/root/.config/gh");
+    expect(argv).toContain("GLAB_CONFIG_DIR=/root/.config/glab-cli");
+    // Shared, not per-agent: the host side is docker-forge, never the
+    // docker-agents/<agent> tree the config-dir mounts use.
+    expect(argv).toContain("docker-forge");
+    // And never the user's own gh login, which on macOS is a Keychain entry
+    // anyway (so the mount would hand the container an unauthenticated gh)
+    // and which Seatbelt hard-denies.
+    expect(argv).not.toContain("/.config/gh:/root/.config/gh");
+  });
+
   it("re-renders for the agent picked, not just the first one", async () => {
     const agents = await browser.execute(() =>
       [...document.querySelectorAll('[data-testid="docker-preview-agent"] option')]

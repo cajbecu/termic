@@ -1,18 +1,12 @@
-# termic Docker sandbox — generic image for ALL agents.
-# One image, every supported agent installed. The per-task agent is
-# just the command run inside it.
-#
-# Edit the marked regions to customize. Rebuild from termic afterwards.
-#
-# Agents are intentionally UNPINNED (always latest). To upgrade them (and
-# the LTS Node base), rebuild WITHOUT cache:  docker build --no-cache --pull
-# termic exposes this as a one-click "Update agents" / rebuild-no-cache.
+# termic Docker sandbox: one image, every supported agent. The per-task agent
+# is just the command run inside it. Edit the marked regions, then rebuild
+# from termic. Agents are UNPINNED (always latest); "Update agents" re-fetches
+# them without re-running the base and apt layers.
 
-# ── Base: current Node LTS (always >=22, satisfies Copilot) + Debian ────
-# node:lts auto-tracks the latest LTS; --pull on rebuild fetches it fresh.
+# ── Base: current Node LTS (>=22, satisfies Copilot) + Debian ──────────
 FROM node:lts-bookworm
 
-# ── System toolchain (git is essential; the rest are common agent deps) ─
+# ── System toolchain ───────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git \
       curl \
@@ -22,32 +16,45 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
-# Native-binary installers: claude + agy drop into ~/.local/bin; grok is
-# the outlier and drops into ~/.grok/bin (binary, bundled skills, and
-# config all live under ~/.grok - see docs/plans/docker-sandbox/findings.md).
+# claude and agy install to ~/.local/bin, grok to ~/.grok/bin.
 ENV PATH="/root/.local/bin:/root/.grok/bin:${PATH}"
 
-# The task worktree is bind-mounted from the host, so its files are owned by
-# a different uid than the container user. Without this, git refuses every
-# operation with "detected dubious ownership". Safe here: the only repos in
-# this throwaway cage are the user's own mounted worktrees.
+# The worktree is bind-mounted from the host, so it is owned by a different
+# uid and git refuses every command as "dubious ownership" without this. Safe
+# here: the only repos in this throwaway cage are your own.
 RUN git config --global --add safe.directory '*'
 
+# ── GitHub / GitLab CLIs ───────────────────────────────────────────────
+# termic mounts a shared config dir for each, so `gh auth login` once inside
+# any Docker task persists. Your Mac's own ~/.config/gh is never mounted.
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+# glab ships per-release .debs, so the latest version is resolved first.
+# NON-FATAL on purpose: this is the one step that depends on the shape of a
+# JSON response, and a GitLab CLI nobody uses must not fail every Docker task.
+RUN GLAB_VER=$(curl -fsSL "https://gitlab.com/api/v4/projects/gitlab-org%2Fcli/releases/permalink/latest" | sed -n 's/.*"tag_name":"v\([^"]*\)".*/\1/p') \
+    && curl -fsSL -o /tmp/glab.deb "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VER}/downloads/glab_${GLAB_VER}_linux_$(dpkg --print-architecture).deb" \
+    && dpkg -i /tmp/glab.deb && rm -f /tmp/glab.deb \
+    || echo "WARNING: glab install failed, the GitLab CLI will be missing from this image"
+
+# Push over HTTPS through whichever CLI is logged in. Baked in here because
+# `gh auth setup-git` writes ~/.gitconfig, which every container throws away.
+RUN git config --global credential."https://github.com".helper '!gh auth git-credential' \
+    && git config --global credential."https://gist.github.com".helper '!gh auth git-credential' \
+    && git config --global credential."https://gitlab.com".helper '!glab auth git-credential'
+
 # ── Agent refresh boundary ─────────────────────────────────────────────
-# Docker invalidates a layer and EVERYTHING after it, so a plain --no-cache
-# rebuild also re-runs the base pull and the apt install above, which is the
-# slow half of the build and almost never what changed. Bumping this arg
-# invalidates from here down instead: the agents are re-fetched (they are
-# unpinned, so that is the point) while the base and apt layers stay cached.
-# termic passes a fresh value for "Update agents"; editing the lines above
-# still invalidates them the normal way, by changing their content.
+# Docker invalidates a layer and everything after it. Bumping this arg
+# re-fetches the unpinned agents below without re-running the base pull and
+# apt install above, which are the slow half and rarely what changed.
 ARG TERMIC_AGENT_REFRESH=0
 RUN echo "agent refresh: $TERMIC_AGENT_REFRESH" > /dev/null
 
-# ── Agents (one per line, each preceded by its source / docs page) ──────
-# Can't comment inside a `\`-continued RUN, so one install per line.
-# claude (Anthropic, native binary -> ~/.local/bin; npm install is
-# deprecated as of Claude Code 2.1.15) https://code.claude.com/docs/en/setup
+# ── Agents: one per line, each after its install docs ──────────────────
+# https://code.claude.com/docs/en/setup (native binary; npm is deprecated)
 RUN curl -fsSL https://claude.ai/install.sh | bash
 # https://www.npmjs.com/package/@openai/codex
 RUN npm install -g @openai/codex
@@ -55,35 +62,24 @@ RUN npm install -g @openai/codex
 RUN npm install -g @github/copilot
 # https://www.npmjs.com/package/opencode-ai
 RUN npm install -g opencode-ai
-# grok (xAI Grok Build, native binary -> ~/.grok/bin) https://docs.x.ai/build/cli
+# https://docs.x.ai/build/cli (native binary -> ~/.grok/bin)
 RUN curl -fsSL https://x.ai/cli/install.sh | bash
-# agy (Google Antigravity, native binary -> ~/.local/bin) https://antigravity.google/docs/cli/install
+# https://antigravity.google/docs/cli/install (native binary -> ~/.local/bin)
 RUN curl -fsSL https://antigravity.google/cli/install.sh | bash
-# pi (Earendil) https://pi.dev/docs/latest — installed from npm ON PURPOSE,
-# not via https://pi.dev/install.sh. That script's managed mode can put the
-# binary in ~/.pi/agent/bin, i.e. INSIDE the same ~/.pi that holds
-# settings.json and trust.json — grok's exact shape, and the reason grok can
-# never persist config in Docker (mounting the config dir would shadow the
-# binary). The npm package puts `pi` in the image's global prefix instead, so
-# ~/.pi holds config only and IS safe to mount.
+# https://pi.dev/docs/latest - from npm ON PURPOSE, not pi.dev/install.sh:
+# that can put the binary inside ~/.pi, which is also its config dir, and
+# mounting a config dir over its own binary is why grok can never persist.
 RUN npm install -g @earendil-works/pi-coding-agent
 
-# ── Add your MCP servers here (installed into the image) ────────────────
+# ── Add your own MCP servers, CLI tools and skills here ────────────────
 # RUN npm install -g @some/mcp-server
-
-# ── Add CLI tools / system packages here ────────────────────────────────
 # RUN apt-get update && apt-get install -y <pkg> && rm -rf /var/lib/apt/lists/*
-
-# ── Add baked-in skills here ────────────────────────────────────────────
 # COPY my-skills/ /root/.claude/skills/
 
-# termic runs this container as the HOST user's own uid:gid (`docker run
-# -u`), not root - some agent CLIs (Claude Code) refuse
-# --dangerously-skip-permissions when running as root. That uid has no
-# matching /etc/passwd entry in here, so it can't own /root the normal way;
-# world read/write/execute is the simplest fix for a throwaway,
-# single-tenant sandbox container (already --rm, --cap-drop ALL,
-# no-new-privileges) that's about to run as an arbitrary numeric uid anyway.
+# termic runs the container as YOUR uid, not root (Claude Code refuses
+# --dangerously-skip-permissions as root). That uid has no /etc/passwd entry,
+# so /root - where HOME points and every agent keeps its config - is made
+# world-writable. Safe in a --rm, --cap-drop ALL, no-new-privileges cage.
 RUN chmod -R a+rwX /root
 
 WORKDIR /workspace
