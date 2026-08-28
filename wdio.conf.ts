@@ -65,6 +65,11 @@ export const config: WebdriverIO.Config = {
     // The app is launched as a child of this process and inherits env, so
     // point it at the throwaway profile (seeded by scripts/e2e-seed.mjs).
     process.env.TERMIC_DATA_DIR = dataDir;
+    // Agent-hook installs write into an agent's own config dir. Point that at
+    // the throwaway profile so a run can exercise install/remove without
+    // touching the developer's real ~/.claude/settings.json. Honoured only by
+    // the `e2e`-feature binary (agent_hooks::host_config_dir).
+    process.env.TERMIC_E2E_AGENT_HOME = dataDir;
     // Purge accumulated tasks so every run starts lean (specs create their own;
     // archived tasks otherwise pile up across runs and bloat loadAll/sidebar).
     try {

@@ -225,7 +225,19 @@ pub fn disable_all_hooks(root: &Value) -> bool {
 
 /// Host config dir for claude (`~/.claude`), from the same table Seatbelt and
 /// Docker read, so the three cannot drift.
+///
+/// The e2e build lets `TERMIC_E2E_AGENT_HOME` stand in for `$HOME`. Without it
+/// the suite's only way to exercise install/remove would be to write into the
+/// developer's REAL `~/.claude/settings.json`, which is not a test, it is a
+/// hazard. Feature-gated so no release binary can be pointed anywhere but the
+/// user's own home. Indexed in `docs/tech-debt.md`.
 fn host_config_dir() -> Result<PathBuf, String> {
+    #[cfg(feature = "e2e")]
+    let home = match std::env::var_os("TERMIC_E2E_AGENT_HOME") {
+        Some(v) => PathBuf::from(v),
+        None => dirs::home_dir().ok_or_else(|| "no home directory".to_string())?,
+    };
+    #[cfg(not(feature = "e2e"))]
     let home = dirs::home_dir().ok_or_else(|| "no home directory".to_string())?;
     let first = crate::agent_dirs::state_dirs("claude")
         .first()

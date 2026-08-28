@@ -836,4 +836,40 @@ describe("agent notifications", () => {
     expect(await taskViewBadge(taskId!)).not.toBe("attention");
     expect(await sidebarBadge(taskId!)).not.toBe("attention");
   });
+  // The agent-hooks feature (#269), end to end through the real detector.
+  //
+  // Measured against Claude Code 2.1.250: while it is blocked on a permission
+  // prompt it paints its IDLE glyph, which arms termic's 5s settle and fires a
+  // "done" a second before the native OSC 9 notify corrects it. The installed
+  // hook returns a terminalSequence that claude writes to its own PTY, and it
+  // lands ~20ms after the idle title. `#hookattn` replays that exact order.
+  //
+  // The assertion that matters is the ABSENCE of a done: goAttention calls
+  // cancelSettle, so the false one must never reach the badge at all. Waiting
+  // past SETTLE_MS (5s) is what makes that a real check rather than a race the
+  // spec happens to win.
+  it("an agent hook's OSC 777 raises attention and suppresses the false done", async () => {
+    await ensureActiveTask(taskId!);
+    await browser.execute((id) => {
+      const s = window.__termic!.useApp.getState();
+      s.clearAttention(id, s.tabs[id][0].id);
+    }, taskId);
+
+    await submitToAgent(taskId!, "#hookattn");
+
+    await waitForWorkBadge(taskId!, "attention", {
+      timeout: 20_000,
+      message: "the hook's OSC 777 never raised attention",
+    });
+
+    // Past the settle window the idle title armed. If cancelSettle regressed,
+    // a done bullet stacks on top of the bell right about here.
+    await browser.waitUntil(async () => (await quietFor(taskId!)) > 7_000, {
+      timeout: 30_000,
+      interval: 500,
+      timeoutMsg: "PTY never went quiet after the hook",
+    });
+    expect(await taskViewBadge(taskId!)).toBe("attention");
+    expect(await sidebarBadge(taskId!)).not.toBe("done");
+  });
 });

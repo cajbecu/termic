@@ -1,9 +1,10 @@
-// First-launch welcome wizard. Three steps:
+// First-launch welcome wizard. Four steps:
 //   1. Repos directory + CLI detection (original behavior).
-//   2. Theme picker - visual previews so the user can lock in their
+//   2. Agent hooks - sits here because the user has just seen which agents
+//      they have, so the list this step acts on is still on screen.
+//   3. Theme picker - visual previews so the user can lock in their
 //      preference before they're staring at it for hours.
-//   3. Sandbox intro - explain what it is, set the global default,
-//      acknowledge that nothing is sandboxed unless they opt in.
+//   4. Project picker, which keeps the Finish button.
 //
 // Wizard layout: header + step body + footer with Back / Skip / Next-or-
 // Finish. Step state persists across nav so backing up doesn't wipe
@@ -16,10 +17,10 @@ import { useUI } from "@/store/ui";
 import { AppDialog } from "@/components/ui/Dialog";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
-import { discoverRepos, detectClis, settingsLoad, settingsSave, agentsSave, projectAdd } from "@/lib/ipc";
+import { discoverRepos, detectClis, settingsLoad, settingsSave, agentsSave, projectAdd, agentHooksStatus, agentHooksInstall, agentHooksRemove } from "@/lib/ipc";
 import { usePr } from "@/store/pr";
 import { Checkbox } from "@/components/ui/Checkbox";
-import type { CliInfo, DiscoveredRepo } from "@/lib/types";
+import type { AgentHookStatus, CliInfo, DiscoveredRepo } from "@/lib/types";
 import { useApp } from "@/store/app";
 import { CliIcon, CLI_LABEL } from "@/icons/cli";
 import { TermicMark } from "@/icons/TermicLogo";
@@ -27,7 +28,7 @@ import { cn } from "@/lib/utils";
 import { usePrefs, applyTheme, type ThemeMode } from "@/store/prefs";
 import { Sun, Moon, Monitor, Sunrise, Droplet, Binary, Code2, Flower2, GitPullRequest } from "lucide-react";
 
-type Step = 0 | 1 | 2;
+type Step = 0 | 1 | 2 | 3;
 
 export function WelcomeDialog() {
   const open = useUI(s => s.welcomeOpen);
@@ -119,7 +120,7 @@ export function WelcomeDialog() {
     } finally { setBusy(false); }
   }
 
-  const next = () => setStep(s => (s < 2 ? ((s + 1) as Step) : s));
+  const next = () => setStep(s => (s < 3 ? ((s + 1) as Step) : s));
   const back = () => setStep(s => (s > 0 ? ((s - 1) as Step) : s));
 
   return (
@@ -142,8 +143,9 @@ export function WelcomeDialog() {
             {/* Parallel imperatives, one per step. Step 0 sets the repos
                 folder and confirms detected agents, so it says so. */}
             {step === 0 && "Set your repos folder and agents."}
-            {step === 1 && "Pick your theme."}
-            {step === 2 && "Pick projects to add."}
+            {step === 1 && "Let agents tell you when they need you."}
+            {step === 2 && "Pick your theme."}
+            {step === 3 && "Pick projects to add."}
           </div>
         </div>
         {/* Tiny pip indicator. Click to jump (handy for skipping back). */}
@@ -152,7 +154,7 @@ export function WelcomeDialog() {
           data-tauri-drag-region="false"
           style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
         >
-          {[0, 1, 2].map(i => (
+          {[0, 1, 2, 3].map(i => (
             <button key={i} onClick={() => setStep(i as Step)}
               aria-label={`Step ${i + 1}`}
               className={cn(
@@ -169,8 +171,9 @@ export function WelcomeDialog() {
           clis={clis} setClis={setClis} browse={browse}
         />
       )}
-      {step === 1 && <StepTheme />}
-      {step === 2 && (
+      {step === 1 && <StepHooks clis={clis} />}
+      {step === 2 && <StepTheme />}
+      {step === 3 && (
         <StepProjects
           dir={dir}
           repos={repos}
@@ -184,17 +187,17 @@ export function WelcomeDialog() {
           Back
         </Button>
         <div className="flex gap-2">
-          {step < 2 && (
+          {step < 3 && (
             <Button variant="ghost" type="button" onClick={next} disabled={busy}>
               Skip
             </Button>
           )}
-          {step < 2 && (
+          {step < 3 && (
             <Button variant="primary" type="button" onClick={next} disabled={busy}>
               Next
             </Button>
           )}
-          {step === 2 && (
+          {step === 3 && (
             <Button variant="primary" type="button" onClick={() => finish(!dir.trim())} disabled={busy}>
               {busy
                 ? "Adding…"
@@ -357,6 +360,98 @@ function ForgeRows() {
         Without these, PR status, creating a PR, merge detection, and starting a task from an issue stay
         off. Everything else works. You can set them up later; Settings re-checks each visit.
       </div>
+    </div>
+  );
+}
+
+// ── Step 2: agent hooks ──────────────────────────────────────────────
+// Recommended-on: supported agents are wired the moment the user lands here,
+// and the row says so with a Remove next to it. That is deliberate, and it is
+// the one place termic writes into a file the USER owns, so the step names the
+// file rather than burying it. Agents we cannot wire say why instead of
+// quietly missing from the list, which is the mistake the competing
+// implementation makes in the other direction.
+function StepHooks({ clis }: { clis: CliInfo[] }) {
+  const [rows, setRows] = useState<Record<string, AgentHookStatus>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  const detected = clis.filter(c => c.found && c.name !== "shell").map(c => c.name);
+
+  // Auto-install once on arrival for everything we can wire. `ran` guards a
+  // re-entry (the pips let the user jump back) so Remove is not undone.
+  const [ran, setRan] = useState(false);
+  useEffect(() => {
+    if (ran || !detected.length) return;
+    setRan(true);
+    void (async () => {
+      const out: Record<string, AgentHookStatus> = {};
+      for (const id of detected) {
+        try {
+          const st = await agentHooksStatus(id);
+          out[id] = st.supported && !st.host.installed && !st.host.disabled_all
+            ? await agentHooksInstall(id).catch(() => st)
+            : st;
+        } catch { /* a row we cannot read is a row we do not show a button for */ }
+      }
+      setRows(out);
+    })();
+  }, [ran, detected]);
+
+  const toggle = async (id: string, install: boolean) => {
+    setBusy(id);
+    try {
+      const next = install ? await agentHooksInstall(id) : await agentHooksRemove(id);
+      setRows(r => ({ ...r, [id]: next }));
+    } catch { /* leave the row as it was; Settings surfaces the error */ }
+    finally { setBusy(null); }
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-[12.5px] text-[var(--color-fg-dim)]">
+        Agents do not always say when they are stuck. Claude paints its idle
+        marker while it is waiting for you to approve something, so Termic can
+        read it as finished. A small hook in the agent's own config fixes that.
+      </p>
+      <div className="flex flex-col gap-1.5">
+        {detected.length === 0 && (
+          <p className="text-[12.5px] text-[var(--color-fg-dim)]">
+            No agent CLIs detected yet. You can turn this on later in Settings.
+          </p>
+        )}
+        {detected.map(id => {
+          const st = rows[id];
+          return (
+            <div key={id}
+              className="flex items-center justify-between gap-3 rounded-md border border-[var(--color-border)] px-3 py-2">
+              <div className="flex items-center gap-2">
+                <CliIcon cli={id} className="h-4 w-4" />
+                <span className="text-[13px]">{CLI_LABEL[id] ?? id}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[11.5px] text-[var(--color-fg-dim)]">
+                  {!st ? "checking…"
+                    : !st.supported ? (id === "codex" ? "not needed" : "not supported yet")
+                    : st.host.disabled_all ? "hooks are disabled in this config"
+                    : st.host.installed ? "on" : "off"}
+                </span>
+                {st?.supported && !st.host.disabled_all && (
+                  <Button variant="ghost" type="button" disabled={busy === id}
+                    onClick={() => toggle(id, !st.host.installed)}>
+                    {busy === id ? "…" : st.host.installed ? "Remove" : "Install"}
+                  </Button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {/* Name the file. This is the user's own config, not ours. */}
+      {Object.values(rows).some(r => r.supported && r.host.installed) && (
+        <p className="text-[11.5px] text-[var(--color-fg-dim)]">
+          Added one entry to your agent's settings file. Remove it any time here
+          or in Settings.
+        </p>
+      )}
     </div>
   );
 }

@@ -66,7 +66,15 @@ set_title "✳ ${name}"
 #               asks for the user. BEL-terminated, as claude sends it.
 #   #bel        emit a REAL bell, distinct from the BEL that terminates an OSC.
 #   #iip        emit an inline PNG, then Pi's alternate-screen redraw.
+#   #hookattn   reproduce a claude PERMISSION PROMPT with termic's agent hook
+#               installed. Real claude paints its IDLE glyph while it is
+#               blocked on you (measured), which arms termic's 5s settle and
+#               fires a false "done"; the hook's OSC 777 lands ~20ms later and
+#               cancels it. This directive replays that exact order, so the
+#               spec proves the attention wins the race rather than trusting
+#               that it does. Body must match agentHooks.ts HOOK_OSC_BODY.
 osc9()   { printf '\033]9;%s\007' "$1"; }
+osc777() { printf '\033]777;notify;%s\007' "$1"; }
 spin()   { for f in 0 1 2; do set_title "${SPINNER[$f]} ${name}"; sleep 0.15; done; }
 
 # One "prompt" per stdin line: go busy (spinner title + streamed output), then
@@ -134,6 +142,12 @@ while IFS= read -r line; do
         sleep 0.1
       done
       set_title "✳ ${name} iip-after"
+      continue ;;
+    "#hookattn")
+      spin
+      echo "FAKE-AGENT needs your permission to continue"
+      set_title "✳ ${name}"                       # the lie: idle while blocked
+      osc777 "termic;agent needs your input"      # the hook, right behind it
       continue ;;
   esac
   spin

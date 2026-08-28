@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { dataDir } from "../../wdio.conf.js";
@@ -2727,5 +2727,97 @@ describe("docker command preview", () => {
     }, { timeoutMsg: "the preview blanked after switching agent" });
 
     expect(first.trim().length).toBeGreaterThan(0);
+  });
+});
+
+
+// Agent hooks (#269): the one place termic writes into a file the USER owns.
+// The install/remove round trip is asserted against the file on disk, because
+// a writer that eats someone's hand-written hooks is the failure that matters
+// and no badge would show it.
+//
+// `TERMIC_E2E_AGENT_HOME` (wdio.conf.ts, honoured only by the e2e-feature
+// binary) points that write at the throwaway profile, so a run never touches
+// the developer's real ~/.claude/settings.json.
+describe("agent hooks", () => {
+  const settingsPath = `${dataDir}/.claude/settings.json`;
+  const scriptDir = `${dataDir}/.claude/termic-hooks`;
+  // Deliberately not alphabetical, and with a hook of the user's own: both are
+  // things a careless writer destroys.
+  const userConfig = `{
+  "model": "opus",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/my-own-hook"
+          }
+        ]
+      }
+    ]
+  },
+  "alwaysThinkingEnabled": true
+}
+`;
+
+  it("merges into the user's config and restores it byte-for-byte", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    mkdirSync(`${dataDir}/.claude`, { recursive: true });
+    writeFileSync(settingsPath, userConfig);
+
+    const after = await browser.execute(async () =>
+      await window.__termic!.invoke("agent_hooks_install", { agentId: "claude" }));
+    expect((after as { host: { installed: boolean } }).host.installed).toBe(true);
+
+    const merged = JSON.parse(readFileSync(settingsPath, "utf8"));
+    // Ours landed...
+    expect(merged.hooks.PermissionRequest[0].hooks[0].command).toContain("termic-hooks");
+    // ...and nothing of theirs moved.
+    expect(merged.hooks.Stop[0].hooks[0].command).toBe("/usr/local/bin/my-own-hook");
+    expect(merged.model).toBe("opus");
+    expect(merged.alwaysThinkingEnabled).toBe(true);
+    // Key ORDER survives too: serde_json sorts by default, which silently
+    // rewrites a config the user hand-ordered.
+    expect(Object.keys(merged)).toEqual(["model", "hooks", "alwaysThinkingEnabled"]);
+
+    // The script is executable, or claude cannot run it and the hook is inert.
+    expect(existsSync(`${scriptDir}/permission-request.sh`)).toBe(true);
+    expect(statSync(`${scriptDir}/permission-request.sh`).mode & 0o111).toBeGreaterThan(0);
+
+    await browser.execute(async () =>
+      await window.__termic!.invoke("agent_hooks_remove", { agentId: "claude" }));
+
+    expect(readFileSync(settingsPath, "utf8")).toBe(userConfig);
+    expect(existsSync(scriptDir)).toBe(false);
+    rmSync(`${dataDir}/.claude`, { recursive: true, force: true });
+  });
+
+  it("refuses a malformed config rather than clobbering it", async () => {
+    mkdirSync(`${dataDir}/.claude`, { recursive: true });
+    writeFileSync(settingsPath, "{ this is not json");
+
+    const err = await browser.execute(async () => {
+      try {
+        await window.__termic!.invoke("agent_hooks_install", { agentId: "claude" });
+        return null;
+      } catch (e) { return String(e); }
+    });
+    expect(err).toBeTruthy();
+    // Untouched: a config we could not parse is a config we must not rewrite.
+    expect(readFileSync(settingsPath, "utf8")).toBe("{ this is not json");
+    rmSync(`${dataDir}/.claude`, { recursive: true, force: true });
+  });
+
+  it("shows an honest per-agent row instead of pretending every agent is wired", async () => {
+    await browser.execute(() =>
+      window.__termic!.useApp.getState().openSettings("notifications"));
+    await waitForText("Exact needs-you detection");
+    // fakeagent is seeded and detected, and phase 1 wires claude only. The row
+    // has to SAY that rather than offer a button that would fail.
+    await waitForText("not supported yet");
+    await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
   });
 });
