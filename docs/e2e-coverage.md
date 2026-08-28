@@ -50,6 +50,11 @@ until `make e2e` is green and this file reflects it.
 | ✅ A premature done is taken back | A done fired at a stage boundary is undone when the agent goes back to work (spinner returns, stale bullet drops), and the turn's real completion still fires | `agent.e2e.ts` |
 | ✅ Split restore | A pane whose tabs are all gone collapses instead of restoring a blank leg; a task whose main tabs were all non-durable still restores with a main tab and a real activeTab | `tabs-layout.e2e.ts` |
 | ✅ Agent notifications | OSC 9 raises attention carrying the agent's verbatim body; the "waiting for your input" idle nag raises nothing | `agent.e2e.ts` |
+| ✅ Agent hook attention | A hook's OSC 777 raises attention and suppresses the false done the idle title would have fired past `SETTLE_MS` | `agent.e2e.ts` |
+| ✅ Agent hook install | Install merges into the user's own `settings.json`, keeping their hooks, unknown keys and key ORDER; the script lands executable | `settings.e2e.ts` |
+| ✅ Agent hook removal | Remove restores the config byte for byte and deletes the script dir | `settings.e2e.ts` |
+| ✅ Agent hook refuses bad config | A malformed `settings.json` is reported, never overwritten | `settings.e2e.ts` |
+| ✅ Agent hook honest rows | An agent termic cannot wire says so instead of appearing installed | `settings.e2e.ts` |
 | ✅ Run tabs | A custom run command opens a run tab whose PTY executes it; the sidebar's Run row carries the tab pill's two controls, a red Stop while the run is live (killing the PTY from the tree) and a Play once it is not, which fronts the run tab and asks its pane to start the command again. Collapsing the task moves that control INTO the header row (asserted by containment, either half of the pair) and expanding hands it back rather than showing it twice; the header shows one button per run tab and none at all once a fourth run tab takes the set past the cap | `run.e2e.ts` |
 | ✅ Task archive | Archived task leaves the active board | `task.e2e.ts` |
 | ✅ Task restore | Archived task shows in History; restore returns it to active | `task.e2e.ts` |

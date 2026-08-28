@@ -32,6 +32,7 @@ import { loadTerminalRenderer, awaitTerminalFonts } from "@/lib/terminalRenderer
 import { resyncViewportAfterReveal } from "@/lib/xtermViewportSync";
 import { IS_MAC, bindingMatches, type ShortcutId } from "@/lib/shortcuts";
 import { registerTerminalDropTarget } from "@/lib/terminalDrop";
+import { HOOK_OSC_TITLE } from "@/lib/agentHooks";
 import { imageFromClipboard, pastePathText } from "@/lib/clipboardImage";
 import { setupImeReplacementBridge } from "@/lib/ime";
 import { deliverMessage, sendMessageToPty } from "@/lib/agentSend";
@@ -1300,23 +1301,37 @@ const captureArmedRef = useRef(false);
     //     so "needs you" would be as wrong as "done" (measured — a background
     //     wait emits a byte-identical notification to a real permission
     //     prompt, so the body alone cannot separate them).
-    const notifyAttention = (reason: string, body: string) => {
+    const notifyAttention = (reason: string, body: string, trusted = false) => {
       if (isRunTab || !workDoneEnabled) return;
       const text = body.trim();
       if (!text) return;
-      if (!notificationWantsAttention(tab.cli, text)) {
+      // `trusted` = termic's own agent hook, not something the agent chose to
+      // say. The body filter below exists to sort an agent's chatter from a
+      // real needs-you, and a user's `attention` list is an ALLOW-LIST, so
+      // teaching termic "my agent says X when it needs me" would otherwise
+      // silence our own hook: it says something else, matches nothing, and the
+      // whole feature dies with no error. Caught by the e2e fixture, which
+      // seeds exactly such a list.
+      if (!trusted && !notificationWantsAttention(tab.cli, text)) {
         wdlog(`${reason} ignored (body not actionable): ${text}`);
         dbg("notify-ignored", text.slice(0, 120));
         return;
       }
       const live = useApp.getState().tabs[task.id]?.find(t => t.id === tab.id) as TerminalTab | undefined;
-      if (localBusy || live?.workState === "working") {
+      // Skipped for a trusted hook, and this is the case the whole feature
+      // turns on. `goIdle` does NOT clear `workState`; it arms the settle and
+      // leaves the tab reading "working" for the full SETTLE_MS. Claude paints
+      // its idle title ~20ms BEFORE the hook fires, so a trusted notification
+      // always lands inside that window and this guard would drop it every
+      // single time. The agent's own hook saying "blocked on you" outranks a
+      // store field that is about to be corrected anyway.
+      if (!trusted && (localBusy || live?.workState === "working")) {
         wdlog(`${reason} ignored (agent already back at work): ${text}`);
         dbg("notify-ignored", `back to work: ${text.slice(0, 100)}`);
         return;
       }
       const term = termRef.current;
-      if (term && hasPendingWork(tab.cli, visibleTailRows(term, PENDING_TAIL_ROWS))) {
+      if (!trusted && term && hasPendingWork(tab.cli, visibleTailRows(term, PENDING_TAIL_ROWS))) {
         wdlog(`${reason} ignored (agent reports pending work): ${text}`);
         dbg("notify-ignored", `pending work: ${text.slice(0, 100)}`);
         return;
@@ -1472,9 +1487,14 @@ const captureArmedRef = useRef(false);
       const parts = data.split(";");
       if (parts[0] !== "notify") return false;
       const body = parts.slice(2).join(";") || parts[1] || "";
-      wdlog(`OSC 777 notify`, body);
+      // The `title` field names the SENDER. Our own agent hook stamps
+      // HOOK_OSC_TITLE there, which is how a signal termic installed itself is
+      // told apart from whatever the agent decided to notify about. See
+      // lib/agentHooks.ts and docs/plans/agent-hooks.md.
+      const trusted = parts[1] === HOOK_OSC_TITLE;
+      wdlog(`OSC 777 notify${trusted ? " (termic hook)" : ""}`, body);
       dbg("osc777-notify", body.slice(0, 200));
-      notifyAttention(`OSC 777 notify`, body);
+      notifyAttention(`OSC 777 notify`, body, trusted);
       return false;
     });
 

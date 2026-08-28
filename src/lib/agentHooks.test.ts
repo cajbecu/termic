@@ -60,6 +60,24 @@ describe("agent hook OSC sequence", () => {
     expect(parseNotifyBody("something;else")).toBeNull();
   });
 
+  // The failure this catches is the nastiest kind: everything keeps working
+  // except the feature, with no error anywhere. A user who teaches termic what
+  // their agent says when it needs them sets an `attention` list, and that list
+  // is an ALLOW-LIST, so our body stops matching and the hook is dropped.
+  // `TerminalPane` therefore trusts OSC 777 by its TITLE field, not its body.
+  // Found by the e2e fixture, which seeds exactly such a list for fakeagent.
+  it("would be filtered out by a user's attention allow-list, hence the title", () => {
+    const withAllowList = [{
+      id: "claude", display_name: "claude", command: "claude", args: [],
+      icon_id: "claude", color: "#000", builtin: true,
+      capabilities: { signals: { attention: ["needs your permission"] } },
+    }] as unknown as Parameters<typeof notificationWantsAttention>[2];
+
+    expect(notificationWantsAttention("claude", HOOK_OSC_BODY, withAllowList)).toBe(false);
+    // ...which is exactly why the sender is identified by the title field.
+    expect(hookOscPayload().split(";")[2]).toBe(HOOK_OSC_TITLE);
+  });
+
   it("is stable, because the Rust side pins the same literal", () => {
     // agent_hooks::script_body() writes this exact text. Changing it here
     // without changing it there produces a hook that fires and does nothing.
