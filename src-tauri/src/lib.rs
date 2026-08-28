@@ -2934,7 +2934,7 @@ fn pty_spawn(
         // A cloned agent stores state under its OWN id (that is what gives it
         // a separate login) but has its BASE agent's config shape.
         let agent_base = docker::base_agent_id(&docker_settings.agents, &agent).to_string();
-        let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone(), &docker_env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts, &id, &agent_base);
+        let spec = docker::build_spec(&task, &agent, &image, &args.cwd, task.docker_extra_args.clone(), &docker_env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts, &id, &agent_base, &docker_settings.docker_shared_config_dirs);
         let argv = docker::render_argv(&spec, &args.cmd, &args.args);
         dlog(&format!("[pty_spawn] docker task={} agent={} image={} argv={argv:?}", task.id, agent, image));
         Some((argv, spec.container_name))
@@ -9758,6 +9758,200 @@ fn read_capped_file(abs: &Path, cap: u64) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
+/// Root of everything termic hands to an agent as a FILE rather than as
+/// text: files staged from a drop (`terminal_stage_file`) and images pasted
+/// into a terminal (`clipboard_dir`).
+///
+/// `$TMPDIR/termic-attachments`, and the location is load-bearing in all
+/// three cages:
+///
+/// - **Seatbelt**: `/private/var/folders` is on `builtin_runtime_paths`, so a
+///   caged agent can read here with no profile change. The app data dir
+///   emphatically CANNOT be used - the profile ends with a final,
+///   last-match-wins `(deny file-read* (subpath <data_dir>))` protecting the
+///   CLI token, so a pasted image there would be unreadable in the very mode
+///   most tasks run under.
+/// - **Docker**: mounted read-only at this identical absolute path
+///   (`docker::build_spec`), so one pasted string is valid in every cage.
+/// - **Neither**: it is just a path.
+///
+/// Canonicalized, because macOS `$TMPDIR` lives under `/var/folders` while
+/// `/var` is a symlink to `/private/var`: the Seatbelt rule, the Docker mount
+/// and the text typed at the prompt all have to name the SAME string, and
+/// only the resolved one is that string.
+///
+/// It is also not the worktree, which is the one place a stray PNG shows up
+/// in `git status` and eventually in somebody's commit.
+pub fn attachments_dir() -> PathBuf {
+    let raw = std::env::temp_dir().join("termic-attachments");
+    let _ = std::fs::create_dir_all(&raw);
+    std::fs::canonicalize(&raw).unwrap_or(raw)
+}
+
+/// Where an image pasted into a terminal is written. See `attachments_dir`
+/// for why it lives there and nowhere else.
+pub fn clipboard_dir() -> Result<PathBuf, String> {
+    let dir = attachments_dir().join("clipboard");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// How long a pasted image sticks around. Long enough that an agent can come
+/// back to one mid-session (or the user can re-reference it tomorrow), short
+/// enough that a habit of pasting screenshots does not quietly grow an
+/// unbounded directory nobody knows exists.
+const CLIPBOARD_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Identify the image from its MAGIC BYTES rather than trusting a
+/// caller-supplied extension. The extension decides what the agent's own
+/// sniffing does with the file, and a `.png` that is really a JPEG is a
+/// confusing failure inside a CLI nobody is going to debug from here. The
+/// four formats are the ones every agent's image path accepts.
+fn image_extension(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0x89, b'P', b'N', b'G', ..] => Some("png"),
+        [0xFF, 0xD8, 0xFF, ..] => Some("jpg"),
+        [b'G', b'I', b'F', b'8', ..] => Some("gif"),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Some("webp"),
+        _ => None,
+    }
+}
+
+/// Delete pasted images older than `CLIPBOARD_MAX_AGE_SECS`. Best-effort by
+/// design: this runs on the save path, and a prune that cannot read the
+/// directory (or a file whose mtime the filesystem will not give up) must
+/// never be the reason a paste fails.
+fn prune_clipboard_dir(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() { continue }
+        let Ok(modified) = meta.modified() else { continue };
+        let Ok(age) = now.duration_since(modified) else { continue };
+        if age.as_secs() > CLIPBOARD_MAX_AGE_SECS {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Write pasted image bytes to `clipboard_dir` and return the absolute path.
+///
+/// Split from the command so the whole decision (format sniffing, naming,
+/// pruning) is unit-testable without an IPC request.
+fn save_clipboard_image(bytes: &[u8], dir: &Path) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Err("clipboard image was empty".to_string());
+    }
+    // 40 MB. A screenshot is 1-5 MB; anything past this is not a paste
+    // anybody meant to make, and the bytes have already crossed the IPC
+    // bridge by the time we are here, so the cap is about what we PERSIST.
+    if bytes.len() > 40_000_000 {
+        return Err("pasted image is too large (>40 MB)".to_string());
+    }
+    let ext = image_extension(bytes)
+        .ok_or_else(|| "clipboard did not hold a PNG, JPEG, GIF or WebP".to_string())?;
+    prune_clipboard_dir(dir);
+    // Name it for WHEN it was pasted, plus a short random tail so two pastes
+    // in the same second cannot collide. Sortable, and recognisable in a
+    // directory listing months later.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let tail = Uuid::new_v4().to_string();
+    let path = dir.join(format!("pasted-{stamp}-{}.{ext}", &tail[..8]));
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Encode raw RGBA (what the clipboard plugin hands back) as PNG.
+///
+/// Split out from the command so the encoding is testable without a
+/// clipboard, an AppHandle, or a running app - and because the ONE thing
+/// that must hold here is that the result is identifiable by
+/// `image_extension`, which is what every downstream reader uses.
+fn encode_rgba_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let expected = (width as usize) * (height as usize) * 4;
+    if rgba.len() < expected {
+        return Err(format!("clipboard image is short: {} bytes for {width}x{height}", rgba.len()));
+    }
+    let mut out: Vec<u8> = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, width, height);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut writer = enc.write_header().map_err(|e| e.to_string())?;
+        // `&rgba[..expected]`, not the whole slice: a longer buffer is not an
+        // error worth refusing a paste over, but handing the encoder more
+        // bytes than the header promised is.
+        writer.write_image_data(&rgba[..expected]).map_err(|e| e.to_string())?;
+    }
+    Ok(out)
+}
+
+/// Read an image straight off the MAC's clipboard, save it, and hand back the
+/// path. The ctrl+V twin of `clipboard_image_save`.
+///
+/// ⌘V arrives in the webview as a `paste` event carrying the bytes, which is
+/// what that command is for. ctrl+V does not: on macOS it is not a paste at
+/// all, it is byte 0x16 travelling down the PTY, and it is the gesture claude
+/// binds its own "attach the clipboard image" action to. Inside a container
+/// that action can never work (a Linux process asking xclip about a
+/// pasteboard that is not there), so termic answers it here instead - reading
+/// the pasteboard natively, which needs no webview clipboard permission and
+/// no user gesture.
+///
+/// The plugin hands back raw RGBA, so it is re-encoded as PNG: the file is
+/// identified by its magic bytes everywhere downstream, and a headerless
+/// pixel dump is not an image any agent can open. Lossless either way.
+///
+/// An empty or non-image clipboard is an ORDINARY error, not a failure worth
+/// a toast: the caller forwards the original ctrl+V to the agent and lets it
+/// say its own piece.
+#[tauri::command]
+async fn clipboard_image_capture(app: tauri::AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri_plugin_clipboard_manager::ClipboardExt;
+        // Off the main thread deliberately - the plugin's own docs warn that
+        // reading here can deadlock when the copy came from the webview.
+        let image = app.clipboard().read_image().map_err(|e| e.to_string())?;
+        let (w, h) = (image.width(), image.height());
+        if w == 0 || h == 0 {
+            return Err("clipboard image had no size".to_string());
+        }
+        let png_bytes = encode_rgba_png(image.rgba(), w, h)?;
+        save_clipboard_image(&png_bytes, &clipboard_dir()?)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Save an image pasted into a terminal, and hand back the path to type in
+/// its place.
+///
+/// The webview cannot write files and the agent cannot read the Mac's
+/// clipboard (in Docker mode it is a Linux process with no pasteboard at
+/// all, and even outside one, xterm.js only ever sends TEXT down the PTY),
+/// so an image paste has to become a FILE somewhere both sides can see. The
+/// frontend takes the bytes off the paste event and posts them here as the
+/// raw request body (`invoke(cmd, uint8array)`) rather than as a JSON array
+/// of numbers, which for a 3 MB screenshot is the difference between one
+/// copy and several million.
+#[tauri::command]
+async fn clipboard_image_save(request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("expected raw image bytes".to_string());
+    };
+    let bytes = bytes.clone();
+    let dir = clipboard_dir()?;
+    // Never on the IPC thread: this writes up to 40 MB and stats a directory
+    // first (see CLAUDE.md's long-running-IPC discipline).
+    tauri::async_runtime::spawn_blocking(move || save_clipboard_image(&bytes, &dir))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Read a text file by ABSOLUTE path, with NO task containment (GH #240).
 ///
 /// This is the ONLY read in the app that is not bounded by a task root, and
@@ -14444,7 +14638,11 @@ fn terminal_stage_file(task_id: String, src: String) -> Result<String, String> {
     let safe_ws: String = task_id.chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
         .collect();
-    let dir = std::env::temp_dir().join("termic-attachments").join(&safe_ws);
+    // Same root as pasted images (`attachments_dir`), which is what the
+    // Docker mount and the Seatbelt runtime allow both name. Sharing it means
+    // a dropped file and a pasted one are readable under exactly the same
+    // rule, instead of two staging locations that can drift apart.
+    let dir = attachments_dir().join(&safe_ws);
     fs::create_dir_all(&dir).map_err(|e| format!("mkdir staging: {e}"))?;
     let dest = dir.join(format!("{}-{}", Uuid::new_v4(), name));
     fs::copy(&src_path, &dest).map_err(|e| format!("copy to staging: {e}"))?;
@@ -15210,6 +15408,27 @@ pub struct Settings {
     /// say) isn't tied to which agent is running.
     #[serde(default)]
     pub docker_default_extra_mounts: Vec<String>,
+    /// Config dirs mounted into EVERY Docker container, for every agent,
+    /// from one shared host dir each (Settings → Docker Sandbox → "Shared
+    /// config dirs"). Home-relative names, same convention as
+    /// `docker_agent_extra_dirs` (`.config/gh`), or an absolute container
+    /// path. Seeded with `docker::default_shared_config_dirs` (gh + glab):
+    /// a forge token belongs to the USER, not to an agent vendor, so
+    /// copying it per agent would mean logging in once per agent AND per
+    /// clone of one. Add anything else that should be shared rather than
+    /// duplicated - a cloud CLI's config dir, an editor config.
+    ///
+    /// Deliberately a LIST of named dirs and not all of `/root/.config`:
+    /// an empty mount over the whole tree shadows what the image put there
+    /// at build time (grok's fish completions today) and would hand every
+    /// agent every credential any other agent ever created. See
+    /// `docker::build_spec` step 4b.
+    ///
+    /// Each entry goes through `docker::sanitize_extra_dir` before it can
+    /// become a mount, so a stray `..` or a system-root target is inert
+    /// rather than escaping the container's `/root`.
+    #[serde(default = "crate::docker::default_shared_config_dirs")]
+    pub docker_shared_config_dirs: Vec<String>,
     /// Personal (this-machine) glob patterns hidden from the "All files"
     /// tree across every project. Unioned with each project's committed
     /// `.termic.yaml` `exclude` list. `.git` is always hidden regardless.
@@ -15764,8 +15983,15 @@ fn default_agents() -> Vec<Agent> {
                 runtime_yolo_command: String::new(),
                 runtime_default_command: String::new(),
                 resume_args: vec!["--continue".into()],
-                session_id_args: vec![],
-                resume_id_args: vec![],
+                // Grok 1.0.5 grew the same deterministic-session pair claude
+                // has, so repo-root tasks no longer have to take whatever
+                // `--continue` finds in the cwd. Verified against a live
+                // binary rather than --help: `-s <uuid> -p "remember banana"`
+                // then `-r <uuid> -p "what word?"` answered "banana".
+                session_id_args: vec!["--session-id".into(), "{UUID}".into()],
+                resume_id_args: vec!["--resume".into(), "{UUID}".into()],
+                // No `--name` equivalent in grok's help; its session title is
+                // model-generated and lands in the terminal title instead.
                 name_args: vec![],
                 signals: AgentSignals::default(),
                 match_output: false,
@@ -15993,6 +16219,10 @@ fn seeded_defaults() -> Settings {
     Settings {
         agents: default_agents(),
         worktree_symlink_paths: default_worktree_symlink_paths(),
+        // Same reason as the two above: `derive(Default)` gives an empty
+        // Vec, and a fresh install with no shared config dirs would have no
+        // gh / glab login inside Docker and no clue why.
+        docker_shared_config_dirs: docker::default_shared_config_dirs(),
         // Required field: derive(Default) would give "", which the UI would
         // render as an empty required box on a fresh install.
         default_tasks_path: builtin_tasks_path(),
@@ -16287,7 +16517,7 @@ fn docker_command_preview_sync(task_id: Option<String>, agent_id: Option<String>
     let (docker_allowed_paths, _) = live_sandbox_lists(&task);
     let preview_env = docker_env_for(&settings.agents, &agent_id, &agent.env);
     let agent_base = docker::base_agent_id(&settings.agents, &agent_id).to_string();
-    let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &preview_env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts, PREVIEW_PTY_ID, &agent_base);
+    let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &preview_env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts, PREVIEW_PTY_ID, &agent_base, &settings.docker_shared_config_dirs);
     let argv = docker::render_argv(&spec, &agent.command, &agent.args);
     Ok(DockerCommandPreview { spec, argv })
 }
@@ -17871,7 +18101,7 @@ pub fn run() {
             task_git_log, task_git_refs, task_git_push, task_git_commit_files, task_git_compare, task_git_blame, task_git_commit_meta, task_git_commit_offset,
             detect_forges, task_pr_status, task_pr_create, task_pr_comments, task_set_pr_watch, task_set_pr_comments_seen,
             project_forge_issues, project_forge_provider,
-            task_file_diff, task_file_diff_sides, task_file_read, file_read_external, task_file_read_base64, task_file_fp, task_file_write, task_dir_list, task_path_stat,
+            task_file_diff, task_file_diff_sides, task_file_read, file_read_external, clipboard_image_save, clipboard_image_capture, task_file_read_base64, task_file_fp, task_file_write, task_dir_list, task_path_stat,
             task_path_rename, task_path_delete, task_reveal_path,
             scratch_list, scratch_read, scratch_write, scratch_set_meta, scratch_delete,
             scratch_promote, scratch_promote_target_exists,
@@ -18278,6 +18508,92 @@ mod tests {
 
         let v: Vec<String> = lsp_versions_in(d.path()).into_iter().map(|(v, _)| v).collect();
         assert_eq!(v, vec!["7.0.2".to_string()]);
+    }
+
+    // ── pasted images ────────────────────────────────────────────────────
+    // An image paste is the one gesture that cannot reach an agent as text.
+    // These pin the three things the file on disk has to get right: it is the
+    // format the bytes actually are (not whatever the caller claimed), it
+    // does not collide with the paste before it, and the directory cannot
+    // grow forever behind the user's back.
+
+    #[test]
+    fn a_clipboard_rgba_buffer_encodes_to_something_downstream_can_identify() {
+        // The clipboard plugin hands back raw pixels; every reader after this
+        // point (ours and the agent's) identifies an image by its magic
+        // bytes, so the ONE thing that must hold is that this is a real PNG.
+        let rgba = vec![255u8; 2 * 3 * 4];
+        let png = encode_rgba_png(&rgba, 2, 3).unwrap();
+        assert_eq!(image_extension(&png), Some("png"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = save_clipboard_image(&png, dir.path()).unwrap();
+        assert!(path.ends_with(".png"), "{path}");
+    }
+
+    #[test]
+    fn a_short_clipboard_buffer_is_refused_rather_than_encoded_as_garbage() {
+        // A buffer that does not match the advertised size means the read
+        // went wrong; encoding it anyway would produce a file that looks like
+        // an image and renders as noise.
+        assert!(encode_rgba_png(&[0, 0, 0, 255], 64, 64).is_err());
+        // An over-long buffer is tolerated: it is not evidence of a bad read,
+        // and the header's own dimensions decide what is written.
+        assert!(encode_rgba_png(&vec![7u8; 4 * 4 * 4 + 99], 4, 4).is_ok());
+    }
+
+    #[test]
+    fn image_extension_reads_the_bytes_not_a_claimed_name() {
+        assert_eq!(image_extension(&[0x89, b'P', b'N', b'G', 13, 10]), Some("png"));
+        assert_eq!(image_extension(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("jpg"));
+        assert_eq!(image_extension(b"GIF89a...."), Some("gif"));
+        assert_eq!(image_extension(b"RIFF\0\0\0\0WEBPVP8 "), Some("webp"));
+        // Not an image: a text paste that somehow reached this path, or a
+        // format no agent can read. Better a clear error than a .png that is
+        // not one, which fails later inside the CLI where nobody can see it.
+        assert_eq!(image_extension(b"not an image at all"), None);
+        assert_eq!(image_extension(&[]), None);
+    }
+
+    #[test]
+    fn save_clipboard_image_writes_a_file_named_for_its_real_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let jpeg = [0xFFu8, 0xD8, 0xFF, 0xE0, 1, 2, 3];
+        let path = save_clipboard_image(&jpeg, dir.path()).unwrap();
+        assert!(path.ends_with(".jpg"), "{path}");
+        assert_eq!(std::fs::read(&path).unwrap(), jpeg);
+
+        // Two pastes in the same second must not overwrite each other: the
+        // first one may already be in the agent's context.
+        let second = save_clipboard_image(&jpeg, dir.path()).unwrap();
+        assert_ne!(path, second);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn save_clipboard_image_refuses_what_it_cannot_name() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(save_clipboard_image(&[], dir.path()).is_err());
+        assert!(save_clipboard_image(b"just some text", dir.path()).is_err());
+        // Nothing was written for either.
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn saving_prunes_images_older_than_the_max_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("pasted-old.png");
+        std::fs::write(&old, [0x89, b'P', b'N', b'G']).unwrap();
+        // Backdate it past the cutoff. Without the prune, a user who pastes
+        // screenshots daily grows a directory nobody ever looks at.
+        let stale = std::time::SystemTime::now()
+            - std::time::Duration::from_secs(CLIPBOARD_MAX_AGE_SECS + 60);
+        std::fs::File::options().write(true).open(&old).unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(stale)).unwrap();
+
+        let fresh = save_clipboard_image(&[0x89, b'P', b'N', b'G', 1], dir.path()).unwrap();
+        assert!(!old.exists(), "the stale image should have been pruned");
+        assert!(std::path::Path::new(&fresh).exists(), "the one just pasted must survive");
     }
 
     // ── file_read_external (GH #240) ─────────────────────────────────────
@@ -19538,6 +19854,24 @@ mod tests {
         assert_eq!(seeded_defaults().worktree_symlink_paths, default_worktree_symlink_paths());
         let corrupt: Settings = serde_json::from_str("not valid json").unwrap_or_else(|_| seeded_defaults());
         assert_eq!(corrupt.worktree_symlink_paths, default_worktree_symlink_paths());
+    }
+
+    // Grok 1.0.5 supports the same deterministic-session pair claude does.
+    // Verified against a live binary: `-s <uuid>` minted a session and
+    // `-r <uuid>` resumed it. Pinned because these were empty for long enough
+    // that every grok task fell back to cwd-based `--continue`, which grabs an
+    // unrelated session when two tasks share a repo root.
+    #[test]
+    fn grok_has_id_based_resume_args() {
+        let agents = seeded_defaults().agents;
+        let grok = agents.iter().find(|a| a.id == "grok").expect("grok seeded");
+        assert_eq!(grok.capabilities.session_id_args, vec!["--session-id", "{UUID}"]);
+        assert_eq!(grok.capabilities.resume_id_args, vec!["--resume", "{UUID}"]);
+        // The cwd-based fallback stays for tasks minted before id resume.
+        assert_eq!(grok.capabilities.resume_args, vec!["--continue"]);
+        assert_eq!(grok.capabilities.yolo_args, vec!["--always-approve"]);
+        // grok has no --name flag; leaving this non-empty would break spawns.
+        assert!(grok.capabilities.name_args.is_empty());
     }
 
     #[test]

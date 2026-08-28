@@ -77,6 +77,7 @@ spread, and the spread, not the event tables, is what should drive the plan:
 | Codex | title says `Action Required`, +22ms | nothing it does not already have (see below) |
 | opencode | nothing at all (static title) | the whole thing, cleanest API, and the only `attention cleared` edge |
 | Antigravity | nothing at all (no OSC whatsoever) | nothing: it loads hooks and never runs them |
+| Grok | nothing usable (title FREEZES on a spinner while blocked) | `Notification` at the moment it blocks, and it is the only way |
 
 The value is concentrated in Claude and opencode, and those two happen to be the
 two cheapest to build: Claude needs no IPC at all (`terminalSequence`), opencode
@@ -310,46 +311,94 @@ paint the idle glyph while blocked. That is the claim to make, and it is narrowe
 than "hooks tell us when the agent needs you". opencode is the only agent
 measured that reports both the block and its release outright.
 
-## Grok: unmeasured, but it reads Claude's config
+## Grok 1.0.5: measured, and it reads our Claude config
 
-`grok` is not installed on the machine the rest of this doc was measured on, so
-none of the following is verified. It is recorded because one line of its
-documentation bears directly on the Claude-only v1, whether or not termic ever
-supports Grok.
+Measured after `grok` was installed. It is the only agent whose hooks arrive
+through a file termic writes for a *different* agent.
 
-Per [the xAI docs](https://docs.x.ai/build/features/hooks), Grok's hook config
-lives at `~/.grok/hooks/*.json` and `<project>/.grok/hooks/*.json`, and it
-**also reads `.claude/settings.json` and `.cursor/hooks.json`**.
+### It reads the global `~/.claude/settings.json`. Confirmed.
 
-That is a hazard for us, not a feature. If it includes the GLOBAL
-`~/.claude/settings.json` (the doc writes the path without a `~/`, so this is
-genuinely ambiguous and is the thing to measure first), then installing hooks for
-Claude silently installs them for Grok too, on every machine where both are
-present. Consequences, in order of how much they would hurt:
+Not ambiguous any more. With a scratch `HOME` whose `.claude/settings.json` held
+the lab's Claude hooks and nothing else, grok ran them and stamped the source
+into the environment:
 
-- Our callback would be invoked by an agent whose payload is **camelCase**
-  (`hookEventName`, `sessionId`, `cwd`, `workspaceRoot`, `toolName`,
-  `toolInput`), not Claude's snake_case. A normaliser written against Claude
-  alone reads every field as undefined.
-- Our Claude transport is `terminalSequence`, a Claude-specific output key.
-  Grok's documented output contract is `{"decision": ..., "reason": ...}` with
-  exit 0 allow / exit 2 deny. An unrecognised key is *probably* ignored, but
-  "probably" is doing a lot of work in a path that can block a tool call.
-- The user consented to termic writing Claude's config. They did not consent to
-  it changing Grok's behaviour, and the Settings pane would not list Grok as
-  installed.
+```
+GROK_HOOK_NAME=global/settings:session_start[0].hooks[0]
+GROK_HOOK_EVENT=session_start
+GROK_SESSION_ID=01a0477c-5bb1-71d3-b388-7bee109a803e
+```
 
-The clean discriminator already exists: Grok exports `GROK_HOOK_EVENT`,
-`GROK_HOOK_NAME`, `GROK_SESSION_ID` and `GROK_WORKSPACE_ROOT` into the hook
-process. A callback should check for those and bail rather than assume it was
-called by Claude. That check is cheap and should go in from the start, before
-anyone confirms whether the global file is read.
+So installing hooks for Claude installs them for Grok, on every machine with
+both. It also sets `CLAUDE_PROJECT_DIR` itself, so that variable cannot be used
+to tell the two apart. `GROK_HOOK_EVENT` can, and a callback should check it
+first thing.
 
-Two further notes if Grok is ever measured properly. It has **no
-`PermissionRequest`**, only `PermissionDenied` and `Notification`, so its
-attention edge would rest on `Notification`, which on Claude we measured as a
-6.0s-late nudge rather than an edge. And `PreToolUse` is documented as "the only
-blocking event", which is a safer contract than Antigravity's.
+**And both configs fire.** With the lab's Claude hooks AND a project-local
+`.grok/hooks/*.json` present, every event fired exactly twice, 24 from
+`global/settings` and 24 from `project/termic-lab`. An installer that writes both
+a Claude file and a Grok file double-fires everything.
+
+The payload is **camelCase**, and the event name inside it is snake_case even
+though the config key is PascalCase:
+
+```json
+{"hookEventName": "notification", "sessionId": "...", "cwd": "...",
+ "workspaceRoot": "...", "timestamp": "...", "transcriptPath": "..."}
+```
+
+A normaliser written against Claude's `hook_event_name` / `session_id` reads
+every field as undefined here.
+
+### Its titles are rich, and trusting them would recreate the Codex bug
+
+grok emits a spinner plus a status word, and a model-generated session summary:
+
+```
+grok                                            idle
+⠴ - Waiting for response… - grok                busy (waiting on the MODEL)
+⠼ - Thinking - grok                             busy
+⠦ - Responding - grok                           busy
+⠙ - Writing file… - grok                        busy
+⠸ - Running: Write `/private/tmp/…` - grok      busy
+Exact One Word Pong Reply Request - grok        idle, with a summary
+```
+
+Note `Waiting for response…` means waiting for the model. Reusing codex's
+`\b(Waiting|Action Required)\b` attention pattern here would badge "needs you"
+on every single turn.
+
+The trap is worse than that. **When grok blocks on plan approval its title
+freezes on a busy spinner frame and stays there.** Measured: 217 seconds on
+`⠹ - Running: Plan: Exit - …` with no further repaint and no idle transition.
+
+So adding busy/idle title patterns for grok would buy precise done detection on
+normal turns and reintroduce exactly the latch this cycle just fixed for Codex:
+`senderStateRef` pinned to `busy`, every demoter gated off, the tab stuck
+"working" for as long as the user takes to approve.
+
+Today grok is signal-silent to termic (it is not in `BUILTIN_TITLE_SIGNALS`), so
+`senderStateRef` stays null and byte-quiet fires with `fallbackReason` of
+`attention`. That is imprecise (every turn ends in an orange bell rather than a
+blue done dot) but it is never *stuck*, and for the blocked case it is
+accidentally right. **Do not add grok title patterns without also taking its
+attention hook.** The two have to land together.
+
+### The hook that makes it safe
+
+`Notification` fires the moment grok blocks, carrying a usable message:
+
+```
+55.627  PreToolUse
+55.659  Notification   message="Plan approval requested"
+```
+
+That is the signal the title cannot give, and unlike Claude's `Notification` it
+is prompt rather than a 6-second nudge. Grok has no `PermissionRequest`; this is
+its attention edge.
+
+So grok is a genuine hooks candidate: it has the state OSC cannot see, and the
+hook is the only way to get it. It is also the agent where a hooks install has
+the widest blast radius, because the file is Claude's.
 
 ## Interrupts: why OSC stays authoritative
 
@@ -448,9 +497,11 @@ Copy rule: no em dashes.
    problem, and the only agent that reports `permission.replied`, so it is where
    the attention state can be made exactly right rather than approximately.
 4. Codex: **not planned.** See "Decision: Codex is out of scope" above.
-5. Antigravity is measured and currently unusable (above). Grok is unmeasured
-   but carries a hazard the Claude work must handle from day one (above).
-   Gemini, Copilot and Cursor remain entirely unmeasured; the old vendor-doc table was wrong
+5. Grok, whose hooks arrive through the Claude file we already write, so most of
+   the work is the guard rather than the adapter. Its title patterns and its
+   `Notification` hook must land together or the tab latches on "working".
+6. Antigravity is measured and currently unusable (above). Gemini, Copilot and
+   Cursor remain entirely unmeasured; the old vendor-doc table was wrong
    often enough for the four agents that WERE measured that it should not be
    trusted for any of them.
 
@@ -466,9 +517,6 @@ Copy rule: no em dashes.
   request resolves, is probably needed.
 - Why `agy` loads a hook config it never invokes, and whether a newer build or
   the Antigravity IDE runs them.
-- Whether Grok reads the GLOBAL `~/.claude/settings.json` or only a project-local
-  `.claude/settings.json`. This decides whether a Claude install silently becomes
-  a Grok install. Needs `grok` on a machine to answer.
 - Gemini, Copilot and Cursor: entirely unmeasured.
 - opencode's `session.error`, `session.compacted` and `session.status`, and
   whether an in-process plugin can hold one open connection rather than paying a
