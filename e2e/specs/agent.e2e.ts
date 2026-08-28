@@ -66,6 +66,53 @@ describe("agent working state", () => {
   });
 });
 
+describe("inline images", () => {
+  let taskId!: string;
+
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+  });
+
+  it("keeps IIP images visible through Pi's alternate-screen redraw", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask("e2e-iip");
+    await waitForAgentReady(taskId);
+
+    const tabId = await browser.execute((id) => window.__termic!.useApp.getState().tabs[id][0].id, taskId);
+    const opaquePixelCount = () => browser.execute((id) => {
+      const layer = document.querySelector(`[data-terminal-host="${id}"] .xterm-image-layer`);
+      if (!(layer instanceof HTMLCanvasElement) || !layer.width || !layer.height) return 0;
+      const context = layer.getContext("2d");
+      if (!context) return 0;
+      const pixels = context.getImageData(0, 0, layer.width, layer.height).data;
+      let count = 0;
+      for (let i = 3; i < pixels.length; i += 4) if (pixels[i]) count++;
+      return count;
+    }, tabId);
+    await submitToAgent(taskId, "#iip");
+
+    await browser.waitUntil(
+      () => browser.execute((id) => (window.__termic!.useApp.getState().tabs[id][0].liveTitle ?? "").endsWith("iip-after"), taskId),
+      { timeout: 10_000, timeoutMsg: "terminal parsing never resumed after the inline image" },
+    );
+    let previousOpaquePixels = 0;
+    let settledFrames = 0;
+    await browser.waitUntil(
+      async () => {
+        const opaquePixels = await opaquePixelCount();
+        settledFrames = opaquePixels > 0 && opaquePixels === previousOpaquePixels ? settledFrames + 1 : 0;
+        previousOpaquePixels = opaquePixels;
+        return settledFrames >= 3;
+      },
+      { timeout: 10_000, timeoutMsg: "Pi's redraw erased the inline image after rendering settled" },
+    );
+    await browser.pause(500);
+    expect(await opaquePixelCount()).toBeGreaterThan(0);
+    await snap("inline-image.png");
+  });
+});
+
 // P0: when an agent you're NOT watching finishes, termic must raise attention
 // on its tab. Start an agent working, switch to another task so it's
 // backgrounded (still mounted), and assert its SIDEBAR row flags completion —

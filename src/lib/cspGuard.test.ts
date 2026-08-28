@@ -40,7 +40,7 @@ describe("tauri.conf.json CSP", () => {
   });
 
   it("allows no remote script origin", () => {
-    expect(directive("script-src")).toBe("script-src 'self'");
+    expect(directive("script-src")).toBe("script-src 'self' 'wasm-unsafe-eval'");
   });
 
   it("still declares a default-src fallback", () => {
