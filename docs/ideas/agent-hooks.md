@@ -1,495 +1,260 @@
-# Agent lifecycle hooks (investigation)
+# Agent lifecycle hooks (measured)
 
-**Status: research, not a build order.** Nothing here is approved for
-implementation. The question this doc exists to answer is whether hooks
-are reliable enough to be worth adding at all, and if so, for which of
-the four things they promise.
+**Status: measured, not approved.** The measurement this doc used to ask for has
+been run. Everything below is what a real PTY driving real agents produced on
+2026-08-28, against Claude Code 2.1.250 and Codex 0.142.5. The earlier version of
+this doc was written from vendor documentation and got enough wrong that its
+conclusions did not survive contact with the CLIs.
 
-Termic infers "the agent finished" from the terminal stream, and that
-works. Every supported agent CLI now also exposes a lifecycle hook
-system that states it outright, with a payload richer than a boolean.
-That is either a real upgrade or a config-mutating dependency that buys
-us little. We do not know yet.
+Method: every
+documented hook event registered at once against one recorder, the agent driven
+in a real PTY with the raw stream tee'd, so hook fires and OSC transitions share
+one wall clock. PTY env reproduces `lib.rs:3099-3112` exactly, including the
+`TERM_PROGRAM=iTerm.app` spoof.
 
-So: **[run the measurement first](#step-1-measure-hooks-against-osc-before-anything-else)**.
-Everything after it (the direction, the architecture, the phasing) is
-written down so the research has something concrete to falsify, not
-because it is decided. Treat the design sections as the strawman the
-data gets to knock over.
+## What the measurement changed
 
-The parts that are settled, because they are constraints rather than
-choices: OSC detection stays authoritative and is never replaced; hooks
-never block or modify agent behaviour; sandboxed tasks are out of scope
-for any first version (see [Sandbox](#sandbox-the-one-real-constraint)).
+The previous draft was wrong on five points that mattered:
 
-## Why
+1. **`Stop.stop_reason` does not exist.** The auto-resume-on-usage-limit payoff
+   (#256) was built entirely on it. The real carrier is `StopFailure`, with
+   matchers `rate_limit` / `overloaded` / `authentication_failed`. Separately,
+   Claude now ships its own quota auto-resume (`Notification` types
+   `quota_auto_resume_fired` / `_stale` / `_disabled`), which reframes #256
+   again.
+2. **`Notification` is not the attention edge.** It is a nudge that arrives
+   6.0 seconds after the agent actually blocks. `PermissionRequest` is the edge,
+   at +20ms.
+3. **Claude no longer emits `OSC 9;4`.** Zero across ten captures including a
+   150-second run. The doc's premise that "OSC detection works today" is only
+   half true: the OSC 0 *title* works, the progress protocol is gone.
+4. **`SubagentStop` is a trap.** It fires ~1.8s after every `Stop` for Claude's
+   internal follow-up-suggestion agent, with `agent_type: ""` and a message
+   unrelated to the turn. `SubagentStart` never fires at all.
+5. **Codex hooks cannot be installed silently.** They trigger a blocking trust
+   modal, and do not run until the user clears it.
 
-Today's detection reads what the agent tells the terminal:
+The doc's two settled constraints survived and are now evidence-backed: OSC stays
+authoritative, and hook-derived state must not latch.
 
-- Claude Code emits `OSC 9;4` (ConEmu/iTerm progress). State 3 busy, 0 idle.
-- Gemini sets the OSC 0 window title: `◇ Ready`, `✦ Working…`, `✋ Action Required`.
-- Codex does the same with `Working` / `Thinking` / `Ready` / `Waiting` / `Action Required`.
+## The headline result: the two agents fail in opposite directions
 
-That was the right call and it stays. It needs no config, works for
-every agent a user adds themselves, and survives inside the sandbox.
+This is the finding the whole design turns on, and neither vendor doc implies it.
 
-What it cannot do:
-
-1. Tell "blocked on a permission prompt" from "blocked on a question".
-   Both surface as one yellow bell.
-2. Hand us the assistant's closing message, which is the raw material
-   for auto-titled tasks and a searchable session index.
-3. Warn before context compaction, which is what a 40-task sidebar
-   needs to show which agent is about to lose its head.
-4. Report subagent completion at all.
-
-Hooks give us all four, from a payload the CLI already assembles.
-
-## Research: hook support across the supported agents
-
-Verified August 2026. All seven first-class agents have a hook or event
-system. Most speak a Claude-compatible nested JSON shape, so one
-normalising layer covers the field.
-
-| Agent | Config location | Turn-done event | Notes |
-|---|---|---|---|
-| Claude Code | `~/.claude/settings.json` | `Stop` | Also `Notification`, `PreCompact`/`PostCompact`, `SubagentStop`, `SessionStart`/`SessionEnd`. Supports `type: "http"` and `async: true`. |
-| Codex | `~/.codex/hooks.json` or `[hooks]` in `~/.codex/config.toml` | full lifecycle hooks, plus legacy `notify` (`agent-turn-complete`) | `notify` is a root key in TOML and must precede all tables. |
-| Gemini CLI | `~/.gemini/settings.json` | `AfterAgent`, `SessionEnd` | `Notification` covers idle, awaiting input, tool confirmation. Lifecycle matchers are exact strings; tool matchers are regex. Hooks run synchronously in the agent loop. |
-| Antigravity (`agy`) | `hooks.json` under `~/.gemini/config/` (or `.agents/` in a workspace) | `Stop`, `PostInvocation` | `PreInvocation`/`PostInvocation`/`Stop` take handlers directly, matcher ignored. |
-| GitHub Copilot CLI | `~/.copilot/config.json` | `agentStop` | Also `sessionStart`/`sessionEnd`, `preCompact`, `errorOccurred`, `userPromptSubmitted`. camelCase event names. |
-| Cursor CLI | `~/.cursor/hooks.json` | `stop` | `{"version": 1, "hooks": {...}}`. `beforeShellExecution` is the permission gate. Fail-open by default. |
-| Grok CLI | `~/.grok/user-settings.json` | Claude-compatible nested JSON | **User scope only**, no repo-local config. |
-| opencode | TS plugin module, or SDK `client.event.subscribe()` | `session.idle` | 25+ events including `session.compacted`, `session.error`. An event stream, not a spawned process. The community already uses `session.idle` for context-window percentage. |
-
-Sources: [Claude Code hooks](https://code.claude.com/docs/en/hooks),
-[Codex advanced config](https://learn.chatgpt.com/docs/config-file/config-advanced),
-[Gemini CLI hooks](https://geminicli.com/docs/hooks/),
-[Antigravity hooks](https://antigravity.google/docs/hooks),
-[Copilot hooks reference](https://docs.github.com/en/copilot/reference/hooks-reference),
-[Cursor hooks](https://cursor.com/docs/hooks),
-[opencode plugins](https://open-code.ai/en/docs/plugins),
-[Grok CLI](https://github.com/superagent-ai/grok-cli).
-
-**Confidence note for the implementer.** The Claude and Codex rows were
-read from primary docs. Gemini, Antigravity, Copilot, Cursor and Grok
-were read from doc summaries and secondary sources; re-verify the exact
-JSON shape and event spelling against the vendor doc before writing each
-adapter. The event *names* are reliable, the surrounding envelope is the
-part to check.
-
-### Payload fields we care about
-
-Claude `Stop`:
-
-```json
-{
-  "session_id": "abc123",
-  "transcript_path": "/Users/x/.claude/projects/.../transcript.jsonl",
-  "cwd": "/Users/x/Work/Repos/termic",
-  "hook_event_name": "Stop",
-  "last_assistant_message": "I've completed the task...",
-  "stop_reason": "end_turn"
-}
-```
-
-Claude `Notification`: `{"message": "...", "notification_type": "permission_prompt"}`.
-
-Codex `notify` (single JSON argv, not stdin): `type`, `thread-id`,
-`turn-id`, `cwd`, `input-messages`, `last-assistant-message`.
-
-Every payload we need carries `cwd`. Claude and Codex also carry a
-session/thread id. That is enough to correlate (see below).
-
-### What Xirp actually does (measured, not documented)
-
-Spotify's Xirp 0.12.0 was installed and driven on a real machine in
-August 2026. Full teardown in the appendix of
-[agent-orchestration.md](agent-orchestration.md#appendix-xirp-0120-teardown).
-The parts that bear on
-this decision:
-
-Its onboarding offers a "session hooks" step ("Installs lightweight
-hooks into coding agents so Xirp can tell when a session is working,
-idle, or waiting"), listing Claude and Codex only. Gemini is absent
-despite being a supported agent.
-
-It does not own a PTY: sessions are tmux, driven by a separate daemon,
-with the agent launched through a Node wrapper. Session titles come from
-reading Claude's own transcript JSONL, no hook involved.
-
-Observed with hooks NOT installed (the user's `~/.claude/settings.json`
-was never touched): the per-session context meter still reported a live
-percentage, so token counts come from the transcript JSONL, not from a
-hook. Work state, however, had **no fallback at all**. The badge latched
-to "working" and stayed there for twenty minutes across a cancelled turn
-and a completed one, with the Stop control still armed, while the agent
-sat idle at a prompt. Their onboarding says as much: "Without hooks, Xirp
-can't tell when Claude is idle or needs input, so minimap badges and
-sounds won't work." So the entire work-state feature is a hard dependency
-on mutating the user's agent config, and declining it degrades to a
-confident wrong answer rather than to nothing.
-
-#### How their hook transport is built
-
-Read out of the shipped `.d.ts` files, which carry their design
-rationale verbatim. Worth knowing because it is the same problem this
-doc has to solve, already solved once.
-
-- **A generated script, not a shell snippet.** Their launcher module
-  generates Node script bytes per (agent, event). The installer writes
-  them to disk once. The script reads the agent's native payload on
-  stdin, wraps it in a versioned envelope (`squab.hook/v1`) and POSTs to
-  their daemon, using only Node built-ins. Their stated reasons: no
-  `jq`, no `curl`, no shell subprocess per hook fire.
-- **HTTP with a bearer token**, persisted at `~/.chirp/hook-auth.token`,
-  mode 0600, generated once on first daemon launch. The token is
-  embedded as a literal in the generated script, so rotating it means
-  regenerating and reinstalling every script. They rejected per-launch
-  random tokens because every restart would invalidate installed scripts
-  and hooks would 401 silently.
-- **Token deliberately not passed by environment.** Their comment: env
-  inheritance "leaks tokens into child processes the agent might spawn
-  (e.g. PreToolUse hooks fire on every Bash tool call in claude's TUI,
-  each subprocess inheriting the env)".
-- **Session id extracted at runtime** from the hook payload rather than
-  injected at install time, so it is one script per (agent, event)
-  regardless of how many sessions share a cwd. Otherwise you need N
-  scripts plus rotation and GC.
-- **A canonical camelCase event enum**, explicitly not Claude's
-  PascalCase, so Claude's vocabulary does not leak into a
-  harness-agnostic surface. Adapters that cannot take hooks surface
-  `NO_HOOKS_ADAPTER`, and installation is gated on a per-adapter,
-  per-event capability answer rather than blindly writing to
-  `~/.claude/settings.json`.
-
-Termic's version is simpler on two of these by construction. The
-transport is the existing Unix socket with a `getpeereid` same-uid
-check, so there is no token to embed, persist or rotate, and nothing to
-leak into a child process. The parts worth copying are the per-(agent,
-event) generated script, runtime session-id extraction, the versioned
-envelope, and the per-adapter capability gate.
-
-Two constraints for this design fall out of that:
-
-1. **Hooks are never the only source of work state.** OSC stays
-   authoritative. A user who declines the toggle must lose precision,
-   never correctness.
-2. **Hook-derived state must not latch.** A later OSC transition has to
-   be able to override it, because there is no `Stop` event on a
-   cancelled turn and any completion-shaped signal will miss interrupts.
-
-Two takeaways for this design. First, the transcript JSONL is a real
-alternative source for titles and token counts, so some of the payoff
-listed below does not depend on hooks at all and can ship earlier.
-Second, their hook install is global too, for two agents, bundled into
-onboarding rather than opt-in. Being opt-in with a working uninstall is
-the differentiator, not the location.
-
-## Decision: global install, opt-in
-
-Hooks are written to the user's **global** agent config, gated behind a
-Settings toggle that ships **off**, with an explicit uninstall.
-
-### Why not per-worktree
-
-Per-task scoping looked better (self-cleaning, no global footprint) and
-is wrong here:
-
-1. **It pollutes the user's diff.** `.claude/settings.local.json` is
-   gitignored by Claude's own convention, but `.codex/hooks.json`,
-   `.gemini/settings.json` and `.cursor/hooks.json` are not reliably
-   ignored. They would appear as untracked files in termic's own diff
-   pane on every task.
-2. **Symlinks defeat the scoping.** Termic already symlinks repo-root
-   dirs (`.claude` and friends, Settings → Tasks) into each new worktree
-   so agents keep gitignored project config. A write into the worktree's
-   `.claude` travels the symlink into the user's real repo.
-3. **It does not cover every task.** Repo-root tasks and non-git projects
-   have no worktree to scope to, so the global path is needed anyway.
-   Two mechanisms, one of which is the dangerous one, is worse than one.
-
-Global gives one write, one uninstall, one place for the user to
-inspect, and identical behaviour for worktree tasks, main-branch tasks
-and plain folders.
-
-Xirp installs globally too, for two agents, silently as part of
-onboarding, with no merge story stated. Our differentiators are that it
-is opt-in, it merges rather than clobbers, it uninstalls cleanly, and it
-covers the whole agent roster rather than the two with the biggest
-market share.
-
-## Architecture
+**Claude's title lies about being blocked.** When Claude stops for a permission
+prompt, a question, or plan approval, it paints its *idle* glyph:
 
 ```
-agent CLI ── spawns ──> `termic hook` ── NDJSON frame ──> termic.sock ──> app
-   (global config)         (termic-cli)                   (cli_server.rs)
+29.774  HOOK  PreToolUse         tool_name=Write
+29.787  OSC   0;✳ Create out.txt file    <- idle glyph. Agent is BLOCKED.
+29.807  HOOK  PermissionRequest  tool_name=Write
+35.830  HOOK  Notification       notification_type=permission_prompt
+35.831  OSC   9;Claude needs your permission   <- termic's first honest hint
 ```
 
-### 1. The callback binary
+With `SETTLE_MS` at 5s, termic fires a **false "done"** at +5s and only corrects
+to "needs you" at +6s. Two notifications for one event, the first one wrong.
 
-A new `termic hook` subcommand in `termic-cli`. It reads the payload on
-stdin (Codex passes it as a single argv instead, so accept both), frames
-it as one NDJSON message, writes it to the control socket, exits.
+**Codex's title tells the truth.** When Codex genuinely blocks on a human it sets
+`[ ! ] Action Required | proj`, which termic's existing `attention` pattern
+already matches, 22ms after the block:
 
-Why a binary rather than per-agent shell snippets:
+```
+37.412  HOOK  PreToolUse
+37.424  HOOK  PermissionRequest              (+12ms)
+37.434  TITLE '[ ! ] Action Required | proj' (+22ms)  <- termic already sees this
+```
 
-- One stable command string in six config files. Agent-specific event
-  names and payload spellings normalise in one place in Rust.
-- No PATH assumptions, no `jq` dependency, no quoting hazards inside
-  JSON-inside-TOML.
-- Claude supports `type: "http"`, but nothing else does, so HTTP would
-  mean two transports. The socket already exists and is already
-  same-uid checked via `getpeereid`.
+So **hooks are essential for Claude and marginal for Codex.** For Claude they are
+the only signal that does not lie. For Codex they buy 10ms and a `tool_name`.
+That asymmetry should drive the phasing: a Claude-only v1 delivers most of the
+value.
 
-If termic is not running the connect fails and the process exits 0
-immediately. A hook must never be the reason an agent stalls.
+Codex's real defect was elsewhere and was not a hook problem at all: it dropped
+the status words its built-in title patterns were written for, so its idle title
+classified as null, `senderStateRef` latched to `busy`, and every demoter is
+gated on `!senderBusy`. Codex tabs went "working" on the first turn and never
+came back. Fixed in `lib/agents.ts` + the submit gate in `TerminalPane`, see
+`docs/gotchas.md`. **A pattern fix, not a hook.** Worth remembering before
+reaching for hooks again: check whether the agent already says it.
 
-### 2. Normalised event model
+## Claude Code 2.1.250: the manifest
 
-Adapters map vendor events onto a small internal set:
+Four registrations. All `type: "command"`, all once per turn, none per tool call.
 
-| Internal | Claude | Codex | Gemini | agy | Copilot | Cursor | opencode |
-|---|---|---|---|---|---|---|---|
-| `turn_done` | `Stop` | `notify` / lifecycle | `AfterAgent` | `Stop` | `agentStop` | `stop` | `session.idle` |
-| `attention` | `Notification` | n/a | `Notification` | n/a | n/a | n/a | n/a |
-| `compact_soon` | `PreCompact` | n/a | n/a | n/a | `preCompact` | n/a | `session.compacted` |
-| `session_end` | `SessionEnd` | n/a | `SessionEnd` | n/a | `sessionEnd` | n/a | `session.deleted` |
-| `subagent_done` | `SubagentStop` | n/a | n/a | n/a | n/a | n/a | n/a |
+| termic edge | event | measured |
+|---|---|---|
+| working | `UserPromptSubmit` | +6..30ms after Enter. `prompt`, `prompt_id`. |
+| attention | `PermissionRequest` | +20..450ms after `PreToolUse`. `tool_name` splits the kind. |
+| done | `Stop` | fires **12ms before** the OSC idle title. `last_assistant_message`, `background_tasks`. |
+| correlation | `SessionStart` | `session_id`, `cwd`, `model`, `source`. |
 
-Gaps stay gaps. OSC covers `turn_done` for every agent regardless, so a
-missing adapter event degrades to today's behaviour, never to nothing.
+`PermissionRequest.tool_name` is what splits the two attention states the old doc
+wanted `notification_type` for, and it splits them three ways rather than two:
 
-### 3. Correlation to a task
+- `Write` / `Edit` / `Bash` / ...: blocked on a permission decision
+- `AskUserQuestion`: blocked on a question
+- `ExitPlanMode`: blocked on plan approval
 
-Order of resolution:
+A `Stop` whose `background_tasks` array is non-empty is **not** done: the shape is
+`[{id, type, status, description, command}]`, and it is how to avoid the
+"done badge held for 617s while three subagents ran" failure `gotchas.md`
+already documents from the other side.
 
-1. `session_id` / `thread-id` against the tab's recorded session id
-   (termic already tracks this for resume).
-2. `cwd` against task worktree paths, and against multi-repo member
-   paths.
-3. If neither resolves, drop the event. Never guess.
+**Do not register:** `SubagentStop` unfiltered (phantom, see above; filter
+`agent_type !== ""`), `Notification` as the attention edge (+6.0s), any of
+`PreToolUse` / `PostToolUse` / `PostToolBatch` (one process spawn per tool call),
+`idle_prompt` (90s at an empty prompt produced nothing).
 
-Repo-root tasks can share a `cwd` across two tabs, which is exactly why
-session id is tried first.
+**Never fired in any scenario**, despite being registered: `Setup`,
+`SessionEnd`, `UserPromptExpansion`, `StopFailure`, `PermissionDenied`,
+`PostToolUseFailure`, `SubagentStart`, `TaskCreated`, `TaskCompleted`,
+`TeammateIdle`, `ConfigChange`, `InstructionsLoaded`, `CwdChanged`,
+`DirectoryAdded`, `WorktreeCreate`, `WorktreeRemove`, `PreCompact`,
+`PostCompact`, `Elicitation`, `ElicitationResult`. Some of those need a scenario
+we did not run (compaction, rate limit); do not assume they are dead.
 
-### 4. Config writing, merge and removal
+### Payload corrections against the published docs
 
-The writer must survive a user who already hand-wrote hooks.
+| Field | Documented | Actual |
+|---|---|---|
+| `SessionStart` reason | `session_start_reason` | `source` |
+| `UserPromptSubmit` text | `user_prompt` | `prompt` |
+| turn number | `turn_number` | absent; `prompt_id` instead |
+| `Stop` reason | `stop_reason` | does not exist |
+| `PostToolUse` | - | `duration_ms` (undocumented) |
+| `Stop` | - | `background_tasks`, `session_crons`, `effort`, `permission_mode` |
 
-- Read the existing JSON/TOML, preserving unknown keys.
-- Append termic's entry into the existing array for that event.
-- Tag every entry with a marker, e.g. `"_termic": 1` where the schema
-  version is the value.
-- Install is idempotent: an entry with our marker is replaced, not
-  duplicated. A bumped schema version replaces the older entry.
-- Removal deletes only marked entries, then removes now-empty arrays and
-  objects that we created, leaving the file byte-identical to its
-  pre-install state when nothing else changed.
-- Write atomically (temp file + rename). Never leave a half-written
-  agent config on disk; that breaks the agent, not just termic.
-- Back up the original file once per agent on first install, so a
-  botched merge is recoverable.
+## Codex 0.142.5
 
-Codex is the awkward one: hooks may live in `hooks.json` **or** as
-`[hooks]` tables in `config.toml`, and the legacy `notify` key is a TOML
-root key that must appear before any table. Prefer `~/.codex/hooks.json`
-and leave `config.toml` alone entirely.
+| termic edge | event | measured |
+|---|---|---|
+| working | `UserPromptSubmit` | carries `turn_id` (Claude's is `prompt_id`) |
+| attention | `PermissionRequest` | +12ms after `PreToolUse`. `tool_name`, `tool_input`. |
+| done | `Stop` | `last_assistant_message`, `stop_hook_active` |
+| correlation | `SessionStart` | fires at the FIRST TURN, not at launch |
 
-### 5. Safety rules
+Three things the vendor doc does not tell you, each of which changes the design:
 
-Non-negotiable, because a bad hook makes termic the thing that froze the
-user's agent:
+- **The trust modal.** Installing `~/.codex/hooks.json` makes Codex open a
+  blocking modal on next launch: *"Hooks need review / N hooks are new or changed
+  / Hooks can run outside the sandbox after you trust them"*, with `1. Review
+  hooks  2. Trust all and continue  3. Continue without trusting (hooks won't
+  run)`. Until cleared, hooks do not run. Trust is keyed on a hash of the hook
+  definition, so **every change to our hook set re-prompts every user.**
+  `--dangerously-bypass-hook-trust` exists but is for automation, not for us.
+- **The schema is strict.** An unknown top-level key rejects the whole file with
+  a visible `failed to parse hooks config` warning. The `description` key shown
+  in the published docs is one such key. A merge writer must not round-trip
+  unknown keys into this file.
+- **TUI noise.** Codex renders `• Running SessionStart hook` in its status line
+  while a synchronous hook runs. Every turn, visible to the user.
 
-- **Never** emit `decision: "block"`, `permissionDecision`, or any other
-  control field. We observe, we do not gate.
+No `SessionEnd`, `PreCompact`, `PostCompact`, `SubagentStart` or `SubagentStop`
+fired in any scenario.
 
-  Worth knowing that Spotify does the opposite, on purpose: their
-  background agent runs all relevant verifiers on the `Stop` hook and a
-  failing verifier **blocks** PR creation
-  ([Honk part 3](https://engineering.atspotify.com/2025/12/feedback-loops-background-coding-agents-part-3)).
-  That is a defensible use of a blocking hook because the agent is
-  unsupervised and the hook is the quality gate. termic's case is the
-  opposite: a human is watching, and a hook that stalls their agent is a
-  worse bug than a late notification. Two different jobs, so do not read
-  their design as permission to gate. See
-  [agent-orchestration.md](agent-orchestration.md) for the rest of their
-  published practice.
-- Set `async: true` where the CLI supports it (Claude does). Claude and
-  Gemini otherwise run hooks synchronously inside the agent loop.
-- Short timeout (1s or less). Fail open on every path.
-- Exit 0 on every error, including malformed payloads and a missing
-  socket.
-- No network, no filesystem writes, no logging to the user's repo.
+## Interrupts: why OSC stays authoritative
 
-## Sandbox: the one real constraint
+Escape during an active turn produced **no `Stop`** on either agent. Claude's
+title went to `✳`, Codex's went to `proj`, and no hook fired at all. Codex also
+left a dangling `PreToolUse` with no matching `PostToolUse`.
 
-`sandbox.rs` denies caged agents both the data dir and the control
-socket, in `EnforceFs` as well as full enforce mode (`sandbox.rs`, the
-"Termic control plane" final rules). That is deliberate: granting an
-agent the CLI is granting terminal access, and `docs/plans/cli.md`
-settles that caged agents get no control plane at all.
+This is the evidence for the constraint the old doc asserted: hooks add
+precision, never correctness. A hook-only work-state model would leave an
+interrupted turn stuck "working" forever.
 
-So a hook spawned by a sandboxed agent **cannot** call back. Hooks are
-therefore useless for exactly the tasks users care most about, unless a
-second path exists.
+## Transport
 
-**v1: do not build one.** Sandboxed tasks keep OSC detection, unchanged.
-Hooks improve unsandboxed tasks. No security surface moves.
+**Claude: no IPC needed.** A Claude hook's stdout JSON may carry
+`terminalSequence`, which Claude writes to its own PTY. Verified end to end:
+`OSC 9;4;3`, `OSC 9;4;0` and `OSC 777;notify;...` all landed in the stream
+verbatim, 6-8ms after the hook fired, and termic's existing handlers already
+parse all three. Allowlist, quoted from the binary: *"only OSC 0/1/2/9/99/777 and
+BEL are permitted, and OSC 9 bodies may not begin with a digit unless in the 9;4
+progress form"*.
 
-**v2, if it proves out:** ride the per-task bearer token on a loopback
-port described in `docs/plans/mcp.md` rather than inventing a second
-socket. That design already solves "which task is calling, and what may
-it do", and a status-report endpoint is a far narrower grant than the
-tool surface it was written for. Do not reopen the control socket to
-caged agents under any circumstance.
+This dissolves the entire transport section of the previous draft. No socket, no
+`termic hook` binary on the host, no Seatbelt grant, no Docker plumbing, no
+per-task token, because the channel is the PTY the agent already owns. It works
+identically unsandboxed, under Seatbelt and in Docker, for free.
 
-## What we get beyond a better bell
+**The one constraint: it requires a synchronous hook.** With `async: true` the
+sequence is silently dropped (measured: no OSC at all). Affordable here, because
+the manifest is four once-per-turn events and a static callback is ~2ms. It would
+not be affordable with a per-tool-call hook, which is a second reason not to
+register one.
 
-Wire these in the same pass, since the payload already carries them:
+**Codex: no equivalent.** Its hook output schema has `systemMessage`,
+`additionalContext`, `suppressOutput` and `hookSpecificOutput`, and no
+terminal-writing field. Codex therefore needs a real transport if we ever want
+its hooks, which is a further reason to treat Codex as phase 2 given how little
+its hooks add over the title it already paints.
 
-- **Auto-titled tasks.** `last_assistant_message` / `last-assistant-message`
-  gives a real title instead of "Untitled session". Termic has no
-  auto-titling today.
-- **Two distinct attention states.** `notification_type` splits
-  "blocked on permission" from "blocked on a question". Today both are
-  one yellow bell.
-- **Context-window pressure.** `PreCompact` / `preCompact` /
-  `session.compacted` drives a per-task context meter in the sidebar.
-  Termic shows nothing today.
-- **Session index groundwork.** `transcript_path` points at the CLI's
-  own JSONL. Recording it per task is the cheap half of a local,
-  on-device "what did we already try" search, with no upload anywhere.
-- **Auto-resume on usage limit** (#256). `stop_reason` in the `Stop`
-  payload lets termic tell a usage-limit stop apart from a normal
-  turn-end without parsing terminal output. Wire in a reset-time parser
-  and a scheduled re-prompt and overnight runs survive the gap
-  automatically. PTY-based detection (#259) works today but breaks when
-  Claude's menu text changes; `stop_reason` is the stable contract.
+## Correlation
 
-## Settings UX
+`TERMIC_TASK_ID` is already injected into every agent PTY (`lib.rs:3079`), and
+the comment there states it reaches every child, caged included. That is an exact
+O(1) key: no cwd matching, and it disambiguates two agents in one worktree, the
+case the previous draft flagged as unsolvable. If it is absent the hook was not
+spawned by a termic PTY: drop the event rather than guess.
 
-Settings → Notifications:
+For the `terminalSequence` route correlation is free anyway, because the sequence
+arrives on the tab's own PTY.
 
-> **Exact work-done detection**
-> Installs a small hook into your coding agent config so termic knows the
-> moment an agent finishes or needs you, instead of inferring it from the
-> terminal. Off by default.
-> Files changed: `~/.claude/settings.json`, `~/.codex/hooks.json`, ...
-> [Install hooks] [Remove hooks]
+## Sandbox
 
-- Off by default. Flip the default only once field data shows it stable.
-- List the exact files before writing, not after.
-- Show per-agent state (installed, not installed, agent not detected),
-  the way Settings → Coding Agents already lists detected CLIs.
-- "Remove hooks" is always available, even if the toggle is off, so a
-  user who uninstalls termic mid-experiment can still clean up.
-- Copy rule: no em dashes anywhere in this UI.
+The previous draft spent a long section on this and it is now mostly moot.
 
-## Failure modes to handle explicitly
+- **Seatbelt.** Nothing to grant. The hook writes to its own stdout; the
+  agent's config dir is already readable in the cage and `(allow process-exec)`
+  is already unconditional (`sandbox.rs:1826`). The control socket stays denied,
+  as `docs/plans/cli.md` settled.
+- **Docker.** The agent config dir is `<data_dir>/docker-agents/<agent_id>/`
+  (`docker.rs:349`), which termic owns. Writing hooks there mutates nothing of
+  the user's, so it needs no consent step and can be on by default. Note the
+  clone trap: the path is keyed on the agent's OWN id while the schema shape
+  comes from `base_agent_id`.
+- **Linux.** No Seatbelt exists (`sandbox.rs` has no `cfg(target_os)`); Docker is
+  the Linux cage. Config paths are the same `~/.claude` and `~/.codex`.
 
-| Failure | Behaviour |
-|---|---|
-| Agent config is malformed JSON | Do not write. Surface a settings-level error naming the file. |
-| User edits our entry by hand | Removal still matches on the marker key; if the marker is gone, leave it alone. |
-| Agent CLI upgrades and changes its schema | Version the marker. On mismatch, remove and reinstall. |
-| Two termic instances (different data dirs) | Marker carries the data dir hash so each removes only its own. |
-| Hook fires for an unknown cwd/session | Drop silently. |
-| Socket missing (app not running) | Exit 0 in under a millisecond. |
-| Hook fires for a sandboxed task | Cannot happen in v1 (socket denied). Ensure it fails silently rather than retrying. |
+## Settings and wizard
 
-## Testing
+Off by default, one toggle, explicit uninstall, files listed before writing, not
+after. Per-agent state shown the way Settings → Coding Agents already lists
+detected CLIs.
 
-Both required before this lands, per `CLAUDE.md`.
+The wizard step the maintainer wants must say the Codex part out loud: a Codex
+trust prompt is coming, inside Codex, and until the user clears it the hooks do
+nothing. Xirp's step promises "hooks wired up" for Claude, Codex and Gemini with
+no such caveat, which cannot be true for Codex. Being honest about it is the
+differentiator, along with being opt-in, merging rather than clobbering, and
+uninstalling cleanly.
 
-**Rust unit tests** on the config writer, one set per agent adapter:
+Copy rule: no em dashes.
 
-- install into an empty config
-- install into a config that already has user hooks (user hooks survive)
-- install twice (idempotent, no duplicate entry)
-- upgrade from an older marker version (replaced, not appended)
-- remove (file is byte-identical to the pre-install original)
-- remove when the user edited our entry (left alone)
-- malformed input (no write, error surfaced)
+## Phasing
 
-**Unit tests** on the normaliser: each vendor payload maps to the right
-internal event and correlates to the right task.
+1. **Claude only, `terminalSequence` route.** Four events, synchronous, writing
+   OSC into the tab's own PTY. No new binary, no socket, no sandbox change. This
+   is where nearly all the value is, and it is the cheapest thing in this doc.
+2. Consume the richer payload where it needs more than an OSC can carry:
+   `last_assistant_message` for auto-titles, `background_tasks` for the
+   done-vs-still-working split, `PermissionRequest.tool_name` for the three-way
+   attention state.
+3. Codex, only if 1 and 2 prove out, and only with the trust modal surfaced
+   honestly. Needs a real transport.
+4. Everything else. Gemini, Antigravity, Copilot, Cursor, Grok, opencode remain
+   entirely unmeasured; the old vendor-doc table for them was wrong often enough
+   for Claude and Codex that it should not be trusted for any of them.
 
-**e2e spec** (`e2e/specs/`, per the `e2e` skill): toggle on, assert the
-config diff on a fixture HOME, assert a hook-driven state change reaches
-the DOM, toggle off, assert clean restore. Add it to
-`docs/e2e-coverage.md`.
+## Still unknown
 
-## Step 1: measure hooks against OSC, before anything else
-
-This is the actual task. It decides which of the payoffs above are
-reachable, and whether any of the design below is worth writing. It is
-cheap, and no code ships until it has run.
-
-Possible outcomes, all acceptable:
-
-- Hooks fire reliably and cover the gaps. Build phase 1.
-- Hooks fire but only add the permission-versus-question split. Build
-  that one thing, drop the rest.
-- Titles and token counts come from the transcript JSONL anyway (Xirp
-  gets them with no hooks at all), so the config write buys almost
-  nothing. Skip hooks, read the JSONL, close this doc.
-- Hooks are flaky across agents. Say so publicly, keep OSC, done.
-
-Harness: a scratch `HOME` whose agent config installs a hook that appends
-`{event, timestamp, payload}` to a log; the agent spawned in a PTY with
-the raw stream tee'd to a file so OSC transitions can be extracted with
-timestamps; a driver that sends the keystrokes for each scenario. One
-table out: fired / missed / latency, per signal, per scenario.
-
-| Scenario | Question |
-|---|---|
-| Turn completes normally | `Stop` fires, OSC → idle. Latency of each. |
-| Escape mid-tool-call | Anything at all? (expect no `Stop`, OSC fires) |
-| Double escape / rewind | Same |
-| Permission prompt appears | `Notification` + `notification_type` vs OSC busy→idle |
-| Plan mode awaiting approval | Which signal marks "needs you" |
-| Agent asks a question, no tool call | Does the turn end |
-| Subagent finishes | `SubagentStop` vs no OSC transition at all |
-| Compaction | `PreCompact` / `PostCompact` timing |
-| API error mid-turn | `StopFailure` vs OSC |
-| `/clear`, `/resume`, session switch | False positives |
-| Agent exits (ctrl-D) | `SessionEnd` vs PTY EOF |
-| Two agents in one worktree | Does `cwd` disambiguate, or is session id required |
-
-Run it per agent, not just Claude. The event vocabularies differ enough
-that a result for one says little about the others.
-
-This scenario list doubles as the e2e spec for the feature once it
-lands, and as publishable evidence for the "protocol beats inference"
-claim.
-
-## Phasing (only if the measurement justifies it)
-
-0. The measurement above. Nothing below starts until it has run and the
-   result is written back into this doc.
-1. `termic hook` subcommand, socket frame, normaliser, correlation.
-   Claude adapter only. Toggle in Settings, off by default.
-2. Codex, Gemini, Antigravity, Copilot, Cursor, Grok adapters.
-   opencode via its plugin/event API rather than a spawned process.
-3. Consume the richer payload: auto-titles, split attention states,
-   context meter.
-4. Sandboxed-task path, only if 1 to 3 prove stable, and only over the
-   `mcp.md` per-task token.
-
-## Open questions
-
-- opencode wants a TS plugin, not a spawned binary. Ship a tiny plugin
-  from the app, or subscribe to its event stream from the Rust side and
-  skip config writing entirely? The latter is cleaner and has no
-  uninstall story to get wrong.
-- Does the context meter need `PreCompact` at all, or can token counts
-  be read from the transcript JSONL that `transcript_path` already
-  hands us? Xirp reads the JSONL directly for titles, which suggests the
-  transcript route works today with no config writing at all. If it
-  covers titles and token counts, phase 3 may not need hooks, and the
-  hook work narrows to the two things only hooks provide: the
-  permission-versus-question split, and subagent completion.
-- Codex `notify` versus its newer lifecycle hooks: is `notify` worth
-  supporting as a fallback for older Codex versions, or do we require a
-  minimum version and keep one code path?
+- `StopFailure` and the rate-limit path (never triggered).
+- Compaction (`PreCompact` / `PostCompact`) on either agent.
+- `SessionEnd` on either agent; Ctrl-D produced neither the hook nor a PTY EOF.
+- Whether `PermissionRequest` means "the human is blocked" or only "a permission
+  decision is required". With Codex's `approvals_reviewer = guardian_subagent` it
+  fired and then auto-resolved in 3s with no human involved. Claude's auto mode
+  is likely the same. A short debounce before raising attention, cancelled if the
+  request resolves, is probably needed.
+- Every agent other than Claude and Codex.
