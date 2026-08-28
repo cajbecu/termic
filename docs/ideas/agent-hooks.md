@@ -216,7 +216,7 @@ null and the demoters downgrade their verdict from `done` to `attention`.
 Antigravity is therefore the one agent where hooks would add the most and the one
 where they currently work the least.
 
-## opencode 1.17.11: the cleanest surface of the four
+## opencode 1.17.11: the cleanest surface of the five
 
 Not a spawned hook at all: a JS/TS module loaded in-process, exporting an async
 function that returns handlers. That makes it the odd one out architecturally and
@@ -433,9 +433,15 @@ register one.
 
 **Codex: no equivalent.** Its hook output schema has `systemMessage`,
 `additionalContext`, `suppressOutput` and `hookSpecificOutput`, and no
-terminal-writing field. Codex therefore needs a real transport if we ever want
-its hooks, which is a further reason to treat Codex as phase 2 given how little
-its hooks add over the title it already paints.
+terminal-writing field. Codex would therefore need a real transport, which is one
+more reason it is out of scope.
+
+**The Claude file is not only Claude's.** Grok reads `~/.claude/settings.json`
+too (measured, below), so anything installed there also runs under Grok, with a
+camelCase payload and a different output contract. Whatever we write into that
+file must check `GROK_HOOK_EVENT` before assuming Claude invoked it, and must not
+assume its own `terminalSequence` output means anything there. That guard belongs
+in the first version, not a later one.
 
 ## Correlation
 
@@ -502,7 +508,7 @@ Copy rule: no em dashes.
    `Notification` hook must land together or the tab latches on "working".
 6. Antigravity is measured and currently unusable (above). Gemini, Copilot and
    Cursor remain entirely unmeasured; the old vendor-doc table was wrong
-   often enough for the four agents that WERE measured that it should not be
+   often enough for the five agents that WERE measured that it should not be
    trusted for any of them.
 
 ## Still unknown
