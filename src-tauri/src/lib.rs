@@ -16032,6 +16032,50 @@ fn default_agents() -> Vec<Agent> {
             post_launch_capture: None,
         },
         Agent {
+            // pi (pi.dev). Verified against 0.84.3 on a live binary, not the
+            // help text:
+            //   --session-id <id>  creates the session if missing and resumes
+            //                      it if present, so ONE flag covers both the
+            //                      mint and the resume that claude needs two
+            //                      for. `-s <uuid> -p "remember banana"` then
+            //                      the same id answered "banana".
+            //   --continue, -c     cwd-based resume, also verified.
+            //   --name, -n         session display name.
+            // No tool-approval prompt in default mode (it wrote a file
+            // unasked), so there is no yolo flag to pass and an empty
+            // `yolo_args` is correct rather than missing.
+            id: "pi".into(),
+            display_name: "pi".into(),
+            command: "pi".into(),
+            args: vec![],
+            icon_id: "pi".into(),
+            color: "#09090b".into(),
+            builtin: true,
+            disabled: false,
+            capabilities: AgentCapabilities {
+                yolo_args: vec![],
+                runtime_yolo_command: String::new(),
+                runtime_default_command: String::new(),
+                resume_args: vec!["--continue".into()],
+                // Same flag both times, by design: --session-id creates the id
+                // if it does not exist yet, so the mint spawn and every later
+                // resume are byte-identical.
+                session_id_args: vec!["--session-id".into(), "{UUID}".into()],
+                resume_id_args: vec!["--session-id".into(), "{UUID}".into()],
+                name_args: vec!["--name".into(), "{WORKSPACE_SLUG}".into()],
+                signals: AgentSignals::default(),
+                match_output: false,
+            },
+            env: std::collections::HashMap::new(),
+            docker_env: std::collections::HashMap::new(),
+            sandbox_allowed_paths: vec!["$HOME/.pi".into()],
+            sandbox_allowed_hosts: vec![],
+            work_done: true,
+            extends: None,
+            kind: "agent".into(),
+            post_launch_capture: None,
+        },
+        Agent {
             // opencode — SST's open-source agentic coding CLI. Sessions are
             // created lazily (only after the first user message), so termic
             // can't mint a UUID at spawn time. Resume strategy:
@@ -19894,6 +19938,29 @@ mod tests {
         assert_eq!(grok.capabilities.yolo_args, vec!["--always-approve"]);
         // grok has no --name flag; leaving this non-empty would break spawns.
         assert!(grok.capabilities.name_args.is_empty());
+    }
+
+    // pi (pi.dev) 0.84.3, verified against a live binary rather than --help.
+    // Its one oddity is that --session-id both MINTS and RESUMES ("creating it
+    // if missing"), so the two arg lists are deliberately identical; a reviewer
+    // seeing that duplication should not "fix" it into claude's two-flag shape.
+    #[test]
+    fn pi_uses_one_flag_for_both_mint_and_resume() {
+        let agents = seeded_defaults().agents;
+        let pi = agents.iter().find(|a| a.id == "pi").expect("pi seeded");
+        assert_eq!(pi.capabilities.session_id_args, vec!["--session-id", "{UUID}"]);
+        assert_eq!(pi.capabilities.resume_id_args, vec!["--session-id", "{UUID}"]);
+        assert_eq!(pi.capabilities.resume_args, vec!["--continue"]);
+        assert_eq!(pi.capabilities.name_args, vec!["--name", "{WORKSPACE_SLUG}"]);
+        // pi asks for no tool approval in default mode, so there is no flag to
+        // pass. Empty here is a measured fact, not an unfinished entry.
+        assert!(pi.capabilities.yolo_args.is_empty());
+        // Sessions live under ~/.pi, which the cage has to reach.
+        assert!(pi.sandbox_allowed_paths.iter().any(|p| p.contains(".pi")));
+        assert_eq!(pi.icon_id, "pi");
+        // pi mints deterministically, so it must NOT use opencode's
+        // post-exit capture path.
+        assert!(pi.post_launch_capture.is_none());
     }
 
     #[test]

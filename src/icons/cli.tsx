@@ -73,6 +73,19 @@ export function OpencodeIcon({ className }: Props) {
   );
 }
 
+// pi (pi.dev). The official mark, an angular staircase reading as the greek
+// letter, with the detached block bottom-right. `fill="currentColor"` rather
+// than the brand's near-black so it inherits the tab/menu color the way every
+// other CLI icon here does, and stays legible on a dark theme.
+export function PiIcon({ className }: Props) {
+  return (
+    <svg viewBox="0 0 800 800" fill="currentColor" className={cn("inline-block", className)} aria-hidden>
+      <path fillRule="evenodd" d="M165.29 165.29H517.36V400H400V517.36H282.65V634.72H165.29ZM282.65 282.65V400H400V282.65Z" />
+      <path d="M517.36 400H634.72V634.72H517.36Z" />
+    </svg>
+  );
+}
+
 // Plain shell / terminal tabs (cli: "shell"). Boxed terminal glyph
 // (lucide square-terminal), stroke style to match the generic default.
 export function ShellIcon({ className }: Props) {
@@ -108,6 +121,7 @@ export function CliIcon({ cli, className }: { cli: string; className?: string })
     case "agy":      return <AntigravityIcon className={className} />;
     case "grok":     return <GrokIcon className={className} />;
     case "opencode": return <OpencodeIcon className={className} />;
+    case "pi":       return <PiIcon className={className} />;
     case "copilot": return <CopilotIcon className={className} />;
     case "shell":  return <ShellIcon className={className} />;
     case "custom": return <CustomCommandIcon className={className} />;
@@ -127,6 +141,7 @@ export const CLI_BRAND_COLOR: Record<string, string> = {
   grok:    "text-[var(--color-cli-grok)]",
   copilot:  "text-[var(--color-cli-copilot)]",
   opencode: "text-[var(--color-cli-opencode)]",
+  pi:       "text-[var(--color-cli-pi)]",
 };
 
 /** Resolve an agent's stable ID to its icon_id using the live agent registry.
@@ -143,4 +158,5 @@ export const CLI_LABEL: Record<string, string> = {
   agy:      "Antigravity",
   grok:     "Grok",
   opencode: "opencode",
+  pi:       "pi",
 };
