@@ -2784,8 +2784,10 @@ describe("agent hooks", () => {
     expect(Object.keys(merged)).toEqual(["model", "hooks", "alwaysThinkingEnabled"]);
 
     // The script is executable, or claude cannot run it and the hook is inert.
-    expect(existsSync(`${scriptDir}/permission-request.sh`)).toBe(true);
-    expect(statSync(`${scriptDir}/permission-request.sh`).mode & 0o111).toBeGreaterThan(0);
+    // One script per signal, named for what it reports. claude registers only
+    // attention, since its terminal already gets working and done right.
+    expect(existsSync(`${scriptDir}/attention.sh`)).toBe(true);
+    expect(statSync(`${scriptDir}/attention.sh`).mode & 0o111).toBeGreaterThan(0);
 
     await browser.execute(async () =>
       await window.__termic!.invoke("agent_hooks_remove", { agentId: "claude" }));

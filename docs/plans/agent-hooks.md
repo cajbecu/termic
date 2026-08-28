@@ -7,12 +7,13 @@ and re-measure before trusting any statement about an agent not listed there.
 
 ## What to build
 
-Install one hook into the user's global Claude config so termic learns the moment
-Claude blocks on the user, instead of reading its terminal title, which says the
-opposite. Ship it off by default, behind a Settings toggle with a working
-uninstall, plus a wizard step.
+Install one hook per state an agent's terminal reports WRONG, into that agent's
+own global config, so termic stops guessing. Off by default, behind a per-agent
+Settings toggle with a working uninstall, plus a wizard step.
 
-Phase 2 adds opencode through its plugin API. Codex is out of scope on evidence.
+Four agents ship: claude, grok, agy and opencode. Each reports a different set,
+because each terminal is wrong in a different way; see "What each agent reports".
+Codex is out of scope on evidence: its terminal is already right.
 
 ## The defect this fixes
 
@@ -36,11 +37,11 @@ entirely.
 
 | Agent | In? | Why |
 |---|---|---|
-| Claude Code | **yes, phase 1** | Only signal that does not lie. See above. |
-| opencode | **yes, phase 2** | No busy/idle OSC at all, and the only agent that reports `permission.replied`. |
+| Claude Code | **shipped** | Its title claims IDLE while blocked, so the hook is a correction, not an addition. |
+| opencode | **shipped** | No busy/idle OSC at all, and the only agent that reports `permission.replied`, so its attention can be cleared exactly. |
 | Codex | no | Its title already says `Action Required` at +22ms. Hooks add 10ms and cost a blocking trust modal that re-prompts on every hook-set change. |
 | Grok | **yes, shipped** | Its title FREEZES on a busy spinner while blocked (measured, 217s on one frame), so `Notification` is the only signal that state has. The guard against our claude hook firing under grok is still mandatory. |
-| Antigravity (`agy`) | **yes, phase 3** | All five events fire. No attention event exists, but it emits no OSC at all, so hooks are its only precise working/done signal. |
+| Antigravity (`agy`) | **shipped** | No attention event exists, so it reports working and done instead. It emits no OSC at all, so that is a large upgrade: every turn used to end in the byte-quiet fallback's orange bell. |
 | Gemini, Copilot, Cursor | no | Unmeasured. Do not write adapters from their docs. |
 
 ## Global installs only. No exceptions.
@@ -72,9 +73,9 @@ Docker is not an exception to this. Its target is
 `<data_dir>/docker-agents/<agent_id>/`, which is per-AGENT and termic-owned, not
 per-project.
 
-## Phase 1: Claude, exactly one hook
+## The design, using claude as the worked example
 
-### Why only one
+### Why claude gets exactly one event
 
 `UserPromptSubmit`, `Stop` and `SessionStart` were all considered and rejected,
 because termic already has each signal at the same instant or better:
@@ -383,74 +384,34 @@ the bug bites rather than a feature advertised. Phase 3 at the earliest.
 
 Copy rule: **no em dashes** anywhere in this UI.
 
-## Phase 2: opencode
+## What each agent reports, and why it differs
 
-Not a spawned hook: a JS/TS module loaded **in-process**, exporting an async
-function that returns handlers. Install to `~/.config/opencode/plugins/`.
+One rule decides the set: a hook is registered ONLY for a state the terminal
+gets wrong or cannot express. Everything the terminal already says correctly is
+left alone, and per-tool-call events are never registered on any agent.
 
-Measured cycle, the most complete of any agent:
+| Agent | Events | Reports | Why that set |
+|---|---|---|---|
+| claude | `PermissionRequest` | attention | Its title claims IDLE while blocked. The hook corrects a lie; working and done are already right. |
+| grok | `Notification` | attention | Has no `PermissionRequest`. Its title FREEZES on a busy spinner while blocked (217s on one frame, measured), so this is the only signal that state has. |
+| agy | `PreInvocation`, `Stop` | working, done | Has NO attention-shaped event. It also emits no OSC at all, so every turn used to end in the byte-quiet fallback's orange bell. `Working` is required for `Done`: a hard idle is ignored unless we were working. |
+| opencode | `chat.message`, `permission.asked`, `permission.replied`, `session.idle` | all four | Emits no busy/idle OSC, and is the only agent that reports the RELEASE of a block, so attention is cleared exactly rather than inferred. |
 
-| termic edge | event | measured |
-|---|---|---|
-| working | `chat.message` | +23ms after submit |
-| attention | `event.permission.asked` | +6ms after `tool.execute.before` |
-| attention cleared | `event.permission.replied` | +9ms after the answer |
-| done | `event.session.idle` | precise, once per turn |
+### Three config shapes, not one
 
-`permission.replied` is the edge no other agent provides.
-
-Three traps, all measured:
-
-- **Both `.opencode/plugin` and `.opencode/plugins` are loaded.** Writing both
-  double-fires every event. Use `plugins` and never write both.
-- The global dir already holds the user's `package.json`, `node_modules` and
-  `opencode.jsonc`. Live alongside them; do not own the directory.
-- **In-process means the safety model inverts.** There is no timeout and no exit
-  code. A throw in `tool.execute.before` blocks the tool (opencode's own
-  documented example). Wrap every handler in its own try/catch.
-
-opencode has no OSC busy/idle signal (its title is a constant, later the session
-name), so it needs a real transport. Being in-process, the plugin can hold one
-open connection rather than paying a spawn per event.
-
-## Phase 3: Antigravity, then Grok
-
-Both only after phases 1 and 2 prove out in the field.
-
-**Antigravity (`agy`).** Config at `~/.gemini/config/hooks.json`, never
-`~/.gemini/antigravity-cli/`. Heterogeneous schema (see the appendix): tool
-events take a `{matcher, hooks}` group, `PreInvocation` / `PostInvocation` /
-`Stop` take handlers directly. Register `PreInvocation` for working and `Stop`
-for done; there is no attention event, so needs-you stays on the existing
-byte-quiet fallback. Verify with `agy -p "/hooks"` that every registered event
-resolved a non-empty command before assuming an install worked.
-
-The gain is larger than it looks: agy emits no OSC whatsoever, so today every
-turn ends in a byte-quiet orange bell rather than a done. `Stop.fullyIdle`
-replaces that with a real answer.
-
-**Grok.** Global install only, at `~/.grok/hooks/*.json`. The most complete
-event set measured, and the only agent that reports an interrupt:
-
-| termic edge | event | measured |
-|---|---|---|
-| working | `UserPromptSubmit` | carries the prompt, wrapped in `<user_query>` |
-| done | `Stop` | `reason="end_turn"` |
-| interrupted | `StopCancelled` | `reason="user_interrupt"`, 435ms after ESC. Nothing else has this. |
-| attention | `Notification` | `notificationType="permission_prompt"`, plus `permissionMode` and `level` |
-
-Its title patterns and its `Notification` hook must land in the SAME change,
-never separately: the title freezes on a busy spinner while blocked (measured at
-217s on one frame), so patterns alone would recreate the Codex latch, and
-`Notification` is the only signal for that state.
-
-Read `~/.grok/docs/user-guide/10-hooks.md` before writing the adapter. It ships
-with the binary, so it is version-matched to what is installed, and it is
-markedly better than the website: it carries the full event table, a
-"differences from Claude" section, and the exit-code semantics. Two things from
-it that a Claude-shaped reader gets wrong: the field is `notificationType`
-(camelCase), and `idle_prompt` fires on ANY turn end including interrupted ones,
-so it reports state rather than attention and is not a needs-you signal.
+- **Claude-compatible** (`claude`, `grok`): `hooks.<Event>[] = { hooks: [handler] }`.
+  Not a coincidence that grok matches: it reads claude's file on purpose.
+  claude merges into the shared `settings.json`; grok gets its own
+  `~/.grok/hooks/termic.json`, so its removal is a delete.
+- **Antigravity named** (`agy`): one top-level entry we own outright at
+  `~/.gemini/config/hooks.json`, and HETEROGENEOUS inside it. Tool events take a
+  `{matcher, hooks}` group; `PreInvocation` / `PostInvocation` / `Stop` take
+  handlers DIRECTLY. Wrap the latter and they register with an EMPTY command:
+  visible in `agy -p "/hooks"`, and inert.
+- **opencode plugin**: a JS module at `~/.config/opencode/plugins/termic.js`.
+  No merge, nothing of the user's to preserve. It runs IN-PROCESS, so there is
+  no timeout and no exit code and a throw in `tool.execute.before` blocks the
+  tool: every handler is individually wrapped.
 
 ## Testing
 
