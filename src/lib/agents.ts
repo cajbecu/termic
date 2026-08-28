@@ -160,6 +160,21 @@ const BUILTIN_FALLBACK: Record<string, Pick<Agent, "command" | "args" | "post_la
       resume_args: ["--continue"],
     },
   },
+  // pi (pi.dev). Mirrors the Rust seeded default in lib.rs; the two tables must
+  // agree, since this one is what runs before the registry has loaded.
+  // `--session-id` MINTS when the id is unknown and RESUMES when it is known,
+  // so both arg lists are identical on purpose. Verified on a live 0.84.3.
+  pi: {
+    command: "pi", args: [],
+    capabilities: {
+      yolo_args: [],
+      runtime_yolo_command: "",
+      resume_args: ["--continue"],
+      session_id_args: ["--session-id", "{UUID}"],
+      resume_id_args: ["--session-id", "{UUID}"],
+      name_args: ["--name", "{WORKSPACE_SLUG}"],
+    },
+  },
   opencode: {
     command: "opencode", args: [],
     capabilities: {

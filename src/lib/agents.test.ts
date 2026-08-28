@@ -267,6 +267,62 @@ describe("decideResume", () => {
   });
 });
 
+// pi (pi.dev) resume, both task shapes. Verified against a live pi 0.84.3
+// before these were written, because the flag contract is unusual:
+// `--session-id` MINTS when the id is unknown and RESUMES when it is known, so
+// the mint and resume arg lists are identical on purpose.
+//
+// The main-checkout case is the one that needed proving. pi scopes sessions per
+// DIRECTORY, so two repo-root tasks share a session directory; measured, two
+// ids in one cwd stay separate (one answered "alpha", the other "bravo") while
+// `--continue` in that same cwd returned the most recent, i.e. the wrong task's
+// conversation. That is exactly why repo-root goes id-based and never cwd-based.
+describe("pi resume", () => {
+  beforeEach(() => { mockAgents.length = 0; });
+  const args = (o: Parameters<typeof spawnArgsForCli>[1]) => spawnArgsForCli("pi", o);
+  const d = (o: Partial<Parameters<typeof decideResume>[0]> = {}) =>
+    decideResume({
+      isAgent: true, idCapable: true, isPrimary: true, isRepoRoot: false,
+      hasResumableHistory: false, failedResume: false, ...o,
+    });
+
+  it("mints with --session-id on a first spawn", () => {
+    const a = args({ yolo: false, resume: false, sessionUuid: "u-1", resumeKnown: false });
+    expect(a).toEqual(expect.arrayContaining(["--session-id", "u-1"]));
+  });
+
+  it("resumes with the SAME flag, because --session-id creates if missing", () => {
+    const a = args({ yolo: false, resume: false, sessionUuid: "u-1", resumeKnown: true });
+    expect(a).toEqual(expect.arrayContaining(["--session-id", "u-1"]));
+    // Not claude's second flag: pi has no --resume <id> that takes an argument.
+    expect(a).not.toContain("--resume");
+  });
+
+  it("two repo-root tasks get DIFFERENT ids, which is what keeps them apart", () => {
+    const one = args({ yolo: false, resume: false, sessionUuid: "u-1", resumeKnown: true });
+    const two = args({ yolo: false, resume: false, sessionUuid: "u-2", resumeKnown: true });
+    expect(one).toContain("u-1");
+    expect(two).toContain("u-2");
+  });
+
+  it("falls back to --continue for a legacy worktree task with no minted id", () => {
+    expect(args({ yolo: false, resume: true })).toContain("--continue");
+  });
+
+  it("is id-capable, so repo-root tasks never take the cwd-resume path", () => {
+    expect(cliSupportsIdSession("pi")).toBe(true);
+    expect(d({ idCapable: true, isRepoRoot: true, isPrimary: true, hasResumableHistory: true }).kind)
+      .toBe("mint");
+    expect(d({ idCapable: true, isRepoRoot: true, isPrimary: true, storedUuid: "u-1" }).kind)
+      .toBe("resume-id");
+  });
+
+  it("keeps a pre-uuid worktree task on --continue rather than orphaning it", () => {
+    expect(d({ idCapable: true, isRepoRoot: false, isPrimary: true, hasResumableHistory: true }).kind)
+      .toBe("cwd-resume");
+  });
+});
+
 // ── defaultCliFirst ───────────────────────────────────────────────────
 
 describe("defaultCliFirst", () => {
