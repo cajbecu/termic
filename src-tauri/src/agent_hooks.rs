@@ -153,24 +153,49 @@ pub fn hooks_for(agent: &str) -> &'static [(&'static str, Signal)] {
             ("permission.replied", Signal::Working),
             ("session.idle", Signal::Done),
         ],
-        "claude" => &[("PermissionRequest", Signal::Attention)],
-        "grok" => &[("Notification", Signal::Attention)],
+        // Working is registered even though the title already reports it,
+        // because it makes the pair SELF-SUFFICIENT: `goIdle(reason, 0)` is
+        // ignored unless we were working, so a Done that depended on the title
+        // having set working would inherit the title's fragility. The Codex
+        // latch (see docs/gotchas.md) is what that failure looks like: a vendor
+        // changed their title format and done detection silently stopped.
+        "claude" => &[
+            ("UserPromptSubmit", Signal::Working),
+            ("PermissionRequest", Signal::Attention),
+            ("Stop", Signal::Done),
+        ],
+        // grok is the only agent measured that reports an INTERRUPT, so it is
+        // the only one whose done survives an escape. StopCancelled carries
+        // reason=user_interrupt, and also covers a declined permission prompt,
+        // --max-turns and a no-progress bail-out.
+        "grok" => &[
+            ("UserPromptSubmit", Signal::Working),
+            ("Notification", Signal::Attention),
+            ("Stop", Signal::Done),
+            ("StopCancelled", Signal::Done),
+        ],
         "agy" => &[("PreInvocation", Signal::Working), ("Stop", Signal::Done)],
         _ => &[],
     }
 }
 
-/// How the hook gets its OSC onto the terminal.
-///
-/// claude returns a `terminalSequence` and writes it itself, which is safest:
-/// it lands at a sane point in claude's own render loop. No other agent has
-/// that field, and a hook cannot fall back to `/dev/tty` because hooks run with
-/// no controlling terminal (measured on grok: rc=1). Those agents write to
-/// `$TERMIC_PTY`, the slave path termic injects at spawn (`lib.rs`), which
-/// works because opening a tty BY NAME needs no ctty.
-fn uses_terminal_sequence(agent: &str) -> bool {
-    agent == "claude"
-}
+// Why every agent writes to `$TERMIC_PTY`, including claude.
+//
+// claude CAN return a `terminalSequence` and write the OSC itself, and that was
+// the original design. It is not enough. Its runtime allowlists what it will
+// write: "only OSC 0/1/2/9/99/777 and BEL are permitted, and OSC 9 bodies may
+// not begin with a digit unless in the 9;4 progress form", quoted from the
+// binary. OSC 133 is not on that list, so a `Done` sent that way is dropped
+// SILENTLY: the hook fires correctly and nothing reaches the parser. Measured.
+//
+// Staying on `9;4` instead would be allowed but costs the hard done: `9;4;0`
+// routes through the 5s settle, while `133;D` is `goIdle(reason, 0)`. For the
+// two states that matter most that is the wrong trade, so claude joins
+// everyone else on the pty.
+//
+// The pty path works for every agent because opening a tty BY NAME needs no
+// controlling terminal, which is exactly what rules out `/dev/tty` (measured on
+// grok: hooks run with no ctty and the write fails, rc=1).
 
 /// Config schema. They are not variations on one shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,20 +234,13 @@ const AGY_HOOK_NAME: &str = "termic";
 pub fn script_body(agent: &str, sig: Signal) -> String {
     let payload = sig.payload();
 
-    // claude parses our stdout and writes the sequence itself. Safest option:
-    // it lands at a sane point in claude's own render loop.
-    let emit = if uses_terminal_sequence(agent) {
-        format!(
-            "printf '%s' '{{\"terminalSequence\":\"\\u001b]{payload}\\u0007\"}}'"
-        )
-    } else {
-        // Everyone else writes straight to the terminal termic handed them.
-        // `/dev/tty` is NOT a fallback: hooks run with no controlling terminal
-        // (measured on grok, rc=1). Opening the slave BY NAME needs no ctty.
-        format!(
-            "[ -n \"$TERMIC_PTY\" ] || exit 0\nprintf '\\033]{payload}\\007' > \"$TERMIC_PTY\" 2>/dev/null"
-        )
-    };
+    // Every agent writes straight to the terminal termic handed it. See
+    // `uses_terminal_sequence` for why claude does not use its own channel.
+    // `/dev/tty` is NOT a fallback: hooks run with no controlling terminal
+    // (measured on grok, rc=1). Opening the slave BY NAME needs no ctty.
+    let emit = format!(
+        "[ -n \"$TERMIC_PTY\" ] || exit 0\nprintf '\\033]{payload}\\007' > \"$TERMIC_PTY\" 2>/dev/null"
+    );
 
     // grok is the one agent that reads ANOTHER agent's config (it scans
     // ~/.claude/settings.json too), so claude's script must stay silent when
@@ -231,7 +249,7 @@ pub fn script_body(agent: &str, sig: Signal) -> String {
     let provenance = if agent == "grok" {
         "# Only meaningful when grok is the caller; this file is grok's own.\n[ -n \"$GROK_HOOK_EVENT\" ] || exit 0"
     } else if agent == "claude" {
-        "# grok reads ~/.claude/settings.json too, with a camelCase payload and\n# no terminalSequence field. The user never opted grok in here.\n[ -z \"$GROK_HOOK_EVENT\" ] || exit 0"
+        "# grok reads ~/.claude/settings.json too, so this file also runs under\n# grok. The user never opted grok in here, and grok has its own install.\n[ -z \"$GROK_HOOK_EVENT\" ] || exit 0"
     } else {
         "# This file is only read by its own agent."
     };
@@ -1057,8 +1075,8 @@ mod tests {
         assert!(s.contains(r#"[ -n "$TERMIC_TASK_ID" ] || exit 0"#));
         assert!(s.contains(r#"[ -z "$GROK_HOOK_EVENT" ] || exit 0"#));
         assert!(s.contains("exit 0\n"));
-        // The sequence must be JSON escapes, never raw control bytes.
-        assert!(s.contains("\\u001b]777;notify;termic;"));
+        // Never raw control bytes in a generated file, whichever form it takes.
+        assert!(s.contains("]777;notify;termic;"));
         assert!(!s.contains('\u{1b}'), "no raw ESC in the generated file");
         assert!(!s.contains('\u{7}'), "no raw BEL in the generated file");
         // The body must not match BUILTIN_NOTIFY_IGNORE.claude or the
@@ -1074,8 +1092,9 @@ mod tests {
     fn grok_writes_its_own_event_and_its_own_file() {
         // grok has NO PermissionRequest. Its attention edge is Notification
         // with notificationType=permission_prompt, measured.
-        assert_eq!(hooks_for("grok"), &[("Notification", Signal::Attention)]);
-        assert_eq!(hooks_for("claude"), &[("PermissionRequest", Signal::Attention)]);
+        // Attention is the edge each of these two exists for.
+        assert!(hooks_for("grok").contains(&("Notification", Signal::Attention)));
+        assert!(hooks_for("claude").contains(&("PermissionRequest", Signal::Attention)));
         // grok scans every *.json under hooks/, so it gets a file of its own:
         // removal is then a delete rather than a merge-back into a file the
         // user also owns.
@@ -1085,16 +1104,16 @@ mod tests {
 
     #[test]
     fn grok_writes_to_the_pty_because_it_has_no_terminal_sequence() {
-        assert!(uses_terminal_sequence("claude"));
-        assert!(!uses_terminal_sequence("grok"));
+        // Every agent is on the pty, claude included: its runtime allowlist
+        // drops OSC 133, so its own channel cannot carry a hard done.
         let g = script_body("grok", Signal::Attention);
         assert!(g.contains("$TERMIC_PTY"), "grok must write to the injected pty");
         assert!(!g.contains("terminalSequence"), "grok's runtime ignores that field");
         // /dev/tty is NOT a fallback: hooks run with no controlling terminal.
         assert!(!g.contains("/dev/tty"));
         let c = script_body("claude", Signal::Attention);
-        assert!(c.contains("terminalSequence"));
-        assert!(!c.contains("$TERMIC_PTY"));
+        assert!(c.contains("$TERMIC_PTY"));
+        assert!(!c.contains("terminalSequence"));
     }
 
     #[test]
@@ -1121,6 +1140,54 @@ mod tests {
             let host = config_dir(&Target::Host((*a).into())).unwrap();
             assert!(!host.to_string_lossy().contains("worktree"), "{a}: {host:?}");
         }
+    }
+
+    // The two states that matter most must come from a PROTOCOL on every
+    // agent that has one, never from the terminal. The terminal is a heuristic
+    // that changes when a vendor changes their UI: the Codex latch in
+    // docs/gotchas.md is exactly that failure, and it silently disabled done
+    // detection until someone noticed tabs stuck on "working".
+    #[test]
+    fn done_comes_from_a_hook_on_every_agent_that_can_report_it() {
+        for agent in SUPPORTED {
+            let h = hooks_for(agent);
+            if *agent == "agy" || *agent == "opencode" || *agent == "claude" || *agent == "grok" {
+                assert!(
+                    h.iter().any(|(_, s)| *s == Signal::Done),
+                    "{agent} must report done via a hook, not the title"
+                );
+            }
+            // Done is ignored unless we were working, so an agent reporting
+            // Done must report Working too or its done never fires.
+            if h.iter().any(|(_, s)| *s == Signal::Done) {
+                assert!(
+                    h.iter().any(|(_, s)| *s == Signal::Working),
+                    "{agent} reports Done with no Working, so Done can never fire"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn attention_comes_from_a_hook_wherever_the_agent_has_such_an_event() {
+        for agent in ["claude", "grok", "opencode"] {
+            assert!(
+                hooks_for(agent).iter().any(|(_, s)| *s == Signal::Attention),
+                "{agent} has an attention-shaped event and must use it"
+            );
+        }
+        // agy is the documented exception: no attention-shaped event exists,
+        // so needs-you there stays on termic's byte-quiet fallback.
+        assert!(!hooks_for("agy").iter().any(|(_, s)| *s == Signal::Attention));
+    }
+
+    #[test]
+    fn only_grok_can_report_an_interrupt() {
+        // Measured: ESC mid-turn fires NOTHING on claude or codex, so their
+        // done cannot survive an interrupt and OSC stays the backstop there.
+        // grok's StopCancelled is the one exception.
+        assert!(hooks_for("grok").iter().any(|(e, _)| *e == "StopCancelled"));
+        assert!(!hooks_for("claude").iter().any(|(e, _)| *e == "StopCancelled"));
     }
 
     // ── Antigravity ─────────────────────────────────────────────────

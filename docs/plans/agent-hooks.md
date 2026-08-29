@@ -390,12 +390,29 @@ One rule decides the set: a hook is registered ONLY for a state the terminal
 gets wrong or cannot express. Everything the terminal already says correctly is
 left alone, and per-tool-call events are never registered on any agent.
 
-| Agent | Events | Reports | Why that set |
+| Agent | Events | Reports | Notes |
 |---|---|---|---|
-| claude | `PermissionRequest` | attention | Its title claims IDLE while blocked. The hook corrects a lie; working and done are already right. |
-| grok | `Notification` | attention | Has no `PermissionRequest`. Its title FREEZES on a busy spinner while blocked (217s on one frame, measured), so this is the only signal that state has. |
-| agy | `PreInvocation`, `Stop` | working, done | Has NO attention-shaped event. It also emits no OSC at all, so every turn used to end in the byte-quiet fallback's orange bell. `Working` is required for `Done`: a hard idle is ignored unless we were working. |
-| opencode | `chat.message`, `permission.asked`, `permission.replied`, `session.idle` | all four | Emits no busy/idle OSC, and is the only agent that reports the RELEASE of a block, so attention is cleared exactly rather than inferred. |
+| claude | `UserPromptSubmit`, `PermissionRequest`, `Stop` | working, attention, **done** | Its title claims IDLE while blocked, so attention is a correction. Done comes from `Stop`, which lands ~25ms before that title and gives a HARD done (no 5s settle). |
+| grok | `UserPromptSubmit`, `Notification`, `Stop`, `StopCancelled` | working, attention, **done** | Has no `PermissionRequest`, and its title FREEZES on a busy spinner while blocked (217s on one frame, measured). `StopCancelled` makes it the only agent whose done survives an INTERRUPT. |
+| agy | `PreInvocation`, `Stop` | working, **done** | Has NO attention-shaped event, so needs-you there stays on the byte-quiet fallback. It emits no OSC at all, so done is a large upgrade. |
+| opencode | `chat.message`, `permission.asked`, `permission.replied`, `session.idle` | all four | The only agent that reports the RELEASE of a block, so attention is cleared exactly rather than inferred. |
+
+**Done and attention come from a protocol on every agent that exposes one.**
+That is the whole point, and it is a reliability argument, not a latency one:
+`Stop` beats the idle title by milliseconds, which is worth nothing on its own.
+What it is worth is not depending on a vendor's UI. The Codex latch in
+`docs/gotchas.md` is exactly that failure: a title format changed, and done
+detection stopped working silently until someone noticed tabs stuck on
+"working".
+
+`Working` is registered alongside `Done` on every agent, even where the title
+already reports it, so the pair is self-sufficient. `goIdle(reason, 0)` is
+ignored unless we were working, so a Done that relied on the title having set
+working would inherit exactly the fragility the hook exists to remove.
+
+OSC stays the backstop, and has to: interrupts fire NO hook on claude
+(measured, ESC mid-turn produces nothing), so a hook-only model would leave an
+interrupted turn stuck on "working" forever. grok is the single exception.
 
 ### Three config shapes, not one
 
