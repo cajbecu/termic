@@ -265,13 +265,15 @@ export function TerminalPane({ task, tab, active }: Props) {
    *    agy       both keys: nothing. The turn really is interrupted (its own
    *              UI prints "Interrupted") but no hook fires, and agy has no
    *              title signals either, so the PTY falling quiet is all we get.
-   *    opencode  ESC is IGNORED, generation continues. Ctrl-C fires
-   *              `session.error` then `session.idle` and exits.
+   *    opencode  the FIRST Escape does nothing and it keeps streaming; the
+   *              SECOND fires `session.error` then `session.idle` 30ms later.
+   *              One Ctrl-C fires the same pair and then EXITS.
    *
-   *  Two agents out of four therefore report nothing, which is why this ref
-   *  exists at all. It is deliberately not enough on its own: something else
-   *  (the title, or the terminal going quiet) has to corroborate it, so the
-   *  key opencode ignores cannot end a turn that is still running. */
+   *  claude and agy therefore report nothing, which is why this ref exists at
+   *  all. It is deliberately not enough on its own: something else (the title,
+   *  or the terminal going quiet) has to corroborate it, so opencode's first
+   *  Escape cannot end a turn that is still running. opencode's second one
+   *  needs no help from this path, since `session.idle` is already Done. */
   const escAtRef = useRef(0);
   // Respawn machinery: when the agent process exits (user typed `exit`,
   // claude crashed, etc.) we tear down the PTY but KEEP the terminal
@@ -2226,11 +2228,11 @@ const captureArmedRef = useRef(false);
           // completion, and paste also pass through here but none of them
           // contain CR/LF, so they leave the done state alone too.
           // Escape and Ctrl-C both mean "stop", and agents disagree about
-          // which they honour: measured mid-turn, claude and grok take either,
-          // agy takes either, and opencode ignores Escape outright while
-          // Ctrl-C makes it exit. Recording both is therefore necessary and
-          // safe, because the key alone never ends a turn: something has to
-          // corroborate it, and the agent that ignores the key never does.
+          // which they honour: measured mid-turn, claude, grok and agy take
+          // either, while opencode needs TWO Escapes and exits on one Ctrl-C.
+          // Recording both is therefore necessary and safe, because the key
+          // alone never ends a turn: something has to corroborate it, and a
+          // press the agent did not act on never produces that corroboration.
           //
           // A bare ESC is exactly one byte, which is what separates it from
           // xterm's automated replies: a cursor-position report is

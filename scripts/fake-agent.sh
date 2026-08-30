@@ -177,7 +177,9 @@ while IFS= read -r line; do
       # through neither a hook nor a title, so the terminal simply falls quiet.
       # Measured: agy fires nothing at all on Escape or Ctrl-C and has no title
       # state to read, which leaves the terminal going quiet as the only
-      # evidence the user's key landed.
+      # evidence the user's key landed. It is the only agent in that position:
+      # claude repaints its idle glyph, grok has StopCancelled, and opencode
+      # reports session.idle on the second Escape.
       #
       # The busy title is painted ONCE and never cleared, including on the
       # interrupt. That is what isolates the path under test: termic's other

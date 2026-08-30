@@ -395,7 +395,7 @@ left alone, and per-tool-call events are never registered on any agent.
 | claude | `UserPromptSubmit`, `PermissionRequest`, `Stop` | working, attention, **done** | Its title claims IDLE while blocked, so attention is a correction. Done comes from `Stop`, which lands ~25ms before that title and gives a HARD done (no 5s settle). |
 | grok | `UserPromptSubmit`, `Notification`, `Stop`, `StopCancelled` | working, attention, **done** | Has no `PermissionRequest`, and its title FREEZES on a busy spinner while blocked (217s on one frame, measured). `StopCancelled` makes it the only agent whose done survives an INTERRUPT. |
 | agy | `PreInvocation`, `Stop` | working, **done** | Has NO attention-shaped event, so needs-you there stays on the byte-quiet fallback. It emits no OSC at all, so done is a large upgrade. |
-| opencode | `chat.message`, `permission.asked`, `permission.replied`, `session.idle` | all four | The only agent that reports the RELEASE of a block, so attention is cleared exactly rather than inferred. |
+| opencode | `chat.message`, `permission.asked`, `permission.replied`, `session.idle` | all four | The only agent that reports the RELEASE of a block, so attention is cleared exactly rather than inferred. `session.idle` also covers an INTERRUPT (measured: it takes two Escapes, and the second fires it). |
 
 **Done and attention come from a protocol on every agent that exposes one.**
 That is the whole point, and it is a reliability argument, not a latency one:
@@ -444,7 +444,7 @@ the key sent 8s in and 15s of recording after it):
 | claude | **no hook**; idle glyph 110ms later | **no hook**; idle glyph 40ms later |
 | grok | `StopCancelled`, `reason="user_interrupt"`, 350ms | `StopCancelled`, same, 40ms |
 | agy | **nothing at all**, and no title state either | **nothing at all**, same |
-| opencode | **key ignored**, generation continues | `session.error` then `session.idle`, then exits |
+| opencode | **first press does nothing**; the SECOND fires `session.error` then `session.idle`, 30ms | `session.error` then `session.idle`, then the process EXITS |
 
 claude was measured with 29 of its 31 lifecycle events registered; its event
 list, read out of the binary, contains no cancel or abort event to register.
@@ -452,16 +452,24 @@ agy's own UI prints "Interrupted", so the turn really did end, and it still
 publishes nothing. That is what settles the design: the keystroke has to be
 part of the evidence, because for claude and agy there is nothing else.
 
-The keystroke is never enough ALONE. Something has to corroborate it, and
-opencode is the reason: it ignores Escape outright and keeps streaming, so a
-detector that trusted the key would end a turn that is still running. termic
-therefore accepts an interrupt only when the key is followed by one of:
+opencode needed a second look. A single Escape was first recorded as "ignored",
+which was true but not the whole truth: it takes TWO, and the second reports
+the interrupt properly through `session.idle`, which termic already maps to
+Done. So opencode is covered by its own hook and the keystroke path never has
+to act for it. Reading one press as the whole answer is the same mistake as
+reading "no hook fired" without checking the title.
+
+The keystroke is never enough ALONE, and opencode is still the reason: one
+Escape leaves it streaming, so a detector that acted on the first press would
+end a turn that is still running. termic therefore accepts an interrupt only
+when the key is followed by one of:
 
 - **the title going idle** (`ESC_INTERRUPT_WINDOW_MS`, 3s) — claude's route,
   and it is prompt: the idle glyph lands 40-110ms after either key.
 - **the terminal going quiet** (`INTERRUPT_QUIET_GRACE_MS`, 15s) — agy's only
-  route, since it has neither a hook nor a title. An agent that ignored the key
-  keeps painting, so quiet never arrives and nothing fires.
+  route, since it has neither a hook nor a title. An agent that did not act on
+  the key keeps painting, so quiet never arrives and nothing fires. That is
+  exactly what happens on opencode's first Escape.
 
 Both are gated on the user actually watching the tab, and both call
 `interruptWork`, not `fireDone`: an interrupt is not a completion, so it earns

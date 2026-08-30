@@ -951,9 +951,10 @@ describe("agent notifications", () => {
     // The agy shape, and the reason the keystroke is not enough on its own.
     // Measured mid-turn: agy fires NO hook for an interrupt and publishes no
     // title state either, so the only evidence its user's key landed is the
-    // terminal falling quiet. An agent that IGNORES the key (opencode ignores
-    // Escape outright) keeps painting, so quiet never arrives and nothing
-    // ends: that asymmetry is what makes corroboration safe.
+    // terminal falling quiet. An agent that did NOT act on the key keeps
+    // painting (opencode's first Escape does nothing; it takes two), so quiet
+    // never arrives and nothing ends: that asymmetry is what makes
+    // corroboration safe.
     it("ends an interrupted turn that reports neither a hook nor a title", async () => {
       await setHooksOwnState("fakeagent", true);
       await reset();
