@@ -143,6 +143,27 @@ while IFS= read -r line; do
       done
       set_title "✳ ${name} iip-after"
       continue ;;
+    "#longwork")
+      # A turn long enough for a spec to interrupt it. The first attempt at
+      # this raced a ~1s turn and pressed the key after it had already ended,
+      # which is the same mistake that invalidated the first live interrupt
+      # probe: an interrupt test has to interrupt something.
+      #
+      # It also HONOURS the interrupt, because that is what a real agent does:
+      # claude stops and repaints its idle glyph ~90ms after Escape. A fixture
+      # that kept spinning would be testing an agent that ignored the user.
+      # `read -t 1` doubles as the frame delay and the input check; integer
+      # timeouts only, since macOS ships bash 3.2 where fractional ones fail.
+      for i in $(seq 1 60); do
+        set_title "${SPINNER[$((i % 8))]} ${name}"
+        if IFS= read -r -t 1 -N 1 _key; then
+          echo "FAKE-AGENT interrupted"
+          set_title "✳ ${name}"
+          continue 2
+        fi
+      done
+      set_title "✳ ${name}"
+      continue ;;
     "#hookattn")
       spin
       echo "FAKE-AGENT needs your permission to continue"

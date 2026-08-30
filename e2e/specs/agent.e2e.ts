@@ -881,26 +881,30 @@ describe("agent notifications", () => {
   // and its own Stop correctly stayed silent throughout. Trusting both means
   // trusting the wrong one.
   describe("when an agent reports its own state", () => {
-    after(async () => { await setHooksOwnState("fakeagent", false); });
-
-    it("ignores the title going idle, so a long turn is not called done early", async () => {
+    const reset = async () => {
       await ensureActiveTask(taskId!);
-      await setHooksOwnState("fakeagent", true);
       await browser.execute((id) => {
         const s = window.__termic!.useApp.getState();
         s.clearAttention(id, s.tabs[id][0].id);
         s.setWorkState(id, s.tabs[id][0].id, "idle");
       }, taskId);
+    };
+    after(async () => { await setHooksOwnState("fakeagent", false); });
 
-      // A normal turn: the fixture spins, then paints claude's idle glyph.
-      await submitToAgent(taskId!, "a turn that ends with the idle glyph");
+    it("ignores the title going idle, so a long turn is not called done early", async () => {
+      await setHooksOwnState("fakeagent", true);
+      await reset();
+
+      // An ordinary turn: the fixture spins, then paints claude's idle glyph.
+      // That glyph alone used to be enough to end the turn.
+      await submitToAgent(taskId!, "an ordinary turn that ends on the idle glyph");
       await waitForWorkBadge(taskId!, "working", {
         timeout: 20_000,
         message: "the turn never reached the working badge",
       });
 
-      // Past SETTLE_MS. The title HAS gone idle by now; before this change
-      // that alone would have fired a done.
+      // Past SETTLE_MS with the PTY quiet, which is precisely the situation
+      // that used to fire a done off the title.
       await browser.waitUntil(async () => (await quietFor(taskId!)) > 8_000, {
         timeout: 30_000, interval: 500,
         timeoutMsg: "PTY never went quiet after the turn",
@@ -909,29 +913,39 @@ describe("agent notifications", () => {
       expect(await sidebarBadge(taskId!)).not.toBe("done");
     });
 
-    it("still honours the title right after Escape, which no hook reports", async () => {
-      await ensureActiveTask(taskId!);
+    // The interrupt half. claude fires NO hook for one (measured with 29 of
+    // its 31 lifecycle events registered), so the keystroke is the only
+    // evidence, and it is what licenses the title for that single turn.
+    it("stops claiming work when the user interrupts, which no hook reports", async () => {
       await setHooksOwnState("fakeagent", true);
-      await browser.execute((id) => {
-        const s = window.__termic!.useApp.getState();
-        s.clearAttention(id, s.tabs[id][0].id);
-        s.setWorkState(id, s.tabs[id][0].id, "idle");
-      }, taskId);
+      await reset();
 
-      await submitToAgent(taskId!, "a turn the user interrupts");
+      await submitToAgent(taskId!, "#longwork");
       await waitForWorkBadge(taskId!, "working", {
         timeout: 20_000,
-        message: "the turn never reached the working badge",
+        message: "the long turn never reached the working badge",
       });
-      // claude fires NO hook for an interrupt (measured with 29 of its 31
-      // events registered) and repaints its idle glyph ~90ms later, so the
-      // keystroke is what licenses the title to end this one turn.
+
       await pressEscape(taskId!);
+
+      // Localise a failure: if the fixture never reacted, the keystroke never
+      // reached the PTY and the bug is in the spec, not the detector.
+      await browser.waitUntil(
+        async () => ((await browser.execute(
+          (id) => (window.__termic!.useApp.getState().tabs[id] ?? [])[0]?.liveTitle ?? "",
+          taskId,
+        )) as string).includes("✳"),
+        { timeout: 15_000, interval: 250,
+          timeoutMsg: "the fixture never went idle, so Escape never reached the PTY" },
+      );
 
       await waitForWorkBadgeGone(taskId!, "working", {
         timeout: 20_000,
-        message: "Escape left the tab claiming it was still working",
+        message: "Escape reached the agent, but termic still claims it is working",
       });
+      // An interrupt is not a completion: it clears the in-progress state and
+      // nothing else, so it must not leave a done badge behind either.
+      expect(await taskViewBadge(taskId!)).not.toBe("done");
     });
   });
 });

@@ -794,6 +794,28 @@ export async function waitForAgentReady(taskId: string, timeout = 30_000): Promi
  * keystroke. The interrupt path reads `onData`, so a spec using ptyWrite
  * would test the fixture rather than the feature.
  */
+/**
+ * Wait until the agent has produced `ms` worth of OUTPUT since now.
+ *
+ * For negative assertions ("no done badge appeared"), which need time to pass
+ * but must not be a sleep. This is a real condition on the app's own clock,
+ * and it additionally proves the agent kept working across the window, which
+ * is usually the thing that makes the negative meaningful.
+ */
+export async function waitForOutputSpan(taskId: string, ms: number): Promise<void> {
+  const at = () =>
+    browser.execute(
+      (id) => (window.__termic!.useApp.getState().tabs[id] ?? [])[0]?.lastOutputAt ?? 0,
+      taskId,
+    ) as Promise<number>;
+  const start = await at();
+  await browser.waitUntil(async () => (await at()) - start > ms, {
+    timeout: ms + 20_000,
+    interval: 400,
+    timeoutMsg: `agent in ${taskId} stopped producing output before ${ms}ms elapsed`,
+  });
+}
+
 export async function pressEscape(taskId: string): Promise<void> {
   const result = await browser.execute((id) => {
     const host = document.querySelector(`[data-task-id="${id}"]`);

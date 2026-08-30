@@ -1222,6 +1222,20 @@ const captureArmedRef = useRef(false);
       // No prior busy → ignore: avoids "Ready" titles on cold spawn
       // marking the tab done out of nowhere.
     };
+    /** The user stopped the agent. Clears the in-progress state and NOTHING
+     *  else: an interrupt is not a completion, so there is no badge, no bell,
+     *  and critically no spending of the one-done-per-submit token. Routing
+     *  this through `fireDone` would burn that token and swallow the NEXT
+     *  genuine done for the tab. */
+    const goInterrupted = (reason: string) => {
+      if (!workDoneEnabled) return;
+      cancelSettle(reason);
+      localBusy = false;
+      wdlog(`→ interrupted (${reason})`);
+      dbg("state→interrupted", reason);
+      setWorkState(task.id, tab.id, "idle");
+    };
+
     const goAttention = (reason: string, message?: string) => {
       if (!workDoneEnabled) return;
       cancelSettle(reason);
@@ -1405,9 +1419,23 @@ const captureArmedRef = useRef(false);
         // still allowed to end one within a moment of the user pressing
         // Escape, because that is an interrupt: no agent except grok reports
         // it, and claude repaints its idle glyph ~90ms after the keystroke.
-        const interrupted = Date.now() - escAtRef.current < ESC_INTERRUPT_WINDOW_MS;
-        if (hooksOwnStateRef.current && !interrupted) {
-          wdlog("title idle ignored (hooks own done for this agent)");
+        //
+        // ALSO gated on the user actually watching this tab, which costs
+        // nothing and removes the only dangerous false positive. Claude's
+        // title oscillates between its idle glyph and a spinner for a few
+        // frames after a response (the reason STICKY_DONE_MS exists), so an
+        // Escape pressed for an unrelated reason, followed by a switch away,
+        // followed by a flicker, could otherwise badge a done that never
+        // happened. It costs nothing because `fireDone` already suppresses the
+        // badge entirely on a watched tab: the interrupt's whole job there is
+        // to stop the spinner, not to notify. The cost of being wrong the
+        // other way is a tab that reads "working" until the next prompt, which
+        // is the direction to fail in.
+        const interrupted = Date.now() - escAtRef.current < ESC_INTERRUPT_WINDOW_MS
+          && isUserWatching(task.id, tab.id);
+        if (hooksOwnStateRef.current) {
+          if (interrupted) goInterrupted("title idle after interrupt");
+          else wdlog("title idle ignored (hooks own done for this agent)");
           if (state) lastTitleState = state;
           return;
         }
@@ -2166,13 +2194,18 @@ const captureArmedRef = useRef(false);
           // within 200ms of it appearing. Arrow keys, backspace, tab
           // completion, and paste also pass through here but none of them
           // contain CR/LF, so they leave the done state alone too.
-          // A bare ESC is exactly one byte. `onData` also carries xterm's
-          // automated replies, and a cursor-position report is
-          // `\x1b[<row>;<col>R`, which also starts with ESC, so matching the
-          // whole payload is what keeps those out.
-          if (data === "\x1b") {
+          // Escape and Ctrl-C both mean "stop". Agents differ on which they
+          // honour (claude takes Escape; Ctrl-C twice quits it outright), and
+          // either way the user has asked for the turn to end.
+          //
+          // A bare ESC is exactly one byte, which is what separates it from
+          // xterm's automated replies: a cursor-position report is
+          // `\x1b[<row>;<col>R` and also begins with ESC. Matching the whole
+          // payload keeps those out. Alt-chords arrive as `\x1b` PLUS the
+          // character in one call, so they are excluded too.
+          if (data === "\x1b" || data === "\x03") {
             escAtRef.current = Date.now();
-            wdlog("ESC pressed; the title may end this turn for the next 3s");
+            wdlog(`${data === "\x03" ? "Ctrl-C" : "ESC"} pressed; the title may end this turn briefly`);
           }
           if (data.indexOf("\r") !== -1 || data.indexOf("\n") !== -1) {
             settledRef.current = { lastHash: 0, unchangedCount: 0, marked: false };
