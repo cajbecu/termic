@@ -410,9 +410,18 @@ already reports it, so the pair is self-sufficient. `goIdle(reason, 0)` is
 ignored unless we were working, so a Done that relied on the title having set
 working would inherit exactly the fragility the hook exists to remove.
 
-OSC stays the backstop, and has to: interrupts fire NO hook on claude
-(measured, ESC mid-turn produces nothing), so a hook-only model would leave an
-interrupted turn stuck on "working" forever. grok is the single exception.
+OSC stays the backstop, and interrupts are exactly why. ESC mid-turn fires no
+hook at all on claude: measured with 29 of its 31 lifecycle events registered
+against a genuinely foreground generation, with the interrupt confirmed (the
+screen printed "Interrupted") and nothing firing in the 14s that followed. Its
+event list, read out of the binary, contains no cancel or abort event to
+register. grok is the only agent with one (`StopCancelled`).
+
+The title covers that case and covers it well: claude repaints its IDLE glyph
+**90ms** after the ESC (35.67 to 35.76 in the same capture). So an interrupted
+turn is not stranded, and no keystroke interception is needed. An earlier
+revision of this doc claimed otherwise; that was inferred from "no hook fires"
+without checking whether the title still moves, and it does.
 
 ### Three config shapes, not one
 
