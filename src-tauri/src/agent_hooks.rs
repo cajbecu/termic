@@ -234,6 +234,36 @@ const AGY_HOOK_NAME: &str = "termic";
 pub fn script_body(agent: &str, sig: Signal) -> String {
     let payload = sig.payload();
 
+    // A Done hook must NOT claim the turn is over while the agent still has
+    // work outstanding. claude fires `Stop` with a populated `background_tasks`
+    // when it backgrounds a subagent or a shell and keeps waiting (measured),
+    // and agy reports the same thing as `fullyIdle: false`. termic used to
+    // catch this by scanning the SCREEN for the agent's own status line, which
+    // is the kind of text heuristic hooks exist to replace: this reads the
+    // protocol instead.
+    //
+    // Deliberately no `jq`: whitespace is stripped and the field matched
+    // literally, so the script keeps its "no dependencies" property. An absent
+    // field means an older agent that cannot background work, so done stands.
+    let guard = match (agent, sig) {
+        ("claude", Signal::Done) => concat!(
+            "flat=$(cat | tr -d '[:space:]')\n",
+            "# Non-empty background_tasks: the turn ended, the WORK did not.\n",
+            "case \"$flat\" in\n",
+            "  *'\"background_tasks\":[]'*) ;;\n",
+            "  *'\"background_tasks\":['*) exit 0 ;;\n",
+            "esac\n",
+        ),
+        ("agy", Signal::Done) => concat!(
+            "flat=$(cat | tr -d '[:space:]')\n",
+            "# agy states it outright: anything but true means work continues.\n",
+            "case \"$flat\" in\n",
+            "  *'\"fullyIdle\":false'*) exit 0 ;;\n",
+            "esac\n",
+        ),
+        _ => "",
+    };
+
     // Every agent writes straight to the terminal termic handed it. See
     // `uses_terminal_sequence` for why claude does not use its own channel.
     // `/dev/tty` is NOT a fallback: hooks run with no controlling terminal
@@ -269,7 +299,7 @@ pub fn script_body(agent: &str, sig: Signal) -> String {
 
 {provenance}
 
-{emit}
+{guard}{emit}
 exit 0
 "#
     )
@@ -1188,6 +1218,35 @@ mod tests {
         // grok's StopCancelled is the one exception.
         assert!(hooks_for("grok").iter().any(|(e, _)| *e == "StopCancelled"));
         assert!(!hooks_for("claude").iter().any(|(e, _)| *e == "StopCancelled"));
+    }
+
+    // The reason done must come from the protocol, in one test.
+    //
+    // Measured: claude backgrounds two shells, ends the parent turn, and paints
+    // its IDLE glyph 49.6 SECONDS before the work actually finishes. On a
+    // 1-2 hour subagent run that is 1-2 hours of a confident, wrong "done".
+    // Its `Stop` fires three times there, and only the third has an empty
+    // `background_tasks`. agy says the same thing as `fullyIdle`.
+    #[test]
+    fn done_hooks_refuse_to_fire_while_work_is_outstanding() {
+        let claude = script_body("claude", Signal::Done);
+        assert!(claude.contains("background_tasks"), "claude's done must consult its payload");
+        // The empty case must be matched BEFORE the general one, or an empty
+        // array reads as "still working" and done never fires at all.
+        let empty_at = claude.find(r#"*'"background_tasks":[]'*"#).expect("empty arm");
+        let any_at = claude.find(r#"*'"background_tasks":['*"#).expect("non-empty arm");
+        assert!(empty_at < any_at, "the empty-array arm must come first");
+
+        let agy = script_body("agy", Signal::Done);
+        assert!(agy.contains("fullyIdle"), "agy's done must consult its payload");
+
+        // No jq: the scripts must keep working on a machine that has none.
+        for a in ["claude", "agy"] {
+            assert!(!script_body(a, Signal::Done).contains("jq"));
+        }
+        // Only Done inspects a payload. Working and attention are unconditional.
+        assert!(!script_body("claude", Signal::Working).contains("background_tasks"));
+        assert!(!script_body("claude", Signal::Attention).contains("background_tasks"));
     }
 
     // ── Antigravity ─────────────────────────────────────────────────
