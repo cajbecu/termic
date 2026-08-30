@@ -11,12 +11,12 @@
 // installed for it inside a container. See docs/plans/agent-hooks.md.
 
 import { useCallback, useEffect, useState } from "react";
-import { agentHooksInstall, agentHooksRemove, agentHooksStatus } from "@/lib/ipc";
+import { agentHooksInstall, agentHooksPlan, agentHooksRemove, agentHooksStatus } from "@/lib/ipc";
 import { useApp } from "@/store/app";
 import { Button } from "@/components/ui/Button";
 import { SubSection } from "./SubSection";
 import { agentDisplayName } from "@/lib/agents";
-import type { AgentHookStatus } from "@/lib/types";
+import type { AgentHookStatus, HookPlan } from "@/lib/types";
 
 /** Why an agent cannot be wired, in the user's terms. An agent that is
  *  installed but unsupported must SAY so rather than appear wired, which is the
@@ -33,6 +33,21 @@ export function AgentHooksBlock() {
   const [status, setStatus] = useState<Record<string, AgentHookStatus>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [failure, setFailure] = useState<Record<string, string>>({});
+  // Disclosure, per agent. These users read shell for a living, so the honest
+  // move is to show the actual scripts rather than describe them.
+  const [plan, setPlan] = useState<Record<string, HookPlan>>({});
+  const [open, setOpen] = useState<string | null>(null);
+
+  const toggleDetails = async (id: string) => {
+    if (open === id) { setOpen(null); return; }
+    setOpen(id);
+    if (!plan[id]) {
+      try {
+        const next = await agentHooksPlan(id);
+        setPlan(p => ({ ...p, [id]: next }));
+      } catch { /* the row still works without the disclosure */ }
+    }
+  };
 
   // Only agents actually on PATH. Offering to wire an agent the user does not
   // have is noise, and the row would have nothing true to say.
@@ -57,6 +72,9 @@ export function AgentHooksBlock() {
     try {
       const next = install ? await agentHooksInstall(id) : await agentHooksRemove(id);
       setStatus(s => ({ ...s, [id]: next }));
+      // Live tabs read this to decide whether the title may still end a turn,
+      // so it has to change with the install rather than at the next restart.
+      await useApp.getState().refreshAgentHooks();
     } catch (e) {
       setFailure(f => ({ ...f, [id]: String(e) }));
     } finally {
@@ -102,11 +120,43 @@ export function AgentHooksBlock() {
                   )}
                 </div>
               </div>
-              {/* Name the files BEFORE writing, not after. */}
-              {st?.supported && !st.host.installed && !blocked && (
-                <p className="text-xs text-[var(--color-fg-subtle)]">
-                  Will write {st.host.script_dir} and add one entry to {st.host.settings_path}.
-                </p>
+              {/* Name the files BEFORE writing, not after, and offer the
+                  whole thing rather than a summary of it. */}
+              {st?.supported && !blocked && (
+                <button
+                  type="button"
+                  onClick={() => void toggleDetails(id)}
+                  className="self-start text-xs text-[var(--color-fg-subtle)] underline decoration-dotted hover:text-[var(--color-fg)]"
+                >
+                  {open === id ? "Hide what this installs" : "Show exactly what this installs"}
+                </button>
+              )}
+              {open === id && plan[id] && (
+                <div className="flex flex-col gap-2 rounded bg-[var(--color-bg-subtle)] p-2 text-xs">
+                  <div>
+                    <span className="text-[var(--color-fg-subtle)]">Config file: </span>
+                    <code className="break-all">{plan[id].config_path}</code>
+                    {plan[id].config_is_shared && (
+                      <span className="text-[var(--color-fg-subtle)]"> (yours; termic merges into it)</span>
+                    )}
+                  </div>
+                  <div>
+                    <div className="text-[var(--color-fg-subtle)]">Added to that file:</div>
+                    <pre className="overflow-x-auto whitespace-pre">{plan[id].config_fragment}</pre>
+                  </div>
+                  {plan[id].entries.map(en => (
+                    <div key={en.event}>
+                      <div className="text-[var(--color-fg-subtle)]">
+                        <code>{en.event}</code> reports <b>{en.reports}</b>, and runs:
+                      </div>
+                      <div className="break-all"><code>{en.script_path}</code></div>
+                      <pre className="overflow-x-auto whitespace-pre">{en.script_body}</pre>
+                    </div>
+                  ))}
+                  {plan[id].notes.map((n, i) => (
+                    <p key={i} className="text-[var(--color-fg-subtle)]">{n}</p>
+                  ))}
+                </div>
               )}
               {err && <p className="text-xs text-[var(--color-danger)]">{err}</p>}
             </div>

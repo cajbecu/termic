@@ -18210,6 +18210,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             agent_hooks::agent_hooks_status,
+            agent_hooks::agent_hooks_plan,
             agent_hooks::agent_hooks_install,
             agent_hooks::agent_hooks_remove,
             perf_boot_elapsed_ms,

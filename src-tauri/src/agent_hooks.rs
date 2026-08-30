@@ -892,6 +892,122 @@ pub struct AgentHookStatus {
     pub docker: HookStatus,
 }
 
+/// Everything an install would write, for an audience that will read it.
+/// These users run coding agents for a living: the honest thing is to show the
+/// exact files and the exact script contents BEFORE touching anything, not a
+/// reassuring sentence.
+#[derive(Debug, Clone, Serialize)]
+pub struct HookPlanEntry {
+    /// The agent's own event name, e.g. `PermissionRequest`.
+    pub event: String,
+    /// What termic learns from it: attention, working or done.
+    pub reports: String,
+    /// Absolute path of the script this event runs.
+    pub script_path: String,
+    /// The script, verbatim. Short by design, precisely so it can be read.
+    pub script_body: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HookPlan {
+    pub agent_id: String,
+    pub supported: bool,
+    /// The config file termic edits, and whether it is shared with the user's
+    /// own settings or a file termic owns outright.
+    pub config_path: String,
+    pub config_is_shared: bool,
+    /// The exact JSON fragment merged into that config.
+    pub config_fragment: String,
+    pub entries: Vec<HookPlanEntry>,
+    /// Anything else the install changes about how the agent runs.
+    pub notes: Vec<String>,
+}
+
+#[tauri::command]
+pub fn agent_hooks_plan(agent_id: String) -> Result<HookPlan, String> {
+    let target = Target::Host(agent_id.clone());
+    let hooks = hooks_for(&agent_id);
+    let prefix = command_prefix(&target).unwrap_or_default();
+    let entries: Vec<HookPlanEntry> = hooks
+        .iter()
+        .map(|(event, sig)| HookPlanEntry {
+            event: (*event).to_string(),
+            reports: sig.stem().to_string(),
+            script_path: format!("{prefix}{}.sh", sig.stem()),
+            script_body: script_body(&agent_id, *sig),
+        })
+        .collect();
+
+    let shared = settings_rel(&agent_id) == "settings.json";
+    let fragment = if hooks.is_empty() {
+        String::new()
+    } else {
+        let commands: Vec<(&str, String)> = hooks
+            .iter()
+            .map(|(e, s)| (*e, format!("{prefix}{}.sh", s.stem())))
+            .collect();
+        let merged = match schema_for(&agent_id) {
+            Schema::AntigravityNamed => agy_merge(&Value::Object(Map::new()), &commands),
+            Schema::OpencodePlugin => Value::String("(a JS plugin file, shown below)".into()),
+            Schema::ClaudeCompatible => {
+                let mut acc = Value::Object(Map::new());
+                for (event, command) in &commands {
+                    acc = merge(&acc, command, &prefix, event);
+                }
+                acc
+            }
+        };
+        serde_json::to_string_pretty(&merged).unwrap_or_default()
+    };
+
+    let mut notes = Vec::new();
+    if !hooks.is_empty() {
+        notes.push(
+            "Each script writes one OSC sequence to this terminal and exits 0. \
+             No network, no file writes, no arguments."
+                .into(),
+        );
+        notes.push(
+            "They stay silent unless TERMIC_TASK_ID is set, so the same files do \
+             nothing when you run the agent in another terminal."
+                .into(),
+        );
+    }
+    if shared && !hooks.is_empty() {
+        notes.push(
+            "This file is yours and may already contain your own hooks. termic \
+             appends one entry per event and removes only those, and it keeps a \
+             backup taken before the first install."
+                .into(),
+        );
+    }
+    if agent_id == "claude" {
+        notes.push(
+            "grok also reads ~/.claude/settings.json. The scripts detect that and \
+             stay silent, and termic additionally sets GROK_CLAUDE_HOOKS_ENABLED=false \
+             for grok tabs it launches."
+                .into(),
+        );
+    }
+    if agent_id == "grok" {
+        notes.push(
+            "grok tabs launched by termic also get GROK_CLAUDE_HOOKS_ENABLED=false, \
+             so grok stops reading claude's hook config and no event fires twice."
+                .into(),
+        );
+    }
+    Ok(HookPlan {
+        supported: SUPPORTED.contains(&agent_id.as_str()),
+        config_path: settings_path(&target).map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        config_is_shared: shared,
+        config_fragment: fragment,
+        entries,
+        notes,
+        agent_id,
+    })
+}
+
 #[tauri::command]
 pub fn agent_hooks_status(agent_id: String) -> AgentHookStatus {
     AgentHookStatus {

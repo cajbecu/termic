@@ -81,6 +81,9 @@ export function App() {
     // opens (AgentsSection drives the latter). Deliberately NOT on every
     // window focus — `loadAll` re-runs on focus, detection does not.
     useApp.getState().refreshClis();
+    // Which agents report their own state. Drives whether the terminal title
+    // is still allowed to end a turn for them (docs/plans/agent-hooks.md).
+    useApp.getState().refreshAgentHooks();
     // Forge CLI (gh / glab) detection for the PR integrations - same
     // policy as agent CLI detection: startup + Settings visits only.
     void usePr.getState().refreshForges();

@@ -1477,3 +1477,26 @@ export interface AgentHookStatus {
   host: HookTargetStatus;
   docker: HookTargetStatus;
 }
+
+/** One event an install would register, with the exact script it runs. Shown
+ *  in full BEFORE anything is written: these users read shell. */
+export interface HookPlanEntry {
+  event: string;
+  /** attention | working | done */
+  reports: string;
+  script_path: string;
+  script_body: string;
+}
+
+/** Everything installing hooks for one agent would change. */
+export interface HookPlan {
+  agent_id: string;
+  supported: boolean;
+  config_path: string;
+  /** True when the config also holds the user's own settings, so termic is
+   *  merging rather than owning the file. */
+  config_is_shared: boolean;
+  config_fragment: string;
+  entries: HookPlanEntry[];
+  notes: string[];
+}

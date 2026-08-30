@@ -8,7 +8,7 @@ import type {
   Project, ProjectMember, Task, CreateTaskArgs, CreateMultiArgs, Settings, DiscoveredRepo,
   ImportableWorktree, CliInfo, ChangeFile, Changes, GitStatus, CheckoutResult, UpdateMode, UpdateResult, UpdateInfo, FileEntry, Agent, RepoConfig,
   SandboxMode, TaskDiffSummary, CliInstallStatus, McpStatus, BranchContext, BlameFile, GitCommit, GitCompare, GitFile, GitLogPage, GitRef,
-  ForgeCliStatus, PrLookup, PrComment, IssueLookup, AgentHookStatus,
+  ForgeCliStatus, PrLookup, PrComment, IssueLookup, AgentHookStatus, HookPlan,
 } from "./types";
 import type { CustomThemeFile } from "./customTheme";
 import {
@@ -1180,5 +1180,7 @@ export type { ChangeFile };
 // See docs/plans/agent-hooks.md.
 
 export const agentHooksStatus  = (agentId: string) => invoke<AgentHookStatus>("agent_hooks_status", { agentId });
+/** Exactly what an install would write, for the "show me first" disclosure. */
+export const agentHooksPlan    = (agentId: string) => invoke<HookPlan>("agent_hooks_plan", { agentId });
 export const agentHooksInstall = (agentId: string) => invoke<AgentHookStatus>("agent_hooks_install", { agentId });
 export const agentHooksRemove  = (agentId: string) => invoke<AgentHookStatus>("agent_hooks_remove", { agentId });

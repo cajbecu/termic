@@ -142,6 +142,13 @@ export interface AppState {
    *  pickers are never stranded before/without detection. Drives the
    *  install badge in Settings and the hide-uninstalled picker filter. */
   detectedClis: Record<string, import("@/lib/types").CliInfo>;
+  /** Agent ids whose hooks are installed, so their own protocol reports
+   *  working / attention / done. While true, the terminal TITLE stops being
+   *  allowed to end a turn for that agent: measured on an 8.5 minute run with
+   *  four real subagents, claude's title claimed idle for 30% of it while the
+   *  work was still outstanding, and its own `Stop` correctly stayed silent
+   *  the whole time. Refreshed by `refreshAgentHooks`. */
+  agentHooksInstalled: Record<string, boolean>;
   /** Per-project spotlight: project_id → ws_id of the currently spotlighted
    *  task, or absent if none. Updated by spotlight://status events and
    *  hydrated from the Rust side on app start. Session-only (not persisted). */
@@ -155,6 +162,7 @@ export interface AppState {
    *  startup (App mount) and whenever Settings → Agent CLIs opens —
    *  deliberately NOT on every window focus. */
   refreshClis: () => Promise<void>;
+  refreshAgentHooks: () => Promise<void>;
   setActiveTask: (id: string | null) => void;
   /** Union `ids` into mountedTasks WITHOUT changing the active task, so their
    *  TaskViews mount (and their agents spawn) while focus stays put. Agent
@@ -569,6 +577,7 @@ export const useApp = create<AppState>((set, get) => ({
   agents: [],
   previewBrowser: "",
   detectedClis: {},
+  agentHooksInstalled: {},
   spotlightTaskId: {},
 
   setSpotlight: (projectId, taskId) =>
@@ -637,6 +646,20 @@ export const useApp = create<AppState>((set, get) => ({
     void import("@/lib/lsp/autoStart")
       .then(m => m.syncAutoStart())
       .catch(() => {});
+  },
+
+  refreshAgentHooks: async () => {
+    try {
+      const ids = get().agents.filter(a => a.kind !== "terminal").map(a => a.id);
+      const rows = await Promise.all(
+        ids.map(id => ipc.agentHooksStatus(id).then(s => [id, s.host.installed] as const)
+          .catch(() => [id, false] as const)),
+      );
+      set({ agentHooksInstalled: Object.fromEntries(rows) });
+    } catch {
+      // Leave the previous answer alone. Defaulting to "installed" here would
+      // silently disable the title fallback for an agent that has no hooks.
+    }
   },
 
   refreshClis: async () => {

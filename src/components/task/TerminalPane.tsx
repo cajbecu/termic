@@ -237,6 +237,14 @@ export function TerminalPane({ task, tab, active }: Props) {
   // working, so a quiet 4 s gap doesn't mean it's done. Cleared back to
   // null/idle when a sender says so, or when the user submits.
   const senderStateRef = useRef<"busy" | "idle" | "attention" | null>(null);
+  // Read inside the spawn effect, which must NOT re-run when this flips.
+  const hooksOwnStateRef = useRef(false);
+  /** When the user last pressed Escape in this tab. The ONE thing the title is
+   *  still trusted to end a turn on: claude fires no hook for an interrupt
+   *  (measured, with 29 of its 31 events registered), and repaints its idle
+   *  glyph ~90ms later. Without this the tab would sit on "working" until the
+   *  next prompt, and with it we do not have to trust the title generally. */
+  const escAtRef = useRef(0);
   // Respawn machinery: when the agent process exits (user typed `exit`,
   // claude crashed, etc.) we tear down the PTY but KEEP the terminal
   // mounted with its scrollback. The "Restart" overlay then bumps `gen`
@@ -270,6 +278,15 @@ export function TerminalPane({ task, tab, active }: Props) {
   const setTabLiveTitle = useApp(s => s.setTabLiveTitle);
   const setWorkState = useApp(s => s.setWorkState);
   const setWorkProgress = useApp(s => s.setWorkProgress);
+  // True when this tab's agent reports its own state. The title then keeps
+  // driving `working` (harmless, and it is often first) but is no longer
+  // allowed to END a turn, because that is the judgement it gets wrong: it
+  // goes idle the moment the parent turn returns, while subagents and
+  // background shells keep running. See docs/plans/agent-hooks.md.
+  const hooksOwnState = useApp(s => s.agentHooksInstalled[tab.cli] === true);
+  // Mirrored into a ref so the spawn effect can read it without listing it
+  // as a dependency and tearing down the PTY when it flips.
+  hooksOwnStateRef.current = hooksOwnState;
   // Bridge from the PTY data listener (registered deep inside the
   // spawn flow) to the OSC 9;4 done timer (defined right after the
   // terminal is opened). Set inside the effect after the timer is
@@ -1090,6 +1107,11 @@ const captureArmedRef = useRef(false);
     // tool calls (~1-3s), short enough to feel responsive. OSC 9 fires
     // immediate done for real completions so this only affects the fallback.
     const SETTLE_MS = 5_000;
+    // How long after an Escape the title may still end a turn. Wide enough for
+    // the agent to finish tearing down and repaint (claude took 90ms), narrow
+    // enough that an Escape which did NOT interrupt anything cannot license a
+    // false done minutes later.
+    const ESC_INTERRUPT_WINDOW_MS = 3_000;
     let localBusy = false;
     let settleTimer: ReturnType<typeof setTimeout> | null = null;
     // Submit-anchored heuristic: when the user presses Enter we open a
@@ -1379,6 +1401,16 @@ const captureArmedRef = useRef(false);
       // beating our 4 s/6 s heuristic thresholds.
       if (state) senderStateRef.current = state;
       if (state === "idle") {
+        // Hooks own the end of a turn when they are installed. The title is
+        // still allowed to end one within a moment of the user pressing
+        // Escape, because that is an interrupt: no agent except grok reports
+        // it, and claude repaints its idle glyph ~90ms after the keystroke.
+        const interrupted = Date.now() - escAtRef.current < ESC_INTERRUPT_WINDOW_MS;
+        if (hooksOwnStateRef.current && !interrupted) {
+          wdlog("title idle ignored (hooks own done for this agent)");
+          if (state) lastTitleState = state;
+          return;
+        }
         // Same submit gate as the busy branch below, and for the same reason.
         // Codex paints its Braille spinner during startup, then settles on a
         // wordless idle title; without this gate that startup busy→idle pair
@@ -2134,6 +2166,14 @@ const captureArmedRef = useRef(false);
           // within 200ms of it appearing. Arrow keys, backspace, tab
           // completion, and paste also pass through here but none of them
           // contain CR/LF, so they leave the done state alone too.
+          // A bare ESC is exactly one byte. `onData` also carries xterm's
+          // automated replies, and a cursor-position report is
+          // `\x1b[<row>;<col>R`, which also starts with ESC, so matching the
+          // whole payload is what keeps those out.
+          if (data === "\x1b") {
+            escAtRef.current = Date.now();
+            wdlog("ESC pressed; the title may end this turn for the next 3s");
+          }
           if (data.indexOf("\r") !== -1 || data.indexOf("\n") !== -1) {
             settledRef.current = { lastHash: 0, unchangedCount: 0, marked: false };
             scrollbackRef.current = { lastLen: -1, stableCount: 0, marked: false };

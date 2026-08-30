@@ -27,6 +27,8 @@ import {
   taskViewBadge,
   waitForAgentReady,
   waitForAppShell,
+  pressEscape,
+  setHooksOwnState,
   waitForWorkBadge,
   waitForWorkBadgeGone,
 } from "../helpers";
@@ -871,5 +873,65 @@ describe("agent notifications", () => {
     });
     expect(await taskViewBadge(taskId!)).toBe("attention");
     expect(await sidebarBadge(taskId!)).not.toBe("done");
+  });
+  // Once an agent reports its own state, the terminal TITLE stops being
+  // allowed to end a turn for it. This is the case the whole design turns on:
+  // measured over an 8.5 minute run with four real subagents, claude's title
+  // claimed idle for 30% of the time while the work was still outstanding,
+  // and its own Stop correctly stayed silent throughout. Trusting both means
+  // trusting the wrong one.
+  describe("when an agent reports its own state", () => {
+    after(async () => { await setHooksOwnState("fakeagent", false); });
+
+    it("ignores the title going idle, so a long turn is not called done early", async () => {
+      await ensureActiveTask(taskId!);
+      await setHooksOwnState("fakeagent", true);
+      await browser.execute((id) => {
+        const s = window.__termic!.useApp.getState();
+        s.clearAttention(id, s.tabs[id][0].id);
+        s.setWorkState(id, s.tabs[id][0].id, "idle");
+      }, taskId);
+
+      // A normal turn: the fixture spins, then paints claude's idle glyph.
+      await submitToAgent(taskId!, "a turn that ends with the idle glyph");
+      await waitForWorkBadge(taskId!, "working", {
+        timeout: 20_000,
+        message: "the turn never reached the working badge",
+      });
+
+      // Past SETTLE_MS. The title HAS gone idle by now; before this change
+      // that alone would have fired a done.
+      await browser.waitUntil(async () => (await quietFor(taskId!)) > 8_000, {
+        timeout: 30_000, interval: 500,
+        timeoutMsg: "PTY never went quiet after the turn",
+      });
+      expect(await taskViewBadge(taskId!)).not.toBe("done");
+      expect(await sidebarBadge(taskId!)).not.toBe("done");
+    });
+
+    it("still honours the title right after Escape, which no hook reports", async () => {
+      await ensureActiveTask(taskId!);
+      await setHooksOwnState("fakeagent", true);
+      await browser.execute((id) => {
+        const s = window.__termic!.useApp.getState();
+        s.clearAttention(id, s.tabs[id][0].id);
+        s.setWorkState(id, s.tabs[id][0].id, "idle");
+      }, taskId);
+
+      await submitToAgent(taskId!, "a turn the user interrupts");
+      await waitForWorkBadge(taskId!, "working", {
+        timeout: 20_000,
+        message: "the turn never reached the working badge",
+      });
+      // claude fires NO hook for an interrupt (measured with 29 of its 31
+      // events registered) and repaints its idle glyph ~90ms later, so the
+      // keystroke is what licenses the title to end this one turn.
+      await pressEscape(taskId!);
+
+      await waitForWorkBadgeGone(taskId!, "working", {
+        timeout: 20_000,
+        message: "Escape left the tab claiming it was still working",
+      });
+    });
   });
 });

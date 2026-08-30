@@ -786,6 +786,45 @@ export async function waitForAgentReady(taskId: string, timeout = 30_000): Promi
  * so they stop encoding how work detection is armed — if the submit path
  * breaks, these tests fail instead of quietly compensating for it.
  */
+/**
+ * Press Escape in the task's terminal, through xterm's own key handling.
+ *
+ * Deliberately NOT `ipc.ptyWrite`: that reaches the PTY without passing
+ * through xterm, so `term.onData` never fires and termic never sees the
+ * keystroke. The interrupt path reads `onData`, so a spec using ptyWrite
+ * would test the fixture rather than the feature.
+ */
+export async function pressEscape(taskId: string): Promise<void> {
+  const result = await browser.execute((id) => {
+    const host = document.querySelector(`[data-task-id="${id}"]`);
+    if (!host) return "task view is not mounted";
+    const ta = [...host.querySelectorAll<HTMLTextAreaElement>(".xterm-helper-textarea")].find(
+      (el) => {
+        const r = (el.closest(".xterm") ?? el).getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      },
+    );
+    if (!ta) return "no visible terminal in the task view";
+    ta.focus();
+    for (const type of ["keydown", "keyup"]) {
+      ta.dispatchEvent(new KeyboardEvent(type, {
+        key: "Escape", code: "Escape", keyCode: 27, which: 27,
+        bubbles: true, cancelable: true,
+      } as KeyboardEventInit));
+    }
+    return "ok";
+  }, taskId);
+  if (result !== "ok") throw new Error(`could not press Escape in ${taskId}: ${result}`);
+}
+
+/** Mark an agent as hook-reporting (or not) for the duration of a spec. */
+export async function setHooksOwnState(cli: string, on: boolean): Promise<void> {
+  await browser.execute((c, v) => {
+    const s = window.__termic!.useApp;
+    s.setState({ agentHooksInstalled: { ...s.getState().agentHooksInstalled, [c]: v } });
+  }, cli, on);
+}
+
 export async function submitToAgent(taskId: string, text: string): Promise<void> {
   // What `lastInputAt` was before this submit. TerminalPane stamps it from
   // xterm's `onData` for a CR, so it advancing is PROOF the keystrokes went
