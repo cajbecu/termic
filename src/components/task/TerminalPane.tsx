@@ -65,6 +65,20 @@ interface Props { task: Task; tab: TerminalTab; active: boolean; }
 // the "Setup finished." banner; click closes immediately).
 const SETUP_AUTO_CLOSE_S = 5;
 
+// How long after an interrupt keystroke the TITLE may end a turn. Wide enough
+// for the agent to tear down and repaint (claude took 40-110ms, measured on
+// both keys), narrow enough that a key which interrupted nothing cannot license
+// a false done minutes later.
+const ESC_INTERRUPT_WINDOW_MS = 3_000;
+// The same licence for the terminal going QUIET, which needs a longer window
+// because quiet is only observable after QUIET_MS of silence has accumulated.
+// This is the only path that ends an interrupted turn for agy, which reports
+// the interrupt through neither a hook nor a title. An agent that IGNORES the
+// key (opencode ignores Escape outright) keeps painting, so quiet never
+// arrives and the window closes with nothing done, which is the point.
+const INTERRUPT_QUIET_GRACE_MS = 15_000;
+
+
 /** FNV-1a 32-bit hash of the visible viewport's text content. Cheap enough
  *  to run every 3s on every live terminal; the cost is one pass over ~3K
  *  characters + multiply-and-xor per char. */
@@ -224,6 +238,7 @@ export function TerminalPane({ task, tab, active }: Props) {
   // BUFFER (Claude Code prints linearly). Alt-screen TUIs (Codex)
   // keep a fixed-length buffer; for those we fall through to the
   // hard-ceiling check.
+// hard-ceiling check.
   const scrollbackRef = useRef({ lastLen: -1, stableCount: 0, marked: false });
   // Timestamp when workState last transitioned TO "working". Hard
   // ceiling: after WORKING_HARD_CEILING_MS without any demoter firing,
@@ -239,11 +254,24 @@ export function TerminalPane({ task, tab, active }: Props) {
   const senderStateRef = useRef<"busy" | "idle" | "attention" | null>(null);
   // Read inside the spawn effect, which must NOT re-run when this flips.
   const hooksOwnStateRef = useRef(false);
-  /** When the user last pressed Escape in this tab. The ONE thing the title is
-   *  still trusted to end a turn on: claude fires no hook for an interrupt
-   *  (measured, with 29 of its 31 events registered), and repaints its idle
-   *  glyph ~90ms later. Without this the tab would sit on "working" until the
-   *  next prompt, and with it we do not have to trust the title generally. */
+  /** When the user last pressed Escape or Ctrl-C in this tab, and the only
+   *  thing that licenses a heuristic to end a turn while hooks own the state.
+   *
+   *  Measured on a real turn, mid-generation, all four agents:
+   *
+   *    claude    ESC and Ctrl-C: NO hook of any kind. Title repaints its idle
+   *              glyph 40-110ms later, and that is the whole signal.
+   *    grok      both keys: `StopCancelled`, `reason: "user_interrupt"`.
+   *    agy       both keys: nothing. The turn really is interrupted (its own
+   *              UI prints "Interrupted") but no hook fires, and agy has no
+   *              title signals either, so the PTY falling quiet is all we get.
+   *    opencode  ESC is IGNORED, generation continues. Ctrl-C fires
+   *              `session.error` then `session.idle` and exits.
+   *
+   *  Two agents out of four therefore report nothing, which is why this ref
+   *  exists at all. It is deliberately not enough on its own: something else
+   *  (the title, or the terminal going quiet) has to corroborate it, so the
+   *  key opencode ignores cannot end a turn that is still running. */
   const escAtRef = useRef(0);
   // Respawn machinery: when the agent process exits (user typed `exit`,
   // claude crashed, etc.) we tear down the PTY but KEEP the terminal
@@ -368,6 +396,16 @@ const captureArmedRef = useRef(false);
     if (!uuid) return;
     pendingSessionUuidRef.current = null;
     useApp.getState().setTabSessionId(task.id, tab.id, uuid);
+  }, [task.id, tab.id]);
+
+  /** The user stopped the agent. Clears the in-progress state and NOTHING
+   *  else: an interrupt is not a completion, so there is no badge, no bell,
+   *  and critically no spending of the one-done-per-submit token. Routing this
+   *  through `fireDone` would burn that token and swallow the NEXT genuine
+   *  done for the tab. */
+  const interruptWork = useCallback((reason: string) => {
+    debugLogRef.current?.("state→interrupted", reason);
+    useApp.getState().setWorkState(task.id, tab.id, "idle");
   }, [task.id, tab.id]);
 
   const fireDone = useCallback((reason: string, attn: "done" | "attention" = "done", seen = false, force = false): boolean => {
@@ -1107,11 +1145,6 @@ const captureArmedRef = useRef(false);
     // tool calls (~1-3s), short enough to feel responsive. OSC 9 fires
     // immediate done for real completions so this only affects the fallback.
     const SETTLE_MS = 5_000;
-    // How long after an Escape the title may still end a turn. Wide enough for
-    // the agent to finish tearing down and repaint (claude took 90ms), narrow
-    // enough that an Escape which did NOT interrupt anything cannot license a
-    // false done minutes later.
-    const ESC_INTERRUPT_WINDOW_MS = 3_000;
     let localBusy = false;
     let settleTimer: ReturnType<typeof setTimeout> | null = null;
     // Submit-anchored heuristic: when the user presses Enter we open a
@@ -1222,18 +1255,16 @@ const captureArmedRef = useRef(false);
       // No prior busy → ignore: avoids "Ready" titles on cold spawn
       // marking the tab done out of nowhere.
     };
-    /** The user stopped the agent. Clears the in-progress state and NOTHING
-     *  else: an interrupt is not a completion, so there is no badge, no bell,
-     *  and critically no spending of the one-done-per-submit token. Routing
-     *  this through `fireDone` would burn that token and swallow the NEXT
-     *  genuine done for the tab. */
+    /** The title corroborated an interrupt. Delegates to `interruptWork` so
+     *  this and the quiet-corroborated path in the demoter tick cannot drift,
+     *  and clears the licence so the two cannot both fire for one keystroke. */
     const goInterrupted = (reason: string) => {
       if (!workDoneEnabled) return;
       cancelSettle(reason);
       localBusy = false;
+      escAtRef.current = 0;
       wdlog(`→ interrupted (${reason})`);
-      dbg("state→interrupted", reason);
-      setWorkState(task.id, tab.id, "idle");
+      interruptWork(reason);
     };
 
     const goAttention = (reason: string, message?: string) => {
@@ -2194,9 +2225,12 @@ const captureArmedRef = useRef(false);
           // within 200ms of it appearing. Arrow keys, backspace, tab
           // completion, and paste also pass through here but none of them
           // contain CR/LF, so they leave the done state alone too.
-          // Escape and Ctrl-C both mean "stop". Agents differ on which they
-          // honour (claude takes Escape; Ctrl-C twice quits it outright), and
-          // either way the user has asked for the turn to end.
+          // Escape and Ctrl-C both mean "stop", and agents disagree about
+          // which they honour: measured mid-turn, claude and grok take either,
+          // agy takes either, and opencode ignores Escape outright while
+          // Ctrl-C makes it exit. Recording both is therefore necessary and
+          // safe, because the key alone never ends a turn: something has to
+          // corroborate it, and the agent that ignores the key never does.
           //
           // A bare ESC is exactly one byte, which is what separates it from
           // xterm's automated replies: a cursor-position report is
@@ -2205,7 +2239,7 @@ const captureArmedRef = useRef(false);
           // character in one call, so they are excluded too.
           if (data === "\x1b" || data === "\x03") {
             escAtRef.current = Date.now();
-            wdlog(`${data === "\x03" ? "Ctrl-C" : "ESC"} pressed; the title may end this turn briefly`);
+            wdlog(`${data === "\x03" ? "Ctrl-C" : "ESC"} pressed; the title or a quiet terminal may end this turn briefly`);
           }
           if (data.indexOf("\r") !== -1 || data.indexOf("\n") !== -1) {
             settledRef.current = { lastHash: 0, unchangedCount: 0, marked: false };
@@ -2512,6 +2546,34 @@ const captureArmedRef = useRef(false);
       // these fallback paths — it's honest about the ambiguity and
       // prompts the user to check rather than claiming the task finished.
       const fallbackReason = senderStateRef.current === null ? "attention" : "done";
+      // When the agent reports its own state, NOTHING below may end a turn.
+      // The title was switched off for hook-owning agents first, but the
+      // byte-quiet, scrollback, settled-hash and ceiling demoters below are
+      // the same heuristic wearing a different hat, and leaving them armed
+      // reproduced the exact bug hooks exist to fix: over an 8.5 minute run
+      // with four real subagents the agent's own `Stop` correctly stayed
+      // silent the whole time, while the screen sat unchanged for minutes at a
+      // stretch. A `done` from any of these is a `done` the agent never
+      // reported. Fail towards "still working", which the next prompt clears.
+      const hooksOwn = hooksOwnStateRef.current;
+      // The one exception, and the only reason an interrupted turn ever ends
+      // for an agent that reports nothing. Licensed by an actual keystroke,
+      // corroborated by the terminal going quiet, and it calls
+      // `interruptWork` rather than `fireDone`: an interrupt is not a
+      // completion, so it earns no badge and spends no done token.
+      const interruptPending = hooksOwn
+        && escAtRef.current > 0
+        && Date.now() - escAtRef.current < INTERRUPT_QUIET_GRACE_MS
+        && isUserWatching(task.id, tab.id);
+      if (interruptPending
+          && cur && cur.type === "terminal" && cur.workState === "working"
+          && lastDataAtRef.current > 0
+          && Date.now() - lastDataAtRef.current >= QUIET_MS) {
+        escAtRef.current = 0;
+        interruptWork(`interrupt then quiet (quietMs=${Date.now() - lastDataAtRef.current})`);
+        return;
+      }
+      if (hooksOwn) return;
       // Byte-quiet fallback: if no PTY data has arrived for QUIET_MS
       // and the tab is `working`, demote to `done`. Fires when the
       // agent goes silent entirely. (Doesn't fire for Claude Code's
@@ -2626,7 +2688,7 @@ const captureArmedRef = useRef(false);
       }
     }, SAMPLE_MS);
     return () => window.clearInterval(id);
-  }, [task.id, tab.id, fireDone]);
+  }, [task.id, tab.id, fireDone, interruptWork]);
 
   const exitedRunTab = !!tab.runTab;
   const exitedRunKind = tab.runTab?.kind ?? "run";

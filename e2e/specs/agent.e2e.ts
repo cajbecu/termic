@@ -947,5 +947,38 @@ describe("agent notifications", () => {
       // nothing else, so it must not leave a done badge behind either.
       expect(await taskViewBadge(taskId!)).not.toBe("done");
     });
+
+    // The agy shape, and the reason the keystroke is not enough on its own.
+    // Measured mid-turn: agy fires NO hook for an interrupt and publishes no
+    // title state either, so the only evidence its user's key landed is the
+    // terminal falling quiet. An agent that IGNORES the key (opencode ignores
+    // Escape outright) keeps painting, so quiet never arrives and nothing
+    // ends: that asymmetry is what makes corroboration safe.
+    it("ends an interrupted turn that reports neither a hook nor a title", async () => {
+      await setHooksOwnState("fakeagent", true);
+      await reset();
+
+      await submitToAgent(taskId!, "#longwork-silent");
+      await waitForWorkBadge(taskId!, "working", {
+        timeout: 20_000,
+        message: "the silent long turn never reached the working badge",
+      });
+
+      await pressEscape(taskId!);
+
+      await waitForWorkBadgeGone(taskId!, "working", {
+        timeout: 30_000,
+        message: "the terminal went quiet after an interrupt, but termic still claims it is working",
+      });
+      // The fixture holds its busy title through the interrupt, so the other
+      // route (title goes idle) could not have fired and the badge can only
+      // have cleared on the silence. Doubles as the mis-dispatch check: the
+      // fixture's default branch ends on the idle glyph.
+      expect(await browser.execute(
+        (id) => (window.__termic!.useApp.getState().tabs[id] ?? [])[0]?.liveTitle ?? "",
+        taskId,
+      )).not.toContain("✳");
+      expect(await taskViewBadge(taskId!)).not.toBe("done");
+    });
   });
 });

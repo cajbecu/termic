@@ -410,18 +410,66 @@ already reports it, so the pair is self-sufficient. `goIdle(reason, 0)` is
 ignored unless we were working, so a Done that relied on the title having set
 working would inherit exactly the fragility the hook exists to remove.
 
-OSC stays the backstop, and interrupts are exactly why. ESC mid-turn fires no
-hook at all on claude: measured with 29 of its 31 lifecycle events registered
-against a genuinely foreground generation, with the interrupt confirmed (the
-screen printed "Interrupted") and nothing firing in the 14s that followed. Its
-event list, read out of the binary, contains no cancel or abort event to
-register. grok is the only agent with one (`StopCancelled`).
+### Hooks own the turn, so the heuristics stand down entirely
 
-The title covers that case and covers it well: claude repaints its IDLE glyph
-**90ms** after the ESC (35.67 to 35.76 in the same capture). So an interrupted
-turn is not stranded, and no keystroke interception is needed. An earlier
-revision of this doc claimed otherwise; that was inferred from "no hook fires"
-without checking whether the title still moves, and it does.
+`agentHooksInstalled[cli]` switches off EVERY path that can end a turn for that
+agent, not just the title: byte-quiet, scrollback stability, the settled-hash
+check, the 90s ceiling and the 10-minute absolute ceiling. They are one
+heuristic wearing five hats, and leaving any of them armed reproduces the exact
+bug hooks exist to fix. The 8.5-minute run with four real subagents is the
+measurement: the agent's own `Stop` correctly stayed silent for all of it,
+while the title claimed idle for 30% of the window and the screen sat unchanged
+for minutes at a time. A `done` from any of those five is a `done` the agent
+never reported.
+
+This trades one failure for another and the direction is deliberate. A dropped
+hook now leaves a tab reading "working" until the next prompt, where before a
+ceiling would eventually force it to "done". A stuck spinner is cosmetic and
+self-heals on the next `UserPromptSubmit`; a false "done" on a task that is
+still running is the bug this whole document exists to remove. Fail towards
+still-working.
+
+The one exception is an interrupt, below, which is licensed by a keystroke and
+clears the working state without claiming a completion.
+
+### Interrupts: the one thing hooks do not cover
+
+Half the supported agents report an interrupt through no channel at all, so
+this is the single hole in "hooks own the turn". Measured on every agent, both
+keys, against a genuinely foreground generation (a 3000-line count, ~50s, with
+the key sent 8s in and 15s of recording after it):
+
+| agent | Escape | Ctrl-C |
+| --- | --- | --- |
+| claude | **no hook**; idle glyph 110ms later | **no hook**; idle glyph 40ms later |
+| grok | `StopCancelled`, `reason="user_interrupt"`, 350ms | `StopCancelled`, same, 40ms |
+| agy | **nothing at all**, and no title state either | **nothing at all**, same |
+| opencode | **key ignored**, generation continues | `session.error` then `session.idle`, then exits |
+
+claude was measured with 29 of its 31 lifecycle events registered; its event
+list, read out of the binary, contains no cancel or abort event to register.
+agy's own UI prints "Interrupted", so the turn really did end, and it still
+publishes nothing. That is what settles the design: the keystroke has to be
+part of the evidence, because for claude and agy there is nothing else.
+
+The keystroke is never enough ALONE. Something has to corroborate it, and
+opencode is the reason: it ignores Escape outright and keeps streaming, so a
+detector that trusted the key would end a turn that is still running. termic
+therefore accepts an interrupt only when the key is followed by one of:
+
+- **the title going idle** (`ESC_INTERRUPT_WINDOW_MS`, 3s) — claude's route,
+  and it is prompt: the idle glyph lands 40-110ms after either key.
+- **the terminal going quiet** (`INTERRUPT_QUIET_GRACE_MS`, 15s) — agy's only
+  route, since it has neither a hook nor a title. An agent that ignored the key
+  keeps painting, so quiet never arrives and nothing fires.
+
+Both are gated on the user actually watching the tab, and both call
+`interruptWork`, not `fireDone`: an interrupt is not a completion, so it earns
+no badge, no bell, and does not spend the one-done-per-submit token.
+
+An earlier revision of this doc said the title alone covered this and no
+keystroke handling was needed. That held for claude and was wrong for agy,
+which has no title to read.
 
 ### Three config shapes, not one
 
@@ -513,7 +561,7 @@ loaded while it is inert or pointed at a dead path.
   `background_tasks`, `session_crons`, `effort`, `permission_mode`.
 - **Neither Claude nor Codex emits `OSC 9;4` any more**, across ten captures
   including a 150s run. Do not restore anything that depends on it.
-- **Interrupts fire no hook on Claude or Codex.** ESC mid-turn produced no
+- **Interrupts fire no hook on Claude, Codex or agy.** ESC mid-turn produced no
   `Stop` on either, only an OSC title change, so OSC stays authoritative for
   those two: hooks add precision, never correctness. **Grok is the exception**
   and has a dedicated `StopCancelled` (measured, `reason="user_interrupt"`,

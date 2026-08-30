@@ -81,6 +81,14 @@ spin()   { for f in 0 1 2; do set_title "${SPINNER[$f]} ${name}"; sleep 0.15; do
 # return to the idle glyph — the busy -> idle transition claude drives, which
 # termic turns into working -> done.
 while IFS= read -r line; do
+  # Strip leading interrupt bytes. A directive that reads a keystroke mid-turn
+  # can be handed MORE than the one byte it consumes (xterm does not promise
+  # one onData call per key), and the remainder then arrives glued to the front
+  # of the next prompt: `#longwork` swallowed one Escape and left the tail to
+  # turn the following `#longwork-silent` into an unrecognised line, which
+  # dispatched to the default branch and silently tested nothing. Every
+  # directive begins with `#`, so anything before it is debris.
+  line="${line#"${line%%[!$'\x1b\x03']*}"}"
   case "$line" in
     "#pending "*)
       spin
@@ -163,6 +171,28 @@ while IFS= read -r line; do
         fi
       done
       set_title "✳ ${name}"
+      continue ;;
+    "#longwork-silent")
+      # The agy shape: a long turn that HONOURS the interrupt but reports it
+      # through neither a hook nor a title, so the terminal simply falls quiet.
+      # Measured: agy fires nothing at all on Escape or Ctrl-C and has no title
+      # state to read, which leaves the terminal going quiet as the only
+      # evidence the user's key landed.
+      #
+      # The busy title is painted ONCE and never cleared, including on the
+      # interrupt. That is what isolates the path under test: termic's other
+      # interrupt route needs the title to go idle, so if the badge clears here
+      # it can only have been the terminal falling quiet. It also makes a
+      # mis-dispatch loud, since the default branch below ends on the idle
+      # glyph and the spec asserts the busy one is still there.
+      set_title "${SPINNER[1]} ${name}"
+      for i in $(seq 1 60); do
+        printf '.'
+        if IFS= read -r -t 1 -N 1 _key; then
+          echo "FAKE-AGENT interrupted"
+          continue 2
+        fi
+      done
       continue ;;
     "#hookattn")
       spin

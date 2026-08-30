@@ -51,6 +51,9 @@ until `make e2e` is green and this file reflects it.
 | ✅ Split restore | A pane whose tabs are all gone collapses instead of restoring a blank leg; a task whose main tabs were all non-durable still restores with a main tab and a real activeTab | `tabs-layout.e2e.ts` |
 | ✅ Agent notifications | OSC 9 raises attention carrying the agent's verbatim body; the "waiting for your input" idle nag raises nothing | `agent.e2e.ts` |
 | ✅ Agent hook attention | A hook's OSC 777 raises attention and suppresses the false done the idle title would have fired past `SETTLE_MS` | `agent.e2e.ts` |
+| ✅ Hooks own the turn | With an agent reporting its own state, the title going idle no longer ends a turn, and neither do the byte-quiet / scrollback / ceiling demoters: an ordinary turn stays out of `done` well past `SETTLE_MS` and `QUIET_MS` | `agent.e2e.ts` |
+| ✅ Interrupt, title-corroborated | An interrupt no agent reports (claude and agy fire NO hook for one, measured) clears the working state once the title goes idle, and leaves no done badge, since an interrupt is not a completion | `agent.e2e.ts` |
+| ✅ Interrupt, quiet-corroborated | The agy shape: an interrupted turn that reports neither a hook nor a title ends on the terminal falling quiet, with the fixture holding its busy title so the other route cannot be what fired | `agent.e2e.ts` |
 | ✅ Agent hook install | Install merges into the user's own `settings.json`, keeping their hooks, unknown keys and key ORDER; the script lands executable | `settings.e2e.ts` |
 | ✅ Agent hook removal | Remove restores the config byte for byte and deletes the script dir | `settings.e2e.ts` |
 | ✅ Agent hook refuses bad config | A malformed `settings.json` is reported, never overwritten | `settings.e2e.ts` |
