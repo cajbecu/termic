@@ -303,44 +303,73 @@ export type SignalPatterns = {
  *  because it checked idle first. */
 export const BUILTIN_TITLE_SIGNALS: Record<string, Required<SignalPatterns>> = {
   claude: {
+    // Claude's title CANNOT report needs-you: it paints the idle glyph while
+    // blocked on a permission prompt, a question or plan approval (measured
+    // repeatedly). An attention pattern here would have to match the idle glyph
+    // itself, which would then fire on every completed turn. Left empty on
+    // purpose; the hook is the only honest source for that state.
     attention: [],
-    // Any leading glyph that isn't the ✳ brand mark is a spinner frame. We've
-    // seen Braille (U+2800..U+28FF) and combinations like "⠐ ⠂".
+    // Any leading glyph that is not the brand mark is a spinner frame. Kept as
+    // a catch-all rather than a glyph list because the alphabet is not stable:
+    // Braille (U+2800..U+28FF) and the circle family (◐◑◒◓) have both shipped.
     busy: ["^\\s*[^A-Za-z0-9\\s✳]"],
     idle: ["^\\s*✳"],
-    // Claude paints the idle glyph the moment its own turn ends, including
-    // when it has backgrounded work that is still running. Measured: a title
-    // that sat on ✳ for 617s while three subagents worked, with the done badge
-    // showing the whole time. These are the words on screen while that is true.
-    // `agents?` and the shell/monitor form are both real (the count decrements
-    // as they land, and background shells count as pending work too).
+    // Claude paints the idle glyph the moment its own turn ends, including when
+    // it has backgrounded work still running. Measured: the title went idle
+    // 49.6s before a 55s job finished, and its own `Stop` fired three times
+    // with a populated `background_tasks` before the real one. These are the
+    // words on screen while that is true, and they are the FALLBACK for what
+    // the Stop hook now reads out of the payload directly.
     pending: [
       "Waiting for \\d+ background agents? to finish",
       "\\d+ shells?(, \\d+ monitors?)? still running",
     ],
   },
   codex: {
-    attention: ["\\b(Waiting|Action Required)\\b"],
-    // Braille frames as a RANGE, not the ten-frame list this used to spell out:
-    // a spinner alphabet is not a stable contract, and a missed busy is the
-    // worse failure (it ends the turn early). Same reasoning as claude's
-    // catch-all busy pattern above.
-    busy: ["\\b(Working|Thinking)\\b", "^\\s*[\\u2800-\\u28FF]"],
-    // `Ready` is kept for older Codex builds that put a status WORD in the
-    // title. Codex 0.142.5 does not: measured, its title is exactly the cwd
-    // basename when idle ("proj") and a spinner frame plus the basename when
-    // working ("⠋ proj"). With `Ready` as the only idle pattern nothing ever
-    // classified as idle, and because `classifyAgentTitle` returning null
-    // leaves TerminalPane's `senderStateRef` untouched, one spinner frame
-    // latched it to "busy" for the rest of the PTY session. Every demoter
-    // (byte-quiet, scrollback-stable, the 90s hard ceiling) is gated on
-    // `!senderBusy`, so a Codex tab went to "working" on its first turn and
-    // could never come back. The second pattern is the general form: a title
-    // whose first non-space character is not a spinner frame is idle. Busy is
-    // evaluated first, so this cannot steal a spinner title.
+    // Real, captured: "[ ! ] Action Required | proj" alternating with
+    // "[ . ] Action Required | proj" (it blinks). Anchored on the words, not
+    // the brackets, since the decoration is cosmetic.
+    attention: ["\\bAction Required\\b"],
+    // Braille as a RANGE, not the ten-frame list this used to spell out: a
+    // spinner alphabet is not a stable contract, and a missed busy is the worse
+    // failure because it ends the turn early.
+    busy: ["^\\s*[\\u2800-\\u28FF]", "\\b(Working|Thinking)\\b"],
+    // Codex 0.142.5 puts NO status word in its idle title: it is the cwd
+    // basename alone ("proj"). `Ready` is kept for older builds that did. The
+    // general form is "first non-space character is not a spinner frame";
+    // busy and attention are both evaluated first, so this cannot steal them.
     idle: ["\\bReady\\b", "^\\s*[^\\s\\u2800-\\u28FF]"],
     pending: [],
   },
+  grok: {
+    // Two DIFFERENT blocked titles, both measured, and only one looks blocked:
+    //   tool prompt:   "⚠ Action Required - ⠋ - Count 1-30… - grok"
+    //   plan approval: "⠹ - Running: Plan: Exit - <plan title> - grok", which
+    //                  FREEZES on one spinner frame (observed at 217s) and is
+    //                  otherwise indistinguishable from working.
+    // The second is why `Running: Plan: Exit` is an attention pattern: without
+    // it a plan awaiting approval reads as busy forever.
+    attention: ["⚠\\s*Action Required", "Running:\\s*Plan:\\s*Exit"],
+    // NOTE the trap: grok's busy title says "Waiting for response…", meaning
+    // waiting on the MODEL. Reusing codex's `\bWaiting\b` here would badge
+    // needs-you on every single turn.
+    busy: ["^\\s*[\\u2800-\\u28FF]"],
+    // Idle is the session summary plus " - grok", or just "grok" at rest.
+    idle: ["^\\s*[^\\s\\u2800-\\u28FF⚠]"],
+    pending: [],
+  },
+  // ── Agents whose titles carry NO state ──────────────────────────────
+  // Listed explicitly, with empty patterns, so the next person does not spend
+  // an afternoon writing regexes for a title that never changes. All three were
+  // captured over full runs:
+  //   agy      emits no OSC 0 at all. Not "a static title": nothing.
+  //   opencode "OpenCode", then the session summary. No state, ever.
+  //   pi       "π - proj", set once at boot and never updated.
+  // Work state for these comes from their hooks; there is nothing to fall back
+  // to, which is exactly why they were wired first.
+  agy: { attention: [], busy: [], idle: [], pending: [] },
+  opencode: { attention: [], busy: [], idle: [], pending: [] },
+  pi: { attention: [], busy: [], idle: [], pending: [] },
 };
 
 /** How many rows up from the bottom of the viewport `pending` patterns are

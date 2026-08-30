@@ -637,11 +637,83 @@ describe("classifyAgentTitle", () => {
     // Older builds that DO carry a status word keep working.
     expect(classifyAgentTitle("codex", "Ready", [])).toBe("idle");
     expect(classifyAgentTitle("codex", "Working", [])).toBe("busy");
-    expect(classifyAgentTitle("codex", "Waiting", [])).toBe("attention");
-    // Precedence: attention and busy still outrank the new catch-all idle.
+    // Precedence: attention and busy still outrank the catch-all idle.
     expect(classifyAgentTitle("codex", "Action Required", [])).toBe("attention");
+    expect(classifyAgentTitle("codex", "[ ! ] Action Required | proj", [])).toBe("attention");
+    // A bare "Waiting" is deliberately NOT attention any more. grok's BUSY
+    // title reads "Waiting for response…", meaning waiting on the model, and a
+    // bare-word pattern is exactly the sort of thing that gets copied between
+    // agents and then badges needs-you on every turn.
+    expect(classifyAgentTitle("codex", "Waiting for response…", [])).not.toBe("attention");
     expect(classifyAgentTitle("codex", "Thinking about proj", [])).toBe("busy");
     expect(classifyAgentTitle("codex", "   ", [])).toBe(null);
+  });
+
+  // ── Real titles, captured from live agents ──────────────────────────
+  //
+  // Every string below was recorded off a real PTY while the agent worked, so
+  // this block is the difference between a pattern that was reasoned about and
+  // one that was measured. If a vendor changes their title, this is where it
+  // should fail.
+  describe("captured titles classify correctly", () => {
+    const cases: Array<[string, string, string | null]> = [
+      // claude: brand mark idle, any other leading glyph busy. Two spinner
+      // families have shipped, which is why busy is a catch-all.
+      ["claude", "✳ Claude Code", "idle"],
+      ["claude", "✳ Background shell commands", "idle"],
+      ["claude", "◐ Claude Code", "busy"],
+      ["claude", "◑ Subtract function for calc.py", "busy"],
+      ["claude", "⠋ thinking", "busy"],
+
+      // codex: cwd basename when idle, Braille frame when working, and a
+      // BLINKING attention title that alternates ! and .
+      ["codex", "proj", "idle"],
+      ["codex", "⠙ proj", "busy"],
+      ["codex", "⠏ proj", "busy"],
+      ["codex", "[ ! ] Action Required | proj", "attention"],
+      ["codex", "[ . ] Action Required | proj", "attention"],
+
+      // grok: the important one. Its two blocked states look nothing alike.
+      ["grok", "grok", "idle"],
+      ["grok", "Exact One Word Pong Reply Request - grok", "idle"],
+      ["grok", "⠴ - Waiting for response… - grok", "busy"],
+      ["grok", "⠼ - Thinking - grok", "busy"],
+      ["grok", "⠙ - Writing file… - grok", "busy"],
+      // Blocked on a tool prompt: leads with the warning sign.
+      ["grok", "⚠ Action Required - ⠋ - Count 1-30 with 1s sleeps… - grok", "attention"],
+      // Blocked on PLAN approval: no warning sign, and the spinner FREEZES.
+      // Observed stuck on one frame for 217 seconds. Without this pattern a
+      // plan awaiting approval reads as busy forever.
+      ["grok", "⠹ - Running: Plan: Exit - Plan Adding Subtract Function to calc.py - grok", "attention"],
+
+      // Agents whose titles carry no state at all.
+      ["agy", "anything at all", null],
+      ["opencode", "OpenCode", null],
+      ["opencode", "OC | Creating out.txt with hi", null],
+      ["pi", "π - proj", null],
+    ];
+    for (const [cli, title, want] of cases) {
+      it(`${cli}: ${JSON.stringify(title)} -> ${want}`, () => {
+        expect(classifyAgentTitle(cli, title, [])).toBe(want);
+      });
+    }
+
+    it("never reads grok's 'Waiting for response' as needs-you", () => {
+      // It means waiting on the MODEL. This is the single most tempting wrong
+      // pattern in the whole table, because codex's older builds really did
+      // use a bare "Waiting" for the opposite meaning.
+      const busy = "⠴ - Waiting for response… - grok";
+      expect(classifyAgentTitle("grok", busy, [])).toBe("busy");
+      expect(classifyAgentTitle("grok", busy, [])).not.toBe("attention");
+    });
+
+    it("claude has no attention pattern, on purpose", () => {
+      // Its title shows the IDLE glyph while blocked, so any pattern that
+      // caught that state would also fire on every completed turn. Measured
+      // three ways (permission prompt, AskUserQuestion, plan approval).
+      expect(BUILTIN_TITLE_SIGNALS.claude.attention).toEqual([]);
+      expect(classifyAgentTitle("claude", "✳ Create out.txt file", [])).toBe("idle");
+    });
   });
 
   // Per-field fallback. Setting one field used to replace the WHOLE built-in
