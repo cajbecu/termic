@@ -3177,6 +3177,23 @@ fn pty_spawn(
         cmd.env("TERMIC_PTY", path);
     }
 
+    // Stop grok scanning ~/.claude/settings.json for hooks.
+    //
+    // grok reads claude's config on purpose (its own docs list it as a
+    // compatibility source), so with hooks installed for BOTH agents every
+    // event fires TWICE. Measured: one run recorded the claude-file hook and
+    // grok's own hook for a single UserPromptSubmit, and setting this to false
+    // left only grok's.
+    //
+    // Its own docs give the resolution order as "env var > config.toml >
+    // default (on)", so this wins without touching the user's config.toml, and
+    // it is scoped to grok spawned BY termic: a grok the user runs in another
+    // terminal keeps whatever they configured. The generated claude script also
+    // bails when GROK_HOOK_EVENT is set, which covers that case.
+    if args.agent_id.as_deref() == Some("grok") {
+        cmd.env("GROK_CLAUDE_HOOKS_ENABLED", "false");
+    }
+
     let mut child = pair.slave.spawn_command(cmd).map_err(|e| {
         let s = e.to_string();
         dlog(&format!("[pty_spawn] spawn_command FAILED: {s}"));
