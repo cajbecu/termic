@@ -440,6 +440,39 @@ export const BUILTIN_NOTIFY_IGNORE: Record<string, string[]> = {
   claude: ["is waiting for your input"],
 };
 
+/** Built-in ALLOW-LIST of notification bodies, per agent. When an agent has
+ *  one, only a body matching it raises attention and everything else is
+ *  chatter. This is the safe direction for an agent that notifies about things
+ *  OTHER than needing you, and claude is exactly that agent.
+ *
+ *  A deny-list cannot work here. Read out of claude 2.1.251, it notifies with
+ *  eleven `notificationType`s, and only five mean needs-you:
+ *
+ *    needs you   `${label} needs your input`              agent_needs_input
+ *                `Claude needs your permission to use X`  permission_prompt
+ *                `${name} needs permission for X`         worker_permission_prompt
+ *                `Claude Code needs your input`           elicitation_dialog
+ *                `Claude Code needs your approval ...`    plan approval
+ *    does not    `${label} finished` / `${label} failed`  agent_completed
+ *                `Claude is waiting for your input`       idle_prompt
+ *                `Claude Code login successful`           auth_success
+ *                `Claude is done using your computer`     computer_use_exit
+ *                `MCP server "X" confirmed ... complete`  elicitation_complete
+ *                `Elicitation response for ...: decline`  elicitation_response
+ *
+ *  termic spoofs `TERM_PROGRAM=iTerm.app`, so claude picks its iTerm2 channel
+ *  and sends ALL of those as OSC 9. Filtering only `idle_prompt` meant a
+ *  finished turn rang the needs-you bell: `agent_completed` fires on a band
+ *  change and not for an interrupted or self-driving turn, which is why it read
+ *  as a random bell on some completions rather than a reliable wrong badge.
+ *
+ *  Every needs-you body contains "needs your" or "needs permission"; not one of
+ *  the other six does. Matching on that is why a notification type claude adds
+ *  LATER is silent by default instead of ringing, which is how this arrived. */
+export const BUILTIN_NOTIFY_ATTENTION: Record<string, string[]> = {
+  claude: ["needs your", "needs permission"],
+};
+
 /** Whether a notification body should raise attention. Defaults to `true` for
  *  unknown agents and unknown bodies: an agent that explicitly asked the
  *  terminal to notify has said what it means. */
@@ -457,6 +490,11 @@ export function notificationWantsAttention(
   // semantics an agent that spams notifications would have no way to opt out.
   const attn = compileSignals(agents.find(a => a.id === cli)?.capabilities?.signals?.attention);
   if (attn.length) return attn.some(re => re.test(text));
+  // Built-in allow-list, when the agent has one. Checked before the ignore
+  // list so a body has to look like a request for the user, rather than merely
+  // avoiding the handful of phrases we thought to exclude.
+  const builtinAttn = compileSignals(BUILTIN_NOTIFY_ATTENTION[cli]);
+  if (builtinAttn.length && !builtinAttn.some(re => re.test(text))) return false;
   return !compileSignals(BUILTIN_NOTIFY_IGNORE[cli]).some(re => re.test(text));
 }
 

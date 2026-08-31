@@ -79,6 +79,31 @@ Two things must hold after `ensureDefaultTab` restores a task, and neither is gu
 
 Related sharp edge, not currently handled: `restoredPaneTabs` is only built inside `if (task?.split_layout)`, so a durable pane tab whose layout failed to save is discarded even though its data is sitting in `persisted_tabs`.
 
+## An agent notification does not mean the agent wants you
+
+termic spoofs `TERM_PROGRAM=iTerm.app` to the PTY, so an agent that supports
+iTerm2's notification channel picks it and sends every notification as OSC 9.
+That is more than the ones that ask for the user. claude 2.1.251 has eleven
+`notificationType`s and only five mean needs-you; `agent_completed` sends
+`` `${label} finished` `` when a turn SUCCEEDS.
+
+termic badged all of them, so a finished task rang the needs-you bell. It read
+as an intermittent "random bell" rather than a reliable wrong badge, because
+claude suppresses that notification for an interrupted or self-driving turn and
+only sends it on a band change. Intermittency is a reason to go read the
+agent's own code, not a reason to call it a race.
+
+`BUILTIN_NOTIFY_ATTENTION` in `src/lib/agents.ts` is therefore an ALLOW-LIST
+per agent, checked before the ignore list: for claude, a body has to say
+"needs your" or "needs permission". A deny-list cannot hold, because the
+failure mode is a notification type the vendor adds LATER, which is exactly how
+this one arrived. With an allow-list a new type is silent until someone looks
+at it; with a deny-list it rings.
+
+The user's own `capabilities.signals.attention` still outranks both, and an
+agent with no built-in allow-list stays permissive: for those, a notification
+really does just mean the agent wants you.
+
 ## Custom agent work-done detection (#68)
 
 An agent's working / done / needs-you state is classified from the fastest reliable signal available. For a CUSTOM CLI, use the highest tier it can emit:

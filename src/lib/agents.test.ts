@@ -649,6 +649,68 @@ describe("classifyAgentTitle", () => {
     expect(classifyAgentTitle("codex", "   ", [])).toBe(null);
   });
 
+  // ── Real notification bodies, read out of claude 2.1.251 ────────────
+  //
+  // Every string below is one claude actually constructs, with its
+  // `notificationType` named. The bug these pin: termic spoofs iTerm2, so
+  // claude sends ALL of them as OSC 9, and filtering only the idle nag meant a
+  // FINISHED turn rang the needs-you bell.
+  describe("claude notification bodies", () => {
+    const wants = (body: string) => notificationWantsAttention("claude", body, []);
+
+    it("raises attention for every body that means needs-you", () => {
+      // agent_needs_input, both forms
+      expect(wants("template config to db needs your input")).toBe(true);
+      expect(wants("template config to db needs your input: which branch?")).toBe(true);
+      // permission_prompt
+      expect(wants("Claude needs your permission to use Bash")).toBe(true);
+      // worker_permission_prompt: says "needs permission", NOT "needs your"
+      expect(wants("subagent needs permission for Edit")).toBe(true);
+      // elicitation_dialog
+      expect(wants("Claude Code needs your input")).toBe(true);
+      // plan approval, captured live off a PTY
+      expect(wants("Claude Code needs your approval for the plan")).toBe(true);
+    });
+
+    it("stays silent for a COMPLETION, which is the reported false bell", () => {
+      // agent_completed: `${label} finished` / `${label} failed`. The user saw
+      // this on a task that had plainly finished ("Crunched for 2m 36s").
+      expect(wants("template config to db finished")).toBe(false);
+      expect(wants("template config to db failed")).toBe(false);
+    });
+
+    it("stays silent for the other bodies claude sends", () => {
+      expect(wants("Claude is waiting for your input")).toBe(false);      // idle_prompt
+      expect(wants("Claude Code login successful")).toBe(false);          // auth_success
+      expect(wants("Claude is done using your computer")).toBe(false);    // computer_use_exit
+      expect(wants('MCP server "x" confirmed elicitation accept complete')).toBe(false);
+      expect(wants('Elicitation response for server "x": decline')).toBe(false);
+    });
+
+    it("is silent by default for a body claude has not shipped yet", () => {
+      // The whole point of the allow-list. A deny-list would badge this, which
+      // is exactly how `agent_completed` started ringing in the first place.
+      expect(wants("some future notification claude adds")).toBe(false);
+    });
+
+    it("leaves an agent with no allow-list permissive", () => {
+      // Only claude has one. Everything else keeps "a notification means the
+      // agent wants you", which is what asking the terminal to notify means.
+      expect(notificationWantsAttention("codex", "anything at all", [])).toBe(true);
+    });
+
+    it("still lets a user's own attention list win", () => {
+      // A user teaching termic their agent's wording must outrank the built-in
+      // allow-list, or a custom claude wrapper could never be tuned.
+      const agents = [{
+        id: "claude", name: "claude", command: "claude", args: [],
+        capabilities: { signals: { attention: ["ping me"] } },
+      }] as unknown as Parameters<typeof notificationWantsAttention>[2];
+      expect(notificationWantsAttention("claude", "ping me", agents)).toBe(true);
+      expect(notificationWantsAttention("claude", "needs your input", agents)).toBe(false);
+    });
+  });
+
   // ── Real titles, captured from live agents ──────────────────────────
   //
   // Every string below was recorded off a real PTY while the agent worked, so
@@ -963,9 +1025,20 @@ describe("notificationWantsAttention", () => {
     expect(notificationWantsAttention("claude", "Claude is waiting for your input")).toBe(false);
   });
 
-  it("defaults to badging unknown agents and unknown bodies", () => {
+  it("defaults to badging an unknown AGENT's bodies", () => {
+    // No allow-list for it, so a notification still means "the agent wants
+    // you", which is what asking the terminal to notify means.
     expect(notificationWantsAttention("some-cli", "build broke")).toBe(true);
-    expect(notificationWantsAttention("claude", "something new claude says")).toBe(true);
+  });
+
+  it("no longer badges an unknown body from claude", () => {
+    // This assertion used to expect `true`, and that WAS the bug. claude
+    // notifies about eleven different things and only five of them want the
+    // user; badging by default meant `agent_completed` ("<task> finished")
+    // rang the needs-you bell on a turn that had just succeeded. claude has a
+    // built-in allow-list now, so silence is the default for anything that
+    // does not ask for the user. See BUILTIN_NOTIFY_ATTENTION.
+    expect(notificationWantsAttention("claude", "something new claude says")).toBe(false);
   });
 
   it("ignores an empty body", () => {
