@@ -591,3 +591,30 @@ A git tick is deliberately NOT a re-fetch. `gitRevision` bumps on every stage an
 ## Settled detection / notifications
 
 TerminalPane samples `term.buffer.active` every 3s, FNV-1a hashes the visible viewport, marks tab "settled" after 2 identical consecutive samples. Resets on user input. `markAttention(wsId, tabId, reason)` never marks the active tab in the active task. `useAttentionNotifier` suppresses OS notifications for every tab in the focused task. Desktop notifications off by default. Clicking a banner only brings the window forward: it never changes the active task or tab (the old focus-edge router jumped on any refocus within 15s of a notification, including a plain cmd-Tab). The unread dot is what points at the tab; the user does the switching.
+
+## Settings: where a feature's row belongs
+
+A row goes where its EFFECT is, not where its mechanism is. Agent hooks writes
+into an agent's own config file, which reads like an Agents concern, and it sits
+under Notifications instead, because the four settings above it (desktop
+notifications, completion sound, the done indicator, the in-progress spinner)
+are all downstream of work-state detection and hooks is where that detection
+comes from. It is the accuracy source for that section.
+
+Two consequences worth keeping:
+
+- **The rows stay in ONE table.** Splitting them per agent would hide coverage:
+  "not needed, its terminal already reports this" and "not supported yet" only
+  mean something next to each other. It is also a decision made once, not a
+  per-agent preference.
+- **Agents links to it, and the link does not gate on support.** The supported
+  set lives in Rust; mirroring it into the settings UI is the same drift that
+  produced the stale `FALLBACK_CAPS` mirror. The link points at the table and
+  lets the table be the authority.
+
+The copy names the benefit that actually carries the tradeoff. This block asks
+to write into a user's config, so it has to say what it buys, and the honest
+answer is DONE detection: needs-you gains about six seconds, while done is the
+difference between a right badge and a wrong one for half an hour. The first
+version named only needs-you, which was accurate when it installed one hook and
+undersold it badly once it installed three.

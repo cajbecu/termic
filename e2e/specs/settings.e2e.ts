@@ -2816,7 +2816,7 @@ describe("agent hooks", () => {
   it("shows an honest per-agent row instead of pretending every agent is wired", async () => {
     await browser.execute(() =>
       window.__termic!.useApp.getState().openSettings("notifications"));
-    await waitForText("Exact needs-you detection");
+    await waitForText("Agent hooks");
     // fakeagent is seeded and detected, and phase 1 wires claude only. The row
     // has to SAY that rather than offer a button that would fail.
     await waitForText("not supported yet");

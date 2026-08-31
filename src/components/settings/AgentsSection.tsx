@@ -11,6 +11,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { settingsLoad, agentsSave, agentsDefaults, projectUpdate } from "@/lib/ipc";
 import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
+import { AGENT_HOOKS_HIGHLIGHT } from "./AgentHooksBlock";
 import type { Agent, CliInfo } from "@/lib/types";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -918,6 +919,25 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
             <div className="border-t border-[var(--color-border-soft)] pt-3 text-[12px] text-[var(--color-fg-dim)]">
               {signalGroupHint(agent.id)}
             </div>
+            {/* The rows below tune a GUESS. Anyone editing them is, by
+                definition, someone the terminal has already got wrong, which
+                makes this the one place in Settings where the exact answer is
+                worth offering. It links rather than repeating the install rows:
+                those only read as coverage when all the agents sit in one
+                table, and this is a decision you make once, not per agent. */}
+            {/* Deliberately NOT gated on whether this agent supports hooks.
+                The supported set lives in Rust, and mirroring it here is the
+                drift that has caught this repo before; the linked table already
+                says "not supported yet" per agent and is the one authority. So
+                this points, it does not promise. */}
+            <button
+              type="button"
+              className="self-start text-left text-[12px] text-[var(--color-accent)] hover:underline"
+              onClick={() => useApp.getState().openSettings(
+                "notifications", undefined, AGENT_HOOKS_HIGHLIGHT)}
+            >
+              Some agents can report their state exactly, with no patterns at all. See agent hooks.
+            </button>
             <RegexListField
               label="Done (title → done)"
               hint="Marks the turn finished: blue badge, bell, notification."

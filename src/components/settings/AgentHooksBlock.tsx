@@ -1,4 +1,12 @@
-// Settings → Notifications → agent hooks.
+// Settings → Notifications → Agent hooks.
+//
+// It lives under Notifications because the four settings above it (desktop
+// notifications, completion sound, the done indicator and the in-progress
+// spinner) are ALL downstream of work-state detection, and this is where that
+// detection comes from. It is the accuracy source for the section, not a fifth
+// sibling toggle. Agents links here rather than duplicating the rows per agent:
+// the per-agent statuses ("not needed", "not supported yet") only read as
+// coverage when they are in one table.
 //
 // One row per DETECTED agent, each with its own action. Deliberately not a
 // single master switch: the consent question differs per agent (a shell script
@@ -27,6 +35,10 @@ const UNSUPPORTED_REASON: Record<string, string> = {
   copilot: "not supported yet",
 };
 
+/** Anchor the Agents section's link targets, so the jump lands ON the block
+ *  rather than at the top of Notifications with the reader hunting for it. */
+export const AGENT_HOOKS_HIGHLIGHT = "agent-hooks";
+
 export function AgentHooksBlock() {
   const detectedClis = useApp(s => s.detectedClis);
   const agents = useApp(s => s.agents);
@@ -37,6 +49,20 @@ export function AgentHooksBlock() {
   // move is to show the actual scripts rather than describe them.
   const [plan, setPlan] = useState<Record<string, HookPlan>>({});
   const [open, setOpen] = useState<string | null>(null);
+  // Arriving from the Agents section's link: scroll to this block and flash it
+  // once. Same one-shot contract as GeneralSection's, so a later manual visit
+  // to Notifications does not re-flash something the reader is already on.
+  const settingsHighlight = useApp(s => s.view.settingsHighlight);
+  const [flash, setFlash] = useState(false);
+  useEffect(() => {
+    if (settingsHighlight !== AGENT_HOOKS_HIGHLIGHT) return;
+    useApp.getState().clearSettingsHighlight();
+    document.getElementById(`setting-${AGENT_HOOKS_HIGHLIGHT}`)
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setFlash(true);
+    const t = window.setTimeout(() => setFlash(false), 1600);
+    return () => window.clearTimeout(t);
+  }, [settingsHighlight]);
 
   const toggleDetails = async (id: string) => {
     if (open === id) { setOpen(null); return; }
@@ -85,10 +111,25 @@ export function AgentHooksBlock() {
   if (!present.length) return null;
 
   return (
+    <div id={`setting-${AGENT_HOOKS_HIGHLIGHT}`} className={flash ? "rounded-md ring-2 ring-[var(--color-accent)]" : undefined}>
     <SubSection
-      title="Exact needs-you detection"
-      hint="Installs a small hook into an agent's own config so Termic knows the moment it is waiting on you, instead of guessing from the terminal. Off by default."
+      title="Agent hooks"
+      hint="Off by default. Lets each agent report when it starts, when it needs you and when it is done, instead of Termic reading its terminal. That makes every setting above exact rather than best effort."
     >
+      {/* The advantage has to be concrete, because the ask is real: this writes
+          into the user's own agent config. The measurement is the argument, and
+          it is DONE detection, not needs-you, that carries it: needs-you gains
+          about six seconds, while done is the difference between a correct
+          badge and a wrong one for half an hour. The old copy named only
+          needs-you and undersold the feature to the exact audience most likely
+          to weigh the tradeoff. */}
+      <p className="text-xs leading-relaxed text-[var(--color-fg-subtle)]">
+        A terminal is a guess. Claude paints its idle glyph while it is blocked
+        on you, and again while its subagents are still working: on an 8.5
+        minute run with four of them, its title read as finished for 30% of the
+        time the work was still outstanding. A hook is the agent&apos;s own
+        word, so a spinner stops early only when the turn really ended.
+      </p>
       <div className="flex flex-col gap-2">
         {present.map(id => {
           const st = status[id];
@@ -164,5 +205,6 @@ export function AgentHooksBlock() {
         })}
       </div>
     </SubSection>
+    </div>
   );
 }
