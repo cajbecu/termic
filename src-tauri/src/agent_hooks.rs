@@ -123,6 +123,19 @@ impl Signal {
             Signal::Done => "done",
         }
     }
+
+    /// What Claude shows in its own UI while the hook runs. It is USER-VISIBLE,
+    /// so it has to describe the signal actually being sent: a single shared
+    /// string meant a turn STARTING announced "you are needed", which is a lie
+    /// on two of the three hooks. Found by installing into a real config and
+    /// reading the result rather than by a test, which is why one now exists.
+    fn status_message(self) -> &'static str {
+        match self {
+            Signal::Attention => "termic: reporting that you are needed",
+            Signal::Working => "termic: reporting that this turn started",
+            Signal::Done => "termic: reporting that this turn finished",
+        }
+    }
 }
 
 /// Which events an agent gets, and what each one reports. Deliberately minimal:
@@ -414,7 +427,7 @@ fn strip_ours(root: &mut Value, prefix: &str, event: &str) -> bool {
 
 /// Insert our entry, replacing any older one of ours. Every unknown key at
 /// every level is preserved: we only ever touch `hooks.<EVENT>`.
-pub fn merge(existing: &Value, command: &str, prefix: &str, event: &str) -> Value {
+pub fn merge(existing: &Value, command: &str, prefix: &str, event: &str, status: &str) -> Value {
     let mut root = if existing.is_object() {
         existing.clone()
     } else {
@@ -426,7 +439,7 @@ pub fn merge(existing: &Value, command: &str, prefix: &str, event: &str) -> Valu
         "type": "command",
         "command": command,
         "timeout": 5,
-        "statusMessage": "termic: reporting that you are needed",
+        "statusMessage": status,
     });
 
     let obj = root.as_object_mut().expect("root is an object");
@@ -465,10 +478,10 @@ pub fn unmerge(existing: &Value, prefix: &str, event: &str) -> Option<Value> {
 /// while `PreInvocation` / `PostInvocation` / `Stop` take handlers DIRECTLY.
 /// Wrapping the latter registers them with an EMPTY command, which `agy -p
 /// "/hooks"` will show and which fires nothing. Measured.
-fn agy_entry(commands: &[(&str, String)]) -> Value {
+fn agy_entry(commands: &[(&str, String, Signal)]) -> Value {
     let mut obj = Map::new();
     obj.insert("enabled".into(), Value::Bool(true));
-    for (event, command) in commands {
+    for (event, command, _sig) in commands {
         let handler = serde_json::json!({
             "type": "command", "command": command, "timeout": 5,
         });
@@ -483,7 +496,7 @@ fn agy_entry(commands: &[(&str, String)]) -> Value {
     Value::Object(obj)
 }
 
-fn agy_merge(existing: &Value, commands: &[(&str, String)]) -> Value {
+fn agy_merge(existing: &Value, commands: &[(&str, String, Signal)]) -> Value {
     let mut root = if existing.is_object() { existing.clone() } else { Value::Object(Map::new()) };
     root.as_object_mut()
         .expect("root is an object")
@@ -754,7 +767,7 @@ pub fn install(target: &Target) -> Result<(), String> {
         );
     }
 
-    let mut commands: Vec<(&str, String)> = Vec::new();
+    let mut commands: Vec<(&str, String, Signal)> = Vec::new();
     for (event, sig) in hooks {
         let script = script_for(&dir, *sig);
         write_atomic(&script, script_body(&agent, *sig).as_bytes())?;
@@ -764,15 +777,15 @@ pub fn install(target: &Target) -> Result<(), String> {
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
                 .map_err(|e| format!("chmod hook script: {e}"))?;
         }
-        commands.push((event, command_for(target, *sig)?));
+        commands.push((event, command_for(target, *sig)?, *sig));
     }
 
     let prefix = command_prefix(target)?;
     let merged = match schema_for(&agent) {
         Schema::ClaudeCompatible => {
             let mut acc = root;
-            for (event, command) in &commands {
-                acc = merge(&acc, command, &prefix, event);
+            for (event, command, sig) in &commands {
+                acc = merge(&acc, command, &prefix, event, sig.status_message());
             }
             acc
         }
@@ -788,7 +801,7 @@ pub fn install(target: &Target) -> Result<(), String> {
 
     let manifest = Manifest {
         schema_version: SCHEMA_VERSION,
-        command: commands.first().map(|(_, c)| c.clone()).unwrap_or_default(),
+        command: commands.first().map(|(_, c, _)| c.clone()).unwrap_or_default(),
         installed_at: chrono::Utc::now().to_rfc3339(),
     };
     write_atomic(
@@ -942,17 +955,17 @@ pub fn agent_hooks_plan(agent_id: String) -> Result<HookPlan, String> {
     let fragment = if hooks.is_empty() {
         String::new()
     } else {
-        let commands: Vec<(&str, String)> = hooks
+        let commands: Vec<(&str, String, Signal)> = hooks
             .iter()
-            .map(|(e, s)| (*e, format!("{prefix}{}.sh", s.stem())))
+            .map(|(e, s)| (*e, format!("{prefix}{}.sh", s.stem()), *s))
             .collect();
         let merged = match schema_for(&agent_id) {
             Schema::AntigravityNamed => agy_merge(&Value::Object(Map::new()), &commands),
             Schema::OpencodePlugin => Value::String("(a JS plugin file, shown below)".into()),
             Schema::ClaudeCompatible => {
                 let mut acc = Value::Object(Map::new());
-                for (event, command) in &commands {
-                    acc = merge(&acc, command, &prefix, event);
+                for (event, command, sig) in &commands {
+                    acc = merge(&acc, command, &prefix, event, sig.status_message());
                 }
                 acc
             }
@@ -1054,6 +1067,9 @@ mod tests {
     /// The tests below all exercise the claude shape. grok's differs only in
     /// which event key it writes under, which `grok_writes_its_own_event` pins.
     const EVENT: &str = "PermissionRequest";
+    /// The real message for `EVENT`'s signal, so the merge tests carry what
+    /// actually ships rather than a placeholder.
+    const SM: &str = "termic: reporting that you are needed";
 
     fn ours_count(v: &Value) -> usize {
         v.get("hooks")
@@ -1072,7 +1088,7 @@ mod tests {
 
     #[test]
     fn installs_into_an_empty_config() {
-        let out = merge(&serde_json::json!({}), C, P, EVENT);
+        let out = merge(&serde_json::json!({}), C, P, EVENT, SM);
         assert_eq!(ours_count(&out), 1);
         let entry = &out["hooks"][EVENT][0]["hooks"][0];
         assert_eq!(entry["type"], "command");
@@ -1095,7 +1111,7 @@ mod tests {
                 ]
             }
         });
-        let after = merge(&before, C, P, EVENT);
+        let after = merge(&before, C, P, EVENT, SM);
         assert_eq!(after["model"], "opus", "unknown top-level keys preserved");
         assert_eq!(after["hooks"]["Stop"], before["hooks"]["Stop"], "other events untouched");
         assert_eq!(
@@ -1107,8 +1123,8 @@ mod tests {
 
     #[test]
     fn install_is_idempotent() {
-        let once = merge(&serde_json::json!({}), C, P, EVENT);
-        let twice = merge(&once, C, P, EVENT);
+        let once = merge(&serde_json::json!({}), C, P, EVENT, SM);
+        let twice = merge(&once, C, P, EVENT, SM);
         assert_eq!(ours_count(&twice), 1, "no duplicate entry");
         assert_eq!(once, twice);
     }
@@ -1120,7 +1136,7 @@ mod tests {
                 { "hooks": [{ "type": "command", "command": format!("{P}old-name.sh"), "timeout": 1 }] }
             ]}
         });
-        let out = merge(&stale, C, P, EVENT);
+        let out = merge(&stale, C, P, EVENT, SM);
         assert_eq!(ours_count(&out), 1);
         assert_eq!(out["hooks"][EVENT][0]["hooks"][0]["command"], C);
     }
@@ -1131,14 +1147,14 @@ mod tests {
             "model": "opus",
             "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "/x" }] }] }
         });
-        let after = merge(&before, C, P, EVENT);
+        let after = merge(&before, C, P, EVENT, SM);
         let back = unmerge(&after, P, EVENT).expect("something of ours to remove");
         assert_eq!(back, before, "byte-identical after a round trip");
     }
 
     #[test]
     fn removal_from_a_config_that_was_empty_leaves_it_empty() {
-        let after = merge(&serde_json::json!({}), C, P, EVENT);
+        let after = merge(&serde_json::json!({}), C, P, EVENT, SM);
         let back = unmerge(&after, P, EVENT).unwrap();
         assert_eq!(back, serde_json::json!({}), "our own hooks key is cleaned up");
     }
@@ -1179,7 +1195,7 @@ mod tests {
 
     #[test]
     fn a_non_object_root_does_not_panic() {
-        let out = merge(&serde_json::json!([1, 2, 3]), C, P, EVENT);
+        let out = merge(&serde_json::json!([1, 2, 3]), C, P, EVENT, SM);
         assert_eq!(ours_count(&out), 1);
     }
 
@@ -1378,12 +1394,42 @@ mod tests {
         assert!(h.iter().any(|(_, s)| *s == Signal::Working));
     }
 
+    /// Claude DISPLAYS `statusMessage` while the hook runs, so a shared string
+    /// meant a turn starting announced "you are needed". It shipped that way
+    /// and was only caught by installing into a real config and reading the
+    /// merged file. Each signal now says what it is actually reporting.
+    #[test]
+    fn each_signal_announces_itself_honestly() {
+        let msgs: Vec<&str> = [Signal::Working, Signal::Attention, Signal::Done]
+            .iter()
+            .map(|s| s.status_message())
+            .collect();
+        let mut uniq = msgs.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), 3, "every signal needs its own wording: {msgs:?}");
+        assert!(
+            Signal::Attention.status_message().contains("needed"),
+            "only the attention hook may claim the user is needed",
+        );
+        for s in [Signal::Working, Signal::Done] {
+            assert!(
+                !s.status_message().contains("needed"),
+                "{s:?} must not announce that the user is needed",
+            );
+        }
+        // Copy rule: no em dashes in anything a user reads.
+        for m in msgs {
+            assert!(!m.contains('\u{2014}'), "em dash in user-visible text: {m}");
+        }
+    }
+
     #[test]
     fn agy_wraps_tool_events_but_not_the_others() {
         let cmds = vec![
-            ("PreInvocation", "/h/pre.sh".to_string()),
-            ("Stop", "/h/stop.sh".to_string()),
-            ("PreToolUse", "/h/tool.sh".to_string()),
+            ("PreInvocation", "/h/pre.sh".to_string(), Signal::Working),
+            ("Stop", "/h/stop.sh".to_string(), Signal::Done),
+            ("PreToolUse", "/h/tool.sh".to_string(), Signal::Working),
         ];
         let out = agy_merge(&serde_json::json!({}), &cmds);
         let e = &out[AGY_HOOK_NAME];
@@ -1401,7 +1447,7 @@ mod tests {
     #[test]
     fn agy_removal_is_a_delete_of_one_named_key() {
         let before = serde_json::json!({ "someone-elses-hook": { "enabled": true } });
-        let after = agy_merge(&before, &[("Stop", "/h/stop.sh".to_string())]);
+        let after = agy_merge(&before, &[("Stop", "/h/stop.sh".to_string(), Signal::Done)]);
         assert!(after.get(AGY_HOOK_NAME).is_some());
         let back = agy_unmerge(&after).expect("ours to remove");
         assert_eq!(back, before, "another author's hook survives untouched");
