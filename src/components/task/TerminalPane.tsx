@@ -7,6 +7,7 @@ import { AlertTriangle, TerminalSquare, Copy, Check, ChevronUp, ChevronDown, Che
 import { PopoverRoot, PopoverTrigger, PopoverContent } from "@/components/ui/Popover";
 import { useUI } from "@/store/ui";
 import { isUserWatching, useApp } from "@/store/app";
+import { logWorkState } from "@/lib/workStateLog";
 import { usePr } from "@/store/pr";
 import {
   QUIET_MS, SAMPLE_MS, SCROLLBACK_STABLE_SAMPLES, SETTLE_SAMPLES,
@@ -407,7 +408,7 @@ const captureArmedRef = useRef(false);
    *  done for the tab. */
   const interruptWork = useCallback((reason: string) => {
     debugLogRef.current?.("state→interrupted", reason);
-    useApp.getState().setWorkState(task.id, tab.id, "idle");
+    useApp.getState().setWorkState(task.id, tab.id, "idle", `interrupt: ${reason}`);
   }, [task.id, tab.id]);
 
   const fireDone = useCallback((reason: string, attn: "done" | "attention" = "done", seen = false, force = false): boolean => {
@@ -450,7 +451,10 @@ const captureArmedRef = useRef(false);
     if (seen || isActive) {
       // Acknowledged: clear to idle, no badge, no bell.
       debugLogRef.current?.("done-seen", reason);
-      app.setWorkState(task.id, tab.id, "idle");
+      // The user was looking, so the done is acknowledged rather than badged.
+      // Named in the trace because it is indistinguishable from "no done ever
+      // fired" once it has happened, and the two have opposite causes.
+      app.setWorkState(task.id, tab.id, "idle", `done-while-watching: ${reason}`);
       return true;
     }
     debugLogRef.current?.("state→done", reason);
@@ -1225,7 +1229,7 @@ const captureArmedRef = useRef(false);
         localBusy = true;
         workingStartedAtRef.current = Date.now();
       }
-      setWorkState(task.id, tab.id, "working");
+      setWorkState(task.id, tab.id, "working", reason);
     };
     const goIdle = (reason: string, delay = SETTLE_MS) => {
       if (!workDoneEnabled) return;
@@ -1277,7 +1281,7 @@ const captureArmedRef = useRef(false);
       // agent has stopped. The orange "attention" badge is layered on top
       // via the unread channel.
       dbg("state→attention", reason);
-      setWorkState(task.id, tab.id, "done");
+      setWorkState(task.id, tab.id, "done", `attention: ${reason}`);
       markAttention(task.id, tab.id, "attention", message);
       // The turn reached a terminal state (waiting on the user). Spend the
       // one-done-per-submit token so a trailing settle/OSC 9 can't stack a
@@ -1382,6 +1386,7 @@ const captureArmedRef = useRef(false);
       // whole feature dies with no error. Caught by the e2e fixture, which
       // seeds exactly such a list.
       if (!trusted && !notificationWantsAttention(tab.cli, text)) {
+        logWorkState("notify-drop", `cli=${tab.cli} body=${JSON.stringify(text.slice(0, 160))}`);
         wdlog(`${reason} ignored (body not actionable): ${text}`);
         dbg("notify-ignored", text.slice(0, 120));
         return;
@@ -1405,6 +1410,7 @@ const captureArmedRef = useRef(false);
         dbg("notify-ignored", `pending work: ${text.slice(0, 100)}`);
         return;
       }
+      logWorkState("notify-badge", `cli=${tab.cli} body=${JSON.stringify(text.slice(0, 160))}`);
       goAttention(reason, text);
     };
 

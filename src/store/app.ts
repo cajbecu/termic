@@ -2,6 +2,7 @@
 // updates (immutable replacements, not in-place mutations).
 
 import { create } from "zustand";
+import { logWorkState } from "@/lib/workStateLog";
 import { useUI } from "@/store/ui";
 import type { Project, Task, Tab, TerminalTab, DiffTab, PersistedTab, SplitTree, PaneLeaf, SplitDir } from "@/lib/types";
 import {
@@ -351,7 +352,7 @@ export interface AppState {
   clearAttention: (taskId: string, tabId: string) => void;
   /** Per-tab work-progress state. Idempotent — writing the same value is
    *  a no-op so we don't churn React for every OSC 9;4 the agent emits. */
-  setWorkState: (taskId: string, tabId: string, state: "idle" | "working" | "done") => void;
+  setWorkState: (taskId: string, tabId: string, state: "idle" | "working" | "done", reason?: string) => void;
   /** ConEmu OSC 9;4 progress: pct 0..100 + kind (1 normal / 2 err /
    *  3 indeterminate / 4 warn). Null pct = indeterminate.
    *  Idempotent (no-op on equal values). */
@@ -2374,10 +2375,17 @@ export const useApp = create<AppState>((set, get) => ({
     return { tabs: { ...s.tabs, [taskId]: next } };
   }),
 
-  setWorkState: (taskId, tabId, state) => set(s => {
+  setWorkState: (taskId, tabId, state, reason) => set(s => {
     const list = s.tabs[taskId] || [];
     const cur = list.find(t => t.id === tabId);
     if (!cur || cur.type !== "terminal") return s;
+    // Trace context, resolved once. `where` names the tab in the log the way a
+    // person reads the UI, so a line can be matched to what they were looking
+    // at without cross-referencing ids.
+    const task = s.tasks.find(t => t.id === taskId);
+    const where = `task=${JSON.stringify(task?.name ?? taskId)} cli=${cur.cli ?? "?"}`
+      + ` from=${cur.workState ?? "idle"} req=${state}`
+      + ` watching=${isUserWatchingIn(s, taskId, tabId)} why=${reason ?? "-"}`;
     // Sticky `done`, but only for STICKY_DONE_MS: an immediate "back to
     // working" from the same turn is noise (Claude oscillates ✳ ↔ spinner for
     // a few frames right after a response). A busy signal still arriving
@@ -2388,12 +2396,18 @@ export const useApp = create<AppState>((set, get) => ({
     // focus in setActiveTask) are unchanged and still clear to "idle".
     const doneAt = cur.workDoneAt ?? 0;
     if (cur.workState === "done" && state === "working"
-        && (doneAt === 0 || Date.now() - doneAt < STICKY_DONE_MS)) return s;
+        && (doneAt === 0 || Date.now() - doneAt < STICKY_DONE_MS)) {
+      logWorkState("refused", `${where} rule=sticky-done ageMs=${doneAt ? Date.now() - doneAt : "never"}`);
+      return s;
+    }
     // A second "done" signal on an already-done tab is a no-op — skip
     // the focused-tab downgrade logic that would turn it into "idle" and
     // wipe the bullet. The only exits from "done" are user-driven
     // (keypress in term.onData, focus in setActiveTask).
-    if (cur.workState === "done" && state === "done") return s;
+    if (cur.workState === "done" && state === "done") {
+      logWorkState("refused", `${where} rule=already-done`);
+      return s;
+    }
     // Focused tab gating:
     //   - "done" on the tab the user is actively looking at (active
     //     task AND active tab) → drop to "idle". They can see the
@@ -2417,15 +2431,27 @@ export const useApp = create<AppState>((set, get) => ({
     if (isFocused) {
       if (effective === "done") {
         effective = "idle";
+        logWorkState("downgrade", `${where} rule=done-on-watched-tab -> idle`);
       } else if (effective === "working") {
         const clearedAt = cur.workClearedAt ?? 0;
         const GRACE_MS = 5_000;
         if (clearedAt > 0 && Date.now() - clearedAt < GRACE_MS) {
           effective = "idle";
+          // The one that hides a spinner on a task that is still working: the
+          // user clicked to dismiss it and a `working` inside the grace window
+          // is read as the stuck spinner re-arming. Logged with the age so a
+          // reader can tell a genuine re-arm from a fresh signal.
+          logWorkState("downgrade",
+            `${where} rule=working-inside-clear-grace ageMs=${Date.now() - clearedAt} -> idle`);
         }
       }
     }
+    // Deliberately NOT traced. Re-asserting a state the tab already holds is
+    // the hot path (every busy title, every output line), and it says nothing:
+    // the interesting events are the ones that CHANGE or REFUSE a state.
+    // Logging it buried them and would have burned the session cap in minutes.
     if ((cur.workState ?? "idle") === effective) return s;
+    logWorkState("set", `${where} eff=${effective}`);
     // Falling edge of "working" → the agent just finished a turn, so any
     // files it touched are now settled on disk. Bump fsRevision so the file
     // tree / open editors / Git panel re-read. This is our FS-watcher stand-in:
