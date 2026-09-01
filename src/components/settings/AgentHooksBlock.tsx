@@ -114,21 +114,25 @@ export function AgentHooksBlock() {
     <div id={`setting-${AGENT_HOOKS_HIGHLIGHT}`} className={flash ? "rounded-md ring-2 ring-[var(--color-accent)]" : undefined}>
     <SubSection
       title="Agent hooks"
-      hint="Off by default. Lets each agent report when it starts, when it needs you and when it is done, instead of Termic reading its terminal. That makes every setting above exact rather than best effort."
+      hint="Off by default. The agent tells Termic when it starts, when it needs you, and when it is done, instead of Termic guessing from what is on screen."
     >
-      {/* The advantage has to be concrete, because the ask is real: this writes
-          into the user's own agent config. The measurement is the argument, and
-          it is DONE detection, not needs-you, that carries it: needs-you gains
-          about six seconds, while done is the difference between a correct
-          badge and a wrong one for half an hour. The old copy named only
-          needs-you and undersold the feature to the exact audience most likely
-          to weigh the tradeoff. */}
+      {/* Plain description, not an argument. This said "a terminal is a guess"
+          and quoted a 30%-of-8.5-minutes measurement, which is the reasoning
+          that justified building the feature and not what someone deciding
+          whether to switch it on needs. They need what it does, what changes,
+          and what it costs. The measurement lives in
+          docs/plans/agent-hooks.md, where the next person changing this can
+          find it. */}
       <p className="text-xs leading-relaxed text-[var(--color-fg-subtle)]">
-        A terminal is a guess. Claude paints its idle glyph while it is blocked
-        on you, and again while its subagents are still working: on an 8.5
-        minute run with four of them, its title read as finished for 30% of the
-        time the work was still outstanding. A hook is the agent&apos;s own
-        word, so a spinner stops early only when the turn really ended.
+        Guessing is usually right and sometimes wrong. Claude shows its idle
+        mark while it is waiting on your answer, and again while its background
+        agents are still running, so a task can look finished when it is not.
+      </p>
+      <p className="text-xs leading-relaxed text-[var(--color-fg-subtle)]">
+        With hooks on, the spinner, the done dot and the needs-you bell come
+        from the agent itself. Termic installs a small script in that
+        agent&apos;s own config folder, shown in full below. Removing it puts
+        the file back exactly as it was.
       </p>
       <div className="flex flex-col gap-2">
         {present.map(id => {
