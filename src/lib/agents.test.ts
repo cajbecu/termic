@@ -21,7 +21,7 @@ vi.mock("@/lib/utils", () => ({
   slugify: (s: string) => s.toLowerCase().replace(/\s+/g, "-"),
 }));
 
-import { spawnArgsForCli, defaultCliFirst, visibleCliIds, cliSupportsIdSession, cliSupportsResumeById, agentDisplayName, decideResume, isTerminalCli, workDoneCapable, terminalLaunchCommand, classifyAgentTitle, compileSignals, BUILTIN_TITLE_SIGNALS, hasPendingWork, notificationWantsAttention, PENDING_TAIL_ROWS } from "@/lib/agents";
+import { spawnArgsForCli, defaultCliFirst, visibleCliIds, cliSupportsIdSession, cliSupportsResumeById, agentDisplayName, decideResume, isTerminalCli, workDoneCapable, terminalLaunchCommand, classifyAgentTitle, compileSignals, BUILTIN_TITLE_SIGNALS, builtinBaseId, hasPendingWork, notificationWantsAttention, PENDING_TAIL_ROWS } from "@/lib/agents";
 import type { Agent, CliInfo } from "@/lib/types";
 
 // ── spawnArgsForCli ───────────────────────────────────────────────────
@@ -649,6 +649,79 @@ describe("classifyAgentTitle", () => {
     expect(classifyAgentTitle("codex", "   ", [])).toBe(null);
   });
 
+  // ── A duplicated agent inherits its base's behaviour ────────────────
+  //
+  // Reported live. The user cloned claude to hold a second login, and the
+  // clone behaved visibly worse than the agent it was copied from, because
+  // every per-agent table here is keyed by id. Captured from the real session,
+  // same body, ninety seconds apart:
+  //
+  //   notify-drop   cli=claude       body="Claude is waiting for your input"
+  //   notify-badge  cli=next-claude  body="Claude is waiting for your input"
+  describe("a cloned agent inherits through `extends`", () => {
+    const agents = [
+      { id: "claude", display_name: "claude", command: "claude", args: [] },
+      // What Settings writes on duplicate, including a renamed id.
+      { id: "next-claude", display_name: "next claude", command: "claude", args: [], extends: "claude" },
+      // Two hops, to prove the walk is not single-step.
+      { id: "next-claude-work", display_name: "w", command: "claude", args: [], extends: "next-claude" },
+      { id: "orphan", display_name: "o", command: "whatever", args: [] },
+      // A chain that points at itself must terminate, not hang: ids are
+      // user-editable, so this is reachable by typing.
+      { id: "loopy", display_name: "l", command: "x", args: [], extends: "loopy" },
+    ] as unknown as NonNullable<Parameters<typeof classifyAgentTitle>[2]>;
+
+    it("resolves a clone, and a clone of a clone, to the base", () => {
+      expect(builtinBaseId("next-claude", agents)).toBe("claude");
+      expect(builtinBaseId("next-claude-work", agents)).toBe("claude");
+      expect(builtinBaseId("claude", agents)).toBe("claude");
+    });
+
+    it("leaves an agent that extends nothing alone, and terminates on a cycle", () => {
+      expect(builtinBaseId("orphan", agents)).toBe("orphan");
+      expect(builtinBaseId("loopy", agents)).toBe("loopy");
+      expect(builtinBaseId("never-heard-of-it", agents)).toBe("never-heard-of-it");
+    });
+
+    it("ignores claude's idle nag on the clone, exactly as on claude", () => {
+      // THE reported bug: this returned true for the clone and rang the bell.
+      const nag = "Claude is waiting for your input";
+      expect(notificationWantsAttention("claude", nag, agents)).toBe(false);
+      expect(notificationWantsAttention("next-claude", nag, agents)).toBe(false);
+      // And the allow-list is inherited too, so a real request still rings.
+      expect(notificationWantsAttention("next-claude", "Claude needs your permission to use Bash", agents))
+        .toBe(true);
+    });
+
+    it("classifies the clone's titles, which it previously could not read at all", () => {
+      // With no patterns the clone had NO sender signal, so every fallback
+      // demotion badged `attention` instead of `done` and turns ended on the
+      // settled-hash heuristic.
+      expect(classifyAgentTitle("next-claude", "✳ Claude Code", agents)).toBe("idle");
+      expect(classifyAgentTitle("next-claude", "◐ Claude Code", agents)).toBe("busy");
+      expect(classifyAgentTitle("next-claude", "✳ Claude Code", [])).toBeNull();
+    });
+
+    it("inherits pending-work patterns", () => {
+      const rows = ["✻ Waiting for 3 background agents to finish"];
+      expect(hasPendingWork("next-claude", rows, agents)).toBe(true);
+      expect(hasPendingWork("orphan", rows, agents)).toBe(false);
+    });
+
+    it("lets the user's own signals win over the inherited ones", () => {
+      // Inheritance supplies DEFAULTS. An override is still looked up by the
+      // agent's real id, or tuning a clone would be impossible.
+      const tuned = [
+        ...(agents as unknown as Array<Record<string, unknown>>),
+        { id: "tuned", display_name: "t", command: "claude", args: [], extends: "claude",
+          capabilities: { signals: { idle: ["^DONE$"] } } },
+      ] as unknown as NonNullable<Parameters<typeof classifyAgentTitle>[2]>;
+      expect(classifyAgentTitle("tuned", "DONE", tuned)).toBe("idle");
+      // The fields they did NOT override still come from the base.
+      expect(classifyAgentTitle("tuned", "◐ Claude Code", tuned)).toBe("busy");
+    });
+  });
+
   // ── Real notification bodies, read out of claude 2.1.251 ────────────
   //
   // Every string below is one claude actually constructs, with its
@@ -705,7 +778,7 @@ describe("classifyAgentTitle", () => {
       const agents = [{
         id: "claude", name: "claude", command: "claude", args: [],
         capabilities: { signals: { attention: ["ping me"] } },
-      }] as unknown as Parameters<typeof notificationWantsAttention>[2];
+      }] as unknown as NonNullable<Parameters<typeof notificationWantsAttention>[2]>;
       expect(notificationWantsAttention("claude", "ping me", agents)).toBe(true);
       expect(notificationWantsAttention("claude", "needs your input", agents)).toBe(false);
     });

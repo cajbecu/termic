@@ -11,6 +11,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { settingsLoad, agentsSave, agentsDefaults, projectUpdate } from "@/lib/ipc";
 import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
+import { fitRows } from "@/lib/fitRows";
 import { AGENT_HOOKS_HIGHLIGHT } from "./AgentHooksBlock";
 import type { Agent, CliInfo } from "@/lib/types";
 import { Button } from "@/components/ui/Button";
@@ -1098,12 +1099,15 @@ function EnvTextarea({ value, onChange }: {
         onChange(parseEnvToMap(next));
       }}
       spellCheck={false}
-      rows={2}
+      rows={fitRows(draft, ENV_PLACEHOLDER)}
       className="w-full resize-y rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 font-mono text-[12.5px] text-[var(--color-fg)] focus:border-[var(--color-accent-soft)] focus:outline-none [field-sizing:content]"
-      placeholder={"CLAUDE_CODE_NO_FLICKER=1\nHTTPS_PROXY=http://localhost:8080\nANTHROPIC_API_KEY=sk-ant-..."}
+      placeholder={ENV_PLACEHOLDER}
     />
   );
 }
+
+const ENV_PLACEHOLDER =
+  "CLAUDE_CODE_NO_FLICKER=1\nHTTPS_PROXY=http://localhost:8080\nANTHROPIC_API_KEY=sk-ant-...";
 
 /** One-path-per-line textarea. Same draft-state pattern as EnvTextarea so the
  *  user can leave incomplete lines while typing. Trims each line and drops
@@ -1128,7 +1132,7 @@ function PathsTextarea({ value, onChange, placeholder }: {
         onChange(parsePaths(e.target.value));
       }}
       spellCheck={false}
-      rows={2}
+      rows={fitRows(draft, placeholder)}
       className="w-full resize-y rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 font-mono text-[12.5px] text-[var(--color-fg)] focus:border-[var(--color-accent-soft)] focus:outline-none [field-sizing:content]"
       placeholder={placeholder}
     />

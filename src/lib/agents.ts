@@ -407,13 +407,51 @@ export const STICKY_DONE_MS = 8_000;
  *
  *  Pure and total (see compileSignals) — a user's bad pattern must never throw
  *  on the path that decides whether to fire done. */
+/** The built-in table an agent's behaviour should come from.
+ *
+ *  A duplicated agent inherits NOTHING today. Every per-agent table here is
+ *  keyed by agent id, so a clone of claude made to hold a second login gets no
+ *  title patterns, no notification filter and no pending-work patterns, and
+ *  then behaves visibly worse than the agent it is a copy of. Measured on a
+ *  real session, same body, ninety seconds apart:
+ *
+ *    notify-drop   cli=claude       body="Claude is waiting for your input"
+ *    notify-badge  cli=next-claude  body="Claude is waiting for your input"
+ *
+ *  Claude's 60s idle nag, correctly ignored for claude and rung as needs-you
+ *  for its own duplicate. With no title patterns either, that clone had no
+ *  sender signal at all, so every fallback demotion badged `attention` rather
+ *  than `done` and turns ended on the settled-hash heuristic.
+ *
+ *  `extends` already records what a clone was copied from and was cosmetic,
+ *  shown in the Settings card header. Walking it is the whole fix. A user's own
+ *  `capabilities.signals` still wins, and is still looked up by the agent's
+ *  REAL id: inheritance is for the built-in defaults, not for their overrides.
+ *
+ *  Depth-capped rather than cycle-detected, because ids are user-editable and
+ *  a chain that points at itself must terminate, not hang. */
+const EXTENDS_MAX_DEPTH = 8;
+
+export function builtinBaseId(cli: string, agents: Agent[]): string {
+  let id = cli;
+  for (let i = 0; i < EXTENDS_MAX_DEPTH; i++) {
+    if (BUILTIN_TITLE_SIGNALS[id] || BUILTIN_NOTIFY_IGNORE[id] || BUILTIN_NOTIFY_ATTENTION[id]) {
+      return id;
+    }
+    const next = agents.find(a => a.id === id)?.extends;
+    if (!next || next === id) break;
+    id = next;
+  }
+  return id;
+}
+
 export function hasPendingWork(
   cli: string,
   rows: string[],
   agents: Agent[] = useApp.getState().agents,
 ): boolean {
   const user = agents.find(a => a.id === cli)?.capabilities?.signals?.pending;
-  const src = user?.length ? user : BUILTIN_TITLE_SIGNALS[cli]?.pending;
+  const src = user?.length ? user : BUILTIN_TITLE_SIGNALS[builtinBaseId(cli, agents)]?.pending;
   if (!src?.length) return false;
   const res = compileSignals(src);
   if (!res.length) return false;
@@ -493,9 +531,10 @@ export function notificationWantsAttention(
   // Built-in allow-list, when the agent has one. Checked before the ignore
   // list so a body has to look like a request for the user, rather than merely
   // avoiding the handful of phrases we thought to exclude.
-  const builtinAttn = compileSignals(BUILTIN_NOTIFY_ATTENTION[cli]);
+  const base = builtinBaseId(cli, agents);
+  const builtinAttn = compileSignals(BUILTIN_NOTIFY_ATTENTION[base]);
   if (builtinAttn.length && !builtinAttn.some(re => re.test(text))) return false;
-  return !compileSignals(BUILTIN_NOTIFY_IGNORE[cli]).some(re => re.test(text));
+  return !compileSignals(BUILTIN_NOTIFY_IGNORE[base]).some(re => re.test(text));
 }
 
 /** Classify a terminal title into a work-done state for `cli`. The agent's
@@ -517,7 +556,7 @@ export function classifyAgentTitle(
   const t = title.trim();
   if (!t) return null;
   const user = agents.find(a => a.id === cli)?.capabilities?.signals;
-  const builtin = BUILTIN_TITLE_SIGNALS[cli];
+  const builtin = BUILTIN_TITLE_SIGNALS[builtinBaseId(cli, agents)];
   if (!user && !builtin) return null;
 
   // PER-FIELD fallback, matching what hasPendingWork already does for

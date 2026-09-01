@@ -46,7 +46,7 @@ import * as ipc from "@/lib/ipc";
 import { maybeRebuildDockerImageForLaunch } from "@/lib/dockerDailyRebuild";
 import { loginShell, loginShellArgs } from "@/lib/loginShell";
 import { usePrefs, currentTerminalStack, currentTerminalTheme, currentColorFgBg, currentMinimumContrastRatio } from "@/store/prefs";
-import { spawnArgsForCli, spawnCommandForCli, tryToggleYoloLive, envForCli, agentDisplayName, cliSupportsIdSession, cliSupportsCaptureResume, postLaunchCaptureForCli, decideResume, resumeIdArgsForCli, workDoneCapable, terminalLaunchCommand, isTerminalCli, classifyAgentTitle, compileSignals, hasPendingWork, notificationWantsAttention, PENDING_TAIL_ROWS, STICKY_DONE_MS } from "@/lib/agents";
+import { spawnArgsForCli, spawnCommandForCli, tryToggleYoloLive, envForCli, agentDisplayName, cliSupportsIdSession, cliSupportsCaptureResume, postLaunchCaptureForCli, decideResume, resumeIdArgsForCli, workDoneCapable, terminalLaunchCommand, isTerminalCli, classifyAgentTitle, compileSignals, hasPendingWork, notificationWantsAttention, PENDING_TAIL_ROWS, STICKY_DONE_MS, builtinBaseId } from "@/lib/agents";
 import { recordTitle, noteSubmit, noteDone } from "@/lib/agentSignalLog";
 import { MessageQueueButton } from "./MessageQueueButton";
 import { ReviewCommentsBar } from "./ReviewCommentsBar";
@@ -1986,8 +1986,16 @@ const captureArmedRef = useRef(false);
         // every heuristic demoter off, and if it is false for an agent whose
         // hooks ARE installed on disk, nothing else in this log will make
         // sense. Cheap: once per PTY, not per event.
+        // `base` is the built-in table this agent's behaviour comes from, and
+        // it is the second-easiest thing to get wrong after hooksOwn. A
+        // duplicated agent inherits through `extends`; if that resolves to
+        // itself for a clone of claude, it has no title patterns and no
+        // notification filter, and every later line will look inexplicable.
+        // Once per PTY.
+        const base = builtinBaseId(tab.cli, useApp.getState().agents);
         logWorkState("spawn",
-          `task=${JSON.stringify(task.name)} cli=${tab.cli} hooksOwn=${hooksOwnStateRef.current}`
+          `task=${JSON.stringify(task.name)} cli=${tab.cli} base=${base}`
+          + ` inherited=${base !== tab.cli} hooksOwn=${hooksOwnStateRef.current}`
           + ` ptyId=${ptyId}`);
         // Sandbox truth lands synchronously with the spawn (no event
         // race possible). Render the warning chip immediately when the

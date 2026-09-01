@@ -3,6 +3,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type FocusEvent as ReactFocusEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { logWorkState } from "@/lib/workStateLog";
 import { useApp, useTaskTabs, useActiveTabId } from "@/store/app";
 import { usePrefs } from "@/store/prefs";
 import { Button } from "@/components/ui/Button";
@@ -2344,6 +2345,24 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
   // is more actionable than one still chugging.
   const hasWorking = workingIndicator && !hasAttention && !hasDone
     && tabs.some(t => t.type === "terminal" && t.workState === "working");
+  // Why no badge is drawn, which the work-state trace cannot answer: it records
+  // DETECTION, and a correct `working` can still render nothing here. Four
+  // independent ways that happens (the pref is off, attention or done outranks
+  // it, or the row is expanded and delegates to per-tab badges) and they are
+  // indistinguishable from the outside. Logged on CHANGE only, so this is a
+  // handful of lines per session and not a per-render cost.
+  const badgeInputs = `${collapsed}|${hasAttention}|${hasDone}|${hasWorking}|${workingIndicator}|${settledHighlight}`;
+  useEffect(() => {
+    logWorkState("row-badge", `task=${JSON.stringify(w.name)}`
+      + ` drawn=${collapsed && (hasAttention || hasDone || hasWorking)}`
+      + ` collapsed=${collapsed} attention=${hasAttention} done=${hasDone}`
+      + ` working=${hasWorking} prefWorking=${workingIndicator}`
+      + ` prefSettled=${settledHighlight}`
+      + ` states=[${tabs.filter(t => t.type === "terminal").map(t => t.workState ?? "idle").join(",")}]`);
+    // Deliberately keyed on the joined string: the individual flags are the
+    // whole point, and re-running per render would flood the log.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [badgeInputs]);
 
   async function commitTaskRename() {
     if (taskRenaming === null) return;
