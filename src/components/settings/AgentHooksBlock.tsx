@@ -108,6 +108,11 @@ export function AgentHooksBlock() {
     }
   };
 
+  // Text sizes here are explicit px, matching Controls.tsx (label 14, hint
+  // 12.5, dense 12). Tailwind's `text-sm` / `text-xs` is a SECOND scale that
+  // resolves against the root font size, so using it rendered this whole block
+  // a notch below its neighbours and drew a "why did you introduce a new text
+  // size" straight away. Match the surrounding settings, do not invent.
   if (!present.length) return null;
 
   return (
@@ -123,12 +128,12 @@ export function AgentHooksBlock() {
           and what it costs. The measurement lives in
           docs/plans/agent-hooks.md, where the next person changing this can
           find it. */}
-      <p className="text-xs leading-relaxed text-[var(--color-fg-subtle)]">
+      <p className="text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
         Guessing is usually right and sometimes wrong. Claude shows its idle
         mark while it is waiting on your answer, and again while its background
         agents are still running, so a task can look finished when it is not.
       </p>
-      <p className="text-xs leading-relaxed text-[var(--color-fg-subtle)]">
+      <p className="text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
         With hooks on, the spinner, the done dot and the needs-you bell come
         from the agent itself. Termic installs a small script in that
         agent&apos;s own config folder, shown in full below. Removing it puts
@@ -145,9 +150,9 @@ export function AgentHooksBlock() {
           return (
             <div key={id} className="flex flex-col gap-1 rounded-md border border-[var(--color-border)] px-3 py-2">
               <div className="flex items-center justify-between gap-3">
-                <span className="text-sm">{agentDisplayName(id, agents)}</span>
+                <span className="text-[14px] font-medium">{agentDisplayName(id, agents)}</span>
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-[var(--color-fg-subtle)]">
+                  <span className="text-[12.5px] text-[var(--color-fg-dim)]">
                     {!st ? "checking..."
                       : !st.supported ? reason
                       : blocked ? "disableAllHooks is set in this config"
@@ -171,13 +176,13 @@ export function AgentHooksBlock() {
                 <button
                   type="button"
                   onClick={() => void toggleDetails(id)}
-                  className="self-start text-xs text-[var(--color-fg-subtle)] underline decoration-dotted hover:text-[var(--color-fg)]"
+                  className="self-start text-[12.5px] text-[var(--color-fg-dim)] underline decoration-dotted hover:text-[var(--color-fg)]"
                 >
                   {open === id ? "Hide what this installs" : "Show exactly what this installs"}
                 </button>
               )}
               {open === id && plan[id] && (
-                <div className="flex flex-col gap-2 rounded bg-[var(--color-bg-subtle)] p-2 text-xs">
+                <div className="flex flex-col gap-2 rounded bg-[var(--color-bg-subtle)] p-2 text-[12px]">
                   <div>
                     <span className="text-[var(--color-fg-subtle)]">Config file: </span>
                     <code className="break-all">{plan[id].config_path}</code>
@@ -203,7 +208,7 @@ export function AgentHooksBlock() {
                   ))}
                 </div>
               )}
-              {err && <p className="text-xs text-[var(--color-danger)]">{err}</p>}
+              {err && <p className="text-[12.5px] text-[var(--color-danger)]">{err}</p>}
             </div>
           );
         })}
