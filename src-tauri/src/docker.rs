@@ -409,6 +409,109 @@ fn shared_config_relocation_env(container: &str) -> Option<&'static str> {
     }
 }
 
+// ────────────────────── Host git identity ──────────────────────────────
+
+/// Where the generated identity file lands inside the container, given the
+/// XDG root in effect. This is git's XDG global config, and every part of
+/// that placement is load-bearing:
+///
+/// - It is read at the GLOBAL level, so the repo's own `.git/config` (the
+///   parent `.git` is mounted, step 2) still outranks it. A repo that
+///   deliberately sets its own `user.email` keeps it, per key, exactly as it
+///   would on the host.
+/// - It does NOT shadow the image's `/root/.gitconfig`, which carries
+///   `safe.directory = *` (without which git refuses every command in the
+///   bind-mounted worktree as "dubious ownership") and the gh/glab credential
+///   helpers. Mounting the host's `~/.gitconfig` over that file, the obvious
+///   reading of "give the container my git config", takes out both.
+/// - `~/.gitconfig` wins over the XDG file for any key it sets, and it sets
+///   no `user.*`, so ours applies.
+///
+/// The rejected alternative was `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env, which is
+/// less code and wrong: env sits ABOVE repo-local, so it silently rewrites the
+/// identity of every repo that configures its own. See docs/sandbox.md.
+fn git_identity_container_path(xdg_config_home: &str) -> String {
+    format!("{}/git/config", xdg_config_home.trim_end_matches('/'))
+}
+
+/// The identity the HOST would use for a commit in this directory, resolved
+/// through git's full precedence chain rather than read out of `~/.gitconfig`:
+/// an `[includeIf "gitdir:~/work/"]` block is how people keep a work identity
+/// separate, and only a repo-scoped read sees it. That the read can therefore
+/// return a repo-LOCAL value is fine, and inert: the container resolves that
+/// same local config itself, from a level that outranks the file we write.
+///
+/// Absent keys come back `None` (`git config --get` exits non-zero), and a
+/// host with no identity at all mounts nothing.
+fn read_git_identity(dir: &std::path::Path) -> (Option<String>, Option<String>) {
+    let get = |key: &str| {
+        crate::git(&["config", "--get", key], dir)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    (get("user.name"), get("user.email"))
+}
+
+/// Render the two-key global config, or `None` when there is no identity to
+/// pass on. Values are quoted and escaped rather than interpolated raw: a name
+/// containing `"`, `\`, `#`, or a trailing space is legal in git config and
+/// would otherwise produce a file that parses as something else. A value
+/// carrying a newline cannot be represented on one line at all, so it is
+/// dropped rather than allowed to inject a second key.
+fn git_identity_config(name: Option<&str>, email: Option<&str>) -> Option<String> {
+    let quote = |v: &str| {
+        (!v.contains('\n') && !v.contains('\r'))
+            .then(|| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\"")))
+    };
+    let name = name.and_then(quote);
+    let email = email.and_then(quote);
+    if name.is_none() && email.is_none() {
+        return None;
+    }
+    let mut s = String::from(
+        "# Written by termic from your host git identity, for the Docker sandbox.\n\
+         # Global level: this repo's own .git/config still wins if it sets user.*\n\
+         [user]\n",
+    );
+    if let Some(n) = name {
+        s.push_str(&format!("\tname = {n}\n"));
+    }
+    if let Some(e) = email {
+        s.push_str(&format!("\temail = {e}\n"));
+    }
+    Some(s)
+}
+
+/// Stage the file on the host and return its path. One file per TASK, because
+/// two tasks can legitimately resolve different identities (that is what
+/// `includeIf` is for), and rewritten on every spawn so a changed host
+/// identity is picked up by the next container without any cache to bust.
+///
+/// Written to a temp path and renamed, so a container starting for one tab can
+/// never read the half-written file another tab's spawn is producing.
+fn stage_git_identity(task_id: &str, contents: &str) -> Option<String> {
+    let path = git_identity_path(task_id)?;
+    let dir = path.parent()?.to_path_buf();
+    std::fs::create_dir_all(&dir).ok()?;
+    let stem = path.file_name()?.to_string_lossy().into_owned();
+    let tmp = dir.join(format!(".{stem}.tmp"));
+    std::fs::write(&tmp, contents).ok()?;
+    std::fs::rename(&tmp, &path).ok()?;
+    Some(path.to_string_lossy().into_owned())
+}
+
+/// Host path of a task's staged identity file. `None` for an id with nothing
+/// filename-safe in it, which is also the signal not to stage one at all:
+/// task ids are uuids, so this is a guard, not a case that happens.
+fn git_identity_path(task_id: &str) -> Option<PathBuf> {
+    let stem: String = task_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    (!stem.is_empty()).then(|| docker_dir().join("gitconfig").join(stem))
+}
+
 // ──────────────────────────── build_spec ───────────────────────────────
 
 /// Build the full `DockerSpec` for a task agent spawn. `cmd`/`args`
@@ -715,6 +818,54 @@ pub fn build_spec(
                 "files you drop or paste into the terminal (read-only)",
                 false,
             ));
+        }
+    }
+
+    // 4d. Your git identity, so a commit made inside the container is
+    //    attributed to YOU rather than failing with "Please tell me who you
+    //    are". The container has no `~/.gitconfig` of yours: the image bakes
+    //    its own (safe.directory + the gh/glab credential helpers) and every
+    //    other host dotfile stays on the host, so `user.name`/`user.email`
+    //    are simply absent and every agent that tries to commit has to be
+    //    told to run `git config` again, in every container, forever.
+    //
+    //    Mounted READ-ONLY at git's XDG global config path - see
+    //    `git_identity_container_path` for why that exact location and not
+    //    `/root/.gitconfig`, and why not `GIT_AUTHOR_*` env.
+    //
+    //    The XDG root follows the agent's own `XDG_CONFIG_HOME` when it sets
+    //    one (`spawn_env`, applied below), because git will look wherever
+    //    that points and a file at the default path would simply not be read.
+    //    Re-asserting our own value instead would break a user who relocated
+    //    it deliberately, which is a real thing to do here: opencode's config
+    //    dir lives under `/root/.config`.
+    {
+        let xdg = spawn_env
+            .get("XDG_CONFIG_HOME")
+            .map(|s| s.trim())
+            .filter(|s| s.starts_with('/') && !s.contains(".."))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{CONTAINER_HOME}/.config"));
+        let container = git_identity_container_path(&xdg);
+        let already_mounted = mounts.iter().any(|m| m.container == container);
+        // `persist_target_allowed` is the same guard every other
+        // user-influenced mount target gets: an `XDG_CONFIG_HOME` of `/etc`
+        // must not turn into a mount over `/etc/git/config`. Checked BEFORE
+        // the read below, so a spawn that will not mount anything does not
+        // shell out to git for an answer it cannot use.
+        if persist_target_allowed(&container) && !already_mounted {
+            let (name, email) = read_git_identity(std::path::Path::new(&task_path));
+            if let Some(contents) = git_identity_config(name.as_deref(), email.as_deref()) {
+                if let Some(host) = stage_git_identity(&task.id, &contents) {
+                    mounts.push(Mount::implicit(
+                        host,
+                        container,
+                        true,
+                        "your git identity (name and email), so commits made in the container are yours",
+                        false,
+                    ));
+                }
+            }
         }
     }
 
@@ -1246,6 +1397,12 @@ pub fn spawn_image_tag() -> Option<String> {
 /// `docker rm -f` every container labeled for this task. Non-fatal.
 pub fn cleanup_task(task_id: &str) {
     rm_by_filter(&format!("label={LABEL_KEY}={task_id}"));
+    // The staged git identity file is per-task (step 4d in `build_spec`), so
+    // an archived task's copy is dead weight. Regenerated on the next spawn
+    // if the task comes back, so deleting it early costs nothing.
+    if let Some(path) = git_identity_path(task_id) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// First 8 chars of an id, for a readable-but-unique container name.
@@ -2208,6 +2365,144 @@ mod tests {
         let mounted: Vec<String> = spec.mounts.iter().map(|m| m.container.clone()).collect();
         let canon = canonicalize_or_keep(&shared_path);
         assert!(mounted.contains(&canon), "{mounted:?}");
+    }
+
+    /// A real repo with the identity set LOCALLY, so what these tests read is
+    /// the fixture's and never the developer's own global git config.
+    fn repo_with_local_identity(name: &str, email: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .expect("git must be on PATH");
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q"]);
+        git(&["config", "--local", "user.name", name]);
+        git(&["config", "--local", "user.email", email]);
+        dir
+    }
+
+    fn spec_for(task: &Task, env: &std::collections::HashMap<String, String>) -> DockerSpec {
+        build_spec(task, "claude", "img", &task.path, vec![], env, &[], false, &[], &[],
+            "pty-gitid001", "claude", &[])
+    }
+
+    #[test]
+    fn the_identity_file_carries_only_the_keys_the_host_actually_has() {
+        // Nothing to say means no file at all, so a host with no identity
+        // gets no mount and no line in the preview explaining one.
+        assert_eq!(git_identity_config(None, None), None);
+        let only_name = git_identity_config(Some("Ada"), None).unwrap();
+        assert!(only_name.contains("name = \"Ada\""), "{only_name}");
+        assert!(!only_name.contains("email"), "{only_name}");
+        // Quoted and escaped: `#` starts a comment in git config and a bare
+        // quote would truncate the value, so a legal name has to survive
+        // verbatim rather than land as something else.
+        let odd = git_identity_config(Some("A \"B\" \\C #1"), Some("a@b.c")).unwrap();
+        assert!(odd.contains("name = \"A \\\"B\\\" \\\\C #1\""), "{odd}");
+        // A newline cannot be represented on one line, so it is dropped
+        // rather than allowed to inject a second key.
+        assert_eq!(git_identity_config(Some("x\ncore.pager = sh"), None), None);
+    }
+
+    #[test]
+    fn the_host_git_identity_is_mounted_at_gits_global_level() {
+        with_scratch_data_dir(|| {
+            let repo = repo_with_local_identity("Ada Lovelace", "ada@example.com");
+            let task = stub_task("t-git-id", &repo.path().to_string_lossy());
+            let spec = spec_for(&task, &std::collections::HashMap::new());
+            let m = spec.mounts.iter().find(|m| m.container == "/root/.config/git/config")
+                .expect("the host identity must reach the container");
+            assert!(m.read_only, "termic is the only writer of this file");
+            let body = std::fs::read_to_string(&m.host).unwrap();
+            assert!(body.contains("Ada Lovelace") && body.contains("ada@example.com"), "{body}");
+
+            // NEVER over `/root/.gitconfig`. That file is the image's, and it
+            // carries `safe.directory = *` (without which git refuses every
+            // command in the bind-mounted worktree as "dubious ownership")
+            // plus the gh/glab credential helpers that make `git push` work.
+            // Shadowing it is the obvious reading of "mount my gitconfig" and
+            // it breaks the container in two ways at once.
+            assert!(!spec.mounts.iter().any(|m| m.container == "/root/.gitconfig"));
+
+            // And never as `GIT_AUTHOR_*`/`GIT_COMMITTER_*`/`GIT_CONFIG_*`
+            // env, which is the tempting shortcut: those sit ABOVE repo-local
+            // config, so they would silently rewrite the identity of every
+            // repo that deliberately sets its own. The mounted file sits
+            // below it instead, which is the whole point of this feature.
+            assert!(!spec.env.iter().any(|(k, _)| k.starts_with("GIT_AUTHOR")
+                || k.starts_with("GIT_COMMITTER") || k.starts_with("GIT_CONFIG")),
+                "{:?}", spec.env);
+        });
+    }
+
+    #[test]
+    fn an_identity_reached_through_an_include_is_resolved() {
+        // `[includeIf "gitdir:~/work/"]` is how people keep a work identity
+        // separate from a personal one, and reading `~/.gitconfig` directly
+        // would miss it entirely. The read is repo-scoped precisely so git
+        // resolves the whole chain itself; a plain `include.path` exercises
+        // that same include machinery without touching the developer's HOME.
+        with_scratch_data_dir(|| {
+            let repo = repo_with_local_identity("Personal", "personal@example.com");
+            let included = repo.path().join("work-identity");
+            std::fs::write(&included, "[user]\n\tname = Work Identity\n\temail = work@example.com\n").unwrap();
+            let out = std::process::Command::new("git")
+                .args(["config", "--local", "include.path", &included.to_string_lossy()])
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            let task = stub_task("t-git-inc", &repo.path().to_string_lossy());
+            let spec = spec_for(&task, &std::collections::HashMap::new());
+            let m = spec.mounts.iter().find(|m| m.container == "/root/.config/git/config").unwrap();
+            let body = std::fs::read_to_string(&m.host).unwrap();
+            assert!(body.contains("work@example.com"), "the included identity is the one git resolves: {body}");
+        });
+    }
+
+    #[test]
+    fn a_path_with_no_resolvable_identity_mounts_nothing() {
+        // No identity, no git, no repo: all the same answer. An empty or
+        // half-written config file mounted into every container would be a
+        // mount the preview cannot explain and git cannot use.
+        with_scratch_data_dir(|| {
+            let task = stub_task("t-git-none", "/tmp/termic-docker-test-does-not-exist-git");
+            let spec = spec_for(&task, &std::collections::HashMap::new());
+            assert!(!spec.mounts.iter().any(|m| m.container.ends_with("/git/config")),
+                "{:?}", spec.mounts);
+        });
+    }
+
+    #[test]
+    fn the_identity_follows_a_relocated_xdg_config_home_but_not_into_a_system_dir() {
+        with_scratch_data_dir(|| {
+            let repo = repo_with_local_identity("Ada", "ada@example.com");
+            // An agent that relocates XDG_CONFIG_HOME (Settings -> Agents,
+            // per-agent env) sends git looking somewhere else, and a file at
+            // the default path would simply never be read. Follow the value
+            // rather than re-asserting our own, which would break a
+            // relocation someone chose on purpose.
+            let task = stub_task("t-git-xdg", &repo.path().to_string_lossy());
+            let mut env = std::collections::HashMap::new();
+            env.insert("XDG_CONFIG_HOME".to_string(), "/root/.myconf".to_string());
+            let spec = spec_for(&task, &env);
+            assert!(spec.mounts.iter().any(|m| m.container == "/root/.myconf/git/config"),
+                "{:?}", spec.mounts);
+
+            // But it is still a user-supplied string landing in a mount
+            // TARGET, so it gets the same guard every other one gets: an
+            // `XDG_CONFIG_HOME` of `/etc` must not become a mount over
+            // `/etc/git/config`.
+            let mut hostile = std::collections::HashMap::new();
+            hostile.insert("XDG_CONFIG_HOME".to_string(), "/etc".to_string());
+            let spec = spec_for(&task, &hostile);
+            assert!(!spec.mounts.iter().any(|m| m.container.ends_with("/git/config")),
+                "{:?}", spec.mounts);
+        });
     }
 
     #[test]
