@@ -206,11 +206,10 @@ fn agent_config(base_id: &str, user_extra_dirs: &[String], persist_enabled: bool
     let sanitized: Vec<String> = user_extra_dirs.iter().filter_map(|d| sanitize_extra_dir(d)).collect();
     if KNOWN_SAFE_AGENTS.contains(&base_id) {
         let (first, rest) = crate::agent_dirs::state_dirs(base_id).split_first()?;
-        let relocation_env = match base_id {
-            "claude" => Some("CLAUDE_CONFIG_DIR"),
-            "codex" => Some("CODEX_HOME"),
-            _ => None,
-        };
+        // Shared with the hooks installer, which has to write into the same
+        // relocated dir a clone actually uses. Two copies of this table would
+        // put one account's hooks in the other account's config.
+        let relocation_env = crate::agent_dirs::config_relocation_env(base_id);
         // `state_dirs` entries are home-relative names; `sanitized` entries
         // are already full container paths (they may point outside HOME).
         let extra_dirs = rest

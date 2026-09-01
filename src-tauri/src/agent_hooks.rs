@@ -600,10 +600,38 @@ fn state_dir(agent: &str) -> Result<&'static str, String> {
         .ok_or_else(|| format!("{agent} has no known state dir"))
 }
 
+/// Which BUILT-IN an agent behaves as: itself, or what it was cloned from.
+///
+/// Everything about a hook comes from this (the event set, the config schema,
+/// the file within the config dir), because a clone of claude runs the claude
+/// binary and reads claude's config shape. Keyed on the base, a duplicated
+/// agent was simply unsupported: `SUPPORTED` never matched it, so the row read
+/// "could not resolve the agent config directory" and the user got no hooks on
+/// the account they made the clone for.
+///
+/// Deliberately NOT `docker::base_agent_id_str`, which falls back to "claude"
+/// for an unrecognised base. That is right for deciding a Docker mount and
+/// wrong here: it would install claude's hooks into an unrelated agent's
+/// config. An unknown agent stays unknown and is reported unsupported.
+fn base_of(agent_id: &str) -> String {
+    let agents = crate::load_settings_inner().agents;
+    crate::docker::base_agent_id(&agents, agent_id).to_string()
+}
+
 /// The directory we write into, on the host filesystem, for a given target.
+///
+/// Resolved from the agent ENTRY, not from its base's default dir. A clone made
+/// to hold a second account relocates its whole config with the agent's own env
+/// var, and writing the base's path here would put one account's hooks into the
+/// other account's config, which is worse than installing none.
 pub fn config_dir(target: &Target) -> Result<PathBuf, String> {
     match target {
-        Target::Host(agent) => Ok(agent_home()?.join(state_dir(agent)?)),
+        Target::Host(agent) => {
+            let home = agent_home()?;
+            let agents = crate::load_settings_inner().agents;
+            crate::agent_dirs::instance_config_dir(&agents, agent, &home)
+                .ok_or_else(|| format!("{agent} has no known state dir"))
+        }
         Target::Docker(agent_id) => Ok(crate::docker::agent_config_host_dir(agent_id)),
     }
 }
@@ -655,7 +683,7 @@ pub fn command_prefix(target: &Target) -> Result<String, String> {
 }
 
 fn settings_path(target: &Target) -> Result<PathBuf, String> {
-    Ok(config_dir(target)?.join(settings_rel(target.agent())))
+    Ok(config_dir(target)?.join(settings_rel(&base_of(target.agent()))))
 }
 
 fn script_dir(target: &Target) -> Result<PathBuf, String> {
@@ -702,7 +730,9 @@ fn read_settings(path: &Path) -> Result<Value, String> {
 }
 
 pub fn status(target: &Target) -> HookStatus {
-    let agent = target.agent().to_string();
+    // The BASE: what this agent behaves as. Paths still come from the target,
+    // which carries the instance id, so a clone writes into its own config dir.
+    let agent = base_of(target.agent());
     let settings = settings_path(target);
     let script = script_dir(target);
     let (settings_path_s, script_dir_s) = (
@@ -781,7 +811,9 @@ fn command_for(target: &Target, sig: Signal) -> Result<String, String> {
 }
 
 pub fn install(target: &Target) -> Result<(), String> {
-    let agent = target.agent().to_string();
+    // The BASE: what this agent behaves as. Paths still come from the target,
+    // which carries the instance id, so a clone writes into its own config dir.
+    let agent = base_of(target.agent());
     let hooks = hooks_for(&agent);
     if hooks.is_empty() {
         return Err(format!("hooks are not supported for {agent} yet"));
@@ -871,7 +903,9 @@ pub fn install(target: &Target) -> Result<(), String> {
 }
 
 pub fn remove(target: &Target) -> Result<(), String> {
-    let agent = target.agent().to_string();
+    // The BASE: what this agent behaves as. Paths still come from the target,
+    // which carries the instance id, so a clone writes into its own config dir.
+    let agent = base_of(target.agent());
     let settings = settings_path(target)?;
     let dir = script_dir(target)?;
     let prefix = command_prefix(target)?;
@@ -946,7 +980,11 @@ pub fn remove(target: &Target) -> Result<(), String> {
 pub const SUPPORTED: &[&str] = &["claude", "grok", "agy", "opencode"];
 
 fn check_supported(agent_id: &str) -> Result<(), String> {
-    if SUPPORTED.contains(&agent_id) {
+    // A duplicated agent is supported when what it was cloned FROM is. It runs
+    // the same binary and reads the same config shape, and the only reason it
+    // was rejected before is that this list holds built-in names.
+    let base = base_of(agent_id);
+    if SUPPORTED.contains(&base.as_str()) {
         Ok(())
     } else {
         Err(format!("hooks are not supported for {agent_id} yet"))
@@ -1082,7 +1120,7 @@ pub fn agent_hooks_plan(agent_id: String) -> Result<HookPlan, String> {
 #[tauri::command]
 pub fn agent_hooks_status(agent_id: String) -> AgentHookStatus {
     AgentHookStatus {
-        supported: SUPPORTED.contains(&agent_id.as_str()),
+        supported: SUPPORTED.contains(&base_of(&agent_id).as_str()),
         host: status(&Target::Host(agent_id.clone())),
         docker: status(&Target::Docker(agent_id.clone())),
         agent_id,
@@ -1108,17 +1146,25 @@ pub fn agent_hooks_status(agent_id: String) -> AgentHookStatus {
 #[tauri::command]
 pub fn agent_hooks_sync() -> Vec<String> {
     let mut updated = Vec::new();
-    for agent in SUPPORTED {
+    // Every agent in the registry, not just the built-in names: a clone is
+    // exactly as entitled to a working set of hooks as what it was copied from,
+    // and it is the clone whose config dir may have moved.
+    let ids: Vec<String> = crate::load_settings_inner()
+        .agents
+        .iter()
+        .map(|a| a.id.clone())
+        .collect();
+    for agent in &ids {
         for target in [
-            Target::Host((*agent).to_string()),
-            Target::Docker((*agent).to_string()),
+            Target::Host(agent.clone()),
+            Target::Docker(agent.clone()),
         ] {
             let st = status(&target);
             if !st.installed || !st.stale || st.error.is_some() || st.disabled_all {
                 continue;
             }
             if install(&target).is_ok() && matches!(target, Target::Host(_)) {
-                updated.push((*agent).to_string());
+                updated.push(agent.clone());
             }
         }
     }

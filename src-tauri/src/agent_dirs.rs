@@ -28,6 +28,82 @@
 /// same relative subpath). Order matters for an agent with no config-dir
 /// relocation env var: the FIRST entry is Docker's primary mount, every
 /// entry after it is an `extra_dirs` mount alongside it.
+/// Where THIS agent INSTANCE keeps its config on the host.
+///
+/// One resolver rather than a per-agent abstraction, deliberately. The pieces
+/// are already data (`state_dirs`, `config_relocation_env`, and the hook
+/// installer's `settings_rel`), and the only thing missing was somewhere that
+/// composes them for a specific agent entry rather than for a built-in NAME.
+/// A trait or a module per agent would buy no control that these tables do not
+/// already give, and would turn "add an agent" from adding a row into
+/// implementing an interface.
+///
+/// Three cases, most specific first:
+///   1. the entry relocates its whole config with the agent's own env var
+///      (`CLAUDE_CONFIG_DIR=~/.next-claude`), which is how a clone holds a
+///      SECOND account. That path is the config dir, verbatim.
+///   2. the entry overrides `HOME`, so the default dir hangs off that instead.
+///   3. neither: the base's default dir under the real home.
+///
+/// Returns None only when the base agent has no known state dir at all, which
+/// is the honest answer for an agent nobody has mapped.
+pub fn instance_config_dir(
+    agents: &[crate::Agent],
+    agent_id: &str,
+    home: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let base = crate::docker::base_agent_id(agents, agent_id);
+    let entry = agents.iter().find(|a| a.id == agent_id);
+    if let Some(env) = entry.map(|a| &a.env) {
+        if let Some(raw) = config_relocation_env(base).and_then(|var| env.get(var)) {
+            let expanded = expand_home(raw, home);
+            if !expanded.as_os_str().is_empty() {
+                return Some(expanded);
+            }
+        }
+        if let Some(h) = env.get("HOME").filter(|h| !h.is_empty()) {
+            return Some(std::path::Path::new(h).join(state_dirs(base).first()?));
+        }
+    }
+    Some(home.join(state_dirs(base).first()?))
+}
+
+/// `~` and `$HOME` in a user-typed env value. They type these by hand in
+/// Settings, so a literal `~/.next-claude` has to become a real path rather
+/// than a directory called `~` (which is what the file tree in the reporter's
+/// screenshot was already showing).
+fn expand_home(raw: &str, home: &std::path::Path) -> std::path::PathBuf {
+    let t = raw.trim();
+    if t == "~" || t == "$HOME" {
+        return home.to_path_buf();
+    }
+    for prefix in ["~/", "$HOME/"] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            return home.join(rest);
+        }
+    }
+    std::path::PathBuf::from(t)
+}
+
+/// The env var that relocates an agent's ENTIRE config dir, when it has one.
+///
+/// This is how a duplicated agent holds a second account: the clone runs the
+/// same binary with `CLAUDE_CONFIG_DIR` pointing somewhere else, so its login,
+/// its settings and its hooks all live apart from the original's. Anything
+/// keyed on the agent's default dir would put one account's hooks into the
+/// other account's config, which is worse than not installing them.
+///
+/// Only agents that genuinely relocate everything are listed. grok has no clean
+/// relocation env (binary, skills and config all share `~/.grok`), and the
+/// others fold their HOME-root dotfiles into the same dir once relocated.
+pub fn config_relocation_env(base_id: &str) -> Option<&'static str> {
+    match base_id {
+        "claude" => Some("CLAUDE_CONFIG_DIR"),
+        "codex" => Some("CODEX_HOME"),
+        _ => None,
+    }
+}
+
 pub fn state_dirs(agent_id: &str) -> &'static [&'static str] {
     match agent_id {
         // claude and codex relocate their ENTIRE config dir via an env var
@@ -57,6 +133,118 @@ pub fn state_dirs(agent_id: &str) -> &'static [&'static str] {
         // declines to support it — see findings.md's "outlier" writeup.
         "grok" => &[".grok"],
         _ => &[],
+    }
+}
+
+#[cfg(test)]
+mod instance_dir_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn agent(id: &str, extends: Option<&str>, env: &[(&str, &str)]) -> crate::Agent {
+        // Same stub shape docker's tests use: clone a real default rather than
+        // construct one, so a new required field cannot silently skip these.
+        let mut a = crate::default_agents().into_iter().next().unwrap();
+        a.id = id.to_string();
+        a.extends = extends.map(|s| s.to_string());
+        a.env = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        a
+    }
+    const HOME: &str = "/Users/u";
+
+    #[test]
+    fn a_plain_agent_uses_its_own_default_dir() {
+        let agents = vec![agent("claude", None, &[])];
+        assert_eq!(
+            instance_config_dir(&agents, "claude", Path::new(HOME)),
+            Some(PathBuf::from("/Users/u/.claude")),
+        );
+    }
+
+    #[test]
+    fn a_clone_with_no_env_falls_back_to_the_base_dir() {
+        // Correct, and worth stating: two agents sharing one login share one
+        // config, so they share one set of hooks. Nothing is wrong with that.
+        let agents = vec![agent("claude", None, &[]), agent("next-claude", Some("claude"), &[])];
+        assert_eq!(
+            instance_config_dir(&agents, "next-claude", Path::new(HOME)),
+            Some(PathBuf::from("/Users/u/.claude")),
+        );
+    }
+
+    #[test]
+    fn a_clone_holding_a_second_account_gets_its_own_dir() {
+        // The reported case, verbatim from the maintainer's settings.
+        let agents = vec![
+            agent("claude", None, &[]),
+            agent("next-claude", Some("claude"), &[("CLAUDE_CONFIG_DIR", "/Users/simion/.next-claude")]),
+        ];
+        assert_eq!(
+            instance_config_dir(&agents, "next-claude", Path::new(HOME)),
+            Some(PathBuf::from("/Users/simion/.next-claude")),
+        );
+        // And the original is untouched, which is the whole point: installing
+        // for one account must never write into the other's config.
+        assert_eq!(
+            instance_config_dir(&agents, "claude", Path::new(HOME)),
+            Some(PathBuf::from("/Users/u/.claude")),
+        );
+    }
+
+    #[test]
+    fn a_hand_typed_tilde_is_expanded() {
+        // Users type this by hand in Settings, and an unexpanded `~` creates a
+        // directory literally called "~".
+        for raw in ["~/.next-claude", "$HOME/.next-claude"] {
+            let agents = vec![
+                agent("claude", None, &[]),
+                agent("c2", Some("claude"), &[("CLAUDE_CONFIG_DIR", raw)]),
+            ];
+            assert_eq!(
+                instance_config_dir(&agents, "c2", Path::new(HOME)),
+                Some(PathBuf::from("/Users/u/.next-claude")),
+                "{raw}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_home_override_moves_the_default_dir() {
+        let agents = vec![
+            agent("claude", None, &[]),
+            agent("c2", Some("claude"), &[("HOME", "/tmp/alt")]),
+        ];
+        assert_eq!(
+            instance_config_dir(&agents, "c2", Path::new(HOME)),
+            Some(PathBuf::from("/tmp/alt/.claude")),
+        );
+    }
+
+    #[test]
+    fn the_relocation_var_outranks_a_home_override() {
+        let agents = vec![
+            agent("claude", None, &[]),
+            agent("c2", Some("claude"), &[("HOME", "/tmp/alt"), ("CLAUDE_CONFIG_DIR", "/tmp/cfg")]),
+        ];
+        assert_eq!(
+            instance_config_dir(&agents, "c2", Path::new(HOME)),
+            Some(PathBuf::from("/tmp/cfg")),
+        );
+    }
+
+    #[test]
+    fn an_agent_with_no_known_dir_says_so() {
+        let agents = vec![agent("mystery", None, &[])];
+        assert_eq!(instance_config_dir(&agents, "mystery", Path::new(HOME)), None);
+    }
+
+    #[test]
+    fn only_agents_that_truly_relocate_are_listed() {
+        assert_eq!(config_relocation_env("claude"), Some("CLAUDE_CONFIG_DIR"));
+        assert_eq!(config_relocation_env("codex"), Some("CODEX_HOME"));
+        // grok's binary lives inside its config dir, so it has no clean one.
+        assert_eq!(config_relocation_env("grok"), None);
+        assert_eq!(config_relocation_env("opencode"), None);
     }
 }
 
