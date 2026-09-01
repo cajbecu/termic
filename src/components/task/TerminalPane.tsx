@@ -255,6 +255,21 @@ export function TerminalPane({ task, tab, active }: Props) {
   const senderStateRef = useRef<"busy" | "idle" | "attention" | null>(null);
   // Read inside the spawn effect, which must NOT re-run when this flips.
   const hooksOwnStateRef = useRef(false);
+  /** Has a hook for THIS pty actually reached us? Installed is not the same as
+   *  working, and conflating them hangs the UI.
+   *
+   *  Measured: a Docker-sandboxed tab has its hooks installed in the container's
+   *  config dir and fires them correctly, and not one OSC arrives, because the
+   *  hook writes to `$TERMIC_PTY` and that is a host device path the container
+   *  cannot see. With the heuristics stood down on the strength of "installed",
+   *  the tab sat on `working` from 07:47:35 onwards and nothing could ever end
+   *  it. Its neighbours on the same agent, unsandboxed, cycled fine.
+   *
+   *  So hooks EARN the right to own the state, per pty, by delivering once. A
+   *  working hook proves itself on the first submit, so the switchover costs a
+   *  fraction of one turn; a transport that cannot deliver leaves the fallbacks
+   *  armed, which is the behaviour that was there before hooks existed. */
+  const hookSeenRef = useRef(false);
   /** When the user last pressed Escape or Ctrl-C in this tab, and the only
    *  thing that licenses a heuristic to end a turn while hooks own the state.
    *
@@ -1176,6 +1191,10 @@ const captureArmedRef = useRef(false);
     // Reset the ref for this new PTY session. The lastInputAt-watching
     // effect and term.onData both set it to true once the user submits.
     submittedSinceSpawnRef.current = false;
+    // Proof is per PTY, not per tab. A restart gets a fresh container, a fresh
+    // env and possibly a different sandbox mode, so it has to demonstrate
+    // delivery again rather than inherit a claim the previous process earned.
+    hookSeenRef.current = false;
     // Reset sender classification so signal-silent agents (agy, custom CLIs)
     // get submit-window working detection on every respawn, not just the first.
     senderStateRef.current = null;
@@ -1472,7 +1491,7 @@ const captureArmedRef = useRef(false);
         // is the direction to fail in.
         const interrupted = Date.now() - escAtRef.current < ESC_INTERRUPT_WINDOW_MS
           && isUserWatching(task.id, tab.id);
-        if (hooksOwnStateRef.current) {
+        if (hooksOwnStateRef.current && hookSeenRef.current) {
           if (interrupted) goInterrupted("title idle after interrupt");
           else wdlog("title idle ignored (hooks own done for this agent)");
           if (state) lastTitleState = state;
@@ -1585,6 +1604,10 @@ const captureArmedRef = useRef(false);
     term.parser.registerOscHandler(777, (data) => {
       const parts = data.split(";");
       if (parts[0] !== "notify") return false;
+      if (!hookSeenRef.current) {
+        hookSeenRef.current = true;
+        logWorkState("hook-proven", `cli=${tab.cli} task=${JSON.stringify(task.name)} (via OSC 777)`);
+      }
       logWorkState("hook-osc", `cli=${tab.cli} osc=777 body=${JSON.stringify(data.slice(0, 120))}`);
       const body = parts.slice(2).join(";") || parts[1] || "";
       // The `title` field names the SENDER. Our own agent hook stamps
@@ -1614,6 +1637,11 @@ const captureArmedRef = useRef(false);
       // transition trace. "Did the hook fire at all" and "did the hook change
       // anything" are different questions, and while diagnosing whether hooks
       // work the first one is the one being asked.
+      if (!hookSeenRef.current) {
+        hookSeenRef.current = true;
+        logWorkState("hook-proven", `cli=${tab.cli} task=${JSON.stringify(task.name)}`
+          + " first hook delivered; fallbacks stand down for this pty");
+      }
       logWorkState("hook-osc", `cli=${tab.cli} osc=133;${sub} task=${JSON.stringify(task.name)}`);
       wdlog(`OSC 133;${sub}`);
       dbg("osc133", sub);
@@ -1995,7 +2023,8 @@ const captureArmedRef = useRef(false);
         const base = builtinBaseId(tab.cli, useApp.getState().agents);
         logWorkState("spawn",
           `task=${JSON.stringify(task.name)} cli=${tab.cli} base=${base}`
-          + ` inherited=${base !== tab.cli} hooksOwn=${hooksOwnStateRef.current}`
+          + ` inherited=${base !== tab.cli} hooksInstalled=${hooksOwnStateRef.current}`
+          + ` hookProven=${hookSeenRef.current}`
           + ` ptyId=${ptyId}`);
         // Sandbox truth lands synchronously with the spawn (no event
         // race possible). Render the warning chip immediately when the
@@ -2587,7 +2616,8 @@ const captureArmedRef = useRef(false);
       // silent the whole time, while the screen sat unchanged for minutes at a
       // stretch. A `done` from any of these is a `done` the agent never
       // reported. Fail towards "still working", which the next prompt clears.
-      const hooksOwn = hooksOwnStateRef.current;
+      // Both halves: configured to own the state AND observed doing it.
+      const hooksOwn = hooksOwnStateRef.current && hookSeenRef.current;
       // The one exception, and the only reason an interrupted turn ever ends
       // for an agent that reports nothing. Licensed by an actual keystroke,
       // corroborated by the terminal going quiet, and it calls

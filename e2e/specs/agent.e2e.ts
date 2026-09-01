@@ -932,9 +932,43 @@ describe("agent notifications", () => {
     };
     after(async () => { await setHooksOwnState("fakeagent", false); });
 
+    // Installed is not the same as WORKING. Measured on a Docker-sandboxed tab:
+    // its hooks were installed in the container's config dir and fired, and not
+    // one OSC arrived, because they write to `$TERMIC_PTY` and that host device
+    // path does not exist inside the container. With the fallbacks stood down
+    // on the strength of "installed", the tab sat on `working` and nothing
+    // could ever end it.
+    it("keeps the fallbacks armed until a hook actually delivers", async () => {
+      await setHooksOwnState("fakeagent", true);
+      await reset();
+
+      // A turn where NO hook OSC is ever emitted, which is the broken-transport
+      // shape. The fixture drives the title only.
+      await submitToAgent(taskId!, "a turn whose hooks never reach termic");
+      await waitForWorkBadge(taskId!, "working", {
+        timeout: 20_000,
+        message: "the turn never reached the working badge",
+      });
+
+      // The turn must still END. Before this, "hooks are installed" alone
+      // silenced the title and every demoter, so this hung indefinitely.
+      await waitForWorkBadgeGone(taskId!, "working", {
+        timeout: 30_000,
+        message: "no hook ever delivered, and the fallbacks never took over: the tab is stuck working",
+      });
+    });
+
     it("ignores the title going idle, so a long turn is not called done early", async () => {
       await setHooksOwnState("fakeagent", true);
       await reset();
+      // Prove delivery FIRST. The suppression under test only applies once a
+      // hook has been seen on this pty, which is the whole point of the case
+      // above: the two together say "trust hooks, but only once they speak".
+      await browser.execute((id) => {
+        const s = window.__termic!.useApp.getState();
+        const tab = s.tabs[id][0];
+        window.__termic!.ipc.ptyWrite(tab.ptyId!, "\u001b]133;C\u0007");
+      }, taskId);
 
       // An ordinary turn: the fixture spins, then paints claude's idle glyph.
       // That glyph alone used to be enough to end the turn.
