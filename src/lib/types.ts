@@ -1464,6 +1464,10 @@ export interface HookTargetStatus {
    *  a file we could not parse. */
   error: string | null;
   schema_version: number | null;
+  /** Installed, but from an older termic whose hook set differs. Kept up to
+   *  date automatically by `agentHooksSync`; a value that stays true means the
+   *  update was refused (unreadable config, or disableAllHooks). */
+  stale: boolean;
 }
 
 /** Per-agent hook state. One toggle governs both targets (see

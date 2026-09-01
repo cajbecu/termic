@@ -2076,8 +2076,12 @@ export const useApp = create<AppState>((set, get) => ({
     //   - unread (bell/attention/exit)
     //   - workState (done OR working) → idle
     // Clearing "working" on focus is the manual escape hatch for
-    // stuck spinners: agents like Claude Code stream continuously
-    // (thinking dots, elapsed counter), defeating every automatic
+    // stuck spinners, and it applies ONLY to agents whose state is read
+    // from their terminal (see visitMayClearWorking). For an agent that
+    // reports its own state there is nothing to escape from, and the
+    // clear was destroying live state that nothing put back.
+    // Historically it was unconditional because agents like Claude Code
+    // stream continuously (thinking dots, elapsed counter), defeating every automatic
     // demoter — focusing the tab is now the user's "I see it, kill
     // the spinner" gesture. The next sender signal / submit will
     // re-arm working if work is actually still happening.

@@ -1082,6 +1082,51 @@ describe("setTabSessionId", () => {
   });
 });
 
+describe("visiting a task does not stop a hook-driven agent looking busy", () => {
+  const seed = (hooks: boolean) => {
+    useUI.getState().setWindowless(false);
+    useUI.getState().setWindowFocused(true);
+    useApp.setState({
+      tasks: [{ id: "t1", project_id: "p", name: "t1", path: "/tmp/t1" }],
+      activeTaskId: null,
+      activeTab: { t1: "a" },
+      splitTree: {}, activePaneId: {},
+      agentHooksInstalled: hooks ? { claude: true } : {},
+      tabs: { t1: [{ id: "a", type: "terminal", cli: "claude", title: "a", workState: "working" }] },
+    } as never);
+  };
+  const workState = () =>
+    (useApp.getState().tabs.t1[0] as { workState?: string }).workState;
+
+  it("keeps the spinner when the agent reports its own state", () => {
+    // The reported regression. Clicking in dropped the spinner, the grace
+    // window then refused to let it back, and unlike the terminal title
+    // nothing re-asserts working, so it stayed gone for the whole turn.
+    seed(true);
+    useApp.getState().setActiveTask("t1");
+    expect(workState()).toBe("working");
+  });
+
+  it("still clears it for an agent read from its terminal", () => {
+    // The escape hatch is real where the state is a guess: a spinner that got
+    // stuck needs a way out that does not involve restarting the tab.
+    seed(false);
+    useApp.getState().setActiveTask("t1");
+    expect(workState()).toBe("idle");
+  });
+
+  it("always clears a done badge, hooks or not", () => {
+    // Done IS a notification, and visiting is exactly the acknowledgement it
+    // was waiting for. Only `working` is live state.
+    seed(true);
+    useApp.setState({
+      tabs: { t1: [{ id: "a", type: "terminal", cli: "claude", title: "a", workState: "done" }] },
+    } as never);
+    useApp.getState().setActiveTask("t1");
+    expect(workState()).toBe("idle");
+  });
+});
+
 describe("isUserWatching and window focus", () => {
   beforeEach(() => {
     useUI.getState().setWindowless(false);

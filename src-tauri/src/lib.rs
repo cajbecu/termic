@@ -18213,6 +18213,7 @@ pub fn run() {
             agent_hooks::agent_hooks_plan,
             agent_hooks::agent_hooks_install,
             agent_hooks::agent_hooks_remove,
+            agent_hooks::agent_hooks_sync,
             perf_boot_elapsed_ms,
             deep_link_take_pending,
             projects_list, project_add, project_add_multi, project_set_members, project_update, project_remove, project_reorder, project_set_group,

@@ -1184,3 +1184,7 @@ export const agentHooksStatus  = (agentId: string) => invoke<AgentHookStatus>("a
 export const agentHooksPlan    = (agentId: string) => invoke<HookPlan>("agent_hooks_plan", { agentId });
 export const agentHooksInstall = (agentId: string) => invoke<AgentHookStatus>("agent_hooks_install", { agentId });
 export const agentHooksRemove  = (agentId: string) => invoke<AgentHookStatus>("agent_hooks_remove", { agentId });
+
+/** Bring already-installed hooks up to this build's set. Safe to call on every
+ *  startup: a no-op unless something we generate actually changed. */
+export const agentHooksSync = () => invoke<string[]>("agent_hooks_sync");
