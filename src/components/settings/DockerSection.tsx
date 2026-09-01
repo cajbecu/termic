@@ -338,7 +338,8 @@ export function DockerSection() {
       <div className="flex flex-col gap-2 rounded-md border border-[var(--color-border-soft)] bg-[var(--color-bg-2)] px-3.5 py-3 text-[12.5px] text-[var(--color-fg-dim)]">
         <div>
           <b className="text-[var(--color-fg)]">Filesystem: </b>
-          only what termic mounts (the worktree and its git metadata). The rest of your Mac is invisible.
+          only what termic mounts: the worktree, its git metadata, and your git name and email so commits
+          you make in there are yours. The rest of your Mac is invisible.
         </div>
         <div>
           <b className="text-[var(--color-fg)]"><u>Network: unrestricted for now</u></b>, unlike Seatbelt's host

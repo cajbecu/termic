@@ -531,14 +531,51 @@ function reseatBottomAtPinBoundary(
  * already drifted: fireDone/seenAtIdle omitted the split-pane leaf, so a tab
  * the user was watching in a split still got a badge. They all route here now.
  */
-export function isUserWatchingIn(s: AppState, taskId: string, tabId?: string): boolean {
-  if (useUI.getState().windowless) return false;
+/** Is this tab the one on screen for its task? PURE in the app store: it
+ *  answers "would the user see this tab if they looked", and says nothing
+ *  about whether they are looking.
+ *
+ *  Split out from `isUserWatchingIn` because the presence half lives in the UI
+ *  store, and a Zustand selector over `useApp` does not re-run when `useUI`
+ *  changes. A subscriber that needs to react to BOTH has to read them
+ *  separately, which it cannot do while the two are welded together. */
+/** May a manual visit clear this tab's `working` state?
+ *
+ *  Clicking a task means "I have seen this", which is true of a DONE badge and
+ *  false of a running agent: the spinner is not a notification to acknowledge,
+ *  it is live state, and the agent keeps working either way. The clear exists
+ *  as an escape hatch from a spinner that got STUCK, which was a real hazard
+ *  while the state came from reading a terminal.
+ *
+ *  When the agent reports its own state that hazard is gone, and the clear
+ *  became the bug instead: visiting a working task dropped its spinner, the
+ *  grace window below then refused to let it back, and with hooks nothing
+ *  re-asserts working the way a repainting title used to. The spinner stayed
+ *  gone for the rest of the turn. Reported from a real session.
+ *
+ *  So the escape hatch survives exactly where it is still needed. */
+function visitMayClearWorking(s: AppState, cli: string | undefined): boolean {
+  return !(cli && s.agentHooksInstalled[cli] === true);
+}
+
+export function isTabOnScreenIn(s: AppState, taskId: string, tabId?: string): boolean {
   if (s.activeTaskId !== taskId) return false;
   if (tabId === undefined) return true;
   const tree = s.splitTree[taskId];
   const paneId = s.activePaneId[taskId];
   const leaf = (tree && paneId) ? findLeaf(tree, paneId) : null;
   return s.activeTab[taskId] === tabId || leaf?.activeTabId === tabId;
+}
+
+export function isUserWatchingIn(s: AppState, taskId: string, tabId?: string): boolean {
+  const ui = useUI.getState();
+  if (ui.windowless) return false;
+  // An unfocused window is not somebody watching. Without this a turn that
+  // finished while the user was in another app was suppressed as already-seen,
+  // so they came back to a task that had quietly gone idle with no badge and
+  // no notification. `windowless` alone only covered the window being CLOSED.
+  if (!ui.windowFocused) return false;
+  return isTabOnScreenIn(s, taskId, tabId);
 }
 
 /** `isUserWatchingIn` against the current store. */
@@ -782,7 +819,9 @@ export const useApp = create<AppState>((set, get) => ({
           if (t.unread) {
             nt = { ...nt, unread: null };
           }
-          if (t.id === activeId && (t.workState === "done" || t.workState === "working")) {
+          const clearable = t.workState === "done"
+            || (t.workState === "working" && visitMayClearWorking(s, t.cli));
+          if (t.id === activeId && clearable) {
             nt = {
               ...nt,
               workState: "idle",
@@ -2051,7 +2090,8 @@ export const useApp = create<AppState>((set, get) => ({
       if (t.type === "terminal") {
         const patch: Partial<TerminalTab> = {};
         if (t.unread) patch.unread = null;
-        if (t.workState === "done" || t.workState === "working") {
+        if (t.workState === "done"
+            || (t.workState === "working" && visitMayClearWorking(s, t.cli))) {
           patch.workState = "idle";
           patch.workProgress = null;
           patch.workProgressKind = null;

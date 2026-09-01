@@ -816,6 +816,29 @@ export async function waitForOutputSpan(taskId: string, ms: number): Promise<voi
   });
 }
 
+/** Drive the app's idea of window focus, deterministically.
+ *
+ *  `useSeenOnDwell` treats "the badged tab is on screen in a FOCUSED window"
+ *  as having read the badge. Real focus is not something a spec can rely on:
+ *  the suite's window is frequently occluded (another Space, behind the
+ *  terminal, a CI runner with no desktop), so `document.hasFocus()` decides
+ *  whether a badge survives, and a spec that does not say which it wants
+ *  passes or fails on where the window happened to be.
+ *
+ *  So every spec that cares states it. `false` models the user being away,
+ *  which is the only time a badge is meant to persist at all.
+ */
+export async function setWindowPresence(focused: boolean): Promise<void> {
+  // Sets the flag, rather than dispatching a focus/blur event. `initWindowFocus`
+  // treats those events only as a cue to re-read `document.hasFocus()`, because
+  // inferring focus from which event arrived gets it wrong when they interleave
+  // during a Space switch. A synthetic event would therefore be a no-op that
+  // silently re-asserted whatever the real window was doing.
+  await browser.execute((f) => {
+    window.__termic!.useUI.getState().setWindowFocused(f);
+  }, focused);
+}
+
 export async function pressEscape(taskId: string): Promise<void> {
   const result = await browser.execute((id) => {
     const host = document.querySelector(`[data-task-id="${id}"]`);

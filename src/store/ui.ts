@@ -133,6 +133,14 @@ interface UIState {
    *  hidden window still reports full layout). See docs/performance.md bear
    *  trap 2 and the windowless block in src-tauri/src/lib.rs. */
   windowless: boolean;
+  /** True while Termic's window has OS focus. Distinct from `windowless`,
+   *  which is the window being gone entirely: a Termic sitting behind the
+   *  user's browser is present but unwatched, and treating that as "watched"
+   *  meant a turn finishing while they were in another app produced no badge
+   *  at all, because the badge was suppressed as already-seen. Set from
+   *  `initWindowFocus`. */
+  windowFocused: boolean;
+  setWindowFocused: (v: boolean) => void;
   setWindowless: (v: boolean) => void;
   /** The window close prompt ("Keep in Menu Bar" / "Quit Termic" / dismiss).
    *  Opened by Rust's `termic://close-requested`, which only fires when the
@@ -417,6 +425,9 @@ export const useUI = create<UIState>(set => ({
   runCommandsDialog: null,
   resumeOverrideTaskId: null,
   windowless: false,
+  // Assume focused until told otherwise: a first paint that guessed "away"
+  // would badge a turn the user watched finish.
+  windowFocused: true,
   closePromptOpen: false,
   closePromptNonce: 0,
   shortcutsHelpOpen: false,
@@ -467,6 +478,7 @@ export const useUI = create<UIState>(set => ({
   openResumeOverride: (taskId) => set({ resumeOverrideTaskId: taskId }),
   closeResumeOverride:() => set({ resumeOverrideTaskId: null }),
   setWindowless: (v) => set({ windowless: v }),
+  setWindowFocused: (v) => set(s => (s.windowFocused === v ? s : { windowFocused: v })),
   setClosePromptOpen: (v) => set({ closePromptOpen: v }),
   requestClosePrompt: () =>
     set(s => ({ closePromptOpen: true, closePromptNonce: s.closePromptNonce + 1 })),

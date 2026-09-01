@@ -29,7 +29,7 @@ vi.mock("@/lib/agents", () => ({
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn().mockResolvedValue(undefined) }));
 
 import { invoke } from "@tauri-apps/api/core";
-import { isUserWatching, useApp } from "@/store/app";
+import { isTabOnScreenIn, isUserWatching, useApp } from "@/store/app";
 import * as ipc from "@/lib/ipc";
 import { markUnattendedSpawn, takeUnattendedSpawn } from "@/lib/unattendedSpawns";
 import type { QueueItem, PaneLeaf, Tab, TerminalTab, PersistedTab } from "@/lib/types";
@@ -1079,6 +1079,45 @@ describe("setTabSessionId", () => {
     const task = useApp.getState().tasks.find(w => w.id === "ws1")!;
     expect(task.persisted_tabs!.find(t => t.id === "a")!.session_id).toBeNull();
     expect(ipc.taskSetTabSessionId).toHaveBeenCalledWith("ws1", "a", "");
+  });
+});
+
+describe("isUserWatching and window focus", () => {
+  beforeEach(() => {
+    useUI.getState().setWindowless(false);
+    useUI.getState().setWindowFocused(true);
+    useApp.setState({
+      activeTaskId: "t1", activeTab: { t1: "a" }, splitTree: {}, activePaneId: {},
+    } as never);
+  });
+  afterEach(() => { useUI.getState().setWindowFocused(true); });
+
+  it("counts a focused window on the active task as watching", () => {
+    expect(isUserWatching("t1", "a")).toBe(true);
+  });
+
+  it("does NOT count an unfocused window, even on the active tab", () => {
+    // The reported case: Termic open behind the browser, agent finishes on the
+    // task that happens to be active. Treating that as watched suppressed the
+    // badge as already-seen, so there was nothing waiting on return.
+    useUI.getState().setWindowFocused(false);
+    expect(isUserWatching("t1", "a")).toBe(false);
+  });
+
+  it("still excludes the windowless case", () => {
+    useUI.getState().setWindowFocused(true);
+    useUI.getState().setWindowless(true);
+    expect(isUserWatching("t1", "a")).toBe(false);
+    useUI.getState().setWindowless(false);
+  });
+
+  it("keeps on-screen separate from presence", () => {
+    // isTabOnScreenIn answers "would they see it if they looked", which stays
+    // true while they are away. That split is what lets a subscriber react to
+    // the two stores independently.
+    useUI.getState().setWindowFocused(false);
+    expect(isTabOnScreenIn(useApp.getState(), "t1", "a")).toBe(true);
+    expect(isUserWatching("t1", "a")).toBe(false);
   });
 });
 

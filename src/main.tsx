@@ -13,6 +13,7 @@ import { initTerminalDropHandler } from "@/lib/terminalDrop";
 import { initWindowlessMode } from "@/lib/windowlessMode";
 import { initModKeyClass } from "@/lib/modKeyClass";
 import { initUserPresence } from "@/lib/userPresence";
+import { initWindowFocus } from "@/lib/windowFocus";
 
 // StrictMode disabled: it double-mounts effects in dev, which races our async
 // PTY spawn flow (first spawn gets killed by the strict teardown before its
@@ -151,6 +152,7 @@ if (import.meta.env.DEV || import.meta.env.VITE_E2E) {
 // plain hover). See modKeyClass.ts + index.css.
 initModKeyClass();
 initUserPresence();
+initWindowFocus();
 
 // Mirror uncaught errors + unhandled promise rejections to the Rust-side
 // debug log so they show up in the dev terminal (`/var/folders/.../T/

@@ -443,9 +443,24 @@ fn git_identity_container_path(xdg_config_home: &str) -> String {
 ///
 /// Absent keys come back `None` (`git config --get` exits non-zero), and a
 /// host with no identity at all mounts nothing.
-fn read_git_identity(dir: &std::path::Path) -> (Option<String>, Option<String>) {
+///
+/// `fallback` is read instead when `dir` is not a directory, which is not a
+/// hypothetical: the SETTINGS-level command preview builds its spec from a
+/// sample task whose path is a deliberate placeholder
+/// (`sample_preview_task`), and that panel tells the reader "everything else,
+/// the mounts, the environment and the hardening flags, is what a real launch
+/// uses". Without the fallback this one mount would be the single line
+/// missing from it, which is the opposite of what a preview is for. Answering
+/// from the home dir is one notch less specific (no repo to resolve
+/// `includeIf` or a repo-local override against) and that is exactly right for
+/// a preview with no real task in play.
+fn read_git_identity(
+    dir: &std::path::Path,
+    fallback: &std::path::Path,
+) -> (Option<String>, Option<String>) {
+    let probe = if dir.is_dir() { dir } else { fallback };
     let get = |key: &str| {
-        crate::git(&["config", "--get", key], dir)
+        crate::git(&["config", "--get", key], probe)
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
@@ -839,6 +854,7 @@ pub fn build_spec(
     //    Re-asserting our own value instead would break a user who relocated
     //    it deliberately, which is a real thing to do here: opencode's config
     //    dir lives under `/root/.config`.
+    let mut no_identity_warning = false;
     {
         let xdg = spawn_env
             .get("XDG_CONFIG_HOME")
@@ -854,17 +870,28 @@ pub fn build_spec(
         // the read below, so a spawn that will not mount anything does not
         // shell out to git for an answer it cannot use.
         if persist_target_allowed(&container) && !already_mounted {
-            let (name, email) = read_git_identity(std::path::Path::new(&task_path));
-            if let Some(contents) = git_identity_config(name.as_deref(), email.as_deref()) {
-                if let Some(host) = stage_git_identity(&task.id, &contents) {
-                    mounts.push(Mount::implicit(
-                        host,
-                        container,
-                        true,
-                        "your git identity (name and email), so commits made in the container are yours",
-                        false,
-                    ));
+            let (name, email) = read_git_identity(
+                std::path::Path::new(&task_path),
+                std::path::Path::new(&home),
+            );
+            match git_identity_config(name.as_deref(), email.as_deref()) {
+                Some(contents) => {
+                    if let Some(host) = stage_git_identity(&task.id, &contents) {
+                        mounts.push(Mount::implicit(
+                            host,
+                            container,
+                            true,
+                            "your git identity (name and email), so commits made in the container are yours",
+                            false,
+                        ));
+                    }
                 }
+                // Say so rather than let the agent discover it. This is the
+                // one case the feature cannot rescue, and it is silent
+                // otherwise: the container simply has no identity, the agent's
+                // first commit dies on "Please tell me who you are", and
+                // nothing anywhere says termic looked and found none.
+                None => no_identity_warning = true,
             }
         }
     }
@@ -920,6 +947,12 @@ pub fn build_spec(
     // A value that IS covered by a mount is left alone: that user arranged
     // somewhere real for it to go, and knows something we do not.
     let mut warnings: Vec<String> = Vec::new();
+    if no_identity_warning {
+        warnings.push(
+            "No git identity found on this Mac, so a commit made inside the container will fail with \"Please tell me who you are\". Set one with: git config --global user.name \"Your Name\" and git config --global user.email \"you@example.com\"."
+                .to_string(),
+        );
+    }
     if let Some((var, want)) = relocation.clone() {
         if let Some(pos) = env.iter().rposition(|(k, _)| *k == var) {
             let have = env[pos].1.clone();
@@ -2226,7 +2259,11 @@ mod tests {
             // And an empty list is a real answer: gh/glab are a DEFAULT, not
             // a floor, so a user who clears the field gets no shared mounts.
             let none = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false, &[], &[], "pty-shared02", "claude", &[]);
-            assert!(!none.mounts.iter().any(|m| m.container.starts_with("/root/.config/")));
+            // The git identity file (step 4d) also lands under `/root/.config`
+            // and is not a shared config dir: it is mounted for every task
+            // regardless of this list, so it is exempt from the check.
+            assert!(!none.mounts.iter().any(|m| m.container.starts_with("/root/.config/")
+                && m.container != "/root/.config/git/config"));
             assert!(!none.env.iter().any(|(k, _)| k == "GH_CONFIG_DIR"));
         });
     }
@@ -2465,15 +2502,42 @@ mod tests {
     }
 
     #[test]
-    fn a_path_with_no_resolvable_identity_mounts_nothing() {
-        // No identity, no git, no repo: all the same answer. An empty or
-        // half-written config file mounted into every container would be a
-        // mount the preview cannot explain and git cannot use.
+    fn a_gone_task_path_reads_the_identity_from_home_instead() {
+        // The SETTINGS-level command preview builds from a sample task whose
+        // path is a placeholder that does not exist, and it promises the
+        // reader that everything but the worktree path is what a real launch
+        // uses. A repo-scoped read against that path fails, so without this
+        // fallback the git identity would be the one mount missing from the
+        // one panel whose whole job is showing what gets mounted.
+        let gone = std::path::Path::new("/tmp/termic-docker-test-does-not-exist-git");
+        let home = repo_with_local_identity("Fallback Home", "fallback@example.com");
+        let (name, email) = read_git_identity(gone, home.path());
+        assert_eq!(name.as_deref(), Some("Fallback Home"));
+        assert_eq!(email.as_deref(), Some("fallback@example.com"));
+
+        // And when there is nothing to find in either place, there is nothing
+        // to mount: no empty file, no half-answer.
+        let nowhere = std::path::Path::new("/tmp/termic-docker-test-also-not-here-git");
+        assert_eq!(read_git_identity(gone, nowhere), (None, None));
+    }
+
+    #[test]
+    fn the_placeholder_preview_task_still_shows_the_identity_line() {
+        // Same guarantee as above, asserted where it is actually made: the
+        // spec the settings preview renders. Skipped on a machine with no git
+        // identity at all, which is the one case where there is correctly
+        // nothing to show (and which the warning below covers instead).
+        let home = dirs::home_dir().unwrap_or_default();
+        let (n, e) = read_git_identity(&home, &home);
+        if n.is_none() && e.is_none() {
+            return;
+        }
         with_scratch_data_dir(|| {
-            let task = stub_task("t-git-none", "/tmp/termic-docker-test-does-not-exist-git");
+            let task = stub_task("sample", "/path/to/your/task-worktree");
             let spec = spec_for(&task, &std::collections::HashMap::new());
-            assert!(!spec.mounts.iter().any(|m| m.container.ends_with("/git/config")),
-                "{:?}", spec.mounts);
+            assert!(spec.mounts.iter().any(|m| m.container == "/root/.config/git/config"),
+                "the settings preview must show this mount like every other one: {:?}", spec.mounts);
+            assert!(spec.warnings.is_empty(), "{:?}", spec.warnings);
         });
     }
 

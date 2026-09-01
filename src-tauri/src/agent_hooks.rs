@@ -172,8 +172,24 @@ pub fn hooks_for(agent: &str) -> &'static [(&'static str, Signal)] {
         // having set working would inherit the title's fragility. The Codex
         // latch (see docs/gotchas.md) is what that failure looks like: a vendor
         // changed their title format and done detection silently stopped.
+        // `PreToolUse` is a HEARTBEAT, not a duplicate of UserPromptSubmit.
+        //
+        // Working is a sustained state and every other signal here is an edge.
+        // The terminal title, which this replaced, re-asserted working on every
+        // repaint, so anything that wrongly cleared the spinner self-healed
+        // within a frame. UserPromptSubmit fires ONCE, so the same clear became
+        // permanent for the rest of the turn: a user clicking into a running
+        // task has its spinner dropped (the manual-clear path) and nothing ever
+        // put it back. Reported from a real session, and a straight regression
+        // against the title detection it replaced.
+        //
+        // A tool call is the protocol's own "still going", it lands many times
+        // per turn, and an observer hook that exits 0 with no output cannot
+        // affect the tool (the same shape as the rtk hook people already run on
+        // this event).
         "claude" => &[
             ("UserPromptSubmit", Signal::Working),
+            ("PreToolUse", Signal::Working),
             ("PermissionRequest", Signal::Attention),
             ("Stop", Signal::Done),
         ],
@@ -183,10 +199,16 @@ pub fn hooks_for(agent: &str) -> &'static [(&'static str, Signal)] {
         // --max-turns and a no-progress bail-out.
         "grok" => &[
             ("UserPromptSubmit", Signal::Working),
+            ("PreToolUse", Signal::Working),
             ("Notification", Signal::Attention),
             ("Stop", Signal::Done),
             ("StopCancelled", Signal::Done),
         ],
+        // agy needs no extra heartbeat: PreInvocation already fires once per
+        // model invocation, several times in a turn. Its PreToolUse is also the
+        // one tool event across these agents that is NOT safe to observe
+        // silently, since `decision` is documented as required, so adding it
+        // would risk blocking the tool for no gain.
         "agy" => &[("PreInvocation", Signal::Working), ("Stop", Signal::Done)],
         _ => &[],
     }
@@ -234,6 +256,10 @@ fn schema_for(agent: &str) -> Schema {
         _ => Schema::ClaudeCompatible,
     }
 }
+
+/// How often the opencode plugin may re-assert "working" while a turn streams.
+/// Well under any demoter's patience, and far above the raw event rate.
+const HEARTBEAT_MS: u32 = 2_000;
 
 /// Top-level key we own in the Antigravity config. Removal deletes exactly this.
 const AGY_HOOK_NAME: &str = "termic";
@@ -357,11 +383,30 @@ const ATTENTION = "{attention}";
 const WORKING   = "{working}";
 const DONE      = "{done}";
 
+// Heartbeat. `chat.message` fires ONCE per turn, and working is a sustained
+// state: anything that clears the spinner mid-turn (the user clicking into the
+// task drops it) would otherwise never be undone, which is the regression the
+// terminal title did not have, because it re-asserted on every repaint.
+// opencode streams `message.part.delta` continuously while it works (measured:
+// hundreds per turn), so re-asserting on those restores self-healing. Throttled
+// because the raw rate is far too high to write an OSC per event.
+let lastBeat = 0;
+const beat = () => {{
+  const now = Date.now();
+  if (now - lastBeat < {HEARTBEAT_MS}) return;
+  lastBeat = now;
+  send(WORKING);
+}};
+
 export const TermicStatus = async () => ({{
   // One per turn, on submit.
-  "chat.message": async () => {{ try {{ send(WORKING); }} catch {{}} }},
+  "chat.message": async () => {{ try {{ send(WORKING); lastBeat = Date.now(); }} catch {{}} }},
   event: async ({{ event }}) => {{
     try {{
+      if (event?.type === "message.part.delta" || event?.type === "message.part.updated") {{
+        beat();
+        return;
+      }}
       switch (event?.type) {{
         // The only agent measured that reports the block AND its release, so
         // attention here can be cleared exactly rather than inferred.

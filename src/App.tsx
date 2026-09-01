@@ -29,6 +29,7 @@ import { Toaster } from "@/components/ui/Toaster";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { useShortcuts } from "@/hooks/useShortcuts";
 import { useAttentionNotifier } from "@/hooks/useAttentionNotifier";
+import { useSeenOnDwell } from "@/hooks/useSeenOnDwell";
 import { useIsFullscreen } from "@/hooks/useIsFullscreen";
 import { useUpdate } from "@/store/update";
 import { usePrefs } from "@/store/prefs";
@@ -63,6 +64,7 @@ export function App() {
 
   useShortcuts();
   useAttentionNotifier();
+  useSeenOnDwell();
 
   useEffect(() => {
     // Before loadAll(): this marks when the shell is on screen, which is what

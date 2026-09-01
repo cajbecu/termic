@@ -31,6 +31,7 @@ import {
   setHooksOwnState,
   waitForWorkBadge,
   waitForWorkBadgeGone,
+  setWindowPresence,
 } from "../helpers";
 
 /** ms since the task's agent tab last produced PTY bytes. Not in the DOM. */
@@ -798,6 +799,8 @@ describe("agent notifications", () => {
     await requireWorkBadges();
     taskId = await openTask("e2e-agent-notify");
     await waitForAgentReady(taskId);
+    // Away, which is the only state in which a badge is meant to persist.
+    await setWindowPresence(false);
 
     await submitToAgent(taskId, "#osc9 FakeAgent needs your permission");
 
@@ -857,6 +860,11 @@ describe("agent notifications", () => {
       s.clearAttention(id, s.tabs[id][0].id);
     }, taskId);
 
+    // This spec waits past SETTLE_MS with the badge up, so it MUST say the
+    // user is away: three seconds of dwelling in a focused window is now a
+    // read receipt, and without this the assertion below would pass or fail on
+    // whether the suite's window happened to have focus.
+    await setWindowPresence(false);
     await submitToAgent(taskId!, "#hookattn");
 
     await waitForWorkBadge(taskId!, "attention", {
@@ -873,6 +881,39 @@ describe("agent notifications", () => {
     });
     expect(await taskViewBadge(taskId!)).toBe("attention");
     expect(await sidebarBadge(taskId!)).not.toBe("done");
+  });
+
+  // Looking at a tab is how you read its badge. `markAttention` marks
+  // unconditionally, focused tab included, and the badge then cleared only on
+  // a keystroke in that terminal or on re-activating the task, so the common
+  // case stuck: the tab you are already on earns a badge while you are in
+  // another app, you come back, and because the tab never CHANGED nothing
+  // cleared it. Clicking away and back was the only way out.
+  it("clears a badge on the tab you are looking at, once you are back", async () => {
+    await ensureActiveTask(taskId!);
+    await setWindowPresence(false);
+    await browser.execute((id) => {
+      const s = window.__termic!.useApp.getState();
+      s.clearAttention(id, s.tabs[id][0].id);
+    }, taskId);
+
+    await submitToAgent(taskId!, "#osc9 FakeAgent needs your permission");
+    await waitForWorkBadge(taskId!, "attention", {
+      timeout: 20_000,
+      message: "the badge never appeared while the user was away",
+    });
+
+    // Still away, and still badged. Without this the test would also pass on a
+    // bug that simply drops every attention, since the assertion below is that
+    // a badge went away.
+    expect(await taskViewBadge(taskId!)).toBe("attention");
+
+    // Back at the keyboard, on that very tab.
+    await setWindowPresence(true);
+    await waitForWorkBadgeGone(taskId!, "attention", {
+      timeout: 20_000,
+      message: "returning to a focused window never cleared the badge on the visible tab",
+    });
   });
   // Once an agent reports its own state, the terminal TITLE stops being
   // allowed to end a turn for it. This is the case the whole design turns on:
