@@ -9,6 +9,7 @@
 //
 // Installed once from main.tsx, next to the other window listeners.
 
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useUI } from "@/store/ui";
 
 let initialized = false;
@@ -34,5 +35,19 @@ export function initWindowFocus(): void {
   window.addEventListener("focus", sync);
   window.addEventListener("blur", sync);
   document.addEventListener("visibilitychange", sync);
+  // The AUTHORITATIVE source, and the reason the DOM listeners above are not
+  // enough on their own. They fire when the WEBVIEW's focus changes, which is
+  // not the same event as the OS window gaining focus: cmd-tabbing back to
+  // Termic left `document.hasFocus()` reporting stale, so a badge earned while
+  // the user was away survived their return and only cleared when they clicked
+  // a task. Reported exactly that way. Tauri reports the window's own focus, so
+  // it is used verbatim rather than as a cue to re-read the DOM.
+  getCurrentWindow()
+    .onFocusChanged(({ payload: focused }) => {
+      useUI.getState().setWindowFocused(focused);
+    })
+    .catch(() => {
+      // No Tauri (vitest, a browser preview). The DOM listeners still apply.
+    });
   sync();
 }

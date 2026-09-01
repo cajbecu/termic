@@ -17904,6 +17904,18 @@ pub fn run() {
         })
         .manage(PtyManager::default())
         .setup(|app| {
+            // FIRST thing, e2e only. Accessory was already set before the
+            // window is shown, and that is too late for the very first launch:
+            // macOS activates a Regular app while it starts up, before any
+            // window work runs, so spec file number one still yanked the user
+            // to whatever Space it opened on. Setting the policy at the top of
+            // setup means the process is never Regular at all.
+            //
+            // Reported three times. Each earlier fix addressed the show path,
+            // which is the second half of the problem.
+            #[cfg(all(target_os = "macos", feature = "e2e"))]
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             // Single instance per data dir (release only): if another
             // termic already owns this data dir's control socket, raise it
             // and exit BEFORE building a window, so a second launch (prod
