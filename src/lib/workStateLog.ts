@@ -16,8 +16,14 @@
 
 import { ptyDebugAppend } from "@/lib/ipc";
 
-/** One file, so a session's whole story is in time order across every task. */
-export const WORK_STATE_LOG = "termic-workstate.log";
+/** One file, so a session's whole story is in time order across every task.
+ *
+ *  The e2e build writes somewhere else. Both share an OS temp dir, so a suite
+ *  run interleaves hundreds of fixture transitions into the file someone is
+ *  reading to diagnose their real agents, and the tail stops being the tail.
+ *  Found while doing exactly that. */
+export const WORK_STATE_LOG =
+  import.meta.env.VITE_E2E ? "termic-workstate-e2e.log" : "termic-workstate.log";
 
 // A session cannot fill the disk. Transitions are rare, so this is generous for
 // a long day and still bounded; the cap is announced in the log rather than
