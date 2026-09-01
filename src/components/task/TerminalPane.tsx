@@ -1585,6 +1585,7 @@ const captureArmedRef = useRef(false);
     term.parser.registerOscHandler(777, (data) => {
       const parts = data.split(";");
       if (parts[0] !== "notify") return false;
+      logWorkState("hook-osc", `cli=${tab.cli} osc=777 body=${JSON.stringify(data.slice(0, 120))}`);
       const body = parts.slice(2).join(";") || parts[1] || "";
       // The `title` field names the SENDER. Our own agent hook stamps
       // HOOK_OSC_TITLE there, which is how a signal termic installed itself is
@@ -1607,6 +1608,13 @@ const captureArmedRef = useRef(false);
     //   D[;<exit>] → command done (idle, immediate — no settle delay)
     term.parser.registerOscHandler(133, (data) => {
       const sub = (data.split(";")[0] || "").toUpperCase();
+      // Logged on ARRIVAL, not on the state change it may or may not cause.
+      // The working hook is a heartbeat: most of its firings land on a tab that
+      // is already working, which is a no-change and therefore invisible in the
+      // transition trace. "Did the hook fire at all" and "did the hook change
+      // anything" are different questions, and while diagnosing whether hooks
+      // work the first one is the one being asked.
+      logWorkState("hook-osc", `cli=${tab.cli} osc=133;${sub} task=${JSON.stringify(task.name)}`);
       wdlog(`OSC 133;${sub}`);
       dbg("osc133", sub);
       if (sub === "C") {
@@ -1973,6 +1981,14 @@ const captureArmedRef = useRef(false);
             + ` t0=${t0} t0iso=${new Date(t0).toISOString()}`
             + ` session=${sessionUuid ?? "none"} resume=${decision.kind} cwd=${task.path}`);
         }
+        // One unconditional line per spawn. `hooksOwn` is the first thing to
+        // check and the easiest to get wrong: it is what switches the title and
+        // every heuristic demoter off, and if it is false for an agent whose
+        // hooks ARE installed on disk, nothing else in this log will make
+        // sense. Cheap: once per PTY, not per event.
+        logWorkState("spawn",
+          `task=${JSON.stringify(task.name)} cli=${tab.cli} hooksOwn=${hooksOwnStateRef.current}`
+          + ` ptyId=${ptyId}`);
         // Sandbox truth lands synchronously with the spawn (no event
         // race possible). Render the warning chip immediately when the
         // cage degraded.
