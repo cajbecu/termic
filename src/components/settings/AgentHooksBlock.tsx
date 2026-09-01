@@ -121,23 +121,31 @@ export function AgentHooksBlock() {
       title="Agent hooks"
       hint="Off by default. The agent tells Termic when it starts, when it needs you, and when it is done, instead of Termic guessing from what is on screen."
     >
-      {/* Plain description, not an argument. This said "a terminal is a guess"
-          and quoted a 30%-of-8.5-minutes measurement, which is the reasoning
-          that justified building the feature and not what someone deciding
-          whether to switch it on needs. They need what it does, what changes,
-          and what it costs. The measurement lives in
-          docs/plans/agent-hooks.md, where the next person changing this can
-          find it. */}
+      {/* State the mechanism on both sides. The audience runs coding agents
+          for a living and is being asked to let termic write into their agent
+          config: the useful thing is which signals each path uses and where
+          the fallback path is known to be wrong, not a characterisation of it.
+          An earlier draft opened "guessing is usually right and sometimes
+          wrong", which tells a developer nothing they can check. */}
       <p className="text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
-        Guessing is usually right and sometimes wrong. Claude shows its idle
-        mark while it is waiting on your answer, and again while its background
-        agents are still running, so a task can look finished when it is not.
+        <b>Without hooks</b>, Termic infers state from the terminal: it
+        classifies the title (OSC 0/2) with per-agent patterns, and reads OSC 9
+        notifications and OSC 9;4 progress from agents that send them. With no
+        such signal it falls back to heuristics, 4s of PTY silence, a stable
+        scrollback, an unchanged viewport hash. Claude paints its idle glyph
+        while it is blocked on a permission prompt, and again while its
+        subagents are still running, so those signals report turns that have
+        not ended.
       </p>
       <p className="text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
-        With hooks on, the spinner, the done dot and the needs-you bell come
-        from the agent itself. Termic installs a small script in that
-        agent&apos;s own config folder, shown in full below. Removing it puts
-        the file back exactly as it was.
+        <b>With hooks</b>, Termic registers scripts on the agent&apos;s own
+        lifecycle events. Each writes one OSC to this tab&apos;s pty:
+        <code> 133;C</code> when a turn starts, <code> 133;D</code> when it
+        ends, <code> 777;notify</code> when the agent needs you. For Claude
+        those events are UserPromptSubmit and PreToolUse, PermissionRequest,
+        and Stop, and the Stop script stays silent while its payload still
+        lists background tasks. Once a hook has been seen on a terminal, the
+        title and the heuristics no longer end a turn there.
       </p>
       <div className="flex flex-col gap-2">
         {present.map(id => {
