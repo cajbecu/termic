@@ -4,28 +4,26 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [1.1.0] - 2026-09-02
+## [1.1.0] - 
 
-Agents can now tell Termic what they are doing, instead of Termic reading their terminal and guessing.
+Agents now tell Termic what they are doing, instead of Termic guessing from the terminal.
 
 ### Features
 
 - **Agent hooks: the agent reports its own state.** Termic installs a small script into an agent's own config so it says when a turn starts, when it needs you, and when it is done, instead of Termic inferring all three from the terminal. Inference is usually right and sometimes wrong in the way that costs you most: Claude paints its idle glyph while it is blocked on a permission prompt, and again while its background agents are still running, so a task can read as finished while it is not. Measured over an 8.5 minute run with four subagents, the title claimed idle for 30% of the time the work was still outstanding. Supported for Claude, Grok, Antigravity and opencode, each with the events that agent actually has: Grok is the only one that reports an interrupt, Antigravity has no needs-you event at all so its permission prompt is read from the screen instead, and Codex is left alone because its title already says `Action Required`. Works the same sandboxed, in Docker, and unsandboxed. Installs globally, one agent at a time, shows you the exact scripts and config before writing anything, and removal puts your config back byte for byte. Find it in Settings, Agents & Terminals, in the Agent hooks row above the per-agent tabs. Off by default and marked **Experimental**. (#269)
-- **Cloned agents inherit instead of copying.** Duplicating an agent used to take a full copy of its settings, once. That copy then rotted: when a CLI renames a flag, the built-in agent moves with the app and every clone keeps the old value forever, with no way to tell which of its seventeen fields you actually chose. A clone now stores only what you override and reads everything else from its parent as it changes, with the inherited values shown greyed in each field so you can see what is in force. One button clears every override and returns the clone to its parent. This also fixes clones being second-class everywhere else: they were blocked from their vendor's API by the sandbox, denied their own config directory, drew a generic icon, and could not have hooks installed at all.
+- **Cloned agents inherit instead of copying.** Duplicating an agent used to take a full copy of its settings, once. That copy then rotted: when a CLI renames a flag, the built-in agent moves with the app and every clone keeps the old value forever, with no way to tell which of its seventeen fields you actually chose. A clone now stores only what you override and reads everything else from its parent as it changes, with the inherited values shown greyed in each field so you can see what is in force. One button clears every override and returns the clone to its parent.
 - **Task ports are a range you choose.** Settings, Tasks now carries a min and max instead of a hard-coded floor at 18100. Existing tasks keep the ports they were given, because a task's ports are frozen at creation, so narrowing the range never moves a live task off the port its dev server is bound to. (#271)
-- **Docker containers get your git identity.** A commit made inside a container no longer fails with "Please tell me who you are". Your identity is mounted at git's global level, so a repo with its own `user.email` still wins, and the Docker settings preview shows the mount like every other one.
 - **A way out when the editor cannot show a file.** Binary and very large files now offer Open in default app and Reveal in Finder, with a plain explanation instead of an empty pane.
 
 ### Bug fixes
 
-- **A finished turn no longer rings the needs-you bell.** Claude sends a notification when work completes, not only when it wants you, and Termic treated every notification as needs-you. It also sends one when it has been idle a minute. Both now stay quiet, and only a genuine request for you rings.
+- **A finished turn no longer rings the needs-you bell.** Claude sends a notification when work completes, not only when it wants you, and Termic treated every notification as needs-you. Only a genuine request for you rings now.
 - **Termic no longer hands a spawned agent another agent's session.** Launching Termic from inside an agent session copied that session's identity into every agent it spawned: the new agent believed it was a child and turned transcript saving off, adopted the launcher's session, and was handed a live messaging socket and token for it, inside the sandbox.
-- **A sandboxed task's spinner cannot stick forever.** Hooks now have to actually deliver before Termic stops using its own detection, so an agent whose hooks cannot reach it keeps the old behaviour instead of showing a spinner that never ends.
-- **Visiting a working task no longer stops its spinner.** Clicking into a task cleared the in-progress state, and with hooks reporting the start of a turn only once, nothing put it back for the rest of the turn.
 - **A badge clears when you come back to it.** A done or needs-you badge on the tab already in front of you now clears when you focus the window, instead of only when you clicked away and back.
-- **Title detection rebuilt for every agent, from captured titles.** The previous patterns covered two agents and were written from reasoning; these are derived from titles recorded off live sessions, including Grok's plan approval, which freezes its spinner and reads as busy forever.
+- **Cloned agents were second-class everywhere.** A duplicated agent was blocked from its vendor's API by the sandbox, denied its own config directory, drew a generic icon instead of its parent's, and could not register with the MCP endpoint. All of that resolves through the agent it was cloned from now.
+- **A commit inside a Docker sandbox no longer fails with "Please tell me who you are".** Your git identity is mounted at git's global level, so a repo with its own `user.email` still wins.
+- **Agent state read from terminal titles, rebuilt from captured titles.** The previous patterns covered two agents and were written from reasoning; these are derived from titles recorded off live sessions. Grok's plan approval freezes its spinner and used to read as busy forever, and an agent with no patterns at all rang the needs-you bell on every completed turn.
 - **Settings fields fit their placeholders.** Multi-line placeholders were scrolling inside a two-row box, so the example patterns a field exists to show were clipped.
-- **Running the test suite no longer steals focus.** The app took foreground on the first launch of each spec file, seventeen times a run.
 
 ## [1.0.2] - 2026-08-28
 

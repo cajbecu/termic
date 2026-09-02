@@ -412,17 +412,6 @@ specs and get an issue at the same time. That is the whole promotion path:
   in 1.0.0; the per-task bearer token that answers which task is calling and
   what it may do, the narrowest grant a sandboxed agent could be given, is
   what is left. Design in [docs/plans/mcp.md](docs/plans/mcp.md).
-- **Know the moment an agent is waiting on you.**
-  ([#269](https://github.com/simion/termic/issues/269)) Claude paints its idle
-  glyph while it is blocked on a permission prompt, a question or plan
-  approval, so termic reads "waiting for you" as "finished" and says so a
-  second before it corrects itself. One hook fixes it, reported over the
-  terminal the agent already owns, so nothing changes for sandboxed or Docker
-  tasks. Off by default. Spec in
-  [docs/plans/agent-hooks.md](docs/plans/agent-hooks.md).
-
-### Ideas
-
 - **Intentional agent-driven orchestration.** The plumbing already ships:
   an agent can spawn a task with `--wait`, prompt another, read its result
   and branch on the exit code. What is missing is intent, and an opinion
