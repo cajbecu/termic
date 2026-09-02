@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fitRows } from "@/lib/fitRows";
+import { fitRows, fitMinHeight } from "@/lib/fitRows";
 
 // These textareas use `field-sizing: content`, which treats an empty field as
 // zero lines, so a multi-line placeholder scrolled inside a 2-row box. They
@@ -31,5 +31,21 @@ describe("fitRows", () => {
   it("caps, so one inherited pattern list cannot become the whole page", () => {
     expect(fitRows("", Array.from({ length: 40 }, (_, i) => `p${i}`).join("\n"))).toBe(8);
     expect(fitRows(Array.from({ length: 40 }, (_, i) => `v${i}`).join("\n"), "")).toBe(8);
+  });
+});
+
+describe("fitMinHeight", () => {
+  it("scales with the row count and the field's own font size", () => {
+    // `rows` alone was not enough: these inputs set `field-sizing: content`,
+    // which sizes to the CONTENT and overrides the attribute, so an empty
+    // field collapsed and its placeholder scrolled inside it anyway. A
+    // min-height is the one thing field-sizing will not shrink past.
+    expect(fitMinHeight("", "a\nb\nc")).toBe("calc(3 * 1.45em + 0.85rem)");
+    expect(fitMinHeight("", "one")).toBe("calc(2 * 1.45em + 0.85rem)");
+  });
+
+  it("caps with fitRows, so one long inherited list cannot fill the page", () => {
+    const many = Array.from({ length: 40 }, (_, i) => `p${i}`).join("\n");
+    expect(fitMinHeight("", many)).toBe("calc(8 * 1.45em + 0.85rem)");
   });
 });

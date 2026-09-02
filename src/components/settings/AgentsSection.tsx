@@ -11,8 +11,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { settingsLoad, agentsSave, agentsDefaults, projectUpdate } from "@/lib/ipc";
 import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
-import { agentOverrides } from "@/lib/agents";
-import { fitRows } from "@/lib/fitRows";
+import { agentOverrides, resolveAgent } from "@/lib/agents";
+import { fitRows, fitMinHeight } from "@/lib/fitRows";
 import { AGENT_HOOKS_HIGHLIGHT } from "./AgentHooksBlock";
 import type { Agent, CliInfo } from "@/lib/types";
 import { Button } from "@/components/ui/Button";
@@ -448,6 +448,7 @@ function AgentsTabs({
   resetAgent: (id: string) => void;
   cloneAgent: (id: string) => void;
   resetOverrides: (id: string) => void;
+  inherited?: Agent;
   reorderAgent: (id: string, toIndex: number) => void;
   onAutoFocusConsumed: () => void;
 }) {
@@ -555,6 +556,12 @@ function AgentsTabs({
   }, []);
 
   const active = agents.find(a => a.id === activeId) ?? agents[0];
+  /** A clone leaves `icon_id` empty and inherits its parent's, so reading it
+   *  raw showed the generic terminal glyph for what is visibly a claude agent. */
+  const iconOf = (a: Agent) => a.icon_id || resolveAgent(agents, a.id)?.icon_id || "";
+  /** The parent as it resolves TODAY: what every empty field on this card is
+   *  actually using. Drives the banner and the placeholders. */
+  const inherited = active?.extends ? resolveAgent(agents, active.extends) : undefined;
   if (!active) return null;
 
   // Grouped display: agents first, then custom terminals (#27). The array
@@ -581,8 +588,11 @@ function AgentsTabs({
       )}
       style={dragId === a.id ? { transform: `translateX(${dragTx}px)` } : undefined}
     >
-      <span className={cn("shrink-0", CLI_BRAND_COLOR[a.icon_id] || "text-[var(--color-fg-dim)]")}>
-        <CliIcon cli={a.icon_id} className="h-3.5 w-3.5" />
+      {/* Resolved: a clone leaves icon_id empty and inherits its parent's, so
+          reading it raw showed the generic terminal glyph for what is visibly
+          a claude agent. */}
+      <span className={cn("shrink-0", CLI_BRAND_COLOR[iconOf(a)] || "text-[var(--color-fg-dim)]")}>
+        <CliIcon cli={iconOf(a)} className="h-3.5 w-3.5" />
       </span>
       <span className="truncate max-w-[140px]">{a.display_name || a.id}</span>
       {isModified(a) && (
@@ -631,6 +641,7 @@ function AgentsTabs({
           onClone={() => cloneAgent(active.id)}
           extendsName={active.extends ? (agents.find(a => a.id === active.extends)?.display_name ?? active.extends) : undefined}
           overrideCount={agentOverrides(agents, active.id).length}
+          inherited={inherited}
           resetOverrides={resetOverrides}
           autoFocus={autoFocusId === active.id}
           onAutoFocusConsumed={onAutoFocusConsumed}
@@ -642,7 +653,7 @@ function AgentsTabs({
   );
 }
 
-function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove, onClone, extendsName, overrideCount, resetOverrides, autoFocus, onAutoFocusConsumed, modified, onReset, dockerSandboxOn }: {
+function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove, onClone, extendsName, overrideCount, resetOverrides, inherited, autoFocus, onAutoFocusConsumed, modified, onReset, dockerSandboxOn }: {
   agent: Agent;
   /** Whether Docker sandboxing is enabled app-wide; gates the Docker-only
    *  environment field, which does nothing while it is off. */
@@ -657,8 +668,11 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
   onClone: () => void;
   /** Display name of the parent agent, if this one was cloned. */
   extendsName?: string;
+  /** Number of fields this clone overrides; 0 means it inherits everything. */
   overrideCount: number;
   resetOverrides: (id: string) => void;
+  /** The parent as it resolves TODAY: what every empty field here uses. */
+  inherited?: Agent;
   /** True for a freshly-created card — scrolls into view + focuses the name
    *  input on mount. */
   autoFocus?: boolean;
@@ -699,8 +713,8 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
     <div data-agent-card={agent.id} className="rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg-1)] p-4">
       <header className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
-          <span className={cn(CLI_BRAND_COLOR[agent.icon_id] || "text-[var(--color-fg-dim)]")}>
-            <CliIcon cli={agent.icon_id} className="h-4 w-4" />
+          <span className={cn(CLI_BRAND_COLOR[inherited ? (agent.icon_id || inherited.icon_id) : agent.icon_id] || "text-[var(--color-fg-dim)]")}>
+            <CliIcon cli={inherited ? (agent.icon_id || inherited.icon_id) : agent.icon_id} className="h-4 w-4" />
           </span>
           <input
             ref={nameRef}
@@ -771,6 +785,20 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
             >{detected.found ? "installed" : "not found"}</span>
           )}
         </div>
+      {/* Said ONCE, at the top, before the reader meets a column of empty
+          boxes. Without it a clone reads as unconfigured rather than
+          inherited, which is the opposite of what those blanks mean. */}
+      {extendsName && (
+        <div className="mt-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-3)] px-3 py-2 text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
+          This agent inherits everything from <b>{extendsName}</b>. Every field
+          left empty uses {extendsName}&apos;s current value, shown greyed
+          below, and follows it as {extendsName} changes. Fill a field in only
+          to override that one.
+          {overrideCount > 0 && (
+            <> You are overriding {overrideCount} field{overrideCount === 1 ? "" : "s"} right now.</>
+          )}
+        </div>
+      )}
         <div className="flex items-center gap-2">
           {/* Force hide/show — disabled agents drop out of every CLI
               picker (worktree popover, New Task, Review, + menu)
@@ -848,14 +876,14 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
         >
           <ArgsInput value={agent.args || []}
             onChange={args => onPatch({ args })}
-            className="font-mono" placeholder="--option1 --option2"
+            className="font-mono" placeholder={inheritedPlaceholder(inherited, a => a.args, "--option1 --option2")}
           />
         </Field>
         {!isTerminal && <>
         <Field label="YOLO args" hint="Appended when YOLO mode (⚡) is on. Empty = no flag added.">
           <ArgsInput value={agent.capabilities?.yolo_args || []}
             onChange={yolo_args => onPatchCaps({ yolo_args })}
-            className="font-mono" placeholder="--dangerously-skip-permissions"
+            className="font-mono" placeholder={inheritedPlaceholder(inherited, a => a.capabilities?.yolo_args, "--dangerously-skip-permissions")}
           />
         </Field>
         <div className="grid grid-cols-2 gap-3">
@@ -875,27 +903,27 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
         <Field label="Resume last (worktrees)" hint="CWD-based resume. Used on every spawn after the first inside a worktree task (each worktree has its own dir, so the agent's most-recent CWD session IS this task's session). Not used in main-checkout tasks (the shared dir would lasso external sessions; the main checkout uses Session/Resume ID args instead).">
           <ArgsInput value={agent.capabilities?.resume_args || []}
             onChange={resume_args => onPatchCaps({ resume_args })}
-            className="font-mono" placeholder="--continue"
+            className="font-mono" placeholder={inheritedPlaceholder(inherited, a => a.capabilities?.resume_args, "--continue")}
           />
         </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Session ID args (main checkout)" hint="First spawn in a main-checkout task, mints a termic-owned uuid. Use {UUID}. Empty = no auto-resume in the main checkout for this agent.">
             <ArgsInput value={agent.capabilities?.session_id_args || []}
               onChange={session_id_args => onPatchCaps({ session_id_args })}
-              className="font-mono" placeholder="--session-id {UUID}"
+              className="font-mono" placeholder={inheritedPlaceholder(inherited, a => a.capabilities?.session_id_args, "--session-id {UUID}")}
             />
           </Field>
           <Field label="Resume ID args (main checkout)" hint="Every spawn after the first in a main-checkout task. Resumes the termic-owned uuid (isolates us from external sessions in the same cwd). Use {UUID}.">
             <ArgsInput value={agent.capabilities?.resume_id_args || []}
               onChange={resume_id_args => onPatchCaps({ resume_id_args })}
-              className="font-mono" placeholder="--resume {UUID}"
+              className="font-mono" placeholder={inheritedPlaceholder(inherited, a => a.capabilities?.resume_id_args, "--resume {UUID}")}
             />
           </Field>
         </div>
         <Field label="Name args" hint="Applied on every spawn. Pins a display name for the session (claude shows it in /resume and the prompt box). Placeholders supported: {WORKSPACE_SLUG}, {WORKSPACE_NAME}, {BRANCH}.">
           <ArgsInput value={agent.capabilities?.name_args || []}
             onChange={name_args => onPatchCaps({ name_args })}
-            className="font-mono" placeholder="--name {WORKSPACE_SLUG}"
+            className="font-mono" placeholder={inheritedPlaceholder(inherited, a => a.capabilities?.name_args, "--name {WORKSPACE_SLUG}")}
           />
         </Field>
         </>}
@@ -929,7 +957,7 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
           <PathsTextarea
             value={agent.sandbox_allowed_paths ?? []}
             onChange={(sandbox_allowed_paths) => onPatch({ sandbox_allowed_paths })}
-            placeholder={"$HOME/.claude\n$HOME/.config/claude\n~/work"}
+            placeholder={inheritedPlaceholder(inherited, a => a.sandbox_allowed_paths, "$HOME/.claude\n$HOME/.config/claude\n~/work", "\n")}
           />
         </Field>
         <Field
@@ -939,7 +967,7 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
           <PathsTextarea
             value={agent.sandbox_allowed_hosts ?? []}
             onChange={(sandbox_allowed_hosts) => onPatch({ sandbox_allowed_hosts })}
-            placeholder={"*.mycompany.com\nbitbucket.org"}
+            placeholder={inheritedPlaceholder(inherited, a => a.sandbox_allowed_hosts, "*.mycompany.com\nbitbucket.org", "\n")}
           />
         </Field>
         {/* Work-done detection and the patterns are one feature: whether we
@@ -1008,28 +1036,28 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
               hint="Marks the turn finished: blue badge, bell, notification."
               value={agent.capabilities?.signals?.idle ?? []}
               onChange={idle => onPatchCaps({ signals: { ...(agent.capabilities?.signals ?? {}), idle } })}
-              placeholder={signalPlaceholder(agent.id, "idle", "Ready\n✓ done\nawaiting input" /* allow-shortcut: example placeholder text, the check mark is illustrative sample content (Orel-approved) */)}
+              placeholder={signalPlaceholder(agent.id, "idle", "Ready\n✓ done\nawaiting input" /* allow-shortcut: example placeholder text, the check mark is illustrative sample content (Orel-approved) */, inherited)}
             />
             <RegexListField
               label="Busy (title → working)"
               hint="Marks the agent as working (spinner), and holds off the idle heuristics while it runs."
               value={agent.capabilities?.signals?.busy ?? []}
               onChange={busy => onPatchCaps({ signals: { ...(agent.capabilities?.signals ?? {}), busy } })}
-              placeholder={signalPlaceholder(agent.id, "busy", "Working\nThinking\nRunning")}
+              placeholder={signalPlaceholder(agent.id, "busy", "Working\nThinking\nRunning", inherited)}
             />
             <RegexListField
               label="Attention (title → needs you)"
               hint="The agent is blocked on you: bell + attention dot. Wins over the other two."
               value={agent.capabilities?.signals?.attention ?? []}
               onChange={attention => onPatchCaps({ signals: { ...(agent.capabilities?.signals ?? {}), attention } })}
-              placeholder={signalPlaceholder(agent.id, "attention", "Action Required\nWaiting for approval")}
+              placeholder={signalPlaceholder(agent.id, "attention", "Action Required\nWaiting for approval", inherited)}
             />
             <RegexListField
               label="Still working (screen → not done yet)"
               hint="Matched against the BOTTOM of the screen, not the title. While one of these matches, the done badge is held back. For agents that background work and end their turn anyway, so the title says idle while the job runs."
               value={agent.capabilities?.signals?.pending ?? []}
               onChange={pending => onPatchCaps({ signals: { ...(agent.capabilities?.signals ?? {}), pending } })}
-              placeholder={signalPlaceholder(agent.id, "pending", "Waiting for \\d+ jobs? to finish\n\\d+ tasks? still running")}
+              placeholder={signalPlaceholder(agent.id, "pending", "Waiting for \\d+ jobs? to finish\n\\d+ tasks? still running", inherited)}
             />
             {/* The fields above are useless without knowing what the
                 agent actually prints. This is where those strings come from. */}
@@ -1164,6 +1192,7 @@ function EnvTextarea({ value, onChange }: {
       }}
       spellCheck={false}
       rows={fitRows(draft, ENV_PLACEHOLDER)}
+      style={{ minHeight: fitMinHeight(draft, ENV_PLACEHOLDER) }}
       className="w-full resize-y rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 font-mono text-[12.5px] text-[var(--color-fg)] focus:border-[var(--color-accent-soft)] focus:outline-none [field-sizing:content]"
       placeholder={ENV_PLACEHOLDER}
     />
@@ -1197,6 +1226,7 @@ function PathsTextarea({ value, onChange, placeholder }: {
       }}
       spellCheck={false}
       rows={fitRows(draft, placeholder)}
+      style={{ minHeight: fitMinHeight(draft, placeholder) }}
       className="w-full resize-y rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 font-mono text-[12.5px] text-[var(--color-fg)] focus:border-[var(--color-accent-soft)] focus:outline-none [field-sizing:content]"
       placeholder={placeholder}
     />
@@ -1208,7 +1238,39 @@ function PathsTextarea({ value, onChange, placeholder }: {
  *  user who wants to adjust one has something to copy rather than a guess. The
  *  sources are written to behave identically when pasted in (see
  *  BUILTIN_TITLE_SIGNALS). Everyone else gets illustrative examples. */
-function signalPlaceholder(cli: string, key: "busy" | "idle" | "attention" | "pending", fallback: string): string {
+/** Placeholder text for a field a CLONE has left empty: the value it actually
+ *  inherits, not a generic example.
+ *
+ *  An empty box means "inherited" now, so showing `--option1 --option2` there
+ *  describes nothing the agent does. The same idea `signalPlaceholder` already
+ *  used for built-in title patterns, applied to the rest of the card: greyed
+ *  text is what runs today, and typing replaces it.
+ *
+ *  Falls back to the example for a non-clone, and for a field the parent has
+ *  not set either, where an example is genuinely the most useful thing. */
+function inheritedPlaceholder(
+  inherited: Agent | undefined,
+  pick: (a: Agent) => string | string[] | undefined,
+  fallback: string,
+  join = " ",
+): string {
+  if (!inherited) return fallback;
+  const v = pick(inherited);
+  const text = (Array.isArray(v) ? v.join(join) : v ?? "").trim();
+  return text || fallback;
+}
+
+function signalPlaceholder(
+  cli: string,
+  key: "busy" | "idle" | "attention" | "pending",
+  fallback: string,
+  inherited?: Agent,
+): string {
+  // A clone's inherited patterns first: BUILTIN_TITLE_SIGNALS is keyed by
+  // built-in NAME, so a clone matched nothing and showed examples for patterns
+  // it really does use.
+  const own = inherited?.capabilities?.signals?.[key];
+  if (own?.length) return own.join("\n");
   const builtin = BUILTIN_TITLE_SIGNALS[cli]?.[key];
   return builtin?.length ? builtin.join("\n") : fallback;
 }
