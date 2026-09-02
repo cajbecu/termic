@@ -818,7 +818,7 @@ export async function waitForOutputSpan(taskId: string, ms: number): Promise<voi
 
 /** Drive the app's idea of window focus, deterministically.
  *
- *  `useSeenOnDwell` treats "the badged tab is on screen in a FOCUSED window"
+ *  `useSeenWhenWatched` treats "the badged tab is on screen in a FOCUSED window"
  *  as having read the badge. Real focus is not something a spec can rely on:
  *  the suite's window is frequently occluded (another Space, behind the
  *  terminal, a CI runner with no desktop), so `document.hasFocus()` decides

@@ -1,4 +1,4 @@
-// Looking at a tab for a moment counts as having seen its badge.
+// Looking at a tab counts as having seen its badge.
 //
 // `markAttention` marks unconditionally, focused tab included, and the badge
 // then cleared only on a keystroke in that terminal or on activating the task
@@ -23,21 +23,11 @@ import { isTabOnScreenIn, useApp } from "@/store/app";
 import { useUI } from "@/store/ui";
 import type { AppState } from "@/store/app";
 
-/** How long the tab has to be the one on screen, in a focused window, before
- *  its badge is treated as read.
- *
- *  Not instant, deliberately. Focusing the window is not the same as reading
- *  the pane: a cmd-Tab through Termic on the way somewhere else would silently
- *  eat a badge that was never seen, and a badge destroyed is worse than a badge
- *  held a second too long. Three seconds is long enough that the user is
- *  actually present and short enough that nobody reaches for the mouse first. */
-export const SEEN_DWELL_MS = 3_000;
-
 /** The badged tab that is on screen, as a stable string key
  *  (`taskId:tabId`) or "" for none. A primitive so the Zustand selector cannot
  *  churn: returning an object here would re-run every subscriber on each store
  *  write, which is the fanout trap this codebase measures for. */
-export function dwellTarget(s: AppState): string {
+export function watchedBadgedTab(s: AppState): string {
   const taskId = s.activeTaskId;
   if (!taskId) return "";
   const tabs = s.tabs[taskId] || [];
@@ -50,8 +40,17 @@ export function dwellTarget(s: AppState): string {
   return t ? `${taskId}:${t.id}` : "";
 }
 
-export function useSeenOnDwell() {
-  const target = useApp(dwellTarget);
+/** Clears the badge on the tab the user is demonstrably looking at.
+ *
+ *  Instant, with no delay. This was a three second dwell, reasoning that
+ *  focusing a window is not the same as reading the pane, so a cmd-tab THROUGH
+ *  Termic should not eat a badge nobody saw. Instant is the better call: the
+ *  badge sits on the tab filling the screen, so focusing the window IS showing
+ *  it to you, and a dot that lingers while you are demonstrably looking at it
+ *  reads as stuck rather than informative. A badge on any OTHER tab or task is
+ *  untouched, which is where the signal actually matters. */
+export function useSeenWhenWatched() {
+  const target = useApp(watchedBadgedTab);
   // One source of truth, shared with `isUserWatchingIn`. A second copy of
   // "is the window focused" in this hook would drift from the one that decides
   // whether a badge is created at all, and the two disagreeing is precisely
@@ -65,29 +64,19 @@ export function useSeenOnDwell() {
   useEffect(() => {
     if (!target || !present) return;
     const [taskId, tabId] = target.split(":");
-    const id = window.setTimeout(() => {
-      // Re-check rather than trusting the closure. The dwell is three seconds
-      // of real time and anything can happen inside it; clearing a badge that
-      // has since moved to another tab would destroy the one signal this
-      // feature is meant to respect.
-      if (dwellTarget(useApp.getState()) !== target) return;
-      const app = useApp.getState();
-      // BOTH, because the two badges have different sources and clearing one
-      // leaves the other on screen. The bell reads `unread.reason`, the blue
-      // done dot reads `workState === "done"` (Sidebar's hasAttention vs
-      // hasDone, and TabBar's showBell vs showDone). The first version called
-      // `clearAttention` alone, so a finished agent kept its dot after the user
-      // came back and only `setActiveTask`, the one path that also writes the
-      // work state, could shift it. Reported as "the only way is to click the
-      // item in the sidebar", which is precisely that path.
-      app.clearAttention(taskId, tabId);
-      const tab = (app.tabs[taskId] ?? []).find(t => t.id === tabId);
-      if (tab?.type === "terminal" && tab.workState === "done") {
-        app.setWorkState(taskId, tabId, "idle", "seen: watched for the dwell");
-      }
-    }, SEEN_DWELL_MS);
-    // Cancels on blur, on the badge going away, and on the user switching to a
-    // different tab, because each of those changes a dep.
-    return () => window.clearTimeout(id);
+    const app = useApp.getState();
+    // BOTH, because the two badges have different sources and clearing one
+    // leaves the other on screen. The bell reads `unread.reason`, the blue done
+    // dot reads `workState === "done"` (Sidebar's hasAttention vs hasDone, and
+    // TabBar's showBell vs showDone). Clearing only `unread` left a finished
+    // agent's dot up after the user came back, with clicking the sidebar item
+    // (the one path that also writes the work state) the only way to shift it.
+    app.clearAttention(taskId, tabId);
+    const tab = (app.tabs[taskId] ?? []).find(t => t.id === tabId);
+    if (tab?.type === "terminal" && tab.workState === "done") {
+      app.setWorkState(taskId, tabId, "idle", "seen: on screen in a focused window");
+    }
+    // No cleanup: nothing is scheduled. Clearing makes `target` empty, so this
+    // re-runs once and returns at the guard.
   }, [target, present]);
 }

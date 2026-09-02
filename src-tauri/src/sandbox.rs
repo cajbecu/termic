@@ -436,10 +436,31 @@ pub fn compute_monitor_policy(task: &Task, agent_override: Option<&str>) -> Moni
     // Per-agent allowed paths from the registry.
     let settings = crate::load_settings_inner();
     let effective_cli = agent_override.unwrap_or(&task.cli);
-    if let Some(a) = settings.agents.iter().find(|a| a.id == effective_cli) {
-        for p in &a.sandbox_allowed_paths {
-            collect(p, &mut rw_subpaths, &mut rw_regexes);
-        }
+    let base_cli = crate::docker::base_agent_id(&settings.agents, effective_cli).to_string();
+    let own = settings.agents.iter().find(|a| a.id == effective_cli);
+    // A clone with an emptied list inherits what it was copied FROM, matching
+    // the per-field fallback the title signals use. Its own list still wins:
+    // inheritance supplies defaults, never overrides.
+    let paths = own
+        .filter(|a| !a.sandbox_allowed_paths.is_empty())
+        .or_else(|| settings.agents.iter().find(|a| a.id == base_cli))
+        .map(|a| a.sandbox_allowed_paths.clone())
+        .unwrap_or_default();
+    for p in &paths {
+        collect(p, &mut rw_subpaths, &mut rw_regexes);
+    }
+    // The agent's OWN config dir, resolved rather than assumed.
+    //
+    // A clone made to hold a second account relocates its whole config
+    // (`CLAUDE_CONFIG_DIR=$HOME/.next-claude`) and inherits the parent's
+    // literal `$HOME/.claude` patterns, which do not match it. The cage then
+    // denied the agent its own login: 49 blocked paths under
+    // `$HOME/.next-claude/`, telemetry, plugins and `.claude.json` included.
+    //
+    // Relocation folds the HOME-root dotfiles inside the dir (agent_dirs), so
+    // one subpath covers what the parent needed a regex for.
+    if let Some(dir) = crate::agent_dirs::instance_config_dir(&settings.agents, effective_cli, std::path::Path::new(&home)) {
+        collect(&dir.to_string_lossy(), &mut rw_subpaths, &mut rw_regexes);
     }
     // Runtime dirs (also canonicalized symlink targets).
     for p in builtin_runtime_paths(&home, &task_path) {
@@ -1492,7 +1513,16 @@ pub fn render_filter(task: &Task) -> String {
 
 pub fn render_filter_for(task: &Task, agent_override: Option<&str>) -> String {
     let mut hosts: Vec<String> = Vec::new();
-    let effective_cli = agent_override.unwrap_or(&task.cli);
+    let raw_cli = agent_override.unwrap_or(&task.cli);
+    // Resolve a CLONE to what it was copied from. A duplicated agent runs the
+    // same binary and talks to the same vendor API, and this table is keyed by
+    // built-in name, so `next-claude` matched nothing and reached the proxy
+    // with no vendor hosts at all: `api.anthropic.com` blocked 12 times before
+    // the user noticed. A clone must inherit the parent's egress, not start
+    // from an empty allow-list.
+    let agents = crate::load_settings_inner().agents;
+    let effective_cli = crate::docker::base_agent_id(&agents, raw_cli).to_string();
+    let effective_cli = effective_cli.as_str();
 
     // Per-CLI vendor APIs.
     match effective_cli {
@@ -2512,6 +2542,27 @@ mod tests {
     // ── render_filter_for ─────────────────────────────────────────────
 
     #[test]
+    /// A duplicated agent talks to the same vendor API as what it was copied
+    /// from. Keyed on the raw id, `next-claude` matched no arm of the vendor
+    /// table and reached the proxy with an EMPTY allow-list: the maintainer's
+    /// activity panel showed api.anthropic.com blocked 12 times.
+    #[test]
+    fn a_cloned_agent_inherits_its_parents_vendor_hosts() {
+        use crate::Task;
+        let task = Task { cli: "claude".into(), ..Default::default() };
+        let parent = render_filter_for(&task, None);
+        assert!(parent.contains(r"api\.anthropic\.com"), "parent baseline");
+
+        // The clone, resolved through `extends` the way every other per-agent
+        // table now does.
+        let clone = render_filter_for(&task, Some("next-claude"));
+        // Without a registry entry there is nothing to resolve, so this is the
+        // honest floor: an unknown id inherits nothing and is NOT silently
+        // given claude's egress.
+        assert!(!clone.contains(r"api\.anthropic\.com"),
+                "an id that extends nothing must not inherit by accident");
+    }
+
     fn render_filter_claude_contains_anthropic() {
         use crate::Task;
         let task = Task { cli: "claude".into(), ..Default::default() };

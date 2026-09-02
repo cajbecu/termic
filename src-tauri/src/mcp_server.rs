@@ -1842,6 +1842,13 @@ fn project_scopes_with_termic(doc: &serde_json::Value) -> Vec<String> {
 }
 
 fn install_client_inner(client: &str) -> Result<String, String> {
+    // A clone registers the way what it was copied from does: same binary,
+    // same config shape, same registration command. Keyed on the raw id, a
+    // duplicated agent fell through to the unsupported arm and could not be
+    // wired to the MCP endpoint at all.
+    let agents = crate::load_settings_inner().agents;
+    let client = crate::docker::base_agent_id(&agents, client).to_string();
+    let client = client.as_str();
     let dir = crate::data_dir().map_err(|e| e.to_string())?;
     let url = state()
         .lock()
