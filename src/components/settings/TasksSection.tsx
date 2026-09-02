@@ -15,6 +15,9 @@ import { Input } from "@/components/ui/Input";
 import { usePrefs } from "@/store/prefs";
 import { Block, ListField, SectionTitle, Toggle, useBackendSettings, useTasksPathConflicts } from "./Controls";
 import { cleanLines } from "@/lib/utils";
+import {
+  PORT_RANGE_DEFAULT, PORT_RANGE_FLOOR, portRangeError, resolvePortRange, tasksThatFit,
+} from "@/lib/portRange";
 
 /** Drop trailing slashes so the "where tasks go" preview never reads
  *  `~/work//<project>`. Keeps a bare `/` intact. */
@@ -39,6 +42,13 @@ export function TasksSection() {
   // the user can see and edit the default rather than guess at it.
   const [tasksPath, setTasksPath] = useState("");
   const [tasksPathOriginal, setTasksPathOriginal] = useState("");
+  // Task port range (GH #271). Held as strings so the inputs can be cleared
+  // mid-edit without the value snapping to 0; 0/absent in settings means the
+  // default, and the fields show that default rather than an empty box, so
+  // the range in force is always visible.
+  const [portMin, setPortMin] = useState(String(PORT_RANGE_DEFAULT.min));
+  const [portMax, setPortMax] = useState(String(PORT_RANGE_DEFAULT.max));
+  const [portRangeOriginal, setPortRangeOriginal] = useState("");
 
   const branchPrefix = usePrefs(s => s.branchPrefix);
   const setBranchPrefix = usePrefs(s => s.setBranchPrefix);
@@ -64,6 +74,10 @@ export function TasksSection() {
     const p = settings.default_tasks_path ?? "";
     setTasksPath(p);
     setTasksPathOriginal(p);
+    const r = resolvePortRange(settings.task_port_min, settings.task_port_max);
+    setPortMin(String(r.min));
+    setPortMax(String(r.max));
+    setPortRangeOriginal(`${r.min}-${r.max}`);
   }, [settings]);
 
   const symlinkDirty = symlinkPaths !== symlinkPathsOriginal;
@@ -118,6 +132,27 @@ export function TasksSection() {
       if (await patch({ default_tasks_path: trimmedTasksPath })) {
         setTasksPath(trimmedTasksPath);
         setTasksPathOriginal(trimmedTasksPath);
+      }
+    } finally { setBusy(false); }
+  }
+
+  // Number() over parseInt: "3000abc" should be rejected, not silently read
+  // as 3000. NaN then fails portRangeError's integer check.
+  const portMinNum = Number(portMin);
+  const portMaxNum = Number(portMax);
+  const portRangeMsg = portRangeError(portMinNum, portMaxNum);
+  const portRangeDirty = `${portMinNum}-${portMaxNum}` !== portRangeOriginal;
+  const canSavePortRange = portRangeDirty && !portRangeMsg;
+
+  async function savePortRange() {
+    if (!settings || !canSavePortRange) return;
+    setBusy(true);
+    try {
+      // Both fields always go together: a half-set pair resolves against the
+      // DEFAULT for the missing half, which for a low range reads as inverted
+      // and silently falls back (see `settings_resolve_to_a_usable_range`).
+      if (await patch({ task_port_min: portMinNum, task_port_max: portMaxNum })) {
+        setPortRangeOriginal(`${portMinNum}-${portMaxNum}`);
       }
     } finally { setBusy(false); }
   }
@@ -212,6 +247,54 @@ export function TasksSection() {
           value={fetchBeforeCreate}
           onChange={saveFetchBeforeCreate}
         />
+      </Block>
+
+      {/* Task port range (GH #271). Sits with the other new-task settings
+          because that is the only thing it affects: a task's ports are frozen
+          when it is created, so this never moves a live one. */}
+      <Block>
+        <div className="text-[14px] font-medium">Task port range</div>
+        <div className="mt-0.5 text-[12.5px] text-[var(--color-fg-dim)]">
+          The window <code className="font-mono">$TERMIC_PORT</code> and every extra named port are allocated from. Each task takes a consecutive block, so the range needs room for a few ports per task. Existing tasks keep the ports they were given; this applies to the next task you create.
+        </div>
+        <div className="mt-2 flex max-w-sm items-center gap-2">
+          <Input
+            type="number"
+            min={PORT_RANGE_FLOOR}
+            max={65535}
+            value={portMin}
+            onChange={(e) => setPortMin(e.target.value)}
+            className="w-28 font-mono"
+            data-testid="task-port-min-input"
+          />
+          <span className="text-[12.5px] text-[var(--color-fg-dim)]">to</span>
+          <Input
+            type="number"
+            min={PORT_RANGE_FLOOR}
+            max={65535}
+            value={portMax}
+            onChange={(e) => setPortMax(e.target.value)}
+            className="w-28 font-mono"
+            data-testid="task-port-max-input"
+          />
+        </div>
+        <div className="mt-1.5 text-[12.5px] text-[var(--color-fg-faint)]">
+          {portRangeMsg ? (
+            <span className="text-[var(--color-err)]" data-testid="task-port-range-error">{portRangeMsg}</span>
+          ) : (
+            <span data-testid="task-port-range-hint">
+              Room for about {tasksThatFit(portMinNum, portMaxNum)} tasks.
+              {portMinNum < PORT_RANGE_DEFAULT.min
+                ? " Ports this low are where dev servers usually live: Termic skips any port something else is already listening on, but it can only see ports that are in use at the moment it allocates."
+                : ""}
+            </span>
+          )}
+        </div>
+        <div className="mt-3">
+          <Button variant="primary" disabled={!canSavePortRange || busy} onClick={savePortRange}>
+            {busy ? "Saving…" : "Save port range"}
+          </Button>
+        </div>
       </Block>
 
       {/* Worktree config symlinks (personal). A project's agent config

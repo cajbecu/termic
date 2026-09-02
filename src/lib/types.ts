@@ -675,6 +675,13 @@ export interface Settings {
    *  tree across every project. Unioned with each project's committed
    *  `.termic.yaml` `exclude`. `.git` is always hidden regardless. */
   file_tree_exclude?: string[];
+  /** GH #271: the port window task blocks are allocated from. 0 or absent on
+   *  either field means the default (`PORT_RANGE_DEFAULT`), so read the pair
+   *  through `resolvePortRange` rather than raw. Only NEW allocations consult
+   *  it: a task's ports are frozen at creation, so narrowing the range never
+   *  moves a live task off the port its dev server is bound to. */
+  task_port_min?: number;
+  task_port_max?: number;
   /** When on (the default), a best-effort `git fetch` of the base ref runs
    *  before a new task's branch is cut, so it starts from the latest remote
    *  commit instead of a stale local `origin/*` (GH #79). Absent = on; set

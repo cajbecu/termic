@@ -1691,6 +1691,114 @@ describe("default tasks path", () => {
     );
     await snap("default-tasks-path-settings.png");
   });
+
+  // GH #271: the task port range. The field is validated BEFORE it is saved,
+  // because a bad range is silently ignored by the allocator (Rust falls back
+  // to the default rather than leave the app unable to create a task), so a UI
+  // that accepted one would have the user believe a range that is not in use.
+  it("validates the task port range and persists a saved one", async () => {
+    await browser.execute(() => window.__termic!.useApp.getState().openSettings("tasks"));
+    await waitVisible('[data-testid="task-port-min-input"]');
+
+    const type = (testid: string, value: string) =>
+      browser.execute((id, v) => {
+        const input = document.querySelector(`[data-testid="${id}"]`) as HTMLInputElement;
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, "value",
+        )!.set!;
+        setter.call(input, v);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }, testid, value);
+    const setRange = async (min: string, max: string) => {
+      await type("task-port-min-input", min);
+      await type("task-port-max-input", max);
+    };
+    const err = () =>
+      browser.execute(
+        () => (document.querySelector(
+          '[data-testid="task-port-range-error"]',
+        ) as HTMLElement | null)?.textContent ?? "",
+      );
+    const hint = () =>
+      browser.execute(
+        () => (document.querySelector(
+          '[data-testid="task-port-range-hint"]',
+        ) as HTMLElement | null)?.textContent ?? "",
+      );
+    const saveDisabled = () =>
+      browser.execute(() => {
+        const btn = [...document.querySelectorAll("button")].find(
+          (b) => b.textContent?.trim() === "Save port range",
+        ) as HTMLButtonElement | undefined;
+        if (!btn) throw new Error("no 'Save port range' button");
+        return btn.disabled;
+      });
+    const save = () =>
+      browser.execute(() => {
+        const btn = [...document.querySelectorAll("button")].find(
+          (b) => b.textContent?.trim() === "Save port range",
+        ) as HTMLButtonElement;
+        btn.click();
+      });
+    const stored = () =>
+      browser.execute(async () => {
+        const s = await window.__termic!.invoke("settings_load") as
+          { task_port_min?: number; task_port_max?: number };
+        return [s.task_port_min ?? 0, s.task_port_max ?? 0];
+      });
+
+    // The field shows the range in force, not an empty box over a hidden
+    // default: an unset pair reads as the 18100-65535 the allocator uses.
+    const shown = await browser.execute(() => [
+      (document.querySelector('[data-testid="task-port-min-input"]') as HTMLInputElement).value,
+      (document.querySelector('[data-testid="task-port-max-input"]') as HTMLInputElement).value,
+    ]);
+    expect(shown).toEqual(["18100", "65535"]);
+
+    // Each distinct mistake names itself, and each blocks the save.
+    for (const [min, max, needle] of [
+      ["80", "4000", "1024"],
+      ["4000", "3000", "above the lowest"],
+      ["3000", "3003", "at least 6 ports"],
+    ] as const) {
+      await setRange(min, max);
+      await browser.waitUntil(
+        async () => (await err()).includes(needle) && (await saveDisabled()),
+        { timeout: 5_000, timeoutMsg: `port range ${min}-${max} was not rejected as "${needle}"` },
+      );
+    }
+
+    // A valid range clears the error, and the hint says how many tasks fit.
+    await setRange("3000", "4000");
+    await browser.waitUntil(
+      async () => (await err()) === "" && (await hint()).includes("166 tasks"),
+      { timeout: 5_000, timeoutMsg: "a valid port range stayed rejected" },
+    );
+    await save();
+    await browser.waitUntil(
+      async () => {
+        const [lo, hi] = await stored() as number[];
+        return lo === 3000 && hi === 4000;
+      },
+      { timeout: 8_000, timeoutMsg: "the saved port range never reached settings.json" },
+    );
+    await snap("task-port-range-settings.png");
+
+    // Put the default back: this profile is shared with every later spec, and
+    // a 3000-4000 range would follow them into every task they create.
+    await setRange("18100", "65535");
+    await browser.waitUntil(async () => !(await saveDisabled()), {
+      timeout: 5_000, timeoutMsg: "restoring the default range stayed blocked",
+    });
+    await save();
+    await browser.waitUntil(
+      async () => {
+        const [lo, hi] = await stored() as number[];
+        return lo === 18100 && hi === 65535;
+      },
+      { timeout: 8_000, timeoutMsg: "the default port range never went back" },
+    );
+  });
 });
 
 // P2: the two reorder drags inside Settings (pointer-based, see

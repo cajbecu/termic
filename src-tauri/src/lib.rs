@@ -1309,8 +1309,92 @@ fn load_tasks() -> Vec<Task> {
 // `18100 + load_tasks().len()` formula, which could collide once a
 // multi-repo task's member ports (base+i+1) overlapped the next
 // count-derived base.
+//
+// The window blocks are drawn from is a setting (GH #271), so the
+// default base below is only the DEFAULT floor, never an invariant.
 const PORT_BASE: u16 = 18100;
+const PORT_CEIL: u16 = 65535;
 const PORT_BLOCK_BUFFER: u16 = 5;
+
+/// Below this a `Task.port` cannot have come from the allocator: it is
+/// a pre-#196 record that was written before port blocks existed and
+/// owns no ports at all.
+///
+/// Deliberately NOT the configurable floor (GH #271). The two used to
+/// be the same constant, which was safe only while the floor could not
+/// move: raise the floor to 30000 and every existing task sitting at
+/// 18100 would answer "legacy, owns nothing" to the occupancy scan, drop
+/// out of `rehome_ports_if_stolen`, and never accept another named port
+/// in `top_up_extra_ports` again.
+const PORT_ALLOC_MIN: u16 = 1024;
+
+/// The window task port blocks are allocated from (GH #271, Settings ->
+/// Tasks). Already sanitized: `min >= PORT_ALLOC_MIN` and `max > min`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortRange {
+    pub min: u16,
+    pub max: u16,
+}
+
+impl Default for PortRange {
+    fn default() -> Self {
+        Self { min: PORT_BASE, max: PORT_CEIL }
+    }
+}
+
+impl PortRange {
+    /// Settings -> range, with every invalid shape falling back to the
+    /// default rather than erroring. This is the backstop, not the
+    /// validation: the settings UI rejects a bad range at entry. A
+    /// half-set pair (one field 0, the app upgraded into the feature)
+    /// takes the default for the missing half.
+    fn from_settings(s: &Settings) -> Self {
+        let d = Self::default();
+        let min = if s.task_port_min == 0 { d.min } else { s.task_port_min.max(PORT_ALLOC_MIN) };
+        let max = if s.task_port_max == 0 { d.max } else { s.task_port_max };
+        // A range with no room for even the smallest single-repo block is
+        // unusable; refusing to allocate at all would be worse than
+        // ignoring it, since the user would have no working app to fix
+        // the setting from.
+        if max <= min || (max - min) < block_len(0, 0) {
+            return d;
+        }
+        Self { min, max }
+    }
+}
+
+/// The configured range, read fresh. Allocation already holds
+/// PORT_ALLOC_LOCK and touches the task files, so one more small read
+/// is not worth caching, and reading fresh means a range change applies
+/// to the very next task without a restart.
+fn current_port_range() -> PortRange {
+    PortRange::from_settings(&load_settings_inner())
+}
+
+/// Advisory check that nothing outside termic is already listening.
+///
+/// Allocation is otherwise a pure scan over termic's own task files, so
+/// without this a user who moves the range down into ordinary dev-server
+/// territory (GH #271 asks for 3000-4000) gets handed a port their own
+/// unrelated server already owns. What happens then is up to their tool:
+/// a plain `http.listen` dies with EADDRINUSE, but Vite and Next quietly
+/// increment to the next free port, leaving the preview URL pointing at
+/// the wrong app and the server on a port termic may hand to another
+/// task later.
+///
+/// Advisory only, on two counts. It is a TOCTOU check (the port can be
+/// taken a millisecond later), and it probes loopback ONLY: binding
+/// 0.0.0.0 to catch wildcard listeners can trip the macOS firewall
+/// prompt, which is a far worse experience than the collision it would
+/// catch.
+fn port_is_free(p: u16) -> bool {
+    // Unit tests drive occupancy through the task list alone. Binding
+    // real sockets would make every allocation assertion depend on
+    // whatever else the dev's machine happens to be listening on; the
+    // probe's own logic is covered through `next_base_port_with`.
+    if cfg!(test) { return true; }
+    std::net::TcpListener::bind(("127.0.0.1", p)).is_ok()
+}
 
 /// The one place the block arithmetic lives: 1 ($TERMIC_PORT) + one
 /// port per composition member + one per extra named port + the buffer.
@@ -1343,34 +1427,70 @@ fn task_block_len(task: &Task) -> u16 {
 /// nothing.
 fn task_port_intervals(t: &Task) -> Vec<(u16, u16)> {
     let mut v = Vec::new();
-    if t.port < PORT_BASE { return v; }
+    if t.port < PORT_ALLOC_MIN { return v; }
     let end = t.port.saturating_add(task_block_len(t));
     v.push((t.port, end));
     for np in &t.extra_named_ports {
-        if np.port >= PORT_BASE && (np.port < t.port || np.port >= end) {
+        if np.port >= PORT_ALLOC_MIN && (np.port < t.port || np.port >= end) {
             v.push((np.port, np.port.saturating_add(1)));
         }
     }
     v
 }
 
-fn next_base_port(existing: &[Task], needed: u16) -> Result<u16, String> {
+/// First-fit a free block of `needed` consecutive ports inside `range`.
+///
+/// Occupancy comes from two independent sources and a block has to clear
+/// both: the interval scan over termic's own live tasks, and `is_free`,
+/// which asks the OS whether anything outside termic holds the port.
+/// Split out so the unit tests can drive occupancy deterministically
+/// without binding real sockets; production goes through
+/// `next_base_port`.
+fn next_base_port_with<F: Fn(u16) -> bool>(
+    existing: &[Task],
+    needed: u16,
+    range: PortRange,
+    is_free: F,
+) -> Result<u16, String> {
     let mut blocks: Vec<(u16, u16)> = existing.iter()
         .filter(|t| !t.archived)
         .flat_map(task_port_intervals)
         .collect();
     blocks.sort_unstable();
-    let mut candidate = PORT_BASE;
-    for (start, end) in blocks {
-        if candidate.saturating_add(needed) <= start { break; }
-        if end > candidate { candidate = end; }
+    let exhausted = || format!(
+        "no free block of {needed} ports left in {}-{}. Archive a task, or widen the range in Settings → Tasks.",
+        range.min, range.max,
+    );
+    let mut candidate = range.min;
+    loop {
+        // Skip past every block termic has already handed out. Restarted
+        // from the top on each pass because a failed probe below moves
+        // the candidate forward, possibly into another task's block.
+        for (start, end) in &blocks {
+            if candidate.saturating_add(needed) <= *start { break; }
+            if *end > candidate { candidate = *end; }
+        }
+        // The block occupies [candidate, candidate + needed), so the last
+        // port used is candidate + needed - 1. u32 throughout: `needed`
+        // pushes a high candidate past u16 easily, and wrapping here
+        // would hand back a colliding or privileged port.
+        if candidate as u32 + needed as u32 - 1 > range.max as u32 {
+            return Err(exhausted());
+        }
+        match (candidate..candidate + needed).find(|p| !is_free(*p)) {
+            None => return Ok(candidate),
+            // Something outside termic holds that port. Everything below
+            // it is settled, so resume the search directly after it.
+            Some(taken) => match taken.checked_add(1) {
+                Some(next) => candidate = next,
+                None => return Err(exhausted()),
+            },
+        }
     }
-    // Practically unreachable, but fail loudly instead of wrapping
-    // into a colliding or privileged port.
-    if candidate.checked_add(needed).is_none() {
-        return Err("no free port block below 65535".into());
-    }
-    Ok(candidate)
+}
+
+fn next_base_port(existing: &[Task], needed: u16, range: PortRange) -> Result<u16, String> {
+    next_base_port_with(existing, needed, range, port_is_free)
 }
 
 /// GH #196: archived tasks' blocks are reusable, so a task created
@@ -1379,8 +1499,8 @@ fn next_base_port(existing: &[Task], needed: u16) -> Result<u16, String> {
 /// move the whole thing (base, member ports, extra named ports) to a
 /// fresh allocation — otherwise two live tasks would race for the
 /// same listening ports. Returns true when the ports moved.
-fn rehome_ports_if_stolen(task: &mut Task, others: &[Task]) -> bool {
-    if task.port < PORT_BASE { return false; } // legacy record, nothing to rehome
+fn rehome_ports_if_stolen(task: &mut Task, others: &[Task], range: PortRange) -> bool {
+    if task.port < PORT_ALLOC_MIN { return false; } // legacy record, nothing to rehome
     // Compare full occupancy on both sides (block + overflow strays):
     // an archived task's stray was just as invisible to allocation as
     // its block, so either can have been claimed meanwhile.
@@ -1394,7 +1514,7 @@ fn rehome_ports_if_stolen(task: &mut Task, others: &[Task]) -> bool {
     // re-home also re-compacts any strays back into one contiguous block.
     let names: Vec<String> = task.extra_named_ports.iter().map(|np| np.name.clone()).collect();
     let member_count = task.composition.len() as u16;
-    match allocate_task_ports(others, member_count, &names) {
+    match allocate_task_ports(others, member_count, &names, range) {
         Ok((base, extras, block_len)) => {
             task.port = base;
             for (i, m) in task.composition.iter_mut().enumerate() {
@@ -1422,8 +1542,8 @@ fn rehome_ports_if_stolen(task: &mut Task, others: &[Task]) -> bool {
 /// concurrent allocation, so callers hold PORT_ALLOC_LOCK from the
 /// `load_tasks()` that produced `others` until the task is persisted.
 /// Returns true when pairs were added (caller persists).
-fn top_up_extra_ports(task: &mut Task, proj: &Project, others: &[Task]) -> bool {
-    if task.port < PORT_BASE { return false; } // legacy record, no block
+fn top_up_extra_ports(task: &mut Task, proj: &Project, others: &[Task], range: PortRange) -> bool {
+    if task.port < PORT_ALLOC_MIN { return false; } // legacy record, no block
     // Stamp the block length before consuming buffer: the computed
     // fallback would otherwise grow with each added pair and creep
     // into the neighbor task allocated right after this block.
@@ -1447,9 +1567,17 @@ fn top_up_extra_ports(task: &mut Task, proj: &Project, others: &[Task]) -> bool 
                 .cloned()
                 .collect();
             occ.push(task.clone());
-            match next_base_port(&occ, 1) {
+            match next_base_port(&occ, 1, range) {
                 Ok(p) => p,
-                Err(_) => break, // port space exhausted; keep what we have
+                // The range is full. Keep the pairs frozen so far and
+                // stop: this runs on the spawn path, where failing the
+                // launch over a missing extra port would be worse than
+                // launching without it. The name simply does not get an
+                // env var, so say so somewhere a bug report can find it.
+                Err(e) => {
+                    eprintln!("[ports] task {}: dropping named port {n:?}: {e}", task.id);
+                    break;
+                }
             }
         };
         task.extra_named_ports.push(NamedPort { name: n, port });
@@ -1466,9 +1594,10 @@ fn allocate_task_ports(
     existing: &[Task],
     member_count: u16,
     extra_names: &[String],
+    range: PortRange,
 ) -> Result<(u16, Vec<NamedPort>, u16), String> {
     let needed = block_len(member_count, extra_names.len() as u16);
-    let base = next_base_port(existing, needed)?;
+    let base = next_base_port(existing, needed, range)?;
     let extras = extra_names.iter().enumerate()
         .map(|(j, n)| NamedPort {
             name: n.clone(),
@@ -4013,7 +4142,7 @@ fn task_open_repo(
     let port_block_len = block_len(member_count_hint, extra_names.len() as u16);
     // Held until save_task below persists the claimed block.
     let _port_guard = PORT_ALLOC_LOCK.lock();
-    let port = next_base_port(&load_tasks(), port_block_len)?;
+    let port = next_base_port(&load_tasks(), port_block_len, current_port_range())?;
 
     // Multi-repo project opened in REPO mode: drop a symlink for
     // each member into the host's working dir so the agent at the
@@ -4336,7 +4465,7 @@ fn task_import_worktree(
     let repo_cfg = repo_config_for(&proj);
     let extra_names = effective_extra_named_ports_from(&repo_cfg, &proj);
     let (port, extra_named_ports, port_block_len) =
-        allocate_task_ports(&existing_tasks, 0, &extra_names)?;
+        allocate_task_ports(&existing_tasks, 0, &extra_names, current_port_range())?;
     let explicit_name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
     let derived = explicit_name.is_none();
     let ws_name = explicit_name
@@ -4696,7 +4825,7 @@ fn task_create_sync(app: AppHandle, args: CreateTaskArgs) -> Result<Task, String
     let port_guard = PORT_ALLOC_LOCK.lock();
     let extra_names = effective_extra_named_ports_from(&repo_cfg, &proj);
     let (port, extra_named_ports, port_block_len) =
-        allocate_task_ports(&load_tasks(), 0, &extra_names)?;
+        allocate_task_ports(&load_tasks(), 0, &extra_names, current_port_range())?;
 
     let cli = args.cli.unwrap_or_else(|| proj.default_cli.clone());
     // Only "custom" tasks carry a pre-set launch command; agent/shell tasks
@@ -5067,7 +5196,7 @@ fn task_create_multi_sync(app: AppHandle, args: CreateMultiArgs) -> Result<Task,
     let port_guard = PORT_ALLOC_LOCK.lock();
     let extra_names = effective_extra_named_ports(&host);
     let (ws_port, extra_named_ports, port_block_len) =
-        allocate_task_ports(&load_tasks(), frozen.len() as u16, &extra_names)?;
+        allocate_task_ports(&load_tasks(), frozen.len() as u16, &extra_names, current_port_range())?;
     let mut next_member_port = ws_port + 1;
     for (mp, spec, dir_name) in frozen.into_iter() {
         let member_port = next_member_port;
@@ -7013,7 +7142,7 @@ fn task_restore_sync(app: AppHandle, id: String) -> Result<Task, String> {
         if let Some(fresh) = snapshot.iter().find(|t| t.id == id) {
             list[idx] = fresh.clone();
         }
-        rehome_ports_if_stolen(&mut list[idx], &snapshot);
+        rehome_ports_if_stolen(&mut list[idx], &snapshot, current_port_range());
         list[idx].archived = false;
         list[idx].archived_at = None;
         save_task(&list[idx]).map_err(|e| e.to_string())?;
@@ -7219,7 +7348,7 @@ fn task_restore_sync(app: AppHandle, id: String) -> Result<Task, String> {
     if let Some(fresh) = snapshot.iter().find(|t| t.id == id) {
         list[idx] = fresh.clone();
     }
-    rehome_ports_if_stolen(&mut list[idx], &snapshot);
+    rehome_ports_if_stolen(&mut list[idx], &snapshot, current_port_range());
     list[idx].archived = false;
     save_task(&list[idx]).map_err(|e| e.to_string())?;
     drop(port_guard);
@@ -14116,7 +14245,7 @@ fn task_ensure_extra_ports(id: String) -> Result<Task, String> {
         return Ok(list[idx].clone()); // orphaned task: spawn with the frozen pairs
     };
     let snapshot = list.clone();
-    if top_up_extra_ports(&mut list[idx], &proj, &snapshot) {
+    if top_up_extra_ports(&mut list[idx], &proj, &snapshot, current_port_range()) {
         save_task(&list[idx]).map_err(|e| e.to_string())?;
     }
     Ok(list[idx].clone())
@@ -14154,7 +14283,7 @@ fn task_run_script_stream(
     // On-the-fly ports (GH #196): names configured after this task was
     // created freeze into its buffer (or overflow to a stray port) now,
     // so this run sees them.
-    if top_up_extra_ports(&mut w, &p, &all_tasks) {
+    if top_up_extra_ports(&mut w, &p, &all_tasks, current_port_range()) {
         let _ = save_task(&w);
     }
     drop(port_guard);
@@ -15623,6 +15752,18 @@ pub struct Settings {
     /// tree across every project. Unioned with each project's committed
     /// `.termic.yaml` `exclude` list. `.git` is always hidden regardless.
     pub file_tree_exclude: Vec<String>,
+    /// GH #271: the port window task blocks are allocated from (Settings
+    /// -> Tasks). 0 on either field (absent in pre-#271 files, or the
+    /// user clearing the input) means "use the default", so the pair
+    /// resolves through `PortRange::from_settings` rather than being read
+    /// raw. Only NEW allocations look at this: a task's ports are frozen
+    /// at creation like every other port in the model, so narrowing the
+    /// range never moves a live task off the port its dev server is
+    /// already bound to.
+    #[serde(default)]
+    pub task_port_min: u16,
+    #[serde(default)]
+    pub task_port_max: u16,
     /// On-disk schema version. Gates one-time data migrations (see
     /// `migrate_workspaces_to_tasks`). 0 (default, absent in old files)
     /// means pre-Task-rename layout; bumped to `TASKS_SCHEMA_VERSION` once
@@ -23354,27 +23495,27 @@ filename f.rs
 
     #[test]
     fn base_port_empty_state() {
-        assert_eq!(next_base_port(&[], 6).unwrap(), 18100);
+        assert_eq!(next_base_port_with(&[], 6, PortRange::default(), |_| true).unwrap(), 18100);
     }
 
     #[test]
     fn blocks_stack_consecutively() {
         // Plain task block = 1 + 0 + 0 + 5 = 6 → next base is 18106.
         let existing = vec![stub_task(18100, 0, 0, false)];
-        assert_eq!(next_base_port(&existing, 6).unwrap(), 18106);
+        assert_eq!(next_base_port_with(&existing, 6, PortRange::default(), |_| true).unwrap(), 18106);
     }
 
     #[test]
     fn members_and_extras_widen_the_block() {
         // 1 + 2 members + 3 extras + 5 buffer = 11 → next base 18111.
         let existing = vec![stub_task(18100, 2, 3, false)];
-        assert_eq!(next_base_port(&existing, 6).unwrap(), 18111);
+        assert_eq!(next_base_port_with(&existing, 6, PortRange::default(), |_| true).unwrap(), 18111);
     }
 
     #[test]
     fn archived_blocks_are_reused() {
         let existing = vec![stub_task(18100, 0, 0, true)];
-        assert_eq!(next_base_port(&existing, 6).unwrap(), 18100);
+        assert_eq!(next_base_port_with(&existing, 6, PortRange::default(), |_| true).unwrap(), 18100);
     }
 
     #[test]
@@ -23382,9 +23523,9 @@ filename f.rs
         // Live at 18100 (len 6) and 18112 (len 6); the 18106..18112 gap
         // fits needed=6 → reused.
         let existing = vec![stub_task(18100, 0, 0, false), stub_task(18112, 0, 0, false)];
-        assert_eq!(next_base_port(&existing, 6).unwrap(), 18106);
+        assert_eq!(next_base_port_with(&existing, 6, PortRange::default(), |_| true).unwrap(), 18106);
         // needed=8 does NOT fit the gap → lands after the last block.
-        assert_eq!(next_base_port(&existing, 8).unwrap(), 18118);
+        assert_eq!(next_base_port_with(&existing, 8, PortRange::default(), |_| true).unwrap(), 18118);
     }
 
     #[test]
@@ -23401,7 +23542,7 @@ filename f.rs
         thief.id = "b".into();
         let list = vec![archived.clone(), thief];
         let mut restoring = archived;
-        assert!(rehome_ports_if_stolen(&mut restoring, &list));
+        assert!(rehome_ports_if_stolen(&mut restoring, &list, PortRange::default()));
         // Thief block = 1 + 0 + 0 + 5 = 6 → new base 18106, extras follow.
         assert_eq!(restoring.port, 18106);
         assert_eq!(restoring.extra_named_ports, vec![
@@ -23418,7 +23559,7 @@ filename f.rs
         other.id = "b".into();
         let list = vec![archived.clone(), other];
         let mut restoring = archived;
-        assert!(!rehome_ports_if_stolen(&mut restoring, &list));
+        assert!(!rehome_ports_if_stolen(&mut restoring, &list, PortRange::default()));
         assert_eq!(restoring.port, 18100);
     }
 
@@ -23440,7 +23581,7 @@ filename f.rs
         let mut task = stub_task(18100, 0, 0, false);
         task.extra_named_ports = vec![NamedPort { name: "API_PORT".into(), port: 18101 }];
         task.port_block_len = 7;
-        assert!(top_up_extra_ports(&mut task, &proj, &[]));
+        assert!(top_up_extra_ports(&mut task, &proj, &[], PortRange::default()));
         assert_eq!(task.extra_named_ports, vec![
             NamedPort { name: "API_PORT".into(),   port: 18101 },
             NamedPort { name: "DB_PORT".into(),    port: 18102 },
@@ -23468,7 +23609,7 @@ filename f.rs
         let mut task = stub_task(18100, 0, 0, false);
         task.id = "a".into();
         task.port_block_len = 6;
-        assert!(top_up_extra_ports(&mut task, &proj, &[]));
+        assert!(top_up_extra_ports(&mut task, &proj, &[], PortRange::default()));
         assert_eq!(task.extra_named_ports.len(), 6);
         assert_eq!(task.extra_named_ports[4],
                    NamedPort { name: "P4_PORT".into(), port: 18105 });
@@ -23497,7 +23638,7 @@ filename f.rs
         task.port_block_len = 6;
         let mut neighbor = stub_task(18106, 0, 0, false);
         neighbor.id = "b".into();
-        assert!(top_up_extra_ports(&mut task, &proj, &[neighbor]));
+        assert!(top_up_extra_ports(&mut task, &proj, &[neighbor], PortRange::default()));
         assert_eq!(task.extra_named_ports[5].port, 18112);
     }
 
@@ -23509,7 +23650,7 @@ filename f.rs
         a.id = "a".into();
         a.port_block_len = 6;
         a.extra_named_ports = vec![NamedPort { name: "STRAY_PORT".into(), port: 18106 }];
-        assert_eq!(next_base_port(&[a], 6).unwrap(), 18107);
+        assert_eq!(next_base_port_with(&[a], 6, PortRange::default(), |_| true).unwrap(), 18107);
     }
 
     #[test]
@@ -23527,7 +23668,7 @@ filename f.rs
         thief.id = "b".into();
         let list = vec![archived.clone(), thief];
         let mut restoring = archived;
-        assert!(rehome_ports_if_stolen(&mut restoring, &list));
+        assert!(rehome_ports_if_stolen(&mut restoring, &list, PortRange::default()));
         // Thief occupies [18106, 18112); new block (1+0+1+5=7) lands after.
         assert_eq!(restoring.port, 18112);
         assert_eq!(restoring.extra_named_ports,
@@ -23553,20 +23694,20 @@ filename f.rs
         };
         let mut task = stub_task(18100, 0, 0, false);
         task.extra_named_ports = vec![NamedPort { name: "OLD_PORT".into(), port: 18101 }];
-        assert!(top_up_extra_ports(&mut task, &proj, &[]));
+        assert!(top_up_extra_ports(&mut task, &proj, &[], PortRange::default()));
         assert_eq!(task.port_block_len, 7, "stamped from the pre-top-up shape");
         assert_eq!(task.extra_named_ports, vec![
             NamedPort { name: "OLD_PORT".into(), port: 18101 },
             NamedPort { name: "NEW_PORT".into(), port: 18102 },
         ]);
         // Idempotent: a second spawn adds nothing.
-        assert!(!top_up_extra_ports(&mut task, &proj, &[]));
+        assert!(!top_up_extra_ports(&mut task, &proj, &[], PortRange::default()));
     }
 
     #[test]
     fn allocate_assigns_consecutive_extras_after_members() {
         let (base, extras, _) = allocate_task_ports(
-            &[], 2, &["API_PORT".to_string(), "DB_PORT".to_string()],
+            &[], 2, &["API_PORT".to_string(), "DB_PORT".to_string()], PortRange::default(),
         ).unwrap();
         assert_eq!(base, 18100);
         // base=TERMIC_PORT, members at base+1+i, extras after members.
@@ -23574,6 +23715,95 @@ filename f.rs
             NamedPort { name: "API_PORT".into(), port: 18103 },
             NamedPort { name: "DB_PORT".into(),  port: 18104 },
         ]);
+    }
+
+    // ── Configurable port range (GH #271) ──
+
+    #[test]
+    fn custom_range_moves_the_floor_and_first_fits_inside_it() {
+        let r = PortRange { min: 3000, max: 4000 };
+        assert_eq!(next_base_port_with(&[], 6, r, |_| true).unwrap(), 3000);
+        let existing = vec![stub_task(3000, 0, 0, false)];
+        assert_eq!(next_base_port_with(&existing, 6, r, |_| true).unwrap(), 3006);
+    }
+
+    #[test]
+    fn range_too_full_fails_instead_of_spilling_past_the_ceiling() {
+        // 3000..=3011 holds exactly two 6-port blocks; the third has to fail
+        // rather than quietly allocate 3012 outside the user's range.
+        let r = PortRange { min: 3000, max: 3011 };
+        let existing = vec![stub_task(3000, 0, 0, false), stub_task(3006, 0, 0, false)];
+        let err = next_base_port_with(&existing, 6, r, |_| true).unwrap_err();
+        assert!(err.contains("3000-3011"), "{err}");
+        // The last block that DOES fit still fits: no off-by-one at the ceiling.
+        assert_eq!(next_base_port_with(&existing[..1], 6, r, |_| true).unwrap(), 3006);
+    }
+
+    #[test]
+    fn a_port_held_outside_termic_is_skipped() {
+        let r = PortRange { min: 3000, max: 4000 };
+        // Someone else's dev server on 3003, in the middle of the first
+        // candidate block: the whole block moves past it, not just the one
+        // port, because a block has to be consecutive.
+        let base = next_base_port_with(&[], 6, r, |p| p != 3003).unwrap();
+        assert_eq!(base, 3004);
+        // A busy port the scan has already passed doesn't drag it back.
+        assert_eq!(next_base_port_with(&[], 6, r, |p| p != 3000).unwrap(), 3001);
+    }
+
+    #[test]
+    fn probe_and_task_occupancy_both_have_to_clear() {
+        let r = PortRange { min: 3000, max: 4000 };
+        // Task owns 3000..3006; an outside listener sits on 3007. The block
+        // has to clear the task scan AND the probe, so it lands past both.
+        let existing = vec![stub_task(3000, 0, 0, false)];
+        assert_eq!(next_base_port_with(&existing, 6, r, |p| p != 3007).unwrap(), 3008);
+    }
+
+    #[test]
+    fn raising_the_floor_does_not_make_existing_tasks_invisible() {
+        // The regression the PORT_BASE/PORT_ALLOC_MIN split exists for: a task
+        // allocated under the old default still occupies its block after the
+        // user moves the range above it, so a re-home can still see the theft.
+        let low = stub_task(18100, 0, 0, false);
+        assert_eq!(task_port_intervals(&low), vec![(18100, 18106)]);
+        let mut restoring = stub_task(18100, 0, 0, true);
+        restoring.id = "restoring".into();
+        restoring.archived = false;
+        let mut thief = stub_task(18100, 0, 0, false);
+        thief.id = "thief".into();
+        assert!(rehome_ports_if_stolen(&mut restoring, &[thief], PortRange { min: 30000, max: 40000 }));
+        assert_eq!(restoring.port, 30000);
+    }
+
+    #[test]
+    fn a_record_with_no_allocated_port_still_owns_nothing() {
+        // The other half of that split: port 0 is a pre-#196 record and must
+        // keep occupying nothing, whatever the configured floor is.
+        assert!(task_port_intervals(&stub_task(0, 0, 0, false)).is_empty());
+        assert!(!rehome_ports_if_stolen(&mut stub_task(0, 0, 0, false), &[], PortRange::default()));
+    }
+
+    #[test]
+    fn settings_resolve_to_a_usable_range_or_the_default() {
+        let d = PortRange::default();
+        let with = |min, max| PortRange::from_settings(&Settings {
+            task_port_min: min, task_port_max: max, ..Default::default()
+        });
+        // Unset (pre-#271 file, or a cleared input) means default.
+        assert_eq!(with(0, 0), d);
+        assert_eq!(with(3000, 0), PortRange { min: 3000, max: d.max });
+        assert_eq!(with(0, 40000), PortRange { min: d.min, max: 40000 });
+        assert_eq!(with(3000, 4000), PortRange { min: 3000, max: 4000 });
+        // Half-set below the DEFAULT floor is an inverted range, not a
+        // 18100-4000 window: it falls back like any other invalid pair.
+        assert_eq!(with(0, 4000), d);
+        // Privileged floor is clamped, not honored.
+        assert_eq!(with(80, 4000), PortRange { min: PORT_ALLOC_MIN, max: 4000 });
+        // Inverted, or too narrow for even one block: fall back rather than
+        // leave the user unable to create the task that would fix it.
+        assert_eq!(with(4000, 3000), d);
+        assert_eq!(with(3000, 3003), d);
     }
 
     // ── write_atomic (the settings.json / projects.json / task writer) ──
