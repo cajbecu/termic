@@ -1,12 +1,16 @@
-// Settings → Notifications → Agent hooks.
+// Settings → Agents & Terminals → Agent hooks.
 //
-// It lives under Notifications because the four settings above it (desktop
-// notifications, completion sound, the done indicator and the in-progress
-// spinner) are ALL downstream of work-state detection, and this is where that
-// detection comes from. It is the accuracy source for the section, not a fifth
-// sibling toggle. Agents links here rather than duplicating the rows per agent:
-// the per-agent statuses ("not needed", "not supported yet") only read as
-// coverage when they are in one table.
+// It sits with the AGENTS because it writes into an agent's own config and
+// changes how that agent reports its state. It lived under Notifications
+// first, on the reasoning that the four indicators there are all downstream of
+// work-state detection: true, and beside the point, since Notifications is
+// where you choose whether to be TOLD rather than how termic KNOWS. The tell
+// was that the arrangement needed a signpost on the Agents page pointing at
+// it, and a cross reference is usually evidence a thing is in the wrong place.
+//
+// One table above the per-agent tabs, not a field on each card: the per-agent
+// statuses ("not needed", "not supported yet") only read as coverage when they
+// sit next to each other, and it is a decision made once, not per agent.
 //
 // One row per DETECTED agent, each with its own action. Deliberately not a
 // single master switch: the consent question differs per agent (a shell script
@@ -19,21 +23,13 @@
 // installed for it inside a container. See docs/agent-hooks.md.
 
 import { useCallback, useEffect, useState } from "react";
+import { ChevronRight } from "lucide-react";
 import { agentHooksInstall, agentHooksPlan, agentHooksRemove, agentHooksStatus } from "@/lib/ipc";
 import { useApp } from "@/store/app";
 import { Button } from "@/components/ui/Button";
-import { SubSection } from "./SubSection";
+import { cn } from "@/lib/utils";
 import { agentDisplayName } from "@/lib/agents";
 import type { AgentHookStatus, HookPlan } from "@/lib/types";
-
-/** Why an agent cannot be wired, in the user's terms. An agent that is
- *  installed but unsupported must SAY so rather than appear wired, which is the
- *  mistake the competing implementation makes in the other direction. */
-const UNSUPPORTED_REASON: Record<string, string> = {
-  codex: "not needed, its terminal already reports this",
-  gemini: "not supported yet",
-  copilot: "not supported yet",
-};
 
 /** Anchor the Agents section's link targets, so the jump lands ON the block
  *  rather than at the top of Notifications with the reader hunting for it. */
@@ -49,6 +45,13 @@ export function AgentHooksBlock() {
   // move is to show the actual scripts rather than describe them.
   const [plan, setPlan] = useState<Record<string, HookPlan>>({});
   const [open, setOpen] = useState<string | null>(null);
+  // COLLAPSED by default. Expanded, this pushed the per-agent tabs (the reason
+  // anyone opens this page) below the fold behind two paragraphs of protocol
+  // detail. That detail is right for someone deciding to let termic write into
+  // their agent config and wrong as the first thing on the page, so it lives
+  // behind the toggle and the collapsed row carries only what it is and how
+  // many agents are wired.
+  const [expanded, setExpanded] = useState(false);
   // Arriving from the Agents section's link: scroll to this block and flash it
   // once. Same one-shot contract as GeneralSection's, so a later manual visit
   // to Notifications does not re-flash something the reader is already on.
@@ -80,6 +83,14 @@ export function AgentHooksBlock() {
   const present = agents
     .filter(a => a.id !== "shell" && detectedClis[a.id]?.found)
     .map(a => a.id);
+
+  // ...and of those, only the ones this can actually wire. A row reading
+  // "not supported yet" or "not needed, its terminal already reports this" is
+  // a row you can do nothing with, and there were more of those than real ones,
+  // which made the list read as mostly unavailable. The unsupported agents are
+  // still described in docs/agent-hooks.md, where the reasoning belongs.
+  const wirable = present.filter(id => status[id]?.supported);
+  const installedCount = wirable.filter(id => status[id]?.host.installed).length;
 
   const refresh = useCallback(async (ids: string[]) => {
     const rows = await Promise.all(
@@ -113,116 +124,124 @@ export function AgentHooksBlock() {
   // resolves against the root font size, so using it rendered this whole block
   // a notch below its neighbours and drew a "why did you introduce a new text
   // size" straight away. Match the surrounding settings, do not invent.
-  if (!present.length) return null;
+  // Nothing to offer, so nothing to show. Also covers the moment before
+  // status resolves, where every row would say "checking...".
+  if (!wirable.length) return null;
 
   return (
-    <div id={`setting-${AGENT_HOOKS_HIGHLIGHT}`} className={flash ? "rounded-md ring-2 ring-[var(--color-accent)]" : undefined}>
-    <SubSection
-      title="Agent hooks"
-      badge="Experimental"
-      hint="Off by default. The agent tells Termic when it starts, when it needs you, and when it is done, instead of Termic guessing from what is on screen."
+    <div
+      id={`setting-${AGENT_HOOKS_HIGHLIGHT}`}
+      className={cn(
+        "rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg-1)] px-4 py-3",
+        flash && "ring-2 ring-[var(--color-accent)]",
+      )}
     >
-      {/* State the mechanism on both sides. The audience runs coding agents
-          for a living and is being asked to let termic write into their agent
-          config: the useful thing is which signals each path uses and where
-          the fallback path is known to be wrong, not a characterisation of it.
-          An earlier draft opened "guessing is usually right and sometimes
-          wrong", which tells a developer nothing they can check. */}
-      <p className="text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
-        <b>Without hooks</b>, Termic infers state from the terminal: it
-        classifies the title (OSC 0/2) with per-agent patterns, and reads OSC 9
-        notifications and OSC 9;4 progress from agents that send them. With no
-        such signal it falls back to heuristics, 4s of PTY silence, a stable
-        scrollback, an unchanged viewport hash. Claude paints its idle glyph
-        while it is blocked on a permission prompt, and again while its
-        subagents are still running, so those signals report turns that have
-        not ended.
-      </p>
-      <p className="text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
-        <b>With hooks</b>, Termic registers scripts on the agent&apos;s own
-        lifecycle events. Each writes one OSC to this tab&apos;s pty:
-        <code> 133;C</code> when a turn starts, <code> 133;D</code> when it
-        ends, <code> 777;notify</code> when the agent needs you. For Claude
-        those events are UserPromptSubmit and PreToolUse, PermissionRequest,
-        and Stop, and the Stop script stays silent while its payload still
-        lists background tasks. Once a hook has been seen on a terminal, the
-        title and the heuristics no longer end a turn there.
-      </p>
-      <div className="flex flex-col gap-2">
-        {present.map(id => {
-          const st = status[id];
-          const reason = UNSUPPORTED_REASON[id] ?? "not supported yet";
-          const err = failure[id] || st?.host.error || "";
-          // `disableAllHooks` in the user's own config means an install would
-          // never fire. Saying "installed" there would be a lie.
-          const blocked = st?.host.disabled_all;
-          return (
-            <div key={id} className="flex flex-col gap-1 rounded-md border border-[var(--color-border)] px-3 py-2">
-              <div className="flex items-center justify-between gap-3">
-                <span className="text-[14px] font-medium">{agentDisplayName(id, agents)}</span>
-                <div className="flex items-center gap-2">
-                  <span className="text-[12.5px] text-[var(--color-fg-dim)]">
-                    {!st ? "checking..."
-                      : !st.supported ? reason
-                      : blocked ? "disableAllHooks is set in this config"
-                      : st.host.installed ? "installed"
-                      : "not installed"}
-                  </span>
-                  {st?.supported && !blocked && (
-                    <Button
-                      variant={st.host.installed ? "ghost" : "primary"}
-                      disabled={busy === id}
-                      onClick={() => act(id, !st.host.installed)}
-                    >
-                      {busy === id ? "..." : st.host.installed ? "Remove" : "Install"}
-                    </Button>
-                  )}
-                </div>
-              </div>
-              {/* Name the files BEFORE writing, not after, and offer the
-                  whole thing rather than a summary of it. */}
-              {st?.supported && !blocked && (
-                <button
-                  type="button"
-                  onClick={() => void toggleDetails(id)}
-                  className="self-start text-[12.5px] text-[var(--color-fg-dim)] underline decoration-dotted hover:text-[var(--color-fg)]"
-                >
-                  {open === id ? "Hide what this installs" : "Show exactly what this installs"}
-                </button>
-              )}
-              {open === id && plan[id] && (
-                <div className="flex flex-col gap-2 rounded bg-[var(--color-bg-subtle)] p-2 text-[12px]">
-                  <div>
-                    <span className="text-[var(--color-fg-subtle)]">Config file: </span>
-                    <code className="break-all">{plan[id].config_path}</code>
-                    {plan[id].config_is_shared && (
-                      <span className="text-[var(--color-fg-subtle)]"> (yours; termic merges into it)</span>
-                    )}
-                  </div>
-                  <div>
-                    <div className="text-[var(--color-fg-subtle)]">Added to that file:</div>
-                    <pre className="overflow-x-auto whitespace-pre">{plan[id].config_fragment}</pre>
-                  </div>
-                  {plan[id].entries.map(en => (
-                    <div key={en.event}>
-                      <div className="text-[var(--color-fg-subtle)]">
-                        <code>{en.event}</code> reports <b>{en.reports}</b>, and runs:
-                      </div>
-                      <div className="break-all"><code>{en.script_path}</code></div>
-                      <pre className="overflow-x-auto whitespace-pre">{en.script_body}</pre>
+      {/* The whole thing collapsed is ONE row: what it is, how many agents are
+          wired, and a way in. Everything else is behind the toggle. */}
+      <button
+        type="button"
+        data-testid="agent-hooks-toggle"
+        aria-expanded={expanded}
+        onClick={() => setExpanded(v => !v)}
+        className="flex w-full items-center gap-2 text-left"
+      >
+        <ChevronRight className={cn("h-4 w-4 shrink-0 text-[var(--color-fg-faint)] transition-transform", expanded && "rotate-90")} />
+        <span className="text-[14px] font-semibold text-[var(--color-fg)]">Agent hooks</span>
+        <span className="rounded bg-[var(--color-accent)]/15 px-1.5 py-0.5 text-[11px] uppercase tracking-wider text-[var(--color-accent)]">
+          Experimental
+        </span>
+        <span className="ml-auto text-[12.5px] text-[var(--color-fg-dim)]">
+          {installedCount > 0
+            ? `${installedCount} of ${wirable.length} installed`
+            : "Let agents report their own state"}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="mt-3 flex flex-col gap-3">
+          <p className="text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
+            Termic installs a small script into the agent&apos;s own config so it
+            reports when a turn starts, when it needs you, and when it is done.
+            Without it Termic infers all three from the terminal, which is
+            usually right: Claude paints its idle glyph while blocked on a
+            permission prompt, and again while its subagents run, so a task can
+            read as finished when it is not. Removal puts the config back byte
+            for byte, and each row shows exactly what it writes.
+          </p>
+          <div className="flex flex-col gap-2">
+            {wirable.map(id => {
+              // `wirable` already filtered to supported agents, so `st` exists.
+              const st = status[id]!;
+              const err = failure[id] || st.host.error || "";
+              // `disableAllHooks` in the user's own config means an install would
+              // never fire. Saying "installed" there would be a lie.
+              const blocked = st.host.disabled_all;
+              return (
+                <div key={id} className="flex flex-col gap-1 rounded-md border border-[var(--color-border)] px-3 py-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-[14px] font-medium">{agentDisplayName(id, agents)}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[12.5px] text-[var(--color-fg-dim)]">
+                        {blocked ? "disableAllHooks is set in this config"
+                          : st.host.installed ? "installed"
+                          : "not installed"}
+                      </span>
+                      {!blocked && (
+                        <Button
+                          variant={st.host.installed ? "ghost" : "primary"}
+                          disabled={busy === id}
+                          onClick={() => act(id, !st.host.installed)}
+                        >
+                          {busy === id ? "..." : st.host.installed ? "Remove" : "Install"}
+                        </Button>
+                      )}
                     </div>
-                  ))}
-                  {plan[id].notes.map((n, i) => (
-                    <p key={i} className="text-[var(--color-fg-subtle)]">{n}</p>
-                  ))}
+                  </div>
+                  {/* Name the files BEFORE writing, not after, and offer the
+                      whole thing rather than a summary of it. */}
+                  {!blocked && (
+                    <button
+                      type="button"
+                      onClick={() => void toggleDetails(id)}
+                      className="self-start text-[12.5px] text-[var(--color-fg-dim)] underline decoration-dotted hover:text-[var(--color-fg)]"
+                    >
+                      {open === id ? "Hide what this installs" : "Show exactly what this installs"}
+                    </button>
+                  )}
+                  {open === id && plan[id] && (
+                    <div className="flex flex-col gap-2 rounded bg-[var(--color-bg-subtle)] p-2 text-[12px]">
+                      <div>
+                        <span className="text-[var(--color-fg-subtle)]">Config file: </span>
+                        <code className="break-all">{plan[id].config_path}</code>
+                        {plan[id].config_is_shared && (
+                          <span className="text-[var(--color-fg-subtle)]"> (yours; termic merges into it)</span>
+                        )}
+                      </div>
+                      <div>
+                        <div className="text-[var(--color-fg-subtle)]">Added to that file:</div>
+                        <pre className="overflow-x-auto whitespace-pre">{plan[id].config_fragment}</pre>
+                      </div>
+                      {plan[id].entries.map(en => (
+                        <div key={en.event}>
+                          <div className="text-[var(--color-fg-subtle)]">
+                            <code>{en.event}</code> reports <b>{en.reports}</b>, and runs:
+                          </div>
+                          <div className="break-all"><code>{en.script_path}</code></div>
+                          <pre className="overflow-x-auto whitespace-pre">{en.script_body}</pre>
+                        </div>
+                      ))}
+                      {plan[id].notes.map((n, i) => (
+                        <p key={i} className="text-[var(--color-fg-subtle)]">{n}</p>
+                      ))}
+                    </div>
+                  )}
+                  {err && <p className="text-[12.5px] text-[var(--color-danger)]">{err}</p>}
                 </div>
-              )}
-              {err && <p className="text-[12.5px] text-[var(--color-danger)]">{err}</p>}
-            </div>
-          );
-        })}
-      </div>
-    </SubSection>
+                  );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

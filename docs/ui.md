@@ -594,27 +594,26 @@ TerminalPane samples `term.buffer.active` every 3s, FNV-1a hashes the visible vi
 
 ## Settings: where a feature's row belongs
 
-A row goes where its EFFECT is, not where its mechanism is. Agent hooks writes
-into an agent's own config file, which reads like an Agents concern, and it sits
-under Notifications instead, because the four settings above it (desktop
+Agent hooks sits under **Agents & Terminals**, not Notifications, and the route
+there is worth recording because the first answer was wrong.
+
+The case for Notifications was real: the four settings there (desktop
 notifications, completion sound, the done indicator, the in-progress spinner)
-are all downstream of work-state detection and hooks is where that detection
-comes from. It is the accuracy source for that section.
+are all downstream of work-state detection, and hooks is where that detection
+comes from. True, and beside the point. Notifications is where you choose
+whether to be TOLD; hooks is how termic KNOWS, it writes into the agent's own
+config, and it changes how that agent behaves.
 
-Two consequences worth keeping:
+The tell was the cross-reference. Placing it under Notifications required a
+signpost on the Agents page pointing at it, which is usually evidence a thing
+is in the wrong place: nobody looking for "how does termic know what claude is
+doing" opens Notifications. The pointer now runs the other way, from the four
+indicators to the thing that decides them, which is the direction that needs
+explaining.
 
-- **The rows stay in ONE table.** Splitting them per agent would hide coverage:
-  "not needed, its terminal already reports this" and "not supported yet" only
-  mean something next to each other. It is also a decision made once, not a
-  per-agent preference.
-- **Agents links to it, and the link does not gate on support.** The supported
-  set lives in Rust; mirroring it into the settings UI is the same drift that
-  produced the stale `FALLBACK_CAPS` mirror. The link points at the table and
-  lets the table be the authority.
-
-The copy names the benefit that actually carries the tradeoff. This block asks
-to write into a user's config, so it has to say what it buys, and the honest
-answer is DONE detection: needs-you gains about six seconds, while done is the
-difference between a right badge and a wrong one for half an hour. The first
-version named only needs-you, which was accurate when it installed one hook and
-undersold it badly once it installed three.
+Two consequences worth keeping. The rows stay in ONE table above the per-agent
+tabs rather than a field on each card: "not needed, its terminal already
+reports this" and "not supported yet" only mean something next to each other,
+and it is a decision made once, not a per-agent preference. And the link out of
+Notifications does not gate on which agents are supported; the table is the
+authority on that.

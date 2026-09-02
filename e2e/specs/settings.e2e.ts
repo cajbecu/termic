@@ -2922,12 +2922,26 @@ describe("agent hooks", () => {
   });
 
   it("shows an honest per-agent row instead of pretending every agent is wired", async () => {
+    // Agents, not Notifications: it writes into an agent's own config and
+    // changes how that agent reports state, so it belongs where agents are
+    // configured. Notifications keeps a pointer, since its indicators are
+    // downstream of what this decides.
     await browser.execute(() =>
-      window.__termic!.useApp.getState().openSettings("notifications"));
+      window.__termic!.useApp.getState().openSettings("agents"));
     await waitForText("Agent hooks");
-    // fakeagent is seeded and detected, and phase 1 wires claude only. The row
-    // has to SAY that rather than offer a button that would fail.
-    await waitForText("not supported yet");
+    // Collapsed by default: expanded, this pushed the per-agent tabs (the
+    // reason anyone opens the page) below the fold behind two paragraphs of
+    // protocol detail.
+    await browser.execute(() =>
+      (document.querySelector('[data-testid="agent-hooks-toggle"]') as HTMLElement | null)?.click());
+    // Only agents that can actually be wired get a row. An agent the installer
+    // cannot help ("not supported yet", "not needed, its terminal already
+    // reports this") is a row you can do nothing with, and there were more of
+    // those than real ones. fakeagent is seeded and detected and is NOT one of
+    // the four, so it must be absent rather than present-and-useless.
+    await waitVisible('[data-testid="agent-hooks-toggle"][aria-expanded="true"]');
+    const rows = await browser.execute(() => document.body.innerText);
+    expect(rows).not.toContain("not supported yet");
     await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
   });
 });

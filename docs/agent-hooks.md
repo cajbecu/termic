@@ -2,7 +2,7 @@
 
 How termic learns what an agent is doing from the agent itself, instead of
 reading its terminal. Off by default, per agent, installed globally into that
-agent's own config. Settings → Notifications → Agent hooks.
+agent's own config. Settings → Agents & Terminals → Agent hooks.
 
 The state machine this feeds (`working` / `attention` / `done`, the settle
 timer, the demoters) lives in `TerminalPane`; this doc covers the hook half and

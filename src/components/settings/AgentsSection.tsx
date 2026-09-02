@@ -13,7 +13,7 @@ import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
 import { agentOverrides, resolveAgent } from "@/lib/agents";
 import { fitRows, fitMinHeight } from "@/lib/fitRows";
-import { AGENT_HOOKS_HIGHLIGHT } from "./AgentHooksBlock";
+import { AgentHooksBlock } from "./AgentHooksBlock";
 import type { Agent, CliInfo } from "@/lib/types";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -343,6 +343,18 @@ export function AgentsSection() {
       </p>
 
       {err && <div className="text-[13px] text-[var(--color-err)]">{err}</div>}
+
+      {/* Above the per-agent tabs, because it is one decision across all of
+          them rather than a field on any one card, and because it belongs on
+          this page at all: it writes into the AGENT's own config and changes
+          how that agent reports its state.
+          It lived under Notifications first, on the reasoning that the
+          indicators there are all downstream of work-state detection. True,
+          and beside the point: Notifications is where you choose whether to be
+          TOLD, not how termic KNOWS. The tell was that placing it there
+          required a signpost on this page pointing at it, and a cross
+          reference is usually evidence the thing is in the wrong place. */}
+      <AgentHooksBlock />
 
       <AgentsTabs
         agents={agents}
@@ -1020,25 +1032,8 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
             <div className="border-t border-[var(--color-border-soft)] pt-3 text-[12px] text-[var(--color-fg-dim)]">
               {signalGroupHint(agent.id)}
             </div>
-            {/* The rows below tune a GUESS. Anyone editing them is, by
-                definition, someone the terminal has already got wrong, which
-                makes this the one place in Settings where the exact answer is
-                worth offering. It links rather than repeating the install rows:
-                those only read as coverage when all the agents sit in one
-                table, and this is a decision you make once, not per agent. */}
-            {/* Deliberately NOT gated on whether this agent supports hooks.
-                The supported set lives in Rust, and mirroring it here is the
-                drift that has caught this repo before; the linked table already
-                says "not supported yet" per agent and is the one authority. So
-                this points, it does not promise. */}
-            <button
-              type="button"
-              className="self-start text-left text-[12px] text-[var(--color-accent)] hover:underline"
-              onClick={() => useApp.getState().openSettings(
-                "notifications", undefined, AGENT_HOOKS_HIGHLIGHT)}
-            >
-              Some agents can report their state exactly, with no patterns at all. See agent hooks.
-            </button>
+            {/* The rows below tune a GUESS, and the exact answer is now on
+                this same page, above the tabs. No signpost needed. */}
             <RegexListField
               label="Done (title → done)"
               hint="Marks the turn finished: blue badge, bell, notification."

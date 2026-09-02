@@ -6,11 +6,11 @@ import { ensureNotifyPermission, previewCompletionSound } from "@/lib/ipc";
 import { Button } from "@/components/ui/Button";
 import { usePrefs } from "@/store/prefs";
 import { useApp } from "@/store/app";
+import { AGENT_HOOKS_HIGHLIGHT } from "./AgentHooksBlock";
 import { Block, SectionTitle, Toggle } from "./Controls";
 import { cn } from "@/lib/utils";
 import { taskLabel } from "@/lib/taskLabel";
 import { COMPLETION_SOUND_OPTIONS, COMPLETION_SOUND_SUPPORTED } from "@/lib/notificationSounds";
-import { AgentHooksBlock } from "./AgentHooksBlock";
 
 export function NotificationsSection() {
   const desktopNotifications = usePrefs(s => s.desktopNotifications);
@@ -119,7 +119,18 @@ export function NotificationsSection() {
           onChange={setWorkingIndicator}
         />
       </Block>
-      <AgentHooksBlock />
+      {/* The four settings above are all downstream of work-state detection,
+          and agent hooks is where that detection comes from. It lives on the
+          Agents page because it writes into an agent's own config, so this is
+          a pointer rather than the thing itself. */}
+      <p className="text-[12.5px] text-[var(--color-fg-dim)]">
+        These four read Termic&apos;s idea of what an agent is doing. To have the
+        agent report that itself instead, see <button
+          type="button"
+          className="text-[var(--color-accent)] hover:underline"
+          onClick={() => useApp.getState().openSettings("agents", undefined, AGENT_HOOKS_HIGHLIGHT)}
+        >Agent hooks</button> under Agents &amp; Terminals.
+      </p>
     </div>
   );
 }
