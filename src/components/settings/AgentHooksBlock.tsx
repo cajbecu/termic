@@ -119,6 +119,7 @@ export function AgentHooksBlock() {
     <div id={`setting-${AGENT_HOOKS_HIGHLIGHT}`} className={flash ? "rounded-md ring-2 ring-[var(--color-accent)]" : undefined}>
     <SubSection
       title="Agent hooks"
+      badge="Experimental"
       hint="Off by default. The agent tells Termic when it starts, when it needs you, and when it is done, instead of Termic guessing from what is on screen."
     >
       {/* State the mechanism on both sides. The audience runs coding agents

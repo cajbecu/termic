@@ -30,15 +30,28 @@
  *  edge under its label; a right-aligned switch is the only thing on the page
  *  the eye has to go find, and it reads as chrome for the header rather than as
  *  the setting it is. */
-export function SubSection({ title, hint, children }: {
+export function SubSection({ title, badge, hint, children }: {
   title: string;
+  /** Marks the group experimental, the same meaning and the same look as
+   *  `SectionTitle`'s badge: off by default because we are not yet confident
+   *  in it, with a stated way out (docs/ui.md's promotion rule). A whole
+   *  settings PAGE gets that one; this is for a group inside a page, so the
+   *  two do not drift into different-looking words for the same claim. */
+  badge?: string;
   hint?: string;
   children: React.ReactNode;
 }) {
   return (
     <section className="-mx-4 space-y-3 border-y border-[var(--color-border)] bg-[var(--color-bg-3)] px-4 py-3 last:-mb-4 last:rounded-b-[7px] last:border-b-0">
       <div>
-        <div className="text-[14px] font-semibold text-[var(--color-fg)]">{title}</div>
+        <div className="flex items-center gap-2">
+          <span className="text-[14px] font-semibold text-[var(--color-fg)]">{title}</span>
+          {badge && (
+            <span className="rounded bg-[var(--color-accent)]/15 px-1.5 py-0.5 text-[11px] uppercase tracking-wider text-[var(--color-accent)]">
+              {badge}
+            </span>
+          )}
+        </div>
         {hint && <div className="mt-1 text-[12px] text-[var(--color-fg-dim)]">{hint}</div>}
       </div>
       {children}
