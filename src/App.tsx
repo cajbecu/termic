@@ -84,7 +84,7 @@ export function App() {
     // window focus — `loadAll` re-runs on focus, detection does not.
     useApp.getState().refreshClis();
     // Which agents report their own state. Drives whether the terminal title
-    // is still allowed to end a turn for them (docs/plans/agent-hooks.md).
+    // is still allowed to end a turn for them (docs/agent-hooks.md).
     useApp.getState().refreshAgentHooks();
     // Forge CLI (gh / glab) detection for the PR integrations - same
     // policy as agent CLI detection: startup + Settings visits only.

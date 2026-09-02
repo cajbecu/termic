@@ -186,7 +186,7 @@ so the agent sees only the relevant errors instead of a build log.
 **2. Verification is gated on the Stop hook.** All relevant verifiers
 run before a PR is created, via Claude Code's `Stop` hook, and a failing
 verifier blocks the PR. This is the counterpoint to
-[agent-hooks.md](agent-hooks.md), which rules out blocking hooks for
+[agent-hooks.md](../agent-hooks.md), which rules out blocking hooks for
 termic. Their use case justifies blocking because the hook is a quality
 gate on unsupervised work; ours would be observation only. Worth being
 explicit that the two uses are different rather than assuming hooks are

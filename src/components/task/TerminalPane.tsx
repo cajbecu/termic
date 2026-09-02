@@ -328,7 +328,7 @@ export function TerminalPane({ task, tab, active }: Props) {
   // driving `working` (harmless, and it is often first) but is no longer
   // allowed to END a turn, because that is the judgement it gets wrong: it
   // goes idle the moment the parent turn returns, while subagents and
-  // background shells keep running. See docs/plans/agent-hooks.md.
+  // background shells keep running. See docs/agent-hooks.md.
   const hooksOwnState = useApp(s => s.agentHooksInstalled[tab.cli] === true);
   // Mirrored into a ref so the spawn effect can read it without listing it
   // as a dependency and tearing down the PTY when it flips.
@@ -1670,7 +1670,7 @@ const captureArmedRef = useRef(false);
       // The `title` field names the SENDER. Our own agent hook stamps
       // HOOK_OSC_TITLE there, which is how a signal termic installed itself is
       // told apart from whatever the agent decided to notify about. See
-      // lib/agentHooks.ts and docs/plans/agent-hooks.md.
+      // lib/agentHooks.ts and docs/agent-hooks.md.
       const trusted = parts[1] === HOOK_OSC_TITLE;
       wdlog(`OSC 777 notify${trusted ? " (termic hook)" : ""}`, body);
       dbg("osc777-notify", body.slice(0, 200));

@@ -1,0 +1,231 @@
+# Agent hooks
+
+How termic learns what an agent is doing from the agent itself, instead of
+reading its terminal. Off by default, per agent, installed globally into that
+agent's own config. Settings → Notifications → Agent hooks.
+
+The state machine this feeds (`working` / `attention` / `done`, the settle
+timer, the demoters) lives in `TerminalPane`; this doc covers the hook half and
+the measurements that decided it. Generation is
+`src-tauri/src/agent_hooks.rs`, the OSC contract is `src/lib/agentHooks.ts`.
+
+## Why not read the terminal
+
+The fallback path infers state from the title (OSC 0/2), from OSC 9
+notifications and OSC 9;4 progress where an agent sends them, and otherwise
+from heuristics: 4s of PTY silence, a stable scrollback, an unchanged viewport
+hash. It is usually right. Two measurements say "usually" is not enough:
+
+- **Blocked reads as finished.** Claude paints its IDLE glyph while blocked on
+  a permission prompt, a question, or plan approval (measured on 2.1.250). The
+  false `done` fires at `SETTLE_MS`, about a second before the honest OSC 9
+  arrives.
+- **Running reads as finished.** Over an 8.5 minute run with four real
+  subagents, the title claimed idle for **154s, 30% of the window**, while
+  claude's own `Stop` correctly stayed silent throughout. This is the
+  "long subagent run reports done early" bug.
+
+The screen-text guard meant to catch the second matched **twice** in those 8.5
+minutes: claude had changed its wording. A text heuristic aimed at a moving
+target.
+
+## What is installed, per agent
+
+| agent | working | attention | done | interrupt |
+| --- | --- | --- | --- | --- |
+| claude | `UserPromptSubmit`, `PreToolUse` | `PermissionRequest` | `Stop`, guarded on `background_tasks: []` | none exists |
+| grok | `UserPromptSubmit`, `PreToolUse` | `Notification` | `Stop` + `StopCancelled` | `StopCancelled` |
+| agy | `PreInvocation` | none exists (see below) | `Stop`, guarded on `fullyIdle` | none exists |
+| opencode | `chat.message`, `permission.replied` | `permission.asked` | `session.idle` | `session.idle`, on the SECOND escape |
+
+Codex is deliberately excluded: its title already says `Action Required` at
++22ms, so it stays on the fallback path.
+
+**`PreToolUse` is a heartbeat, not a duplicate.** Working is the only sustained
+state here; every other signal is an edge. The title re-asserted working on
+every repaint, so anything that wrongly cleared the spinner self-healed within
+a frame. A single `UserPromptSubmit` made the same clear permanent for the rest
+of the turn: a user clicking into a running task had its spinner dropped and
+nothing ever put it back. A tool call is the protocol's own "still going".
+
+agy is the exception twice over: `PreInvocation` already fires per model
+invocation, and its `PreToolUse` documents `decision` as REQUIRED, so observing
+it silently risks blocking the tool.
+
+**Done and attention get no heartbeat.** A turn ends once, and repeating it
+would re-badge something the user just dismissed. There is a test saying so.
+
+## agy has no attention event, so it is read from the screen
+
+Measured against Antigravity CLI 1.1.24 at a live permission prompt: **no
+title, no OSC of any kind, no bell.** The prompt exists only as text:
+
+```
+Requesting permission for:
+   echo hello-from-agy
+Do you want to proceed?
+```
+
+So agy is a hybrid: hooks for working and done, screen content for attention.
+`BUILTIN_OUTPUT_SIGNALS` in `lib/agents.ts` is a table SEPARATE from the title
+one, deliberately: claude's `^\s*✳` describes a title and is nonsense against
+stdout, which is why the output scanner refuses to fall back to it.
+
+Give a pty a window size before probing a TUI. Two earlier probes concluded agy
+emits nothing at all, and both were invalid: without `TIOCSWINSZ` agy never
+finishes booting, so the probe was typing into a splash screen.
+
+## Transport
+
+Every agent writes one OSC to the terminal termic handed it. Three targets,
+tried in order, chained on redirection failure:
+
+```sh
+emit "$TERMIC_PTY" || emit /proc/1/fd/1 || emit /dev/tty || true
+```
+
+- `$TERMIC_PTY` is the slave path from `ptsname(master_fd)`, exported per spawn.
+- `/proc/1/fd/1` is the container's main-process stdout, which docker relays to
+  that same pty under `run -i -t`. It needs NO controlling terminal, which is
+  why it beats `/dev/tty`: hooks run without one (measured on grok, rc=1).
+- Chained on failure rather than a readiness test, because `[ -w /dev/tty ]` is
+  true in places where opening it fails. Attempting the write IS the test.
+
+**Docker needs the env, not just the script.** `cmd.env(...)` sets the HOST
+process's environment, and for a Docker task that process is the `docker run`
+CLI. Docker forwards none of it, so `TERMIC_PTY` and `TERMIC_TASK_ID` are
+pushed onto the container env in `docker::build_spec`, with `TERMIC_PTY` set to
+the CONTAINER's address (`/proc/1/fd/1`). Before that, every hook in a
+sandboxed tab exited on its first line and a whole tab delivered zero OSCs
+while its unsandboxed neighbours delivered hundreds.
+
+**Why not `terminalSequence`.** claude can write the OSC itself, and its
+runtime allowlists that to OSC 0/1/2/9/99/777 plus BEL. OSC 133 is not on the
+list and is dropped SILENTLY, so a Done sent that way never arrives. Measured.
+
+**Why not the CLI socket.** `cli_server` is a command surface whose token is
+deliberately kept out of the app environment, because `pty_spawn` copies that
+environment into every child: an env-stashed token would be a sandbox escape.
+The seatbelt profile also denies caged agents that socket by path, and a
+container has neither the socket nor the binary. An ingest-only socket (no
+verbs, no shared secret) would be a sound escalation if the pty ever proves
+insufficient; the cage already permits unix sockets generally.
+
+## Hooks own the turn, once they have proved it
+
+While an agent's hooks are installed AND at least one has been seen on that
+pty, nothing else may end a turn for it: not the title, not byte-quiet, not
+scrollback stability, not the settled hash, not either ceiling. They are one
+heuristic wearing five hats, and leaving any armed reproduces the bug hooks
+exist to fix.
+
+**Installed is not working**, and conflating them hangs the UI. Hooks earn the
+right per pty by delivering once (`hookSeenRef`). A working hook proves itself
+on the first submit; a transport that cannot deliver leaves the fallbacks armed,
+which is the behaviour that existed before hooks. That is what stopped Docker
+tabs pinning to `working` forever while their hooks wrote into nothing.
+
+The title must not drive `working` either, once hooks own the tab. Captured
+live: a hook reported `133;C` then `133;D` 1ms apart, the title re-armed
+`working` 19ms later, and the next genuine `133;D` was swallowed by the
+one-done-per-submit token the first had spent. The tab claimed to be working
+for 44 seconds with the agent idle at its prompt.
+
+**A hook done outranks that token.** The token stops one turn NOTIFYING twice
+(a settle, a late OSC 9); it was never meant to stop a turn ENDING. Safe by
+measurement: claude fires `Stop` several times per turn and the script drops
+every one whose `background_tasks` is non-empty, so at most one qualifying done
+reaches us.
+
+## Interrupts: the one thing hooks do not cover
+
+Measured on every agent, both keys, mid-generation:
+
+| agent | Escape | Ctrl-C |
+| --- | --- | --- |
+| claude | no hook; idle glyph 110ms later | no hook; idle glyph 40ms later |
+| grok | `StopCancelled`, `reason="user_interrupt"` | same |
+| agy | nothing, and no title either | nothing |
+| opencode | first press does nothing; the SECOND fires `session.idle` | `session.idle`, then it exits |
+
+claude was measured with 29 of its 31 lifecycle events registered; its event
+list, read out of the binary, has no cancel or abort event to register.
+
+So the keystroke has to be part of the evidence, and can never be all of it:
+opencode's first Escape leaves it streaming, so acting on one press would end a
+live turn. termic accepts an interrupt only when the key is corroborated by the
+title going idle (3s) or the terminal falling quiet (15s), and only while the
+user is watching. It calls `interruptWork`, not `fireDone`: an interrupt is not
+a completion, so it earns no badge and spends no done token.
+
+## Config shapes, and the grok guard
+
+Three shapes: claude-compatible JSON (claude, grok), Antigravity's named-block
+shape with tool events grouped under a matcher and the rest direct (agy), and a
+generated JS plugin (opencode). Paths are in `settings_rel`; agy's LIVE path is
+`config/hooks.json` (`antigravity-cli/hooks.json` parses, logs "loaded 1 named
+hooks", and executes nothing).
+
+grok reads `~/.claude/settings.json` on purpose, so installing both double-fires
+everything. termic exports `GROK_CLAUDE_HOOKS_ENABLED=false` on grok tabs, and
+each script carries the opposite `GROK_HOOK_EVENT` gate.
+
+## Versioning and auto-maintenance
+
+`SCHEMA_VERSION` in `agent_hooks.rs`, recorded in each install's
+`manifest.json`. An install from an older version is `stale`, and
+`agent_hooks_sync` (run from `refreshAgentHooks` on startup) rewrites it. The
+user's consent is "hooks on for this agent", not "these exact scripts": asking
+someone to notice a version number and press a button is asking them to do our
+job, and it fails quietly, since a stale install still reports itself installed
+while reporting less than it could. v2 added the heartbeat; v3 added the
+container transport, which a v2 install does not have at all.
+
+Sync only touches agents already installed, so it never introduces hooks for
+one the user declined, and re-running `install` preserves the pre-install
+backup (`if !backup.exists()`), so removal stays byte-for-byte.
+
+## Cloned agents
+
+Everything here resolves through `extends`: the event set, the schema, the
+config file, and the config DIRECTORY. A clone made to hold a second account
+relocates its whole config with the agent's own env var
+(`CLAUDE_CONFIG_DIR=~/.next-claude`), so `agent_dirs::instance_config_dir`
+resolves the directory from the agent ENTRY rather than the base's default.
+Writing the base's path there would put one account's hooks into the other
+account's config, which is worse than installing none.
+
+Deliberately NOT `docker::base_agent_id_str`, which falls back to `"claude"`
+for an unrecognised base. Right for choosing a Docker mount, wrong here.
+
+## Diagnostics
+
+`termic-workstate.log` in the OS temp dir (`-dev` and `-e2e` suffixes per build
+flavour, so two live apps do not interleave). Always on, no flag: by the time
+anyone notices a wrong badge, the evidence has to already be on disk.
+
+It records state CHANGES and REFUSALS, because a resulting state cannot tell
+you why it is wrong: "working was requested and refused because the tab is in
+its post-click grace window" and "no working signal ever arrived" leave
+identical state and have opposite causes. `hook-osc` lines record every hook
+OSC on ARRIVAL, since the heartbeat mostly lands on a tab that is already
+working and would otherwise be invisible. The spawn line carries `base`,
+`inherited`, `hooksInstalled` and `hookProven`, which are the first four things
+to check and the easiest to get wrong.
+
+## Traps
+
+- **`/dev/tty` does not work from a hook on the host.** No controlling terminal
+  (measured on grok, rc=1). Opening the slave BY NAME needs none.
+- **`SubagentStop` is not a done.** 107 fires against 2 real Stops in one run.
+  `background_tasks` already covers subagents (`type: "subagent"` ×1006,
+  `"shell"` ×1529).
+- **claude's notifications are not all needs-you.** Eleven `notificationType`s,
+  five of which mean it. `agent_completed` sends `` `${label} finished` `` when
+  a turn SUCCEEDS, and termic spoofs iTerm2 so it arrives as OSC 9. See
+  `BUILTIN_NOTIFY_ATTENTION`: an allow-list, because the failure mode is a type
+  the vendor adds LATER.
+- **Read the binary, not the website.** Both wrong conclusions in this work
+  (agy "loads hooks and never runs them", grok "has the least complete event
+  set") came from reasoning instead of asking the installed binary. grok has
+  the most complete set of the four.

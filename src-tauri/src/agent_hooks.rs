@@ -5,7 +5,7 @@
 //! permission prompt, a question, or plan approval. termic reads that title,
 //! arms its 5s settle, and fires a "done" badge about a second before the
 //! native OSC 9 notify (6.0s late) corrects it to "needs you". Measured; see
-//! `docs/plans/agent-hooks.md`.
+//! `docs/agent-hooks.md`.
 //!
 //! The transport is deliberately not IPC. A Claude hook's stdout JSON may carry
 //! a `terminalSequence`, which Claude writes to its own PTY, and `TerminalPane`

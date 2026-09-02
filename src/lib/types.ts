@@ -1471,7 +1471,7 @@ export interface HookTargetStatus {
 }
 
 /** Per-agent hook state. One toggle governs both targets (see
- *  docs/plans/agent-hooks.md): a user who declines for an agent must not find
+ *  docs/agent-hooks.md): a user who declines for an agent must not find
  *  hooks installed for that agent inside Docker. */
 export interface AgentHookStatus {
   agent_id: string;

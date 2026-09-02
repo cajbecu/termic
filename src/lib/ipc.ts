@@ -1177,7 +1177,7 @@ export type { ChangeFile };
 // One hook in the agent's own global config that reports the moment it is
 // blocked on the user. Install and remove each cover BOTH the host config and
 // that agent's Docker config dir, so the two can never disagree.
-// See docs/plans/agent-hooks.md.
+// See docs/agent-hooks.md.
 
 export const agentHooksStatus  = (agentId: string) => invoke<AgentHookStatus>("agent_hooks_status", { agentId });
 /** Exactly what an install would write, for the "show me first" disclosure. */

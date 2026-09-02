@@ -16,7 +16,7 @@
 // Each row's action covers BOTH that agent's targets, host and its Docker
 // config dir. Docker needs no separate consent because termic owns that
 // directory, but a user who declines for an agent must never find hooks
-// installed for it inside a container. See docs/plans/agent-hooks.md.
+// installed for it inside a container. See docs/agent-hooks.md.
 
 import { useCallback, useEffect, useState } from "react";
 import { agentHooksInstall, agentHooksPlan, agentHooksRemove, agentHooksStatus } from "@/lib/ipc";
