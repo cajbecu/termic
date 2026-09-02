@@ -1371,31 +1371,6 @@ fn current_port_range() -> PortRange {
     PortRange::from_settings(&load_settings_inner())
 }
 
-/// Advisory check that nothing outside termic is already listening.
-///
-/// Allocation is otherwise a pure scan over termic's own task files, so
-/// without this a user who moves the range down into ordinary dev-server
-/// territory (GH #271 asks for 3000-4000) gets handed a port their own
-/// unrelated server already owns. What happens then is up to their tool:
-/// a plain `http.listen` dies with EADDRINUSE, but Vite and Next quietly
-/// increment to the next free port, leaving the preview URL pointing at
-/// the wrong app and the server on a port termic may hand to another
-/// task later.
-///
-/// Advisory only, on two counts. It is a TOCTOU check (the port can be
-/// taken a millisecond later), and it probes loopback ONLY: binding
-/// 0.0.0.0 to catch wildcard listeners can trip the macOS firewall
-/// prompt, which is a far worse experience than the collision it would
-/// catch.
-fn port_is_free(p: u16) -> bool {
-    // Unit tests drive occupancy through the task list alone. Binding
-    // real sockets would make every allocation assertion depend on
-    // whatever else the dev's machine happens to be listening on; the
-    // probe's own logic is covered through `next_base_port_with`.
-    if cfg!(test) { return true; }
-    std::net::TcpListener::bind(("127.0.0.1", p)).is_ok()
-}
-
 /// The one place the block arithmetic lives: 1 ($TERMIC_PORT) + one
 /// port per composition member + one per extra named port + the buffer.
 fn block_len(member_count: u16, extra_count: u16) -> u16 {
@@ -1438,59 +1413,36 @@ fn task_port_intervals(t: &Task) -> Vec<(u16, u16)> {
     v
 }
 
-/// First-fit a free block of `needed` consecutive ports inside `range`.
+/// First-fit a free block of `needed` consecutive ports inside `range`,
+/// over the blocks termic's own live tasks already hold.
 ///
-/// Occupancy comes from two independent sources and a block has to clear
-/// both: the interval scan over termic's own live tasks, and `is_free`,
-/// which asks the OS whether anything outside termic holds the port.
-/// Split out so the unit tests can drive occupancy deterministically
-/// without binding real sockets; production goes through
-/// `next_base_port`.
-fn next_base_port_with<F: Fn(u16) -> bool>(
-    existing: &[Task],
-    needed: u16,
-    range: PortRange,
-    is_free: F,
-) -> Result<u16, String> {
+/// Occupancy means "another TASK owns it", never "the OS says it is
+/// free". Choosing a range nothing else on the machine uses is the
+/// user's call (GH #271): a range down in dev-server territory works
+/// exactly as well as the ports in it are actually free, and a server
+/// launched onto a busy one fails to bind, in its own run tab, saying so.
+fn next_base_port(existing: &[Task], needed: u16, range: PortRange) -> Result<u16, String> {
     let mut blocks: Vec<(u16, u16)> = existing.iter()
         .filter(|t| !t.archived)
         .flat_map(task_port_intervals)
         .collect();
     blocks.sort_unstable();
-    let exhausted = || format!(
-        "no free block of {needed} ports left in {}-{}. Archive a task, or widen the range in Settings → Tasks.",
-        range.min, range.max,
-    );
     let mut candidate = range.min;
-    loop {
-        // Skip past every block termic has already handed out. Restarted
-        // from the top on each pass because a failed probe below moves
-        // the candidate forward, possibly into another task's block.
-        for (start, end) in &blocks {
-            if candidate.saturating_add(needed) <= *start { break; }
-            if *end > candidate { candidate = *end; }
-        }
-        // The block occupies [candidate, candidate + needed), so the last
-        // port used is candidate + needed - 1. u32 throughout: `needed`
-        // pushes a high candidate past u16 easily, and wrapping here
-        // would hand back a colliding or privileged port.
-        if candidate as u32 + needed as u32 - 1 > range.max as u32 {
-            return Err(exhausted());
-        }
-        match (candidate..candidate + needed).find(|p| !is_free(*p)) {
-            None => return Ok(candidate),
-            // Something outside termic holds that port. Everything below
-            // it is settled, so resume the search directly after it.
-            Some(taken) => match taken.checked_add(1) {
-                Some(next) => candidate = next,
-                None => return Err(exhausted()),
-            },
-        }
+    for (start, end) in blocks {
+        if candidate.saturating_add(needed) <= start { break; }
+        if end > candidate { candidate = end; }
     }
-}
-
-fn next_base_port(existing: &[Task], needed: u16, range: PortRange) -> Result<u16, String> {
-    next_base_port_with(existing, needed, range, port_is_free)
+    // The block occupies [candidate, candidate + needed), so the last port
+    // used is candidate + needed - 1. u32 because a high candidate plus
+    // `needed` overflows u16, and wrapping would hand back a colliding or
+    // privileged port instead of failing.
+    if candidate as u32 + needed as u32 - 1 > range.max as u32 {
+        return Err(format!(
+            "no free block of {needed} ports left in {}-{}. Archive a task, or widen the range in Settings → Tasks.",
+            range.min, range.max,
+        ));
+    }
+    Ok(candidate)
 }
 
 /// GH #196: archived tasks' blocks are reusable, so a task created
@@ -23495,27 +23447,27 @@ filename f.rs
 
     #[test]
     fn base_port_empty_state() {
-        assert_eq!(next_base_port_with(&[], 6, PortRange::default(), |_| true).unwrap(), 18100);
+        assert_eq!(next_base_port(&[], 6, PortRange::default()).unwrap(), 18100);
     }
 
     #[test]
     fn blocks_stack_consecutively() {
         // Plain task block = 1 + 0 + 0 + 5 = 6 → next base is 18106.
         let existing = vec![stub_task(18100, 0, 0, false)];
-        assert_eq!(next_base_port_with(&existing, 6, PortRange::default(), |_| true).unwrap(), 18106);
+        assert_eq!(next_base_port(&existing, 6, PortRange::default()).unwrap(), 18106);
     }
 
     #[test]
     fn members_and_extras_widen_the_block() {
         // 1 + 2 members + 3 extras + 5 buffer = 11 → next base 18111.
         let existing = vec![stub_task(18100, 2, 3, false)];
-        assert_eq!(next_base_port_with(&existing, 6, PortRange::default(), |_| true).unwrap(), 18111);
+        assert_eq!(next_base_port(&existing, 6, PortRange::default()).unwrap(), 18111);
     }
 
     #[test]
     fn archived_blocks_are_reused() {
         let existing = vec![stub_task(18100, 0, 0, true)];
-        assert_eq!(next_base_port_with(&existing, 6, PortRange::default(), |_| true).unwrap(), 18100);
+        assert_eq!(next_base_port(&existing, 6, PortRange::default()).unwrap(), 18100);
     }
 
     #[test]
@@ -23523,9 +23475,9 @@ filename f.rs
         // Live at 18100 (len 6) and 18112 (len 6); the 18106..18112 gap
         // fits needed=6 → reused.
         let existing = vec![stub_task(18100, 0, 0, false), stub_task(18112, 0, 0, false)];
-        assert_eq!(next_base_port_with(&existing, 6, PortRange::default(), |_| true).unwrap(), 18106);
+        assert_eq!(next_base_port(&existing, 6, PortRange::default()).unwrap(), 18106);
         // needed=8 does NOT fit the gap → lands after the last block.
-        assert_eq!(next_base_port_with(&existing, 8, PortRange::default(), |_| true).unwrap(), 18118);
+        assert_eq!(next_base_port(&existing, 8, PortRange::default()).unwrap(), 18118);
     }
 
     #[test]
@@ -23650,7 +23602,7 @@ filename f.rs
         a.id = "a".into();
         a.port_block_len = 6;
         a.extra_named_ports = vec![NamedPort { name: "STRAY_PORT".into(), port: 18106 }];
-        assert_eq!(next_base_port_with(&[a], 6, PortRange::default(), |_| true).unwrap(), 18107);
+        assert_eq!(next_base_port(&[a], 6, PortRange::default()).unwrap(), 18107);
     }
 
     #[test]
@@ -23722,9 +23674,9 @@ filename f.rs
     #[test]
     fn custom_range_moves_the_floor_and_first_fits_inside_it() {
         let r = PortRange { min: 3000, max: 4000 };
-        assert_eq!(next_base_port_with(&[], 6, r, |_| true).unwrap(), 3000);
+        assert_eq!(next_base_port(&[], 6, r).unwrap(), 3000);
         let existing = vec![stub_task(3000, 0, 0, false)];
-        assert_eq!(next_base_port_with(&existing, 6, r, |_| true).unwrap(), 3006);
+        assert_eq!(next_base_port(&existing, 6, r).unwrap(), 3006);
     }
 
     #[test]
@@ -23733,31 +23685,10 @@ filename f.rs
         // rather than quietly allocate 3012 outside the user's range.
         let r = PortRange { min: 3000, max: 3011 };
         let existing = vec![stub_task(3000, 0, 0, false), stub_task(3006, 0, 0, false)];
-        let err = next_base_port_with(&existing, 6, r, |_| true).unwrap_err();
+        let err = next_base_port(&existing, 6, r).unwrap_err();
         assert!(err.contains("3000-3011"), "{err}");
         // The last block that DOES fit still fits: no off-by-one at the ceiling.
-        assert_eq!(next_base_port_with(&existing[..1], 6, r, |_| true).unwrap(), 3006);
-    }
-
-    #[test]
-    fn a_port_held_outside_termic_is_skipped() {
-        let r = PortRange { min: 3000, max: 4000 };
-        // Someone else's dev server on 3003, in the middle of the first
-        // candidate block: the whole block moves past it, not just the one
-        // port, because a block has to be consecutive.
-        let base = next_base_port_with(&[], 6, r, |p| p != 3003).unwrap();
-        assert_eq!(base, 3004);
-        // A busy port the scan has already passed doesn't drag it back.
-        assert_eq!(next_base_port_with(&[], 6, r, |p| p != 3000).unwrap(), 3001);
-    }
-
-    #[test]
-    fn probe_and_task_occupancy_both_have_to_clear() {
-        let r = PortRange { min: 3000, max: 4000 };
-        // Task owns 3000..3006; an outside listener sits on 3007. The block
-        // has to clear the task scan AND the probe, so it lands past both.
-        let existing = vec![stub_task(3000, 0, 0, false)];
-        assert_eq!(next_base_port_with(&existing, 6, r, |p| p != 3007).unwrap(), 3008);
+        assert_eq!(next_base_port(&existing[..1], 6, r).unwrap(), 3006);
     }
 
     #[test]

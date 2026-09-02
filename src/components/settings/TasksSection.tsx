@@ -285,7 +285,7 @@ export function TasksSection() {
             <span data-testid="task-port-range-hint">
               Room for about {tasksThatFit(portMinNum, portMaxNum)} tasks.
               {portMinNum < PORT_RANGE_DEFAULT.min
-                ? " Ports this low are where dev servers usually live: Termic skips any port something else is already listening on, but it can only see ports that are in use at the moment it allocates."
+                ? " Ports this low are where dev servers usually live. Pick a range nothing else on this machine uses, or a server started on a port that is already taken will fail to bind."
                 : ""}
             </span>
           )}
