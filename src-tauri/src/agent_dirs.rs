@@ -85,6 +85,111 @@ fn expand_home(raw: &str, home: &std::path::Path) -> std::path::PathBuf {
     std::path::PathBuf::from(t)
 }
 
+/// A clone resolved against what it extends: every field it left EMPTY comes
+/// from the parent, live, at read time.
+///
+/// A clone used to be a full COPY of the parent, made once. That is a snapshot
+/// that rots: when a vendor renames a flag the built-in entry moves with the
+/// app and every clone keeps the old value forever, silently, with no way for
+/// the user to tell which of its seventeen fields they actually chose. It had
+/// already happened here, a clone carrying the parent's literal `$HOME/.claude`
+/// sandbox paths while its own config lived elsewhere, so the cage denied it
+/// its own login.
+///
+/// EMPTY MEANS INHERIT, which is the rule `classifyAgentTitle` already uses for
+/// per-field signal fallback, extended to the whole record rather than a second
+/// convention. Cost of the choice, and it is the same one that doc records: "no
+/// value at all" stops being expressible by clearing a field, because clearing
+/// is how you ask for the parent's.
+///
+/// `id`, `extends`, `display_name` and `builtin` are the clone's OWN identity
+/// and are never inherited. Resolution walks the chain, so a clone of a clone
+/// works, and is depth-capped because ids are user-editable.
+/// Per-LIST capability merge. Wholesale replacement would mean a clone that
+/// overrides one flag list stops tracking the parent on every other, which is
+/// the freeze this change exists to remove, one field down.
+fn merge_caps(child: &mut crate::AgentCapabilities, parent: &crate::AgentCapabilities) {
+    macro_rules! take_if_empty {
+        ($($f:ident),* $(,)?) => { $( if child.$f.is_empty() { child.$f = parent.$f.clone(); } )* };
+    }
+    take_if_empty!(
+        yolo_args, runtime_yolo_command, runtime_default_command,
+        resume_args, session_id_args, resume_id_args, name_args,
+    );
+    // Signals are per-FIELD, matching `classifyAgentTitle`: overriding the
+    // busy patterns must not silently drop the inherited idle ones.
+    if child.signals.busy.is_empty() { child.signals.busy = parent.signals.busy.clone(); }
+    if child.signals.idle.is_empty() { child.signals.idle = parent.signals.idle.clone(); }
+    if child.signals.attention.is_empty() {
+        child.signals.attention = parent.signals.attention.clone();
+    }
+    if child.signals.pending.is_empty() {
+        child.signals.pending = parent.signals.pending.clone();
+    }
+}
+
+/// True when any capability list carries a value of the clone's own.
+fn caps_overridden(c: &crate::AgentCapabilities) -> bool {
+    !c.yolo_args.is_empty() || !c.runtime_yolo_command.is_empty()
+        || !c.runtime_default_command.is_empty() || !c.resume_args.is_empty()
+        || !c.session_id_args.is_empty() || !c.resume_id_args.is_empty()
+        || !c.name_args.is_empty()
+        || !c.signals.busy.is_empty() || !c.signals.idle.is_empty()
+        || !c.signals.attention.is_empty() || !c.signals.pending.is_empty()
+}
+
+pub fn resolve_agent(agents: &[crate::Agent], id: &str) -> Option<crate::Agent> {
+    let mut out = agents.iter().find(|a| a.id == id)?.clone();
+    let mut cur = out.extends.clone();
+    for _ in 0..8 {
+        let Some(parent_id) = cur.filter(|p| !p.is_empty() && *p != out.id) else { break };
+        let Some(parent) = agents.iter().find(|a| a.id == parent_id) else { break };
+        if out.command.trim().is_empty() { out.command = parent.command.clone(); }
+        if out.args.is_empty() { out.args = parent.args.clone(); }
+        if out.icon_id.trim().is_empty() { out.icon_id = parent.icon_id.clone(); }
+        if out.color.trim().is_empty() { out.color = parent.color.clone(); }
+        if out.env.is_empty() { out.env = parent.env.clone(); }
+        if out.docker_env.is_empty() { out.docker_env = parent.docker_env.clone(); }
+        if out.sandbox_allowed_paths.is_empty() {
+            out.sandbox_allowed_paths = parent.sandbox_allowed_paths.clone();
+        }
+        if out.sandbox_allowed_hosts.is_empty() {
+            out.sandbox_allowed_hosts = parent.sandbox_allowed_hosts.clone();
+        }
+        if out.post_launch_capture.is_none() {
+            out.post_launch_capture = parent.post_launch_capture.clone();
+        }
+        // Capabilities are the flags a vendor renames, so this is the field
+        // the whole change is FOR. Merged per-list rather than wholesale: a
+        // clone overriding `yolo_args` alone must still track the parent's
+        // resume flags, or overriding one field silently freezes the rest.
+        merge_caps(&mut out.capabilities, &parent.capabilities);
+        if !out.work_done { out.work_done = parent.work_done; }
+        cur = parent.extends.clone();
+    }
+    Some(out)
+}
+
+/// Which fields this agent OVERRIDES, as field names the UI can label. Empty
+/// for a clone that inherits everything, and always empty for a non-clone,
+/// which owns its values rather than overriding anything.
+pub fn agent_overrides(agents: &[crate::Agent], id: &str) -> Vec<String> {
+    let Some(a) = agents.iter().find(|a| a.id == id) else { return Vec::new() };
+    if a.extends.as_deref().unwrap_or("").is_empty() { return Vec::new() }
+    let mut out = Vec::new();
+    if !a.command.trim().is_empty() { out.push("command".into()); }
+    if !a.args.is_empty() { out.push("args".into()); }
+    if !a.icon_id.trim().is_empty() { out.push("icon_id".into()); }
+    if !a.color.trim().is_empty() { out.push("color".into()); }
+    if !a.env.is_empty() { out.push("env".into()); }
+    if !a.docker_env.is_empty() { out.push("docker_env".into()); }
+    if !a.sandbox_allowed_paths.is_empty() { out.push("sandbox_allowed_paths".into()); }
+    if !a.sandbox_allowed_hosts.is_empty() { out.push("sandbox_allowed_hosts".into()); }
+    if a.post_launch_capture.is_some() { out.push("post_launch_capture".into()); }
+    if caps_overridden(&a.capabilities) { out.push("capabilities".into()); }
+    out
+}
+
 /// The env var that relocates an agent's ENTIRE config dir, when it has one.
 ///
 /// This is how a duplicated agent holds a second account: the clone runs the

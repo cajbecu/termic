@@ -949,7 +949,10 @@ describe("agent notifications", () => {
 
       // An ordinary turn: the fixture spins, then paints claude's idle glyph.
       // That glyph alone used to be enough to end the turn.
-      await submitToAgent(taskId!, "an ordinary turn that ends on the idle glyph");
+      // `#hookturn`: the hook says the turn started and never says it ended,
+      // while the title goes idle. That IS the case, and a fixture whose only
+      // signal was a title could not produce it now that hooks own both edges.
+      await submitToAgent(taskId!, "#hookturn");
       await waitForWorkBadge(taskId!, "working", {
         timeout: 20_000,
         message: "the turn never reached the working badge",

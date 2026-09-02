@@ -11,6 +11,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { settingsLoad, agentsSave, agentsDefaults, projectUpdate } from "@/lib/ipc";
 import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
+import { agentOverrides } from "@/lib/agents";
 import { fitRows } from "@/lib/fitRows";
 import { AGENT_HOOKS_HIGHLIGHT } from "./AgentHooksBlock";
 import type { Agent, CliInfo } from "@/lib/types";
@@ -251,19 +252,62 @@ export function AgentsSection() {
     if (next.some((a, i) => a.id !== agents[i].id)) mutate(next);
   }
 
+  /** Drop every override so the clone inherits its parent again, live.
+   *
+   *  The escape hatch for a clone made before agents inherited rather than
+   *  copied: those carry a full snapshot of the parent taken at creation, and
+   *  every one of those fields is now indistinguishable from a deliberate
+   *  override. One button beats asking someone to clear seventeen fields by
+   *  hand and guess which ones they meant.
+   *
+   *  Identity is kept: id, display name, what it extends, and whether it is
+   *  hidden are the clone's own and are not overrides of anything.
+   */
+  function resetOverrides(id: string) {
+    const src = agents.find(a => a.id === id);
+    if (!src?.extends) return;
+    const bare = {
+      id: src.id,
+      display_name: src.display_name,
+      extends: src.extends,
+      builtin: false,
+      disabled: src.disabled,
+      kind: src.kind,
+      work_done: true,
+      command: "", args: [], icon_id: "", color: "",
+    } as Agent;
+    mutate(agents.map(a => (a.id === id ? bare : a)));
+  }
+
   function cloneAgent(id: string) {
     const src = agents.find(a => a.id === id);
     if (!src) return;
     // Base the clone id on the source's id; increment suffix until unique.
     let n = 2;
     while (agents.some(a => a.id === `${src.id}-${n}`)) n++;
+    // SPARSE, not a copy. Every field left empty resolves through `extends` at
+    // read time (`resolveAgent`), so the clone tracks its parent: when a vendor
+    // renames a flag the built-in entry moves with the app and the clone moves
+    // with it. A copy is a snapshot that rots, and this one had already rotted
+    // in the field, carrying the parent's literal `$HOME/.claude` sandbox
+    // paths while its own config lived elsewhere, so the cage denied it its
+    // own login.
+    //
+    // Only identity is the clone's own. `kind` and `disabled` are structural
+    // rather than inherited values, and `work_done` stays on so a fresh clone
+    // behaves like the agent it came from.
     const clone: Agent = {
-      ...src,
       id: `${src.id}-${n}`,
       display_name: `${src.display_name}-copy`,
+      command: "",
+      args: [],
+      icon_id: "",
+      color: "",
       builtin: false,
+      kind: src.kind,
+      work_done: true,
       extends: src.id,
-    };
+    } as Agent;
     mutate([...agents, clone]);
     setAutoFocusId(clone.id);
   }
@@ -314,6 +358,7 @@ export function AgentsSection() {
         requestRemoveAgent={requestRemoveAgent}
         resetAgent={resetAgent}
         cloneAgent={cloneAgent}
+        resetOverrides={resetOverrides}
         reorderAgent={reorderAgent}
         onAutoFocusConsumed={() => setAutoFocusId(null)}
       />
@@ -385,7 +430,7 @@ export function AgentsSection() {
  *  the freshly-created one via the autoFocusId signal. */
 function AgentsTabs({
   agents, activeId, setActiveId, autoFocusId, defaults, isModified,
-  patchAgent, onCommitId, patchCaps, requestRemoveAgent, resetAgent, cloneAgent, reorderAgent, onAutoFocusConsumed,
+  patchAgent, onCommitId, patchCaps, requestRemoveAgent, resetAgent, cloneAgent, resetOverrides, reorderAgent, onAutoFocusConsumed,
   dockerSandboxOn,
 }: {
   /** App-wide Docker sandbox switch; gates the Docker-only env field. */
@@ -402,6 +447,7 @@ function AgentsTabs({
   requestRemoveAgent: (id: string) => void;
   resetAgent: (id: string) => void;
   cloneAgent: (id: string) => void;
+  resetOverrides: (id: string) => void;
   reorderAgent: (id: string, toIndex: number) => void;
   onAutoFocusConsumed: () => void;
 }) {
@@ -584,6 +630,8 @@ function AgentsTabs({
           onRemove={() => requestRemoveAgent(active.id)}
           onClone={() => cloneAgent(active.id)}
           extendsName={active.extends ? (agents.find(a => a.id === active.extends)?.display_name ?? active.extends) : undefined}
+          overrideCount={agentOverrides(agents, active.id).length}
+          resetOverrides={resetOverrides}
           autoFocus={autoFocusId === active.id}
           onAutoFocusConsumed={onAutoFocusConsumed}
           modified={isModified(active)}
@@ -594,7 +642,7 @@ function AgentsTabs({
   );
 }
 
-function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove, onClone, extendsName, autoFocus, onAutoFocusConsumed, modified, onReset, dockerSandboxOn }: {
+function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove, onClone, extendsName, overrideCount, resetOverrides, autoFocus, onAutoFocusConsumed, modified, onReset, dockerSandboxOn }: {
   agent: Agent;
   /** Whether Docker sandboxing is enabled app-wide; gates the Docker-only
    *  environment field, which does nothing while it is off. */
@@ -609,6 +657,8 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
   onClone: () => void;
   /** Display name of the parent agent, if this one was cloned. */
   extendsName?: string;
+  overrideCount: number;
+  resetOverrides: (id: string) => void;
   /** True for a freshly-created card — scrolls into view + focuses the name
    *  input on mount. */
   autoFocus?: boolean;
@@ -681,8 +731,22 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
           {extendsName && (
             <span
               className="rounded bg-[var(--color-bg-3)] px-1.5 py-0.5 text-[11px] text-[var(--color-fg-dim)] font-mono"
-              title={`Cloned from ${extendsName}. All settings inherited at clone time; edit independently.`}
+              title={overrideCount
+                ? `Inherits from ${extendsName}. ${overrideCount} field${overrideCount === 1 ? "" : "s"} overridden; everything else follows ${extendsName} as it changes.`
+                : `Inherits everything from ${extendsName}, live. Editing a field here overrides just that one.`}
             >extends: {extendsName}</span>
+          )}
+          {/* The count is the honest summary of a clone: which of its fields
+              are ITS OWN, and therefore frozen against the parent. Everything
+              else tracks the parent as the app updates, which is the whole
+              point of inheriting rather than copying. */}
+          {extendsName && overrideCount > 0 && (
+            <button
+              type="button"
+              onClick={() => resetOverrides(agent.id)}
+              className="rounded bg-[var(--color-accent)]/15 px-1.5 py-0.5 text-[11px] text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25"
+              title={`Clear all ${overrideCount} override${overrideCount === 1 ? "" : "s"} and inherit everything from ${extendsName} again.`}
+            >{overrideCount} override{overrideCount === 1 ? "" : "s"} · reset</button>
           )}
           {modified && (
             <span

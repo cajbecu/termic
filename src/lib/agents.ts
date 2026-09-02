@@ -450,7 +450,7 @@ export function hasPendingWork(
   rows: string[],
   agents: Agent[] = useApp.getState().agents,
 ): boolean {
-  const user = agents.find(a => a.id === cli)?.capabilities?.signals?.pending;
+  const user = resolveAgent(agents, cli)?.capabilities?.signals?.pending;
   const src = user?.length ? user : BUILTIN_TITLE_SIGNALS[builtinBaseId(cli, agents)]?.pending;
   if (!src?.length) return false;
   const res = compileSignals(src);
@@ -526,7 +526,7 @@ export function notificationWantsAttention(
   // This is the only tuning knob for notification bodies — the ignore list
   // below is per-built-in and not user-editable, so without allow-list
   // semantics an agent that spams notifications would have no way to opt out.
-  const attn = compileSignals(agents.find(a => a.id === cli)?.capabilities?.signals?.attention);
+  const attn = compileSignals(resolveAgent(agents, cli)?.capabilities?.signals?.attention);
   if (attn.length) return attn.some(re => re.test(text));
   // Built-in allow-list, when the agent has one. Checked before the ignore
   // list so a body has to look like a request for the user, rather than merely
@@ -555,7 +555,7 @@ export function classifyAgentTitle(
 ): WorkState | null {
   const t = title.trim();
   if (!t) return null;
-  const user = agents.find(a => a.id === cli)?.capabilities?.signals;
+  const user = resolveAgent(agents, cli)?.capabilities?.signals;
   const builtin = BUILTIN_TITLE_SIGNALS[builtinBaseId(cli, agents)];
   if (!user && !builtin) return null;
 
@@ -614,13 +614,101 @@ export function terminalLaunchCommand(cli: string, task?: Task): string | undefi
   return expandArg(line, vars);
 }
 
+/** An agent resolved against what it EXTENDS: every field it left empty comes
+ *  from its parent, live, at read time.
+ *
+ *  A clone used to be a full copy of the parent, taken once. That is a snapshot
+ *  that rots: when a vendor renames a flag the built-in entry moves with the
+ *  app and every clone keeps the old value forever, with no way for the user to
+ *  tell which of its fields they actually chose. It had already happened here,
+ *  a clone carrying the parent's literal `$HOME/.claude` sandbox paths while
+ *  its own config lived elsewhere, so the cage denied it its own login.
+ *
+ *  EMPTY MEANS INHERIT, the rule `classifyAgentTitle` already uses per field,
+ *  applied to the whole record rather than inventing a second convention. Its
+ *  documented cost applies here too: "no value at all" stops being expressible
+ *  by clearing a field, because clearing is how you ask for the parent's.
+ *
+ *  `id`, `display_name` and `extends` are the clone's own identity and are
+ *  never inherited. Depth-capped because ids are user-editable and a chain that
+ *  points at itself has to terminate. */
+export function resolveAgent(agents: Agent[], cli: string): Agent | undefined {
+  const own = agents.find(a => a.id === cli);
+  if (!own) return undefined;
+  const out: Agent = { ...own, capabilities: { ...(own.capabilities ?? {}) } };
+  let next = own.extends;
+  for (let i = 0; i < 8 && next && next !== out.id; i++) {
+    const parent: Agent | undefined = agents.find(a => a.id === next);
+    if (!parent) break;
+    if (!out.command?.trim()) out.command = parent.command;
+    if (!out.args?.length) out.args = parent.args;
+    if (!out.icon_id?.trim()) out.icon_id = parent.icon_id;
+    if (!out.color?.trim()) out.color = parent.color;
+    if (!Object.keys(out.env ?? {}).length) out.env = parent.env;
+    if (!Object.keys(out.docker_env ?? {}).length) out.docker_env = parent.docker_env;
+    if (!out.sandbox_allowed_paths?.length) out.sandbox_allowed_paths = parent.sandbox_allowed_paths;
+    if (!out.sandbox_allowed_hosts?.length) out.sandbox_allowed_hosts = parent.sandbox_allowed_hosts;
+    if (!out.post_launch_capture) out.post_launch_capture = parent.post_launch_capture;
+    // Per-LIST, not wholesale: overriding `yolo_args` alone must not silently
+    // freeze the resume flags, which is the same freeze one level down.
+    const pc = parent.capabilities ?? {};
+    const oc = out.capabilities ?? {};
+    out.capabilities = {
+      ...oc,
+      yolo_args: oc.yolo_args?.length ? oc.yolo_args : pc.yolo_args,
+      runtime_yolo_command: oc.runtime_yolo_command || pc.runtime_yolo_command,
+      runtime_default_command: oc.runtime_default_command || pc.runtime_default_command,
+      resume_args: oc.resume_args?.length ? oc.resume_args : pc.resume_args,
+      session_id_args: oc.session_id_args?.length ? oc.session_id_args : pc.session_id_args,
+      resume_id_args: oc.resume_id_args?.length ? oc.resume_id_args : pc.resume_id_args,
+      name_args: oc.name_args?.length ? oc.name_args : pc.name_args,
+      signals: {
+        busy: oc.signals?.busy?.length ? oc.signals.busy : pc.signals?.busy,
+        idle: oc.signals?.idle?.length ? oc.signals.idle : pc.signals?.idle,
+        attention: oc.signals?.attention?.length ? oc.signals.attention : pc.signals?.attention,
+        pending: oc.signals?.pending?.length ? oc.signals.pending : pc.signals?.pending,
+      },
+    };
+    next = parent.extends;
+  }
+  return out;
+}
+
+/** Field names this agent OVERRIDES. Empty for one that inherits everything,
+ *  and always empty for a non-clone, which owns its values rather than
+ *  overriding anything. Drives the "reset to inherited" affordance. */
+export function agentOverrides(agents: Agent[], cli: string): string[] {
+  const a = agents.find(x => x.id === cli);
+  if (!a?.extends) return [];
+  const c = a.capabilities ?? {};
+  const s = c.signals ?? {};
+  const on: Array<[string, boolean]> = [
+    ["command", !!a.command?.trim()],
+    ["args", !!a.args?.length],
+    ["icon_id", !!a.icon_id?.trim()],
+    ["color", !!a.color?.trim()],
+    ["env", !!Object.keys(a.env ?? {}).length],
+    ["docker_env", !!Object.keys(a.docker_env ?? {}).length],
+    ["sandbox_allowed_paths", !!a.sandbox_allowed_paths?.length],
+    ["sandbox_allowed_hosts", !!a.sandbox_allowed_hosts?.length],
+    ["post_launch_capture", !!a.post_launch_capture],
+    ["capabilities", !!(c.yolo_args?.length || c.runtime_yolo_command || c.runtime_default_command
+      || c.resume_args?.length || c.session_id_args?.length || c.resume_id_args?.length
+      || c.name_args?.length || s.busy?.length || s.idle?.length || s.attention?.length
+      || s.pending?.length)],
+  ];
+  return on.filter(([, v]) => v).map(([k]) => k);
+}
+
 function findAgent(cli: string): {
   command: string; args: string[];
   caps: NonNullable<Agent["capabilities"]>;
   env: Record<string, string>;
 } {
   const registry = useApp.getState().agents;
-  const a = registry.find(a => a.id === cli);
+  // Resolved, so a clone that left a field empty gets its parent's CURRENT
+  // value rather than a copy frozen when it was created.
+  const a = resolveAgent(registry, cli);
   if (a) {
     return {
       command: a.command,

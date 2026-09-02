@@ -426,9 +426,35 @@ const captureArmedRef = useRef(false);
     useApp.getState().setWorkState(task.id, tab.id, "idle", `interrupt: ${reason}`);
   }, [task.id, tab.id]);
 
-  const fireDone = useCallback((reason: string, attn: "done" | "attention" = "done", seen = false, force = false): boolean => {
-    if (doneFiredSinceSubmitRef.current) {
-      debugLogRef.current?.("done-suppressed", `already fired this turn (${reason})`);
+  const fireDone = useCallback((reason: string, attn: "done" | "attention" = "done", seen = false, force = false, fromHook = false): boolean => {
+    // Trust the hook. The one-done-per-submit token exists for HEURISTIC dones
+    // (a settle timer, byte-quiet, a late OSC 9) where a repeat is noise and
+    // the user has already been told. A hook done is the agent stating that
+    // its turn ended, which outranks a guard built to second-guess a guess.
+    //
+    // Safe by measurement, not by hope: claude fires `Stop` several times in a
+    // turn, and the installed script drops every one whose `background_tasks`
+    // is non-empty, so at most one qualifying done per turn reaches us. The
+    // notifier's own 8s debounce is the backstop if an agent ever disagrees.
+    if (doneFiredSinceSubmitRef.current && !fromHook) {
+      // The token stops one turn NOTIFYING twice: a trailing settle or a late
+      // OSC 9 must not stack a second badge and bell on a turn the user was
+      // already told about. It was never meant to stop the turn ENDING, and
+      // returning here without touching workState is what pinned a tab to
+      // "working" for 44 seconds with the agent idle at its prompt (captured:
+      // a 133;D arrived, found the token spent, and did nothing at all).
+      //
+      // So: no badge, no bell, but the spinner still stops. Repeating a done
+      // is harmless for the STATE and only ever harmful for the notification,
+      // which is the half this guard keeps.
+      const live = useApp.getState().tabs[task.id]
+        ?.find(t => t.id === tab.id) as TerminalTab | undefined;
+      if (live?.workState === "working") {
+        debugLogRef.current?.("done-again", `state cleared, badge suppressed (${reason})`);
+        useApp.getState().setWorkState(task.id, tab.id, "idle", `done again: ${reason}`);
+      } else {
+        debugLogRef.current?.("done-suppressed", `already fired this turn (${reason})`);
+      }
       return true;
     }
     // The agent's UI still says it has work outstanding (backgrounded
@@ -1250,7 +1276,7 @@ const captureArmedRef = useRef(false);
       }
       setWorkState(task.id, tab.id, "working", reason);
     };
-    const goIdle = (reason: string, delay = SETTLE_MS) => {
+    const goIdle = (reason: string, delay = SETTLE_MS, fromHook = false) => {
       if (!workDoneEnabled) return;
       cancelSettle(reason);
       if (delay === 0) {
@@ -1266,7 +1292,7 @@ const captureArmedRef = useRef(false);
         // done — the user already acknowledged it. fireDone also enforces
         // one-done-per-submit as a second layer.
         if (!wasWorking) return;
-        fireDone(reason);
+        fireDone(reason, "done", false, false, fromHook);
         return;
       }
       const cur = useApp.getState().tabs[task.id]?.find(t => t.id === tab.id);
@@ -1367,9 +1393,14 @@ const captureArmedRef = useRef(false);
         // `attention` (its no-signal fallback) — the exact false bell this
         // tier is meant to replace with a real `done`.
         senderStateRef.current = state;
+        // Same rule as the title above: while hooks own this agent's state,
+        // a line of output must not re-arm `working` behind a hook that has
+        // already ended the turn.
+        const hooksOwnHere = hooksOwnStateRef.current && hookSeenRef.current;
         if (state === "attention") goAttention("output line");
-        else if (state === "busy") { if (submittedSinceSpawnRef.current) goWorking("output line"); }
-        else goIdle("output line");
+        else if (state === "busy") {
+          if (!hooksOwnHere && submittedSinceSpawnRef.current) goWorking("output line");
+        } else if (!hooksOwnHere) goIdle("output line");
       }
       // Bound the buffer so an EOL-less stream can't grow without limit.
       if (scanLineBuf.length > MAX_SCAN_LINE * 4) scanLineBuf = scanLineBuf.slice(-MAX_SCAN_LINE);
@@ -1513,12 +1544,31 @@ const captureArmedRef = useRef(false);
       } else if (state === "attention") {
         goAttention(`title attention`);
       } else if (state === "busy") {
-        // Gate on submittedSinceSpawnRef: startup animations (Codex Braille
-        // spinner, Claude's initial render) look identical to working
-        // spinners. Only trust busy titles after the user has sent at
-        // least one message this PTY session (keyboard Enter or broadcast).
-        if (submittedSinceSpawnRef.current) goWorking(`title busy`);
-        else wdlog(`title busy suppressed (no submit since spawn)`);
+        // Hooks own BOTH edges, not just the end of a turn.
+        //
+        // The title was left driving `working` here on the grounds that it is
+        // harmless and often first. It is not harmless. Captured live: a hook
+        // reported 133;C then 133;D 1ms apart, the title re-armed `working`
+        // 19ms later, and the NEXT genuine 133;D was swallowed by the
+        // one-done-per-submit token the first done had already spent. The tab
+        // then claimed to be working for 44 seconds with the agent sitting
+        // idle at its prompt, until an unrelated re-render cleared it.
+        //
+        // Two sources for one state, and the slower one re-arming after the
+        // faster one finished, is the overlap this whole design set out to
+        // remove. The heartbeat (PreToolUse) is what makes dropping it safe:
+        // working is re-asserted by the protocol many times per turn.
+        if (hooksOwnStateRef.current && hookSeenRef.current) {
+          wdlog("title busy ignored (hooks own both edges for this agent)");
+        } else if (submittedSinceSpawnRef.current) {
+          // Gate on submittedSinceSpawnRef: startup animations (Codex Braille
+          // spinner, Claude's initial render) look identical to working
+          // spinners. Only trust busy titles after the user has sent at
+          // least one message this PTY session (keyboard Enter or broadcast).
+          goWorking(`title busy`);
+        } else {
+          wdlog(`title busy suppressed (no submit since spawn)`);
+        }
       }
       if (state) lastTitleState = state;
     });
@@ -1649,7 +1699,7 @@ const captureArmedRef = useRef(false);
         goWorking(`OSC 133;C`);
       } else if (sub === "D") {
         // 133;D is a hard "command ended" — no need to wait SETTLE_MS.
-        goIdle(`OSC 133;D`, 0);
+        goIdle(`OSC 133;D`, 0, true);
       } else if (sub === "A" || sub === "B") {
         // Prompt boundary — idle, but only settle if we were busy.
         goIdle(`OSC 133;${sub}`);

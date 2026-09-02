@@ -75,6 +75,8 @@ set_title "✳ ${name}"
 #               that it does. Body must match agentHooks.ts HOOK_OSC_BODY.
 osc9()   { printf '\033]9;%s\007' "$1"; }
 osc777() { printf '\033]777;notify;%s\007' "$1"; }
+# The hook transport: what termic's installed scripts write.
+osc133() { printf '\033]133;%s\007' "$1"; }
 spin()   { for f in 0 1 2; do set_title "${SPINNER[$f]} ${name}"; sleep 0.15; done; }
 
 # One "prompt" per stdin line: go busy (spinner title + streamed output), then
@@ -162,6 +164,10 @@ while IFS= read -r line; do
       # that kept spinning would be testing an agent that ignored the user.
       # `read -t 1` doubles as the frame delay and the input check; integer
       # timeouts only, since macOS ships bash 3.2 where fractional ones fail.
+      # Starts the turn the way a hooked agent does. Hooks own both edges now,
+      # so a busy title alone cannot set working for an agent that reports its
+      # own state.
+      osc133 C
       for i in $(seq 1 60); do
         set_title "${SPINNER[$((i % 8))]} ${name}"
         if IFS= read -r -t 1 -N 1 _key; then
@@ -188,6 +194,11 @@ while IFS= read -r line; do
       # mis-dispatch loud, since the default branch below ends on the idle
       # glyph and the spec asserts the busy one is still there.
       set_title "${SPINNER[1]} ${name}"
+      # The turn STARTS the way a hooked agent starts one. Since hooks own both
+      # edges, a busy title no longer sets working for an agent that reports
+      # its own state, so a fixture without this could never reach working and
+      # would be testing an agent that does not exist.
+      osc133 C
       for i in $(seq 1 60); do
         printf '.'
         if IFS= read -r -t 1 -N 1 _key; then
@@ -195,6 +206,16 @@ while IFS= read -r line; do
           continue 2
         fi
       done
+      continue ;;
+    "#hookturn")
+      # A hooked agent mid-turn whose TITLE then goes idle while the turn is
+      # still outstanding: 133;C and no 133;D. Exactly claude's shape when it
+      # backgrounds subagents, and the case the whole design turns on, so the
+      # fixture has to produce it rather than the spec faking a state.
+      osc133 C
+      spin
+      echo "FAKE-AGENT echo: ${line}"
+      set_title "✳ ${name}"
       continue ;;
     "#hookattn")
       spin

@@ -21,7 +21,7 @@ vi.mock("@/lib/utils", () => ({
   slugify: (s: string) => s.toLowerCase().replace(/\s+/g, "-"),
 }));
 
-import { spawnArgsForCli, defaultCliFirst, visibleCliIds, cliSupportsIdSession, cliSupportsResumeById, agentDisplayName, decideResume, isTerminalCli, workDoneCapable, terminalLaunchCommand, classifyAgentTitle, compileSignals, BUILTIN_TITLE_SIGNALS, builtinBaseId, hasPendingWork, notificationWantsAttention, PENDING_TAIL_ROWS } from "@/lib/agents";
+import { spawnArgsForCli, defaultCliFirst, visibleCliIds, cliSupportsIdSession, cliSupportsResumeById, agentDisplayName, decideResume, isTerminalCli, workDoneCapable, terminalLaunchCommand, classifyAgentTitle, compileSignals, BUILTIN_TITLE_SIGNALS, builtinBaseId, resolveAgent, agentOverrides, hasPendingWork, notificationWantsAttention, PENDING_TAIL_ROWS } from "@/lib/agents";
 import type { Agent, CliInfo } from "@/lib/types";
 
 // ── spawnArgsForCli ───────────────────────────────────────────────────
@@ -647,6 +647,69 @@ describe("classifyAgentTitle", () => {
     expect(classifyAgentTitle("codex", "Waiting for response…", [])).not.toBe("attention");
     expect(classifyAgentTitle("codex", "Thinking about proj", [])).toBe("busy");
     expect(classifyAgentTitle("codex", "   ", [])).toBe(null);
+  });
+
+  // ── True inheritance: a clone stores overrides, not a copy ──────────
+  describe("resolveAgent", () => {
+    const parent = {
+      id: "claude", display_name: "Claude", command: "claude", args: ["--v2"],
+      icon_id: "claude", color: "#c96", env: { A: "1" }, docker_env: {},
+      sandbox_allowed_paths: ["$HOME/.claude"], sandbox_allowed_hosts: ["api.x"],
+      capabilities: { yolo_args: ["--yolo"], resume_args: ["--continue"],
+                      signals: { busy: ["^b"], idle: ["^i"], attention: [], pending: [] } },
+    } as unknown as Parameters<typeof resolveAgent>[0][number];
+
+    const sparse = { id: "c2", display_name: "second account", extends: "claude",
+                     command: "", args: [], icon_id: "", color: "" } as unknown as typeof parent;
+
+    it("fills every empty field from the parent, live", () => {
+      const r = resolveAgent([parent, sparse], "c2")!;
+      // The point of the change: a vendor renaming a flag moves the parent and
+      // the clone moves with it, instead of keeping a copy taken at creation.
+      expect(r.args).toEqual(["--v2"]);
+      expect(r.command).toBe("claude");
+      expect(r.sandbox_allowed_paths).toEqual(["$HOME/.claude"]);
+      expect(r.capabilities?.yolo_args).toEqual(["--yolo"]);
+      // Identity is the clone's own and is never inherited.
+      expect(r.id).toBe("c2");
+      expect(r.display_name).toBe("second account");
+    });
+
+    it("keeps what the clone actually overrode", () => {
+      const over = { ...sparse, args: ["--mine"] } as typeof parent;
+      const r = resolveAgent([parent, over], "c2")!;
+      expect(r.args).toEqual(["--mine"]);
+      // And everything it did NOT override still tracks the parent.
+      expect(r.command).toBe("claude");
+      expect(r.capabilities?.resume_args).toEqual(["--continue"]);
+    });
+
+    it("merges capabilities per list, not wholesale", () => {
+      // Overriding one flag list must not freeze the others: that is the same
+      // rot the whole change removes, one level down.
+      const over = { ...sparse,
+        capabilities: { yolo_args: ["--danger"] } } as unknown as typeof parent;
+      const r = resolveAgent([parent, over], "c2")!;
+      expect(r.capabilities?.yolo_args).toEqual(["--danger"]);
+      expect(r.capabilities?.resume_args).toEqual(["--continue"]);
+      expect(r.capabilities?.signals?.busy).toEqual(["^b"]);
+    });
+
+    it("walks a chain and survives a cycle", () => {
+      const mid = { id: "mid", display_name: "m", extends: "claude" } as unknown as typeof parent;
+      const leaf = { id: "leaf", display_name: "l", extends: "mid" } as unknown as typeof parent;
+      expect(resolveAgent([parent, mid, leaf], "leaf")!.command).toBe("claude");
+      const loop = { id: "loop", display_name: "x", extends: "loop" } as unknown as typeof parent;
+      expect(resolveAgent([loop], "loop")!.id).toBe("loop");
+    });
+
+    it("reports which fields are overrides, for the reset affordance", () => {
+      expect(agentOverrides([parent, sparse], "c2")).toEqual([]);
+      const over = { ...sparse, args: ["--mine"], color: "#fff" } as typeof parent;
+      expect(agentOverrides([parent, over], "c2").sort()).toEqual(["args", "color"]);
+      // A non-clone owns its values; it overrides nothing.
+      expect(agentOverrides([parent], "claude")).toEqual([]);
+    });
   });
 
   // ── A duplicated agent inherits its base's behaviour ────────────────
