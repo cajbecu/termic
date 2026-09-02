@@ -436,15 +436,12 @@ pub fn compute_monitor_policy(task: &Task, agent_override: Option<&str>) -> Moni
     // Per-agent allowed paths from the registry.
     let settings = crate::load_settings_inner();
     let effective_cli = agent_override.unwrap_or(&task.cli);
-    let base_cli = crate::docker::base_agent_id(&settings.agents, effective_cli).to_string();
-    let own = settings.agents.iter().find(|a| a.id == effective_cli);
-    // A clone with an emptied list inherits what it was copied FROM, matching
-    // the per-field fallback the title signals use. Its own list still wins:
-    // inheritance supplies defaults, never overrides.
-    let paths = own
-        .filter(|a| !a.sandbox_allowed_paths.is_empty())
-        .or_else(|| settings.agents.iter().find(|a| a.id == base_cli))
-        .map(|a| a.sandbox_allowed_paths.clone())
+    // Resolved through `extends`, the one mechanism: a clone that never set its
+    // own paths inherits the parent's CURRENT list rather than a copy frozen
+    // when it was created. This started as a bespoke two-line fallback here,
+    // which is how a second convention gets born; there is one resolver now.
+    let paths = crate::agent_dirs::resolve_agent(&settings.agents, effective_cli)
+        .map(|a| a.sandbox_allowed_paths)
         .unwrap_or_default();
     for p in &paths {
         collect(p, &mut rw_subpaths, &mut rw_regexes);

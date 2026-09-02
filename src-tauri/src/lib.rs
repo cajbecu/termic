@@ -16678,8 +16678,10 @@ fn docker_env_for(
     // down anywhere - you would have to diff two boxes in your head to know
     // what a container actually runs with, and a value you never typed can
     // still reach it.
-    match agents.iter().find(|a| a.id == agent_id) {
-        Some(a) if !a.docker_env.is_empty() => a.docker_env.clone(),
+    // Resolved, so a sparse clone gets its parent's docker env rather than an
+    // empty map and a silent fall back to the host list.
+    match crate::agent_dirs::resolve_agent(agents, agent_id) {
+        Some(a) if !a.docker_env.is_empty() => a.docker_env,
         _ => fallback.clone(),
     }
 }
@@ -16730,6 +16732,12 @@ fn docker_command_preview_sync(task_id: Option<String>, agent_id: Option<String>
     let agent_extra_dirs = settings.docker_agent_extra_dirs.get(&agent_id).cloned().unwrap_or_default();
     let agent_persist_enabled = settings.docker_agent_persist_enabled.get(&agent_id).copied().unwrap_or(false);
     let (docker_allowed_paths, _) = live_sandbox_lists(&task);
+    // Resolved: a sparse clone has no command, args or env of its own, and a
+    // preview that showed those blank would be describing a launch that never
+    // happens. This whole command exists so nobody has to diff two boxes in
+    // their head to know what a container runs with.
+    let agent = crate::agent_dirs::resolve_agent(&settings.agents, &agent_id)
+        .unwrap_or_else(|| agent.clone());
     let preview_env = docker_env_for(&settings.agents, &agent_id, &agent.env);
     let agent_base = docker::base_agent_id(&settings.agents, &agent_id).to_string();
     let spec = docker::build_spec(&task, &agent_id, &image, &task.path, task.docker_extra_args.clone(), &preview_env, &agent_extra_dirs, agent_persist_enabled, &docker_allowed_paths, &task.docker_extra_mounts, PREVIEW_PTY_ID, &agent_base, &settings.docker_shared_config_dirs);
@@ -17192,7 +17200,13 @@ fn detect_clis_blocking() -> Vec<CliInfo> {
     // thread per agent collapses the wall-clock to a single probe.
     let handles: Vec<_> = agents.iter().map(|agent| {
         let id = agent.id.clone();
-        let bin = agent.command.trim().to_string();
+        // Resolved: a clone runs its parent's binary and would otherwise probe
+        // an empty command and be reported as not installed.
+        let bin = crate::agent_dirs::resolve_agent(&agents, &agent.id)
+            .map(|a| a.command)
+            .unwrap_or_else(|| agent.command.clone())
+            .trim()
+            .to_string();
         thread::spawn(move || {
             let bin = bin.as_str();
             let mut found = false;

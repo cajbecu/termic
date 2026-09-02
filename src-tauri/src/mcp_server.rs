@@ -2328,8 +2328,23 @@ mod tests {
         // With nothing to reclaim, any free port is fine.
         assert!(bind_listener(None).is_ok());
         // And once it is free again, it is reclaimed.
+        //
+        // Retried rather than asserted on the first attempt. `drop` closes the
+        // socket but the kernel can hold the address briefly afterwards, so an
+        // immediate rebind races TIME_WAIT and fails for a reason that has
+        // nothing to do with what this test checks. It failed intermittently
+        // on an idle machine and reliably on a loaded one, which is the worst
+        // shape for a gating test: it looks like whatever you changed last.
+        // PORT_RELEASE_WAIT is the same budget the production reclaim path
+        // allows for exactly this.
         drop(held);
-        assert!(bind_listener(Some(port)).is_ok());
+        let deadline = std::time::Instant::now() + PORT_RELEASE_WAIT * 8;
+        let reclaimed = loop {
+            if bind_listener(Some(port)).is_ok() { break true }
+            if std::time::Instant::now() >= deadline { break false }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(reclaimed, "a freed advertised port must be reclaimable");
     }
 
     #[test]
