@@ -2,6 +2,7 @@
 // All paths use currentColor so the parent text/icon color flows through.
 
 import { cn } from "@/lib/utils";
+import { resolveAgent } from "@/lib/agents";
 import type { Agent } from "@/lib/types";
 
 interface Props { className?: string; }
@@ -148,7 +149,12 @@ export const CLI_BRAND_COLOR: Record<string, string> = {
  *  Built-in agents have id === icon_id, so they work without lookup. Custom
  *  and cloned agents may differ (e.g. id="claude-dpf", icon_id="claude"). */
 export function resolveIconId(agentId: string, agents: Agent[]): string {
-  return agents.find(a => a.id === agentId)?.icon_id ?? agentId;
+  // Resolved through `extends`: a cloned agent stores only its overrides, so
+  // `icon_id` is EMPTY on one that never picked its own, and reading it raw
+  // drew the generic terminal glyph for what is visibly a claude agent.
+  // `||` rather than `??` on purpose, since the empty string is the "inherit"
+  // marker here and must not win.
+  return resolveAgent(agents, agentId)?.icon_id || agentId;
 }
 
 /** Display label for a cli id in the pickers. The id stays terse

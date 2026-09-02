@@ -16,7 +16,7 @@ import { useUI } from "@/store/ui";
 import { PopoverRoot, PopoverTrigger, PopoverContent } from "@/components/ui/Popover";
 import { Button } from "@/components/ui/Button";
 import { Tip } from "@/components/ui/Tooltip";
-import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
+import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { workDoneCapable } from "@/lib/agents";
 import { cn } from "@/lib/utils";
 import { MessageSquarePlus, X, Repeat, CornerDownLeft, Send } from "lucide-react";
@@ -193,7 +193,7 @@ export function MessageQueueButton({ taskId, compact = false, className, preferT
                   )}
                 >
                   <span className={cn("shrink-0", CLI_BRAND_COLOR[t.cli])}>
-                    <CliIcon cli={t.cli} className="h-3.5 w-3.5" />
+                    <CliIcon cli={resolveIconId(t.cli, agents)} className="h-3.5 w-3.5" />
                   </span>
                   <span className="min-w-0 truncate">{tabLabel(t)}</span>
                   {count > 0 && (

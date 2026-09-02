@@ -20,7 +20,7 @@ import { Input } from "@/components/ui/Input";
 import { AppDialog } from "@/components/ui/Dialog";
 import { Tip } from "@/components/ui/Tooltip";
 import { Trash2, Plus, Check, AlertTriangle, RotateCcw, Copy } from "lucide-react";
-import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
+import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { SignalInspector } from "./SignalInspector";
 import { cn, slugify } from "@/lib/utils";
 import { isTerminalEntry, BUILTIN_TITLE_SIGNALS } from "@/lib/agents";
@@ -591,8 +591,8 @@ function AgentsTabs({
       {/* Resolved: a clone leaves icon_id empty and inherits its parent's, so
           reading it raw showed the generic terminal glyph for what is visibly
           a claude agent. */}
-      <span className={cn("shrink-0", CLI_BRAND_COLOR[iconOf(a)] || "text-[var(--color-fg-dim)]")}>
-        <CliIcon cli={iconOf(a)} className="h-3.5 w-3.5" />
+      <span className={cn("shrink-0", CLI_BRAND_COLOR[resolveIconId(a.id, agents)] || "text-[var(--color-fg-dim)]")}>
+        <CliIcon cli={resolveIconId(a.id, agents)} className="h-3.5 w-3.5" />
       </span>
       <span className="truncate max-w-[140px]">{a.display_name || a.id}</span>
       {isModified(a) && (
@@ -713,8 +713,8 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
     <div data-agent-card={agent.id} className="rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-bg-1)] p-4">
       <header className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
-          <span className={cn(CLI_BRAND_COLOR[inherited ? (agent.icon_id || inherited.icon_id) : agent.icon_id] || "text-[var(--color-fg-dim)]")}>
-            <CliIcon cli={inherited ? (agent.icon_id || inherited.icon_id) : agent.icon_id} className="h-4 w-4" />
+          <span className={cn(CLI_BRAND_COLOR[agent.icon_id || inherited?.icon_id || agent.id] || "text-[var(--color-fg-dim)]")}>
+            <CliIcon cli={agent.icon_id || inherited?.icon_id || agent.id} className="h-4 w-4" />
           </span>
           <input
             ref={nameRef}
@@ -785,20 +785,6 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
             >{detected.found ? "installed" : "not found"}</span>
           )}
         </div>
-      {/* Said ONCE, at the top, before the reader meets a column of empty
-          boxes. Without it a clone reads as unconfigured rather than
-          inherited, which is the opposite of what those blanks mean. */}
-      {extendsName && (
-        <div className="mt-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-3)] px-3 py-2 text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
-          This agent inherits everything from <b>{extendsName}</b>. Every field
-          left empty uses {extendsName}&apos;s current value, shown greyed
-          below, and follows it as {extendsName} changes. Fill a field in only
-          to override that one.
-          {overrideCount > 0 && (
-            <> You are overriding {overrideCount} field{overrideCount === 1 ? "" : "s"} right now.</>
-          )}
-        </div>
-      )}
         <div className="flex items-center gap-2">
           {/* Force hide/show — disabled agents drop out of every CLI
               picker (worktree popover, New Task, Review, + menu)
@@ -861,6 +847,21 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
           )}
         </div>
       </header>
+
+      {/* Said ONCE, at the top, before the reader meets a column of empty
+          boxes. Without it a clone reads as unconfigured rather than
+          inherited, which is the opposite of what those blanks mean. */}
+      {extendsName && (
+        <div className="mt-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-3)] px-3 py-2 text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
+          This agent inherits everything from <b>{extendsName}</b>. Every field
+          left empty uses {extendsName}&apos;s current value, shown greyed
+          below, and follows it as {extendsName} changes. Fill a field in only
+          to override that one.
+          {overrideCount > 0 && (
+            <> You are overriding {overrideCount} field{overrideCount === 1 ? "" : "s"} right now.</>
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-3">
         <Field label="Command" hint={isTerminal

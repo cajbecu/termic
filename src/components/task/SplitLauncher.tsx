@@ -11,7 +11,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Task } from "@/lib/types";
 import { useApp } from "@/store/app";
 import { visibleCliIds, isTerminalEntry } from "@/lib/agents";
-import { CliIcon, CLI_BRAND_COLOR } from "@/icons/cli";
+import { CliIcon, CLI_BRAND_COLOR, resolveIconId } from "@/icons/cli";
 import { cn } from "@/lib/utils";
 
 interface LauncherItem {
@@ -33,10 +33,10 @@ export function SplitLauncher({ task, paneId }: { task: Task; paneId: string }) 
       { cli: "shell", label: "Terminal", iconId: "shell", section: "terminal" },
     ];
     for (const a of registry.filter(a => isTerminalEntry(a) && !a.disabled)) {
-      out.push({ cli: a.id, label: a.display_name, iconId: a.icon_id, section: "terminal" });
+      out.push({ cli: a.id, label: a.display_name, iconId: resolveIconId(a.id, registry), section: "terminal" });
     }
     for (const a of registry.filter(a => visible.has(a.id))) {
-      out.push({ cli: a.id, label: a.display_name, iconId: a.icon_id, section: "agent" });
+      out.push({ cli: a.id, label: a.display_name, iconId: resolveIconId(a.id, registry), section: "agent" });
     }
     return out;
   }, [registry, detectedClis]);

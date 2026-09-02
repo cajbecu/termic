@@ -3053,7 +3053,26 @@ fn pty_spawn(
     // Inherit ALL parent env first — agents need ANTHROPIC_API_KEY,
     // GEMINI_API_KEY, OPENAI_API_KEY, HTTPS_PROXY, etc. The user's per-spawn
     // `env` overlay then takes precedence for known keys like TERMIC_*.
+    //
+    // MINUS another agent session's runtime markers. Termic is routinely
+    // launched FROM an agent (a `make beta` typed into a termic tab), and it
+    // then copied that session's identity into every agent it spawned:
+    //
+    //   CLAUDE_CODE_CHILD_SESSION   the spawned agent believes it is a child,
+    //                               and turns transcript saving off. Reported.
+    //   CLAUDE_CODE_SESSION_ID      it adopts the LAUNCHER's session, which is
+    //   CLAUDE_CODE_BRIDGE_...      why an agent in one repo was seen reaching
+    //                               for another repo entirely.
+    //   CLAUDE_CODE_MESSAGING_*     a live socket AND token for that other
+    //                               session, handed to a CAGED process. That
+    //                               one is not cosmetic: the cage exists to
+    //                               stop an agent reaching things like this.
+    //
+    // An explicit list, not a `CLAUDE_*` prefix sweep: `CLAUDE_CONFIG_DIR` is
+    // a legitimate setting a user relocates a cloned agent with, and dropping
+    // it would silently point a second account back at the first.
     for (k, v) in std::env::vars() {
+        if agent_session_marker(&k) { continue }
         cmd.env(k, v);
     }
     // Override the inherited PATH with the login-shell-resolved one.
@@ -16686,6 +16705,35 @@ fn docker_env_for(
     }
 }
 
+/// Env vars that identify or AUTHORISE another agent session, and so must
+/// never be inherited by an agent termic spawns.
+///
+/// Measured from inside a real Claude Code session, which is where termic gets
+/// launched from in practice. Deliberately an explicit list rather than a
+/// `CLAUDE_*` prefix match: `CLAUDE_CONFIG_DIR` is how a user points a cloned
+/// agent at a second account, and sweeping it away would silently send that
+/// clone back to the first one's login.
+///
+/// A new marker from a future agent version lands here, not in a wildcard. The
+/// failure it prevents is quiet (a wrong session id looks like nothing until an
+/// agent reads someone else's project), so the list is worth keeping honest.
+fn agent_session_marker(key: &str) -> bool {
+    matches!(
+        key,
+        "CLAUDECODE"
+            | "CLAUDE_CODE_CHILD_SESSION"
+            | "CLAUDE_CODE_SESSION_ID"
+            | "CLAUDE_CODE_BRIDGE_SESSION_ID"
+            | "CLAUDE_CODE_ENTRYPOINT"
+            | "CLAUDE_CODE_EXECPATH"
+            | "CLAUDE_CODE_MESSAGING_SOCKET"
+            | "CLAUDE_CODE_MESSAGING_TOKEN"
+            | "CLAUDE_PID"
+            | "CLAUDE_JOB_DIR"
+            | "CLAUDE_EFFORT"
+    )
+}
+
 /// Stand-in pty id for the command PREVIEW. A preview belongs to no tab,
 /// and the only thing the id feeds is the container's `--name` suffix, so a
 /// fixed marker keeps the rendered name stable between openings instead of
@@ -20205,6 +20253,32 @@ mod tests {
     // `-r <uuid>` resumed it. Pinned because these were empty for long enough
     // that every grok task fell back to cwd-based `--continue`, which grabs an
     // unrelated session when two tasks share a repo root.
+    /// Termic is routinely launched FROM an agent, and it copied that
+    /// session's identity into every agent it spawned: the child believed it
+    /// was a child (transcript saving off), adopted the launcher's session id
+    /// (an agent in one repo reaching for another), and was handed a live
+    /// messaging socket and token for it while caged.
+    #[test]
+    fn another_agent_session_is_not_inherited_by_a_spawn() {
+        for k in [
+            "CLAUDECODE",
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_BRIDGE_SESSION_ID",
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "CLAUDE_CODE_MESSAGING_TOKEN",
+            "CLAUDE_PID",
+        ] {
+            assert!(agent_session_marker(k), "{k} must not reach a spawned agent");
+        }
+        // NOT swept: the user's own settings. `CLAUDE_CONFIG_DIR` is how a
+        // cloned agent holds a second account, and dropping it would point
+        // that clone back at the first one's login. A prefix match would.
+        for k in ["CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_NO_FLICKER", "PATH"] {
+            assert!(!agent_session_marker(k), "{k} must still be inherited");
+        }
+    }
+
     #[test]
     fn grok_has_id_based_resume_args() {
         let agents = seeded_defaults().agents;

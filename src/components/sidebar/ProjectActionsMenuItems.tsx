@@ -340,8 +340,8 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
           {a.id === "shell" ? (
             <TerminalSquare className="h-4 w-4 shrink-0 text-[var(--color-fg-dim)]" />
           ) : (
-            <span className={cn("shrink-0", CLI_BRAND_COLOR[a.icon_id ?? ""] || "text-[var(--color-fg-dim)]")}>
-              <CliIcon cli={a.icon_id ?? ""} className="h-4 w-4" />
+            <span className={cn("shrink-0", CLI_BRAND_COLOR[resolveIconId(a.id, agents)] || "text-[var(--color-fg-dim)]")}>
+              <CliIcon cli={resolveIconId(a.id, agents)} className="h-4 w-4" />
             </span>
           )}
           <span className="truncate">{a.display_name}</span>

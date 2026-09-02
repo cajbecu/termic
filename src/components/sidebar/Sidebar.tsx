@@ -2422,7 +2422,7 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
             !isLoaded && "opacity-60",
           )}
         >
-          <CliIcon cli={w.cli} className="h-4 w-4" />
+          <CliIcon cli={resolveIconId(w.cli, agents)} className="h-4 w-4" />
           {/* Activity dot in the corner — the compact rail has no room
               for the full bell/check badge, so color carries meaning:
               warm = needs you, blue = work done. The ring lifts it off

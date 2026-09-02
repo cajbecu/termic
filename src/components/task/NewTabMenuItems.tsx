@@ -64,11 +64,14 @@ function ResumeMenuItems({ entries, agents, onResume }: {
 /** Registry entries rendered as dropdown rows — shared by the "New terminal"
  *  custom entries and the "New agent" list. */
 function CliMenuItems({ entries, onSpawn }: { entries: Agent[]; onSpawn: (cli: string) => void }) {
+  // The FULL registry, not `entries`: resolving a clone's icon needs its
+  // parent, and the parent may be filtered out of the list being rendered.
+  const agents = useApp(s => s.agents);
   return (
     <>
       {entries.map(a => (
         <DropdownItem key={a.id} onSelect={() => onSpawn(a.id)}>
-          <span className={cn("shrink-0", CLI_BRAND_COLOR[a.icon_id] || "text-[var(--color-fg-dim)]")}><CliIcon cli={a.icon_id} className="h-4 w-4" /></span>
+          <span className={cn("shrink-0", CLI_BRAND_COLOR[resolveIconId(a.id, agents)] || "text-[var(--color-fg-dim)]")}><CliIcon cli={resolveIconId(a.id, agents)} className="h-4 w-4" /></span>
           {a.display_name}
         </DropdownItem>
       ))}

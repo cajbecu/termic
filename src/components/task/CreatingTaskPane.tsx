@@ -13,11 +13,13 @@ import { useEffect, useRef } from "react";
 import { Loader2, AlertTriangle } from "lucide-react";
 import { useApp } from "@/store/app";
 import { usePendingTask, usePendingTasks } from "@/store/pendingTasks";
-import { CliIcon } from "@/icons/cli";
+import { CliIcon, resolveIconId } from "@/icons/cli";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/utils";
 
 export function CreatingTaskPane({ id }: { id: string }) {
+  // Resolved: a cloned agent inherits its parent's icon.
+  const agents = useApp(s => s.agents);
   const pending = usePendingTask(id);
   const setActive = useApp(s => s.setActiveTask);
   const remove = usePendingTasks(s => s.remove);
@@ -43,7 +45,7 @@ export function CreatingTaskPane({ id }: { id: string }) {
           ? <AlertTriangle className="h-4 w-4 shrink-0 text-[var(--color-err)]" />
           : <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[var(--color-fg-dim)]" />
         }
-        <CliIcon cli={pending.cli} className="h-4 w-4 shrink-0" />
+        <CliIcon cli={resolveIconId(pending.cli, agents)} className="h-4 w-4 shrink-0" />
         <span className="truncate">{pending.name}</span>
         <span className={cn("shrink-0", isError ? "text-[var(--color-err)]" : "text-[var(--color-fg-faint)]")}>
           {isError ? "Creation failed." : "Creating…"}
