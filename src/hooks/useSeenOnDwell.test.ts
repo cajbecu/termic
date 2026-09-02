@@ -38,8 +38,23 @@ describe("dwellTarget", () => {
     expect(dwellTarget(useApp.getState())).toBe("t1:a");
   });
 
-  it("names nothing when the visible tab has no badge", () => {
-    useApp.setState({ tabs: { ...useApp.getState().tabs, t1: [tab("a", null)] } } as never);
+  it("names a tab whose only badge is the blue DONE dot", () => {
+    // The reported bug. The two badges read different fields: the bell is
+    // `unread.reason`, the dot is `workState === "done"`. A target keyed on
+    // `unread` alone missed a tab holding just the dot, and the dwell cleared
+    // the bell while the dot stayed until the user clicked the sidebar item.
+    useApp.setState({
+      tabs: { ...useApp.getState().tabs,
+        t1: [{ id: "a", type: "terminal", cli: "claude", title: "a", unread: null, workState: "done" }] },
+    } as never);
+    expect(dwellTarget(useApp.getState())).toBe("t1:a");
+  });
+
+  it("names nothing when the visible tab has neither badge", () => {
+    useApp.setState({
+      tabs: { ...useApp.getState().tabs,
+        t1: [{ id: "a", type: "terminal", cli: "claude", title: "a", unread: null, workState: "idle" }] },
+    } as never);
     expect(dwellTarget(useApp.getState())).toBe("");
   });
 

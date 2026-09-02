@@ -966,6 +966,29 @@ pub fn build_spec(
         }
     }
 
+    // Agent-hook wiring, termic's to set and re-asserted last so a user's own
+    // Docker env block cannot shadow it.
+    //
+    // `cmd.env(...)` on the spawn sets the HOST process's environment, which
+    // for a Docker task is the `docker run` CLI, not the container. Docker
+    // forwards nothing, so both of the hook script's gates failed inside the
+    // cage and every hook exited on its first line:
+    //
+    //     [ -n "$TERMIC_PTY" ] || exit 0
+    //
+    // That is why a sandboxed tab delivered ZERO hook OSCs while its
+    // unsandboxed neighbours on the same agent delivered hundreds. Not the
+    // transport, not the install, not permissions: the variables simply were
+    // not there.
+    //
+    // TERMIC_PTY is the CONTAINER's address for the same terminal, not the
+    // host path, which names a device the container has no entry for.
+    // `/proc/1/fd/1` is the main process's stdout, which docker relays to the
+    // pty termic is reading under `run -i -t`, and it needs no controlling
+    // terminal (hooks have none). Measured in the real sandbox image.
+    env.push(("TERMIC_PTY".to_string(), "/proc/1/fd/1".to_string()));
+    env.push(("TERMIC_TASK_ID".to_string(), task.id.clone()));
+
     DockerSpec {
         warnings,
         // task id keeps the name recognisable in `docker ps`; the pty id
@@ -1878,6 +1901,26 @@ mod tests {
     }
 
     #[test]
+    /// The hook wiring has to be IN the container, not merely on the host
+    /// process. `cmd.env(...)` sets the `docker run` CLI's environment and
+    /// docker forwards none of it, so both gates in the hook script failed and
+    /// every sandboxed tab delivered zero OSCs while unsandboxed tabs on the
+    /// same agent delivered hundreds.
+    #[test]
+    fn the_container_gets_the_hook_env_at_a_container_address() {
+        let task = stub_task("t-hooks", "/tmp/termic-docker-test-does-not-exist");
+        let env = std::collections::HashMap::new();
+        let spec = build_spec(&task, "claude", "img", &task.path, vec![], &env, &[], false,
+                              &[], &[], "pty-hooks01", "claude", &[]);
+        let get = |k: &str| spec.env.iter().rev().find(|(a, _)| a == k).map(|(_, v)| v.clone());
+        assert_eq!(get("TERMIC_TASK_ID"), Some(task.id.clone()));
+        // NOT the host device path: the container has no entry for it, which
+        // is the whole reason this exists.
+        let pty = get("TERMIC_PTY").expect("TERMIC_PTY must reach the container");
+        assert_eq!(pty, "/proc/1/fd/1");
+        assert!(!pty.starts_with("/dev/tty"), "a host pty path is meaningless in the cage");
+    }
+
     fn build_spec_names_the_container_per_pty_not_per_task() {
         // A task can host several agent tabs, each with its own container.
         // Keyed on task id alone, tab B's `--name` collided with tab A's live

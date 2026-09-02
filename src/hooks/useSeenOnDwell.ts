@@ -41,7 +41,12 @@ export function dwellTarget(s: AppState): string {
   const taskId = s.activeTaskId;
   if (!taskId) return "";
   const tabs = s.tabs[taskId] || [];
-  const t = tabs.find(t => t.unread && isTabOnScreenIn(s, taskId, t.id));
+  // `unread` OR a done work state: they are separate fields feeding separate
+  // badges, and a tab can hold either without the other (a keystroke clears
+  // unread and leaves the dot).
+  const t = tabs.find(t =>
+    (t.unread || (t.type === "terminal" && t.workState === "done"))
+    && isTabOnScreenIn(s, taskId, t.id));
   return t ? `${taskId}:${t.id}` : "";
 }
 
@@ -66,7 +71,20 @@ export function useSeenOnDwell() {
       // has since moved to another tab would destroy the one signal this
       // feature is meant to respect.
       if (dwellTarget(useApp.getState()) !== target) return;
-      useApp.getState().clearAttention(taskId, tabId);
+      const app = useApp.getState();
+      // BOTH, because the two badges have different sources and clearing one
+      // leaves the other on screen. The bell reads `unread.reason`, the blue
+      // done dot reads `workState === "done"` (Sidebar's hasAttention vs
+      // hasDone, and TabBar's showBell vs showDone). The first version called
+      // `clearAttention` alone, so a finished agent kept its dot after the user
+      // came back and only `setActiveTask`, the one path that also writes the
+      // work state, could shift it. Reported as "the only way is to click the
+      // item in the sidebar", which is precisely that path.
+      app.clearAttention(taskId, tabId);
+      const tab = (app.tabs[taskId] ?? []).find(t => t.id === tabId);
+      if (tab?.type === "terminal" && tab.workState === "done") {
+        app.setWorkState(taskId, tabId, "idle", "seen: watched for the dwell");
+      }
     }, SEEN_DWELL_MS);
     // Cancels on blur, on the badge going away, and on the user switching to a
     // different tab, because each of those changes a dep.
