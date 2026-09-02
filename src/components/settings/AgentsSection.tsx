@@ -590,8 +590,13 @@ function AgentsTabs({
     >
       {/* Resolved: a clone leaves icon_id empty and inherits its parent's, so
           reading it raw showed the generic terminal glyph for what is visibly
-          a claude agent. */}
-      <span className={cn("shrink-0", CLI_BRAND_COLOR[resolveIconId(a.id, agents)] || "text-[var(--color-fg-dim)]")}>
+          a claude agent. `data-icon-id` is the DOM hook for that: it is the
+          user-visible consequence of inheritance, so a spec can assert it
+          without reaching into the store for the resolver. */}
+      <span
+        data-icon-id={resolveIconId(a.id, agents)}
+        className={cn("shrink-0", CLI_BRAND_COLOR[resolveIconId(a.id, agents)] || "text-[var(--color-fg-dim)]")}
+      >
         <CliIcon cli={resolveIconId(a.id, agents)} className="h-3.5 w-3.5" />
       </span>
       <span className="truncate max-w-[140px]">{a.display_name || a.id}</span>
@@ -757,6 +762,7 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
           {extendsName && overrideCount > 0 && (
             <button
               type="button"
+              data-testid="reset-overrides"
               onClick={() => resetOverrides(agent.id)}
               className="rounded bg-[var(--color-accent)]/15 px-1.5 py-0.5 text-[11px] text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25"
               title={`Clear all ${overrideCount} override${overrideCount === 1 ? "" : "s"} and inherit everything from ${extendsName} again.`}
@@ -832,8 +838,9 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
               title="Reset this agent to ship defaults"
             ><RotateCcw className="h-3.5 w-3.5" /> Reset</button>
           )}
-          <Tip content="Clone this agent: copies all settings into a new custom agent you can override independently" side="top">
+          <Tip content="Clone this agent: the copy INHERITS every setting and follows this agent as it changes. Fill a field on the copy to override just that one." side="top">
             <button
+              data-testid="clone-agent"
               onClick={onClone}
               className="rounded p-1.5 text-[var(--color-fg-faint)] hover:bg-[var(--color-bg-3)] hover:text-[var(--color-fg)]"
             ><Copy className="h-4 w-4" /></button>

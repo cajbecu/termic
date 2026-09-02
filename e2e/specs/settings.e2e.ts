@@ -2823,3 +2823,131 @@ describe("agent hooks", () => {
     await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
   });
 });
+
+// Cloning an agent, end to end through the real UI and the real save path.
+//
+// A clone used to be a full COPY taken once, which is a snapshot that rots:
+// when a vendor renames a flag the built-in entry moves with the app and every
+// clone keeps the old value forever. It had already happened, a clone carrying
+// the parent's literal $HOME/.claude sandbox paths while its own config lived
+// elsewhere, so the cage denied it its own login.
+//
+// Only the FUNCTIONAL half is asserted here: what gets stored, what resolves,
+// and what the two buttons do. The banner, the badge and the placeholders are
+// wording, and a spec that pinned those would break on every copy edit while
+// catching nothing.
+describe("cloned agents inherit rather than copy", () => {
+  let cloneId: string | null = null;
+
+  const agentIds = () => browser.execute(() =>
+    window.__termic!.useApp.getState().agents.map((a: { id: string }) => a.id));
+  const record = (id: string) => browser.execute((i) =>
+    window.__termic!.useApp.getState().agents.find((a: { id: string }) => a.id === i) ?? null, id);
+
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    await dismissOverlays();
+    await browser.execute(() => window.__termic!.useApp.getState().openSettings("agents"));
+    await waitVisible('[data-agent-id][data-kind="agent"]');
+  });
+
+  after(async () => {
+    // The profile is shared across this file, so a clone left behind would
+    // outlive the run and show up in someone else's assertions.
+    if (!cloneId) return;
+    await browser.execute(async (id) => {
+      const app = window.__termic!.useApp.getState();
+      await window.__termic!.ipc.agentsSave(
+        app.agents.filter((a: { id: string }) => a.id !== id));
+      await window.__termic!.useApp.getState().loadAll();
+    }, cloneId);
+  });
+
+  it("stores ONLY identity, so every other field resolves through the parent", async () => {
+    const before = (await agentIds()) as string[];
+    await browser.execute(() => {
+      const card = document.querySelector('[data-agent-card="claude"]');
+      (card?.querySelector('[data-testid="clone-agent"]') as HTMLElement | null)?.click();
+    });
+    await browser.waitUntil(async () => ((await agentIds()) as string[]).length > before.length, {
+      timeout: 10_000, timeoutMsg: "cloning claude never added an agent",
+    });
+    cloneId = ((await agentIds()) as string[]).find(i => !before.includes(i))!;
+
+    const stored = await record(cloneId) as Record<string, unknown>;
+    expect(stored.extends).toBe("claude");
+    // The whole point: a snapshot is NOT taken. These stay empty and are
+    // answered by the parent at read time.
+    expect(stored.command).toBe("");
+    expect(stored.args).toEqual([]);
+    expect(stored.icon_id).toBe("");
+    expect(stored.sandbox_allowed_paths ?? []).toEqual([]);
+
+    // And the inheritance is VISIBLE, which is the half a user notices: the
+    // clone's pill draws its parent's brand icon even though its own
+    // `icon_id` is empty. Reported as "the icon was lost" when this read the
+    // field raw.
+    const iconOf = (id: string) => browser.execute((i) => (document.querySelector(
+      `[data-agent-id="${i}"] [data-icon-id]`) as HTMLElement | null)?.dataset.iconId ?? null, id);
+    await browser.waitUntil(async () => (await iconOf(cloneId!)) !== null,
+      { timeout: 10_000, timeoutMsg: "the clone never appeared in the agent strip" });
+    expect(await iconOf(cloneId!)).toBe(await iconOf("claude"));
+  });
+
+  it("keeps an override, and follows the parent on every field it did not", async () => {
+    await browser.execute((id) => {
+      const app = window.__termic!.useApp.getState();
+      const next = app.agents.map((a: { id: string }) =>
+        a.id === id ? { ...a, args: ["--mine"] } : a);
+      return window.__termic!.ipc.agentsSave(next).then(() => app.loadAll());
+    }, cloneId!);
+
+    const stored = await record(cloneId!) as Record<string, unknown>;
+    expect(stored.args).toEqual(["--mine"]);
+    // Overriding ONE field must not freeze the rest, which is the same rot one
+    // level down: `command` stays empty, so it still resolves to the parent.
+    expect(stored.command).toBe("");
+    // Still visibly a claude agent.
+    const iconOf = (id: string) => browser.execute((i) => (document.querySelector(
+      `[data-agent-id="${i}"] [data-icon-id]`) as HTMLElement | null)?.dataset.iconId ?? null, id);
+    expect(await iconOf(cloneId!)).toBe(await iconOf("claude"));
+  });
+
+  it("the reset button clears every override and keeps identity", async () => {
+    // The agents panel keeps its OWN loaded copy of the registry, so the
+    // previous test's write through ipc.agentsSave is invisible to it until it
+    // remounts. Navigating away and back is the remount; without it the reset
+    // button never renders (overrideCount is stale at 0) and the failure reads
+    // as "reset did nothing".
+    await browser.execute(() => window.__termic!.useApp.getState().openSettings("general"));
+    await browser.execute(() => window.__termic!.useApp.getState().openSettings("agents"));
+    await waitVisible('[data-agent-id][data-kind="agent"]');
+
+    // Only the SELECTED agent renders a card, so the clone's pill has to be
+    // clicked first. Without that the button simply is not in the DOM, which
+    // looks exactly like a reset that did nothing.
+    await browser.execute((id) => {
+      (document.querySelector(`[data-agent-id="${id}"]`) as HTMLElement | null)?.click();
+    }, cloneId!);
+    await waitVisible(`[data-agent-card="${cloneId}"] [data-testid="reset-overrides"]`);
+    await browser.execute((id) => {
+      const card = document.querySelector(`[data-agent-card="${id}"]`);
+      (card?.querySelector('[data-testid="reset-overrides"]') as HTMLElement | null)?.click();
+    }, cloneId!);
+
+    await browser.waitUntil(async () => {
+      const a = await record(cloneId!) as Record<string, unknown> | null;
+      return !!a && (a.args as unknown[]).length === 0;
+    }, { timeout: 10_000, timeoutMsg: "reset never cleared the override" });
+
+    const after = await record(cloneId!) as Record<string, unknown>;
+    // Identity survives: this is the escape hatch for a clone made before
+    // agents inherited, not a way to delete it.
+    expect(after.id).toBe(cloneId);
+    expect(after.extends).toBe("claude");
+    expect(after.args).toEqual([]);
+    expect(after.command).toBe("");
+  });
+});
+
