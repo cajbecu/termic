@@ -694,6 +694,13 @@ export const useApp = create<AppState>((set, get) => ({
           .catch(() => [id, false] as const)),
       );
       set({ agentHooksInstalled: Object.fromEntries(rows) });
+      // Logged because the SPAWN line lies about this until it resolves. This
+      // is async and a tab can spawn first, so the trace showed
+      // `hooksInstalled=false` for an agent whose hooks were installed and
+      // working. Behaviour self-corrects (the value is read live per tick);
+      // the diagnostic did not, and a diagnostic that lies is worse than none.
+      logWorkState("hooks-resolved",
+        rows.map(([id, on]) => `${id}=${on}`).join(" ") || "none");
     } catch {
       // Leave the previous answer alone. Defaulting to "installed" here would
       // silently disable the title fallback for an agent that has no hooks.
