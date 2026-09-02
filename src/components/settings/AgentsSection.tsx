@@ -852,7 +852,7 @@ function AgentCard({ agent, detected, onPatch, onCommitId, onPatchCaps, onRemove
           boxes. Without it a clone reads as unconfigured rather than
           inherited, which is the opposite of what those blanks mean. */}
       {extendsName && (
-        <div className="mt-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-3)] px-3 py-2 text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
+        <div className="mt-3 mb-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-3)] px-3 py-2 text-[12.5px] leading-relaxed text-[var(--color-fg-dim)]">
           This agent inherits everything from <b>{extendsName}</b>. Every field
           left empty uses {extendsName}&apos;s current value, shown greyed
           below, and follows it as {extendsName} changes. Fill a field in only
