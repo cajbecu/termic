@@ -1767,7 +1767,15 @@ mod tests {
         let effective = spec.env.iter().rev()
             .find(|(k, _)| k == "CLAUDE_CONFIG_DIR").map(|(_, v)| v.clone()).unwrap();
         assert_eq!(effective, "/root/.claude/alt");
-        assert!(spec.warnings.is_empty(), "{:?}", spec.warnings);
+        // Narrowed to what this test MEANS: no warning about the config dir.
+        // Asserting "no warnings at all" made it depend on the machine, since
+        // `build_spec` also warns when the host has no global git identity.
+        // Every developer box has one and a fresh CI runner does not, so this
+        // passed everywhere except the place that gates merges.
+        let about_config: Vec<&String> = spec.warnings.iter()
+            .filter(|w| w.contains("CLAUDE_CONFIG_DIR") || w.contains(".claude"))
+            .collect();
+        assert!(about_config.is_empty(), "{about_config:?}");
     }
 
     #[test]
@@ -2579,7 +2587,14 @@ mod tests {
             let spec = spec_for(&task, &std::collections::HashMap::new());
             assert!(spec.mounts.iter().any(|m| m.container == "/root/.config/git/config"),
                 "the settings preview must show this mount like every other one: {:?}", spec.mounts);
-            assert!(spec.warnings.is_empty(), "{:?}", spec.warnings);
+            // Same narrowing as `a_config_dir_inside_a_mount_is_left_alone`:
+            // the no-identity warning is a property of the MACHINE, and this
+            // test is about the mount. A runner without a git identity is a
+            // legitimate environment, not a failure.
+            let unrelated: Vec<&String> = spec.warnings.iter()
+                .filter(|w| !w.contains("No git identity found"))
+                .collect();
+            assert!(unrelated.is_empty(), "{unrelated:?}");
         });
     }
 
