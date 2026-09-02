@@ -46,7 +46,7 @@ import * as ipc from "@/lib/ipc";
 import { maybeRebuildDockerImageForLaunch } from "@/lib/dockerDailyRebuild";
 import { loginShell, loginShellArgs } from "@/lib/loginShell";
 import { usePrefs, currentTerminalStack, currentTerminalTheme, currentColorFgBg, currentMinimumContrastRatio } from "@/store/prefs";
-import { spawnArgsForCli, spawnCommandForCli, tryToggleYoloLive, envForCli, agentDisplayName, cliSupportsIdSession, cliSupportsCaptureResume, postLaunchCaptureForCli, decideResume, resumeIdArgsForCli, workDoneCapable, terminalLaunchCommand, isTerminalCli, classifyAgentTitle, compileSignals, hasPendingWork, notificationWantsAttention, PENDING_TAIL_ROWS, STICKY_DONE_MS, builtinBaseId } from "@/lib/agents";
+import { spawnArgsForCli, spawnCommandForCli, tryToggleYoloLive, envForCli, agentDisplayName, cliSupportsIdSession, cliSupportsCaptureResume, postLaunchCaptureForCli, decideResume, resumeIdArgsForCli, workDoneCapable, terminalLaunchCommand, isTerminalCli, classifyAgentTitle, compileSignals, hasPendingWork, notificationWantsAttention, PENDING_TAIL_ROWS, STICKY_DONE_MS, builtinBaseId, BUILTIN_OUTPUT_SIGNALS, resolveAgent } from "@/lib/agents";
 import { recordTitle, noteSubmit, noteDone } from "@/lib/agentSignalLog";
 import { MessageQueueButton } from "./MessageQueueButton";
 import { ReviewCommentsBar } from "./ReviewCommentsBar";
@@ -1348,14 +1348,21 @@ const captureArmedRef = useRef(false);
     // still decode, line-split and ANSI-strip every chunk on the hot data path
     // in order to test zero patterns. Settings disables the switch in that
     // state; this is the enforcement.
-    const sigAgent = useApp.getState().agents.find(a => a.id === tab.cli);
+    // Resolved, so a CLONE gets its parent's signals and its parent's
+    // `match_output` rather than falling out of this tier entirely.
+    const agentsNow = useApp.getState().agents;
+    const sigAgent = resolveAgent(agentsNow, tab.cli);
     const sigs = sigAgent?.capabilities?.signals;
-    const compiled = workDoneEnabled && sigAgent?.capabilities?.match_output
-      ? {
-          attention: compileSignals(sigs?.attention),
-          busy: compileSignals(sigs?.busy),
-          idle: compileSignals(sigs?.idle),
-        }
+    // Some agents ship OUTPUT patterns of their own, and those are not opt-in:
+    // for agy this is the ONLY way needs-you can be reported at all. Measured
+    // at a live permission prompt, it writes no title, no OSC and no bell, so
+    // its hooks cover working and done and the screen is all that is left for
+    // the third state. A user's own patterns still win per field.
+    const builtinOut = BUILTIN_OUTPUT_SIGNALS[builtinBaseId(tab.cli, agentsNow)];
+    const pick = (k: "attention" | "busy" | "idle") =>
+      compileSignals(sigs?.[k]?.length ? sigs[k] : builtinOut?.[k]);
+    const compiled = workDoneEnabled && (sigAgent?.capabilities?.match_output || builtinOut)
+      ? { attention: pick("attention"), busy: pick("busy"), idle: pick("idle") }
       : null;
     const outputSignals =
       compiled && (compiled.attention.length || compiled.busy.length || compiled.idle.length)

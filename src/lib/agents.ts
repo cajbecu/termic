@@ -474,6 +474,32 @@ export function hasPendingWork(
  *                                                 ago and we already said so.
  *  Badging the second would ring a bell a minute after every turn you did not
  *  immediately reply to. */
+/** Built-in patterns matched against a line of OUTPUT, not the title.
+ *
+ *  Deliberately separate from `BUILTIN_TITLE_SIGNALS`: claude's `^\s*✳`
+ *  describes a title and would be nonsense against stdout, which is why the
+ *  output scanner refuses to fall back to that table.
+ *
+ *  agy is the reason this exists. Measured against Antigravity CLI 1.1.24, with
+ *  the pty given a window size (without one it never finishes booting, and two
+ *  earlier probes wrongly concluded it emits nothing): at a live permission
+ *  prompt agy writes NO title, NO OSC of any kind, and NO bell. Its screen is
+ *  the only place the state appears, so it is the only place to read it. Its
+ *  hooks cover working and done; this is the missing third state, and the
+ *  hybrid the maintainer asked for.
+ *
+ *  Two patterns because agy's prompt renders as a block and either line can be
+ *  the one that survives a redraw:
+ *
+ *      Requesting permission for:
+ *         echo hello-from-agy
+ *      Do you want to proceed?
+ *      > 1. Yes ... 4. No
+ */
+export const BUILTIN_OUTPUT_SIGNALS: Record<string, Partial<SignalPatterns>> = {
+  agy: { attention: ["Requesting permission for:", "Do you want to proceed\\?"] },
+};
+
 export const BUILTIN_NOTIFY_IGNORE: Record<string, string[]> = {
   claude: ["is waiting for your input"],
 };

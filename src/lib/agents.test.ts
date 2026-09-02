@@ -21,7 +21,7 @@ vi.mock("@/lib/utils", () => ({
   slugify: (s: string) => s.toLowerCase().replace(/\s+/g, "-"),
 }));
 
-import { spawnArgsForCli, defaultCliFirst, visibleCliIds, cliSupportsIdSession, cliSupportsResumeById, agentDisplayName, decideResume, isTerminalCli, workDoneCapable, terminalLaunchCommand, classifyAgentTitle, compileSignals, BUILTIN_TITLE_SIGNALS, builtinBaseId, resolveAgent, agentOverrides, hasPendingWork, notificationWantsAttention, PENDING_TAIL_ROWS } from "@/lib/agents";
+import { spawnArgsForCli, defaultCliFirst, visibleCliIds, cliSupportsIdSession, cliSupportsResumeById, agentDisplayName, decideResume, isTerminalCli, workDoneCapable, terminalLaunchCommand, classifyAgentTitle, compileSignals, BUILTIN_TITLE_SIGNALS, BUILTIN_OUTPUT_SIGNALS, builtinBaseId, resolveAgent, agentOverrides, hasPendingWork, notificationWantsAttention, PENDING_TAIL_ROWS } from "@/lib/agents";
 import type { Agent, CliInfo } from "@/lib/types";
 
 // ── spawnArgsForCli ───────────────────────────────────────────────────
@@ -647,6 +647,50 @@ describe("classifyAgentTitle", () => {
     expect(classifyAgentTitle("codex", "Waiting for response…", [])).not.toBe("attention");
     expect(classifyAgentTitle("codex", "Thinking about proj", [])).toBe("busy");
     expect(classifyAgentTitle("codex", "   ", [])).toBe(null);
+  });
+
+  // ── agy's needs-you comes from the SCREEN, because nothing else exists ─
+  //
+  // Measured against Antigravity CLI 1.1.24 at a live permission prompt, with
+  // the pty given a window size (two earlier probes without one never got agy
+  // past its splash and wrongly reported that it emits nothing at all): no
+  // title, no OSC of any kind, no bell. Hooks cover its working and done; the
+  // screen is the only place the third state appears.
+  describe("BUILTIN_OUTPUT_SIGNALS", () => {
+    const lines = [
+      "Requesting permission for:",
+      "   echo hello-from-agy",
+      "Do you want to proceed?",
+      "> 1. Yes",
+    ];
+    const attn = () => compileSignals(BUILTIN_OUTPUT_SIGNALS.agy?.attention);
+
+    it("matches agy's real permission prompt", () => {
+      const hits = lines.filter(l => attn().some(re => re.test(l)));
+      expect(hits).toContain("Requesting permission for:");
+      expect(hits).toContain("Do you want to proceed?");
+    });
+
+    it("does not fire on ordinary output", () => {
+      // The cost of a screen pattern is a false bell on innocent text, so the
+      // wording has to be specific to the prompt.
+      for (const l of [
+        "Generating...",
+        "echo hello-from-agy",
+        "Tip: View and review artifacts with /artifact.",
+        "I will now request the permission I need",
+      ]) {
+        expect(attn().some(re => re.test(l))).toBe(false);
+      }
+    });
+
+    it("is OUTPUT-only, and never reuses a title pattern", () => {
+      // claude's `^\s*✳` describes a title and is nonsense against stdout,
+      // which is why the scanner refuses to fall back to the title table.
+      expect(BUILTIN_OUTPUT_SIGNALS.claude).toBeUndefined();
+      expect(BUILTIN_OUTPUT_SIGNALS.agy?.busy).toBeUndefined();
+      expect(BUILTIN_OUTPUT_SIGNALS.agy?.idle).toBeUndefined();
+    });
   });
 
   // ── True inheritance: a clone stores overrides, not a copy ──────────
