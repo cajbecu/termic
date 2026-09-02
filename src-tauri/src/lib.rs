@@ -10097,10 +10097,16 @@ fn decode_task_file(bytes: Vec<u8>) -> Result<String, String> {
 }
 
 /// How much of a file is sniffed to answer "binary or text?" before the size
-/// cap is applied. One page-ish: every real binary format this fires on
-/// (archives, compiled objects, spreadsheets, fonts, `.DS_Store`) puts
-/// undecodable bytes in its first few, and a file that survives the sniff is
-/// still fully validated by `decode_task_file` below.
+/// cap is applied. One page-ish: the formats this fires on in practice
+/// (archives, compiled objects, spreadsheets, fonts, `.DS_Store`) put
+/// undecodable bytes well inside it.
+///
+/// It is a heuristic, and the fallback is graceful. A format whose first page
+/// happens to decode (NUL-padded ASCII, a `.tar` of text files) sniffs as
+/// text: UNDER the cap it is still caught by the full `decode_task_file`
+/// below and lands on the same notice, and over the cap it reports "too
+/// large" instead of "binary", which is the worse of two true answers rather
+/// than a wrong one.
 const TEXT_SNIFF_BYTES: u64 = 8192;
 
 /// Is this PREFIX of a file binary? Invalid UTF-8 says yes; a sequence merely
@@ -10113,6 +10119,17 @@ fn head_is_binary(head: &[u8]) -> bool {
         Ok(_) => false,
         Err(e) => e.error_len().is_some(),
     }
+}
+
+/// Bytes the continue-read may still take, `cap + 1` so one byte over the cap
+/// is observable. SATURATING, and that is the whole reason this is a named
+/// function rather than an expression: the sniff runs BEFORE the size check
+/// and can buffer up to `TEXT_SNIFF_BYTES`, so a file that grew past a small
+/// `cap` between the fstat and the sniff arrives already over budget. Zero
+/// there means "read no more", and the caller's own over-cap check reports
+/// it; a plain subtraction would panic in a debug build first.
+fn remaining_read_budget(cap: u64, already: u64) -> u64 {
+    (cap + 1).saturating_sub(already)
 }
 
 /// The editor's read: `abs` decoded as text, capped at `cap` bytes.
@@ -10148,7 +10165,7 @@ fn read_text_file_capped(abs: &Path, cap: u64) -> Result<String, String> {
     }
     // Continues from where the sniff left off; the handle was never rewound.
     (&mut f)
-        .take(cap + 1 - buf.len() as u64)
+        .take(remaining_read_budget(cap, buf.len() as u64))
         .read_to_end(&mut buf)
         .map_err(|e| format!("read failed: {e}"))?;
     if buf.len() as u64 > cap {
@@ -19650,6 +19667,20 @@ mod tests {
         fs::write(&p, &body).unwrap();
         assert!(body.len() > TEXT_SNIFF_BYTES as usize);
         assert_eq!(read_text_file_capped(&p, 2_000_000).unwrap(), body);
+    }
+
+    #[test]
+    fn the_read_budget_saturates_when_the_sniff_already_overran_the_cap() {
+        // Reachable only by a file that GREW between the fstat and the sniff,
+        // which is why the arithmetic is tested here rather than raced in a
+        // temp dir: a plain `cap + 1 - already` panics in a debug build, and
+        // tauri:dev IS a debug build.
+        assert_eq!(remaining_read_budget(1024, 8192), 0);
+        assert_eq!(remaining_read_budget(1024, 1025), 0);
+        // The ordinary case still gets the one byte that makes an over-cap
+        // file observable rather than silently truncated.
+        assert_eq!(remaining_read_budget(2_000_000, 8192), 2_000_000 + 1 - 8192);
+        assert_eq!(remaining_read_budget(1024, 0), 1025);
     }
 
     #[test]

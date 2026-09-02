@@ -3512,8 +3512,16 @@ describe("unviewable file notice", () => {
     await snap("unviewable-file-notice");
   });
 
-  /** Click the tree row for `rel` (writing it first) and wait for the notice. */
-  const openAndExpectNotice = async (rel: string, contents: Buffer | string) => {
+  /** Click the tree row for `rel` (writing it first) and wait for the notice
+   *  to say `expected`.
+   *
+   *  Waiting on the notice EXISTING would be a race and a silent one: the
+   *  preview tab recycles in place, so the previous case's notice is still
+   *  mounted while the new file is being read, the wait would return on it
+   *  immediately, and the assertions would run against the copy for the
+   *  wrong file. Waiting for the text to become what this case is about is
+   *  the only condition that cannot pass early. */
+  const openAndExpectNotice = async (rel: string, contents: Buffer | string, expected: string) => {
     writeFileSync(path.join(fixture, rel), contents);
     await browser.execute((id) => window.__termic!.useApp.getState().bumpFsRevision(id), taskId);
     const sel = `[data-path="${rel}"]`;
@@ -3524,18 +3532,29 @@ describe("unviewable file notice", () => {
     await browser.execute((s) => {
       (document.querySelector(s) as HTMLElement).click();
     }, sel);
+    let text = "";
     await browser.waitUntil(
-      () => browser.execute((s) => !!document.querySelector(s), NOTICE),
-      { timeout: 15_000, timeoutMsg: `no notice for ${rel}` },
+      async () => {
+        const tab = await editTabFor(rel);
+        if (!tab) return false;
+        text = await paneText(tab.id);
+        return text.includes(expected);
+      },
+      { timeout: 15_000, timeoutMsg: `the notice for ${rel} never said ${JSON.stringify(expected)}` },
     );
-    return paneText((await editTabFor(rel)).id);
+    // It is the notice pane, not a red error that happens to contain the copy.
+    expect(await browser.execute((s) => !!document.querySelector(s), NOTICE)).toBe(true);
+    return text;
   };
 
   it("gives a file past the read cap the same notice, naming its size", async () => {
     // 3 MB of plain ASCII: decodable, so the ONLY thing wrong with it is the
     // size, which is what separates this from the case above.
-    const text = await openAndExpectNotice(bigName, "a".repeat(3_000_000));
-    expect(text).toContain("This file is too large for the editor to show (3.0 MB).");
+    const text = await openAndExpectNotice(
+      bigName,
+      "a".repeat(3_000_000),
+      "This file is too large for the editor to show (3.0 MB).",
+    );
     expect(text).toContain("Open in default app");
     expect(text).toContain("Reveal in Finder");
     // Same as the binary case: no raw message, no red framing.
@@ -3550,8 +3569,11 @@ describe("unviewable file notice", () => {
     const blob = Buffer.alloc(3_000_000, 0x61);
     blob.writeUInt8(0xff, 0);
     blob.writeUInt8(0xfe, 1);
-    const text = await openAndExpectNotice(bigBinName, blob);
-    expect(text).toContain("This looks like a binary file, so the editor can't show it.");
+    const text = await openAndExpectNotice(
+      bigBinName,
+      blob,
+      "This looks like a binary file, so the editor can't show it.",
+    );
     expect(text).not.toContain("too large");
   });
 
