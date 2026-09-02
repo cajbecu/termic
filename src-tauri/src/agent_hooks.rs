@@ -37,7 +37,12 @@ use std::path::{Path, PathBuf};
 // v2 registered a Working HEARTBEAT (claude/grok PreToolUse, an opencode
 // throttle). An install from v1 still works and reports less, so it is stale
 // rather than broken.
-pub const SCHEMA_VERSION: u32 = 2;
+// v3 writes to the first of three targets that accepts it, so a Docker
+// sandboxed agent can reach the terminal at all: $TERMIC_PTY is a HOST path and
+// does not exist in the container, which made every hook in a sandboxed tab a
+// silent no-op. A v2 install is not stale-but-working there, it is dead, which
+// is the strongest reason yet for sync to update installs on its own.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Directory we create inside the agent's config dir. Also the prefix that
 /// identifies our entries for removal, which is why it must never be renamed
@@ -314,10 +319,28 @@ pub fn script_body(agent: &str, sig: Signal) -> String {
 
     // Every agent writes straight to the terminal termic handed it. See
     // `uses_terminal_sequence` for why claude does not use its own channel.
-    // `/dev/tty` is NOT a fallback: hooks run with no controlling terminal
-    // (measured on grok, rc=1). Opening the slave BY NAME needs no ctty.
+    //
+    // THREE targets, tried in order, because `$TERMIC_PTY` is a HOST path and
+    // a Docker-sandboxed agent cannot see it. Measured inside the real sandbox
+    // image: `TERMIC_PTY_EXISTS=NO`, so every hook in a sandboxed tab fired
+    // correctly and wrote into nothing. Its neighbours on the same agent,
+    // unsandboxed, worked throughout.
+    //
+    //   $TERMIC_PTY    the slave by name. The host case, and unambiguous.
+    //   /proc/1/fd/1   the container's main process stdout, which docker
+    //                  relays to that same host pty (`docker run -i -t`).
+    //                  Measured to arrive. Needs NO controlling terminal,
+    //                  which is the whole reason it beats /dev/tty here.
+    //   /dev/tty       last resort. Hooks run with no ctty (measured on grok,
+    //                  rc=1), so this usually fails, but it costs one failed
+    //                  open and covers a runtime that does give them one.
+    //
+    // Chained on redirection failure, not on a readiness test: `[ -w /dev/tty ]`
+    // is true even where opening it fails, so trying the write IS the test.
     let emit = format!(
-        "[ -n \"$TERMIC_PTY\" ] || exit 0\nprintf '\\033]{payload}\\007' > \"$TERMIC_PTY\" 2>/dev/null"
+        "[ -n \"$TERMIC_PTY\" ] || exit 0\n\
+         emit() {{ printf '\\033]{payload}\\007' > \"$1\" 2>/dev/null; }}\n\
+         emit \"$TERMIC_PTY\" || emit /proc/1/fd/1 || emit /dev/tty || true"
     );
 
     // grok is the one agent that reads ANOTHER agent's config (it scans
@@ -383,9 +406,17 @@ const PTY = process.env.TERMIC_PTY;
 // loads under a plain `opencode` in any terminal). Do nothing there.
 const ACTIVE = Boolean(PTY && process.env.TERMIC_TASK_ID);
 
+// Same three targets as the shell hooks, same reason: $TERMIC_PTY is a HOST
+// path, so a Docker-sandboxed opencode cannot see it. /proc/1/fd/1 is the
+// container's main process stdout, which docker relays to that same pty.
+const TARGETS = [PTY, "/proc/1/fd/1", "/dev/tty"];
+
 const send = (payload) => {{
   if (!ACTIVE) return;
-  try {{ writeFileSync(PTY, `\x1b]${{payload}}\x07`); }} catch {{ /* never throw into opencode */ }}
+  for (const t of TARGETS) {{
+    if (!t) continue;
+    try {{ writeFileSync(t, `\x1b]${{payload}}\x07`); return; }} catch {{ /* try the next */ }}
+  }}
 }};
 
 const ATTENTION = "{attention}";
@@ -1404,6 +1435,24 @@ mod tests {
         assert_eq!(settings_rel("claude"), "settings.json");
     }
 
+    /// The chain has to survive a target that does not exist, which is exactly
+    /// the Docker case: `$TERMIC_PTY` names a host device the container has no
+    /// entry for, so the first redirection fails and the next must be tried.
+    #[test]
+    fn a_dead_first_target_falls_through_to_the_next() {
+        let body = script_body("claude", Signal::Working);
+        // `||` chaining on redirection failure, NOT a readiness test:
+        // `[ -w /dev/tty ]` is true in places where opening it fails, so
+        // attempting the write is the only honest test.
+        assert!(body.contains("emit \"$TERMIC_PTY\" || emit /proc/1/fd/1 || emit /dev/tty"),
+                "targets must chain on failure:\n{body}");
+        assert!(!body.contains("[ -w"), "a readiness test would lie about /dev/tty");
+        // Still gated: an agent termic did not spawn writes nothing at all,
+        // wherever it is running.
+        assert!(body.contains("[ -n \"$TERMIC_PTY\" ] || exit 0"));
+        assert!(body.contains("[ -n \"$TERMIC_TASK_ID\" ] || exit 0"));
+    }
+
     #[test]
     fn grok_writes_to_the_pty_because_it_has_no_terminal_sequence() {
         // Every agent is on the pty, claude included: its runtime allowlist
@@ -1411,8 +1460,18 @@ mod tests {
         let g = script_body("grok", Signal::Attention);
         assert!(g.contains("$TERMIC_PTY"), "grok must write to the injected pty");
         assert!(!g.contains("terminalSequence"), "grok's runtime ignores that field");
-        // /dev/tty is NOT a fallback: hooks run with no controlling terminal.
-        assert!(!g.contains("/dev/tty"));
+        // $TERMIC_PTY is FIRST and the others are fallbacks, which is the whole
+        // ordering: a host agent must never route around the pty it was given.
+        let pty_at = g.find("$TERMIC_PTY").expect("pty target");
+        for later in ["/proc/1/fd/1", "/dev/tty"] {
+            assert!(g.find(later).expect(later) > pty_at, "{later} must come after $TERMIC_PTY");
+        }
+        // This used to assert /dev/tty was absent, on the grounds that hooks run
+        // with no controlling terminal (measured on grok, rc=1). Still true, and
+        // that is why it is LAST rather than why it is excluded: a failed open
+        // costs one syscall. The reason the chain exists at all is Docker, where
+        // $TERMIC_PTY is a host path the container cannot see, measured in the
+        // real sandbox image as TERMIC_PTY_EXISTS=NO.
         let c = script_body("claude", Signal::Attention);
         assert!(c.contains("$TERMIC_PTY"));
         assert!(!c.contains("terminalSequence"));
