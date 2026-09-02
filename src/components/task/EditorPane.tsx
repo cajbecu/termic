@@ -16,13 +16,18 @@ import { basicSetup } from "codemirror";
 import { search } from "@codemirror/search";
 import { lintGutter, setDiagnostics } from "@codemirror/lint";
 import { indentUnit } from "@codemirror/language";
-import { taskFileRead, fileReadExternal, taskFileWrite, scratchRead, scratchWrite, scratchSetMeta } from "@/lib/ipc";
+import { taskFileRead, fileReadExternal, taskFileWrite, scratchRead, scratchWrite, scratchSetMeta, revealPath } from "@/lib/ipc";
 import { langForId, langForPath } from "@/lib/languageExts";
 import { PLAIN_TEXT, effectiveLanguageId, normalizeLanguageId } from "@/lib/languages";
 import { detectSyntaxFromContent } from "@/lib/detectSyntax";
 import { detectIndent, type IndentStyle } from "@/lib/detectIndent";
 import { useCodeIntel, checkoutRoot, grantKey } from "@/store/codeIntel";
 import { lspServerFor } from "@/lib/lsp/languages";
+import { classifyEditorLoadError, isUnviewable, type EditorLoadError } from "@/lib/editorError";
+import { FILE_MANAGER, openInDefaultApp } from "@/lib/openExternal";
+import { joinPath } from "@/lib/clipboard";
+import { Button } from "@/components/ui/Button";
+import { ExternalLink, FolderOpen } from "lucide-react";
 import { attachHiddenScrollRestore } from "@/lib/hiddenScrollRestore";
 import { reviewCommentsExtension, dispatchSelectionComment } from "./reviewCommentsExt";
 import { inlineBlameExtension, invalidateBlame, refreshBlame, markBlameStale } from "./inlineBlameExt";
@@ -187,7 +192,7 @@ export function EditorPane({ task, tab, active, onContent }: {
   // reconfiguring would tear the plugins down and rebuild them for nothing).
   const blameOnRef = useRef<boolean | null>(null);
   const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState<string | null>(null);
+  const [err, setErr] = useState<EditorLoadError | null>(null);
   // Mirrors the tab's `dirty` flag so the CodeMirror updateListener
   // only touches the store on the clean→dirty edge, not every
   // keystroke (patchTab re-renders the whole TabBar).
@@ -602,12 +607,11 @@ export function EditorPane({ task, tab, active, onContent }: {
         forceParsing(view, view.viewport.to, 60);
       } catch (e) {
         if (!alive) return;
-        const msg = String(e);
-        // Binary files (.DS_Store, images, compiled blobs) fail the Rust
-        // UTF-8 read. Show a human message instead of the raw stream error.
-        setErr(/valid UTF-8/i.test(msg)
-          ? "This file isn't valid UTF-8 text (it looks binary), so it can't be shown in the editor."
-          : msg);
+        // A binary file (.xlsx, archives, compiled blobs, .DS_Store) and one
+        // past the read cap are both WRONG-VIEWER states, not failures, and
+        // render as a calm notice with a way out; everything else stays a
+        // red raw error. See lib/editorError.ts for the rule.
+        setErr(classifyEditorLoadError(e));
         setLoading(false);
       }
     })();
@@ -886,6 +890,14 @@ export function EditorPane({ task, tab, active, onContent }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editorFontSize, codeLigatures, editorThemeId, appIsLight]);
 
+  // Absolute path the two OS actions on the notice act on. A `scratch` pad
+  // has no file behind it (and cannot fail either read check anyway), so it
+  // has none, and the notice falls back to the raw error rather than offering
+  // to open something that does not exist. `external` tabs are already
+  // absolute; `edit` paths are task-relative.
+  const unviewableAbs =
+    tab.type === "external" ? tab.path : tab.type === "edit" ? joinPath(task.path, tab.path) : null;
+
   return (
     // No chrome bar: the tab already shows the filename, and the old
     // Diff / Open buttons were redundant with the Changes panel and the
@@ -894,7 +906,12 @@ export function EditorPane({ task, tab, active, onContent }: {
     // underneath via the visibility-toggle keep-alive).
     <div ref={hostRef} className="relative h-full overflow-hidden bg-[var(--color-bg)]">
       {loading && <div className="p-4 text-[14px] text-[var(--color-fg-dim)]">Loading…</div>}
-      {err && <div className="p-4 text-[14px] text-[var(--color-err)]">Error: {err}</div>}
+      {err && isUnviewable(err) && unviewableAbs && (
+        <UnviewableFileNotice abs={unviewableAbs} message={err.message} />
+      )}
+      {err && (!isUnviewable(err) || !unviewableAbs) && (
+        <div className="p-4 text-[14px] text-[var(--color-err)]">Error: {err.message}</div>
+      )}
       {/* Dirty buffers only: disk diverged while the user has unsaved edits,
           so ask before clobbering (clean buffers reload silently, GH #57). */}
       {diskChanged && isActive && (
@@ -914,6 +931,42 @@ export function EditorPane({ task, tab, active, onContent }: {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+/** The pane a file the editor cannot show lands on: binary, or past the read
+ *  cap. Not an error state: the file is fine, this viewer just can't read it,
+ *  so the job here is to hand the user off to something that can. The two
+ *  cases share a pane because they share an answer, and only the sentence
+ *  above the buttons differs. Centered and dimmed to match the sibling
+ *  treatments for the same class of file (BinaryDiffBody in the diff pane,
+ *  PreviewPane's centered image), rather than red text in the top-left
+ *  corner of an otherwise empty pane.
+ *
+ *  Both actions are the ones already in the path context menu
+ *  (CopyPathItems), same wording and same order, calling the same helpers —
+ *  so `openInDefaultApp`'s "nothing is registered for .blend, showed it in
+ *  Finder instead" toast comes along for free. */
+function UnviewableFileNotice({ abs, message }: { abs: string; message: string }) {
+  const name = abs.split("/").pop() || abs;
+  const reveal = () => {
+    revealPath(abs).catch((e: unknown) => useUI.getState().pushToast(String(e), "error"));
+  };
+  return (
+    <div
+      className="flex h-full flex-col items-center justify-center gap-4 p-4 text-center"
+      data-testid="unviewable-file-notice"
+    >
+      <div className="max-w-[420px] text-[13px] text-[var(--color-fg-dim)]">{message}</div>
+      <div className="flex items-center gap-2">
+        <Button variant="secondary" size="sm" onClick={() => void openInDefaultApp(abs, name)}>
+          <ExternalLink className="h-3.5 w-3.5" /> Open in default app
+        </Button>
+        <Button variant="secondary" size="sm" onClick={reveal}>
+          <FolderOpen className="h-3.5 w-3.5" /> Reveal in {FILE_MANAGER}
+        </Button>
+      </div>
     </div>
   );
 }

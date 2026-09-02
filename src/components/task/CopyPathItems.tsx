@@ -18,12 +18,9 @@
 import { ContextMenuItem, ContextMenuSeparator } from "@/components/ui/ContextMenu";
 import { copyToClipboard, joinPath } from "@/lib/clipboard";
 import { openPath, revealPath } from "@/lib/ipc";
-import { openInDefaultApp } from "@/lib/openExternal";
+import { FILE_MANAGER, openInDefaultApp } from "@/lib/openExternal";
 import { useUI } from "@/store/ui";
-import { IS_MAC } from "@/lib/shortcuts";
 import { Copy, CornerUpLeft, ExternalLink, FolderOpen } from "lucide-react";
-
-const FILE_MANAGER = IS_MAC ? "Finder" : "File Manager";
 
 export function CopyPathItems({ rel, root, isDir = false }: { rel: string; root: string; isDir?: boolean }) {
   const abs = joinPath(root, rel);

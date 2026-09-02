@@ -3397,3 +3397,239 @@ describe("svg source/preview toggle", () => {
     expect(await browser.execute(() => localStorage.getItem("svgDefaultView"))).toBe("preview");
   });
 });
+
+// A file the editor cannot show is a WRONG-VIEWER state, not a failure: it
+// gets a calm centered notice offering "Open in default app" and "Reveal in
+// Finder" rather than red text with no way out. Two files qualify, binary
+// and over the read cap, and the ORDER between them is load-bearing: a big
+// archive is both, and only "binary" leads anywhere useful, so Rust sniffs
+// for binary before it looks at the size. Cases: the notice replaces the red
+// error and carries both buttons; a too-large text file gets the same notice
+// naming its size; a big binary reports binary rather than too-large;
+// recycling the preview tab onto a real text file clears it; a GENUINE
+// failure (missing file) still gets the red raw error, because offering
+// "Open in default app" for a file that would not read is offering a button
+// that fails again.
+//
+// NEITHER button is ever clicked here. "Open in default app" would launch
+// whatever app is registered for the fixture's extension on the runner, with
+// nothing in the suite able to close it, and "Reveal in Finder" would steal
+// focus from the window WebdriverIO is driving. Presence + labels is the
+// contract worth pinning; the actions themselves are the same helpers the
+// path context menu has always used.
+describe("unviewable file notice", () => {
+  let taskId!: string;
+  const binName = "e2e-blob.bin";
+  const binPath = path.join(fixture, binName);
+  // Past the 2 MB cap task_file_read enforces, by enough that a rounding
+  // change in the notice's size can never make this test ambiguous.
+  const bigName = "e2e-huge.txt";
+  const bigBinName = "e2e-huge.bin";
+  const NOTICE = '[data-testid="unviewable-file-notice"]';
+
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+    try {
+      execSync(`git -C "${fixture}" clean -fd`);
+    } catch {
+      /* nothing */
+    }
+  });
+
+  /** Visible text of the whole editor pane for `tab`, main or split. */
+  const paneText = (tabId: string) =>
+    browser.execute((id) => {
+      const el = document.querySelector(
+        `[data-main-tab-id="${id}"], [data-split-leaf][data-tab-id="${id}"]`,
+      ) as HTMLElement | null;
+      return el?.innerText ?? "";
+    }, tabId);
+
+  const editTabFor = (rel: string) =>
+    browser.execute(
+      (id, p) =>
+        (window.__termic!.useApp.getState().tabs[id] ?? []).find(
+          (t: any) => t.type === "edit" && t.path === p,
+        ),
+      taskId,
+      rel,
+    );
+
+  it("shows a friendly notice with both OS actions instead of a red error", async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask("e2e-binary");
+
+    // Bytes that can never be valid UTF-8 (a lone 0xFF), written inline
+    // rather than committed: the suite keeps no binary fixtures (see the PDF
+    // case above, which builds its own PDF the same way).
+    writeFileSync(binPath, Buffer.from([0xff, 0xfe, 0x00, 0x01, 0x02, 0xff]));
+    await browser.execute(
+      (id) => window.__termic!.useApp.getState().bumpFsRevision(id),
+      taskId,
+    );
+
+    const sel = `[data-path="${binName}"]`;
+    await browser.waitUntil(
+      () => browser.execute((s) => !!document.querySelector(s), sel),
+      { timeout: 10_000, timeoutMsg: `${binName} never appeared in the tree` },
+    );
+    await browser.execute((s) => {
+      (document.querySelector(s) as HTMLElement).click();
+    }, sel);
+
+    await browser.waitUntil(
+      () => browser.execute((s) => !!document.querySelector(s), NOTICE),
+      { timeout: 10_000, timeoutMsg: "the binary-file notice never rendered" },
+    );
+
+    const tab = await editTabFor(binName);
+    const text = await paneText(tab.id);
+    // The copy the user reads, and the two ways out.
+    expect(text).toContain("This looks like a binary file, so the editor can't show it.");
+    expect(text).toContain("Open in default app");
+    expect(text).toContain("Reveal in Finder");
+    // Neither the raw Rust message nor the old red framing survives.
+    expect(text).not.toContain("UTF-8");
+    expect(text).not.toContain("Error:");
+
+    // Nothing in the pane is painted with the error token. Resolved through a
+    // probe element rather than string-matching the CSS var, so this holds in
+    // any theme (the var is a hex, the computed color an rgb()).
+    const reds = await browser.execute((sel2) => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--color-err)";
+      document.body.appendChild(probe);
+      const err = getComputedStyle(probe).color;
+      probe.remove();
+      const pane = document.querySelector(sel2) as HTMLElement;
+      return [...pane.querySelectorAll("*")]
+        .filter((el) => (el as HTMLElement).innerText?.trim())
+        .filter((el) => getComputedStyle(el).color === err).length;
+    }, NOTICE);
+    expect(reds).toBe(0);
+
+    await snap("unviewable-file-notice");
+  });
+
+  /** Click the tree row for `rel` (writing it first) and wait for the notice
+   *  to say `expected`.
+   *
+   *  Waiting on the notice EXISTING would be a race and a silent one: the
+   *  preview tab recycles in place, so the previous case's notice is still
+   *  mounted while the new file is being read, the wait would return on it
+   *  immediately, and the assertions would run against the copy for the
+   *  wrong file. Waiting for the text to become what this case is about is
+   *  the only condition that cannot pass early. */
+  const openAndExpectNotice = async (rel: string, contents: Buffer | string, expected: string) => {
+    writeFileSync(path.join(fixture, rel), contents);
+    await browser.execute((id) => window.__termic!.useApp.getState().bumpFsRevision(id), taskId);
+    const sel = `[data-path="${rel}"]`;
+    await browser.waitUntil(
+      () => browser.execute((s) => !!document.querySelector(s), sel),
+      { timeout: 10_000, timeoutMsg: `${rel} never appeared in the tree` },
+    );
+    await browser.execute((s) => {
+      (document.querySelector(s) as HTMLElement).click();
+    }, sel);
+    let text = "";
+    await browser.waitUntil(
+      async () => {
+        const tab = await editTabFor(rel);
+        if (!tab) return false;
+        text = await paneText(tab.id);
+        return text.includes(expected);
+      },
+      { timeout: 15_000, timeoutMsg: `the notice for ${rel} never said ${JSON.stringify(expected)}` },
+    );
+    // It is the notice pane, not a red error that happens to contain the copy.
+    expect(await browser.execute((s) => !!document.querySelector(s), NOTICE)).toBe(true);
+    return text;
+  };
+
+  it("gives a file past the read cap the same notice, naming its size", async () => {
+    // 3 MB of plain ASCII: decodable, so the ONLY thing wrong with it is the
+    // size, which is what separates this from the case above.
+    const text = await openAndExpectNotice(
+      bigName,
+      "a".repeat(3_000_000),
+      "This file is too large for the editor to show (3.0 MB).",
+    );
+    expect(text).toContain("Open in default app");
+    expect(text).toContain("Reveal in Finder");
+    // Same as the binary case: no raw message, no red framing.
+    expect(text).not.toContain("bytes)");
+    expect(text).not.toContain("Error:");
+  });
+
+  it("calls a big binary binary, not too large", async () => {
+    // Both true of this file. Checking the size first would send an archive
+    // to "too large", which tells the user nothing they can act on, instead
+    // of to "open it in the app that can read it".
+    const blob = Buffer.alloc(3_000_000, 0x61);
+    blob.writeUInt8(0xff, 0);
+    blob.writeUInt8(0xfe, 1);
+    const text = await openAndExpectNotice(
+      bigBinName,
+      blob,
+      "This looks like a binary file, so the editor can't show it.",
+    );
+    expect(text).not.toContain("too large");
+  });
+
+  it("clears the notice when the preview tab recycles onto a text file", async () => {
+    // Same mounted EditorPane, new tab.path: a stale notice would render on
+    // top of the next file's contents.
+    const sel = '[data-path="README.md"]';
+    await browser.waitUntil(
+      () => browser.execute((s) => !!document.querySelector(s), sel),
+      { timeout: 10_000, timeoutMsg: "README row never appeared" },
+    );
+    await browser.execute((s) => {
+      (document.querySelector(s) as HTMLElement).click();
+    }, sel);
+
+    await browser.waitUntil(
+      () =>
+        browser.execute(
+          () =>
+            !document.querySelector('[data-testid="unviewable-file-notice"]') &&
+            (document.querySelector(".cm-content")?.textContent ?? "").includes(
+              "e2e fixture",
+            ),
+        ),
+      { timeout: 10_000, timeoutMsg: "the notice outlived the file it described" },
+    );
+  });
+
+  it("keeps a genuine read failure as a raw error, with no buttons", async () => {
+    const missing = "e2e-not-here.txt";
+    await browser.execute(
+      (id, p) =>
+        window.__termic!.useApp.getState().openPreviewTab(id, {
+          type: "edit",
+          path: p,
+          title: p,
+        }),
+      taskId,
+      missing,
+    );
+
+    const tab = await browser.waitUntil(
+      async () => (await editTabFor(missing)) ?? false,
+      { timeout: 10_000, timeoutMsg: "the missing-file tab never opened" },
+    );
+    await browser.waitUntil(
+      async () => (await paneText((tab as any).id)).includes("Error:"),
+      { timeout: 10_000, timeoutMsg: "a missing file did not report an error" },
+    );
+
+    const text = await paneText((tab as any).id);
+    expect(text).not.toContain("Open in default app");
+    const notice = await browser.execute(
+      (s) => !!document.querySelector(s),
+      NOTICE,
+    );
+    expect(notice).toBe(false);
+  });
+});
