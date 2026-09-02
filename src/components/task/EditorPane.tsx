@@ -23,7 +23,7 @@ import { detectSyntaxFromContent } from "@/lib/detectSyntax";
 import { detectIndent, type IndentStyle } from "@/lib/detectIndent";
 import { useCodeIntel, checkoutRoot, grantKey } from "@/store/codeIntel";
 import { lspServerFor } from "@/lib/lsp/languages";
-import { classifyEditorLoadError, type EditorLoadError } from "@/lib/editorError";
+import { classifyEditorLoadError, isUnviewable, type EditorLoadError } from "@/lib/editorError";
 import { FILE_MANAGER, openInDefaultApp } from "@/lib/openExternal";
 import { joinPath } from "@/lib/clipboard";
 import { Button } from "@/components/ui/Button";
@@ -607,9 +607,9 @@ export function EditorPane({ task, tab, active, onContent }: {
         forceParsing(view, view.viewport.to, 60);
       } catch (e) {
         if (!alive) return;
-        // Binary files (.xlsx, archives, compiled blobs, .DS_Store) fail the
-        // Rust UTF-8 read. That is a wrong-viewer state, not a failure, and
-        // renders as a calm notice with a way out; everything else stays a
+        // A binary file (.xlsx, archives, compiled blobs, .DS_Store) and one
+        // past the read cap are both WRONG-VIEWER states, not failures, and
+        // render as a calm notice with a way out; everything else stays a
         // red raw error. See lib/editorError.ts for the rule.
         setErr(classifyEditorLoadError(e));
         setLoading(false);
@@ -890,12 +890,12 @@ export function EditorPane({ task, tab, active, onContent }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editorFontSize, codeLigatures, editorThemeId, appIsLight]);
 
-  // Absolute path the two OS actions on the binary notice act on. A `scratch`
-  // pad has no file behind it (and cannot fail a UTF-8 read anyway), so it
+  // Absolute path the two OS actions on the notice act on. A `scratch` pad
+  // has no file behind it (and cannot fail either read check anyway), so it
   // has none, and the notice falls back to the raw error rather than offering
   // to open something that does not exist. `external` tabs are already
   // absolute; `edit` paths are task-relative.
-  const binaryAbs =
+  const unviewableAbs =
     tab.type === "external" ? tab.path : tab.type === "edit" ? joinPath(task.path, tab.path) : null;
 
   return (
@@ -906,8 +906,10 @@ export function EditorPane({ task, tab, active, onContent }: {
     // underneath via the visibility-toggle keep-alive).
     <div ref={hostRef} className="relative h-full overflow-hidden bg-[var(--color-bg)]">
       {loading && <div className="p-4 text-[14px] text-[var(--color-fg-dim)]">Loading…</div>}
-      {err?.kind === "binary" && binaryAbs && <BinaryFileNotice abs={binaryAbs} message={err.message} />}
-      {(err?.kind === "raw" || (err?.kind === "binary" && !binaryAbs)) && (
+      {err && isUnviewable(err) && unviewableAbs && (
+        <UnviewableFileNotice abs={unviewableAbs} message={err.message} />
+      )}
+      {err && (!isUnviewable(err) || !unviewableAbs) && (
         <div className="p-4 text-[14px] text-[var(--color-err)]">Error: {err.message}</div>
       )}
       {/* Dirty buffers only: disk diverged while the user has unsaved edits,
@@ -933,9 +935,11 @@ export function EditorPane({ task, tab, active, onContent }: {
   );
 }
 
-/** The pane a binary file lands on. Not an error state: the file is fine,
- *  this viewer just can't read it, so the job here is to hand the user off
- *  to something that can. Centered and dimmed to match the sibling
+/** The pane a file the editor cannot show lands on: binary, or past the read
+ *  cap. Not an error state: the file is fine, this viewer just can't read it,
+ *  so the job here is to hand the user off to something that can. The two
+ *  cases share a pane because they share an answer, and only the sentence
+ *  above the buttons differs. Centered and dimmed to match the sibling
  *  treatments for the same class of file (BinaryDiffBody in the diff pane,
  *  PreviewPane's centered image), rather than red text in the top-left
  *  corner of an otherwise empty pane.
@@ -944,7 +948,7 @@ export function EditorPane({ task, tab, active, onContent }: {
  *  (CopyPathItems), same wording and same order, calling the same helpers —
  *  so `openInDefaultApp`'s "nothing is registered for .blend, showed it in
  *  Finder instead" toast comes along for free. */
-function BinaryFileNotice({ abs, message }: { abs: string; message: string }) {
+function UnviewableFileNotice({ abs, message }: { abs: string; message: string }) {
   const name = abs.split("/").pop() || abs;
   const reveal = () => {
     revealPath(abs).catch((e: unknown) => useUI.getState().pushToast(String(e), "error"));
@@ -952,7 +956,7 @@ function BinaryFileNotice({ abs, message }: { abs: string; message: string }) {
   return (
     <div
       className="flex h-full flex-col items-center justify-center gap-4 p-4 text-center"
-      data-testid="binary-file-notice"
+      data-testid="unviewable-file-notice"
     >
       <div className="max-w-[420px] text-[13px] text-[var(--color-fg-dim)]">{message}</div>
       <div className="flex items-center gap-2">

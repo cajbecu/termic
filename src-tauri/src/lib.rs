@@ -10069,10 +10069,9 @@ fn read_external_file(path: &str) -> Result<String, String> {
     // `read_capped_file` rejects a directory (and anything else that is not a
     // regular file) via the fstat on the already-OPEN handle, so a clicked
     // directory lands here as a plain error rather than a huge read.
-    let bytes = read_capped_file(abs, 2_000_000)?;
-    // Same decode as the in-task read, so an external tab on a binary file
-    // gets the SAME rejection message and therefore the same calm notice.
-    decode_task_file(bytes)
+    // Same read as the in-task one, so an external tab on a binary file gets
+    // the SAME rejection message and therefore the same calm notice.
+    read_text_file_capped(abs, 2_000_000)
 }
 
 #[tauri::command]
@@ -10084,8 +10083,7 @@ fn task_file_read(id: String, path: String) -> Result<String, String> {
     let (cwd, rel) = resolve_task_git_path(&w, &path)?;
     let abs = safe_task_read_path(&w, &cwd, &rel)?;
     // Refuse binary or huge files for now — viewer is text-only.
-    let bytes = read_capped_file(&abs, 2_000_000)?;
-    decode_task_file(bytes)
+    read_text_file_capped(&abs, 2_000_000)
 }
 
 /// Text-or-nothing decode for the editor's read. Split out ONLY so the
@@ -10096,6 +10094,67 @@ fn task_file_read(id: String, path: String) -> Result<String, String> {
 /// here must fail `cargo test` instead.
 fn decode_task_file(bytes: Vec<u8>) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "file is not valid UTF-8".to_string())
+}
+
+/// How much of a file is sniffed to answer "binary or text?" before the size
+/// cap is applied. One page-ish: every real binary format this fires on
+/// (archives, compiled objects, spreadsheets, fonts, `.DS_Store`) puts
+/// undecodable bytes in its first few, and a file that survives the sniff is
+/// still fully validated by `decode_task_file` below.
+const TEXT_SNIFF_BYTES: u64 = 8192;
+
+/// Is this PREFIX of a file binary? Invalid UTF-8 says yes; a sequence merely
+/// CUT OFF by the end of the prefix does not, because that is the sniff
+/// window landing mid-character, which any file with multi-byte text will
+/// eventually do. `error_len()` is exactly that distinction: `Some` for a
+/// genuinely invalid sequence, `None` for an incomplete trailing one.
+fn head_is_binary(head: &[u8]) -> bool {
+    match std::str::from_utf8(head) {
+        Ok(_) => false,
+        Err(e) => e.error_len().is_some(),
+    }
+}
+
+/// The editor's read: `abs` decoded as text, capped at `cap` bytes.
+///
+/// BINARY IS CHECKED FIRST, and the order is the whole point. A 40 MB `.zip`
+/// is both binary and over the cap, and the two answers lead somewhere
+/// different: "binary" offers to open it in the app that CAN read it, while
+/// "too large" says nothing useful about a file no editor was ever going to
+/// show. Checking the size first meant every big binary got the less helpful
+/// of the two. So a prefix is read and sniffed before the cap is consulted,
+/// which costs one page of IO on a file that was about to be read anyway.
+///
+/// TOCTOU-safe on the same terms as `read_capped_file`: one open handle,
+/// `fstat` on it, and `take()` bounding the read whatever fstat claimed.
+fn read_text_file_capped(abs: &Path, cap: u64) -> Result<String, String> {
+    let mut f = fs::File::open(abs).map_err(|e| format!("open failed: {e}"))?;
+    let meta = f.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err(format!("not a file: {}", abs.display()));
+    }
+    let mut buf = Vec::with_capacity((meta.len().min(cap) as usize).max(1));
+    (&mut f)
+        .take(TEXT_SNIFF_BYTES)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read failed: {e}"))?;
+    if head_is_binary(&buf) {
+        return Err("file is not valid UTF-8".to_string());
+    }
+    // Only now does size matter. Message pinned by a test for the same reason
+    // the UTF-8 one is: src/lib/editorError.ts matches it to pick the pane.
+    if meta.len() > cap {
+        return Err(format!("file too large to preview ({} bytes)", meta.len()));
+    }
+    // Continues from where the sniff left off; the handle was never rewound.
+    (&mut f)
+        .take(cap + 1 - buf.len() as u64)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read failed: {e}"))?;
+    if buf.len() as u64 > cap {
+        return Err(format!("file too large to preview (>{cap} bytes)"));
+    }
+    decode_task_file(buf)
 }
 
 /// Mime type by extension for images/PDFs the markdown preview or file-tree
@@ -19548,6 +19607,63 @@ mod tests {
         // binary branch, including non-ASCII that is perfectly valid UTF-8.
         assert_eq!(decode_task_file("héllo\n".as_bytes().to_vec()).unwrap(), "héllo\n");
         assert_eq!(decode_task_file(Vec::new()).unwrap(), "");
+    }
+
+    #[test]
+    fn a_big_binary_reports_binary_rather_than_too_large() {
+        // The ordering this feature turns on. Both things are true of this
+        // file; only one of them leads anywhere useful, so binary must win.
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("big.bin");
+        let mut bytes = vec![0xFFu8; 64];
+        bytes.extend(std::iter::repeat(b'a').take(4096));
+        fs::write(&p, bytes).unwrap();
+        let err = read_text_file_capped(&p, 1024).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("valid utf-8"),
+            "a big binary must read as binary, not as too-large; got {err:?}",
+        );
+    }
+
+    #[test]
+    fn a_big_text_file_is_rejected_with_the_message_the_editor_matches() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("big.txt");
+        fs::write(&p, vec![b'a'; 4096]).unwrap();
+        let err = read_text_file_capped(&p, 1024).unwrap_err();
+        assert!(
+            err.contains("too large to preview"),
+            "editorError.ts matches /too large to preview/i against this message; got {err:?}",
+        );
+        // The size is parsed out of it to name the file's size in the notice.
+        assert!(err.contains("4096 bytes"), "the byte count must survive; got {err:?}");
+    }
+
+    #[test]
+    fn text_longer_than_the_sniff_window_still_reads_whole() {
+        // The sniff reads a prefix and the rest is read from the SAME handle,
+        // so an off-by-one there would silently truncate every file over 8 KB.
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("long.txt");
+        // Multi-byte, so a boundary landing mid-character is exercised too.
+        let body = "héllo wörld\n".repeat(2000);
+        fs::write(&p, &body).unwrap();
+        assert!(body.len() > TEXT_SNIFF_BYTES as usize);
+        assert_eq!(read_text_file_capped(&p, 2_000_000).unwrap(), body);
+    }
+
+    #[test]
+    fn head_is_binary_ignores_a_character_cut_by_the_window() {
+        // "é" is two bytes; a window ending between them is TEXT, not binary.
+        let bytes = "aé".as_bytes();
+        assert!(!head_is_binary(&bytes[..bytes.len() - 1]));
+        assert!(head_is_binary(&[b'a', 0xFF, b'b']));
+    }
+
+    #[test]
+    fn read_text_file_capped_rejects_a_directory() {
+        let dir = tempdir().unwrap();
+        assert!(read_text_file_capped(dir.path(), 1024).is_err());
     }
 
     // ── find-in-files backends (GH #181) ──

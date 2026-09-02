@@ -3398,13 +3398,18 @@ describe("svg source/preview toggle", () => {
   });
 });
 
-// A file the editor cannot decode is a WRONG-VIEWER state, not a failure: it
-// shows a calm centered notice offering "Open in default app" and "Reveal in
-// Finder" rather than red text with no way out. Cases: the notice replaces
-// the red error and carries both buttons; recycling the preview tab onto a
-// real text file clears it; a GENUINE failure (missing file) still gets the
-// red raw error, because offering "Open in default app" for a file that
-// would not read is offering a button that fails again.
+// A file the editor cannot show is a WRONG-VIEWER state, not a failure: it
+// gets a calm centered notice offering "Open in default app" and "Reveal in
+// Finder" rather than red text with no way out. Two files qualify, binary
+// and over the read cap, and the ORDER between them is load-bearing: a big
+// archive is both, and only "binary" leads anywhere useful, so Rust sniffs
+// for binary before it looks at the size. Cases: the notice replaces the red
+// error and carries both buttons; a too-large text file gets the same notice
+// naming its size; a big binary reports binary rather than too-large;
+// recycling the preview tab onto a real text file clears it; a GENUINE
+// failure (missing file) still gets the red raw error, because offering
+// "Open in default app" for a file that would not read is offering a button
+// that fails again.
 //
 // NEITHER button is ever clicked here. "Open in default app" would launch
 // whatever app is registered for the fixture's extension on the runner, with
@@ -3412,11 +3417,15 @@ describe("svg source/preview toggle", () => {
 // focus from the window WebdriverIO is driving. Presence + labels is the
 // contract worth pinning; the actions themselves are the same helpers the
 // path context menu has always used.
-describe("binary file notice", () => {
+describe("unviewable file notice", () => {
   let taskId!: string;
   const binName = "e2e-blob.bin";
   const binPath = path.join(fixture, binName);
-  const NOTICE = '[data-testid="binary-file-notice"]';
+  // Past the 2 MB cap task_file_read enforces, by enough that a rounding
+  // change in the notice's size can never make this test ambiguous.
+  const bigName = "e2e-huge.txt";
+  const bigBinName = "e2e-huge.bin";
+  const NOTICE = '[data-testid="unviewable-file-notice"]';
 
   after(async () => {
     if (taskId) await archiveTask(taskId);
@@ -3500,7 +3509,50 @@ describe("binary file notice", () => {
     }, NOTICE);
     expect(reds).toBe(0);
 
-    await snap("binary-file-notice");
+    await snap("unviewable-file-notice");
+  });
+
+  /** Click the tree row for `rel` (writing it first) and wait for the notice. */
+  const openAndExpectNotice = async (rel: string, contents: Buffer | string) => {
+    writeFileSync(path.join(fixture, rel), contents);
+    await browser.execute((id) => window.__termic!.useApp.getState().bumpFsRevision(id), taskId);
+    const sel = `[data-path="${rel}"]`;
+    await browser.waitUntil(
+      () => browser.execute((s) => !!document.querySelector(s), sel),
+      { timeout: 10_000, timeoutMsg: `${rel} never appeared in the tree` },
+    );
+    await browser.execute((s) => {
+      (document.querySelector(s) as HTMLElement).click();
+    }, sel);
+    await browser.waitUntil(
+      () => browser.execute((s) => !!document.querySelector(s), NOTICE),
+      { timeout: 15_000, timeoutMsg: `no notice for ${rel}` },
+    );
+    return paneText((await editTabFor(rel)).id);
+  };
+
+  it("gives a file past the read cap the same notice, naming its size", async () => {
+    // 3 MB of plain ASCII: decodable, so the ONLY thing wrong with it is the
+    // size, which is what separates this from the case above.
+    const text = await openAndExpectNotice(bigName, "a".repeat(3_000_000));
+    expect(text).toContain("This file is too large for the editor to show (3.0 MB).");
+    expect(text).toContain("Open in default app");
+    expect(text).toContain("Reveal in Finder");
+    // Same as the binary case: no raw message, no red framing.
+    expect(text).not.toContain("bytes)");
+    expect(text).not.toContain("Error:");
+  });
+
+  it("calls a big binary binary, not too large", async () => {
+    // Both true of this file. Checking the size first would send an archive
+    // to "too large", which tells the user nothing they can act on, instead
+    // of to "open it in the app that can read it".
+    const blob = Buffer.alloc(3_000_000, 0x61);
+    blob.writeUInt8(0xff, 0);
+    blob.writeUInt8(0xfe, 1);
+    const text = await openAndExpectNotice(bigBinName, blob);
+    expect(text).toContain("This looks like a binary file, so the editor can't show it.");
+    expect(text).not.toContain("too large");
   });
 
   it("clears the notice when the preview tab recycles onto a text file", async () => {
@@ -3519,7 +3571,7 @@ describe("binary file notice", () => {
       () =>
         browser.execute(
           () =>
-            !document.querySelector('[data-testid="binary-file-notice"]') &&
+            !document.querySelector('[data-testid="unviewable-file-notice"]') &&
             (document.querySelector(".cm-content")?.textContent ?? "").includes(
               "e2e fixture",
             ),
