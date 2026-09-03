@@ -30,6 +30,14 @@ The window itself is not free and the docs should not pretend otherwise: a secon
 
 CPU% divides a mach-absolute-time delta by a mach-absolute-time wall delta, so the units cancel and no `mach_timebase_info` conversion is involved — which is the trap it avoids, since that conversion is 1/1 on Intel and 125/3 on Apple silicon (a raw-ticks-as-nanoseconds bug reads 24× low on every current Mac). The timebase is still needed for the cumulative "CPU time" column, and `timebase_is_sane` pins it.
 
+## Worktree creation
+
+The wait after picking an agent is `git fetch` + `git worktree add` + `files_to_copy`. On APFS the copy is `clonefile(2)` (copy-on-write; writes still diverge). Linux and Windows still walk + `fs::copy`. `libc::clonefile` does not link off Darwin, so the fast path is `#[cfg(target_os = "macos")]`.
+
+The default list includes `node_modules`. A byte copy of a multi-GB tree was 10-15s before the PTY started. `ENOTSUP`/`EXDEV` (other volume, non-APFS) fall back to the walk and do not retry clonefile per file.
+
+Do not drop `node_modules` from the default list to "fix" a slow create without measuring. The clone is what makes that default viable on Mac.
+
 ## Sub-pixel / rendering hardening
 
 - Force grayscale font smoothing on `html` (`-webkit-font-smoothing: antialiased`) — subpixel AA produces colored fringing on dark backgrounds.

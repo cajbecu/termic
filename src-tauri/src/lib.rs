@@ -11437,7 +11437,77 @@ fn slugify(s: &str) -> String {
 /// Recursively copy a file or directory. `fs::copy` ONLY handles files, so
 /// the previous implementation silently dropped directory patterns like
 /// `.venv` and `node_modules` — the two patterns we ship as defaults.
+/// On macOS, clonefile(2) first (APFS copy-on-write; writes still diverge).
+/// ENOTSUP/EXDEV fall back to a walk that does not retry clonefile; an
+/// existing dest skips clone at that node so children can still clone.
 fn copy_file_or_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    copy_file_or_dir_inner(src, dst, true)
+}
+
+fn copy_file_or_dir_inner(src: &Path, dst: &Path, try_clone: bool) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        if try_clone && matches!(dst.symlink_metadata(), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+            match clonefile_copy(src, dst) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    // A failed dir clone can leave a partial dest. Don't
+                    // unlink a dest we didn't create (EEXIST race).
+                    if e.kind() != std::io::ErrorKind::AlreadyExists {
+                        let _ = match dst.symlink_metadata() {
+                            Ok(m) if m.file_type().is_dir() => fs::remove_dir_all(dst),
+                            Ok(_) => fs::remove_file(dst),
+                            Err(_) => Ok(()),
+                        };
+                    }
+                    eprintln!("clonefile {} → {}: {e}; falling back to copy", src.display(), dst.display());
+                    // ENOTSUP/EXDEV apply to the whole subtree (non-APFS,
+                    // other volume). Retrying clonefile per child is
+                    // thousands of failing syscalls on node_modules.
+                    if clonefile_not_supported(&e) {
+                        return copy_file_or_dir_walk(src, dst, false);
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = try_clone;
+    copy_file_or_dir_walk(src, dst, try_clone)
+}
+
+/// APFS clone of a file, symlink, or directory tree. `dst` must not exist.
+/// `CLONE_NOFOLLOW` keeps a matching symlink a symlink (same as the walk).
+#[cfg(target_os = "macos")]
+fn clonefile_copy(src: &Path, dst: &Path) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    // libc has clonefile but not this flag. 0x0001 is Darwin CLONE_NOFOLLOW.
+    const CLONE_NOFOLLOW: u32 = 0x0001;
+    let src_c = CString::new(src.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "src path contains NUL")
+    })?;
+    let dst_c = CString::new(dst.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "dst path contains NUL")
+    })?;
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    // SAFETY: src_c and dst_c are valid C strings for the duration of the call.
+    let rc = unsafe { libc::clonefile(src_c.as_ptr(), dst_c.as_ptr(), CLONE_NOFOLLOW) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn clonefile_not_supported(err: &std::io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(libc::ENOTSUP | libc::EOPNOTSUPP | libc::EXDEV))
+}
+
+fn copy_file_or_dir_walk(src: &Path, dst: &Path, try_clone: bool) -> std::io::Result<()> {
     let meta = match fs::symlink_metadata(src) {
         Ok(m) => m,
         Err(e) => return Err(e),
@@ -11465,7 +11535,7 @@ fn copy_file_or_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
             // Best-effort: log on failure but keep going so one bad file
             // (e.g. a broken symlink inside node_modules) doesn't abort
             // the whole copy.
-            if let Err(e) = copy_file_or_dir(&child_src, &child_dst) {
+            if let Err(e) = copy_file_or_dir_inner(&child_src, &child_dst, try_clone) {
                 eprintln!("copy {} → {}: {e}", child_src.display(), child_dst.display());
             }
         }
@@ -24067,6 +24137,111 @@ filename f.rs
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert!(landed.is_empty(), "a blank glob copied {landed:?}");
+    }
+
+    #[test]
+    fn copy_file_or_dir_copies_a_nested_tree_and_isolates_writes() {
+        // A write to the dest must not change the source.
+        let src = tempdir().unwrap();
+        fs::create_dir_all(src.path().join("pkg/nested")).unwrap();
+        fs::write(src.path().join("pkg/nested/a.txt"), "v1").unwrap();
+        fs::write(src.path().join("pkg/root.txt"), "root").unwrap();
+
+        let dst = tempdir().unwrap();
+        let dst_pkg = dst.path().join("pkg");
+        copy_file_or_dir(&src.path().join("pkg"), &dst_pkg).unwrap();
+
+        assert_eq!(fs::read_to_string(dst_pkg.join("nested/a.txt")).unwrap(), "v1");
+        assert_eq!(fs::read_to_string(dst_pkg.join("root.txt")).unwrap(), "root");
+        fs::write(dst_pkg.join("nested/a.txt"), "v2").unwrap();
+        assert_eq!(fs::read_to_string(src.path().join("pkg/nested/a.txt")).unwrap(), "v1",
+            "a write to the copy must not change the source");
+    }
+
+    #[test]
+    fn copy_file_or_dir_fills_an_existing_dest_dir() {
+        // clonefile cannot overwrite. An existing dest dir (the worktree)
+        // must still receive children, and files already there must stay.
+        let src = tempdir().unwrap();
+        fs::write(src.path().join("a.txt"), "from-src").unwrap();
+        let dst = tempdir().unwrap();
+        fs::write(dst.path().join("stale.txt"), "keep").unwrap();
+        copy_file_or_dir(src.path(), dst.path()).unwrap();
+        assert_eq!(fs::read_to_string(dst.path().join("a.txt")).unwrap(), "from-src");
+        assert_eq!(fs::read_to_string(dst.path().join("stale.txt")).unwrap(), "keep");
+    }
+
+    #[test]
+    fn copy_file_or_dir_walk_without_clone_still_copies_a_tree() {
+        // ENOTSUP/EXDEV disable clonefile for the subtree; the walk must
+        // still copy, and a write to the dest must not change the source.
+        let src = tempdir().unwrap();
+        fs::create_dir_all(src.path().join("n")).unwrap();
+        fs::write(src.path().join("n/a.txt"), "v").unwrap();
+        let dst = tempdir().unwrap();
+        let dest = dst.path().join("out");
+        copy_file_or_dir_inner(src.path(), &dest, false).unwrap();
+        assert_eq!(fs::read_to_string(dest.join("n/a.txt")).unwrap(), "v");
+        fs::write(dest.join("n/a.txt"), "x").unwrap();
+        assert_eq!(fs::read_to_string(src.path().join("n/a.txt")).unwrap(), "v");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_file_or_dir_preserves_a_symlink_and_a_symlink_inside_a_dir() {
+        let src = tempdir().unwrap();
+        fs::write(src.path().join("real.env"), "SECRET=1").unwrap();
+        std::os::unix::fs::symlink("real.env", src.path().join("link.env")).unwrap();
+        fs::create_dir(src.path().join("bin")).unwrap();
+        std::os::unix::fs::symlink("../real.env", src.path().join("bin/tool")).unwrap();
+
+        let dst = tempdir().unwrap();
+        copy_file_or_dir(src.path().join("link.env").as_path(), &dst.path().join("link.env")).unwrap();
+        copy_file_or_dir(src.path().join("bin").as_path(), &dst.path().join("bin")).unwrap();
+
+        assert!(dst.path().join("link.env").symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_link(dst.path().join("link.env")).unwrap(), PathBuf::from("real.env"));
+        assert!(dst.path().join("bin/tool").symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_link(dst.path().join("bin/tool")).unwrap(), PathBuf::from("../real.env"));
+    }
+
+    #[test]
+    fn copy_file_or_dir_overwrites_an_existing_file() {
+        // clonefile cannot overwrite. An existing dest (e.g. a
+        // post-checkout `.env`) must still be replaced.
+        let src = tempdir().unwrap();
+        fs::write(src.path().join(".env"), "FROM_REPO=1").unwrap();
+        let dst = tempdir().unwrap();
+        fs::write(dst.path().join(".env"), "SEEDED=0").unwrap();
+        copy_file_or_dir(src.path().join(".env").as_path(), &dst.path().join(".env")).unwrap();
+        assert_eq!(fs::read_to_string(dst.path().join(".env")).unwrap(), "FROM_REPO=1");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn clonefile_copy_clones_a_directory_tree() {
+        let src = tempdir().unwrap();
+        fs::create_dir(src.path().join("sub")).unwrap();
+        fs::write(src.path().join("sub/a.txt"), "hello").unwrap();
+        let dst = tempdir().unwrap();
+        let dest = dst.path().join("cloned");
+        clonefile_copy(src.path(), &dest).unwrap();
+        assert_eq!(fs::read_to_string(dest.join("sub/a.txt")).unwrap(), "hello");
+        fs::write(dest.join("sub/a.txt"), "changed").unwrap();
+        assert_eq!(fs::read_to_string(src.path().join("sub/a.txt")).unwrap(), "hello");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn clonefile_not_supported_matches_enotsup_and_exdev() {
+        let enotsup = std::io::Error::from_raw_os_error(libc::ENOTSUP);
+        let eopnotsupp = std::io::Error::from_raw_os_error(libc::EOPNOTSUPP);
+        let exdev = std::io::Error::from_raw_os_error(libc::EXDEV);
+        let other = std::io::Error::from_raw_os_error(libc::EIO);
+        assert!(clonefile_not_supported(&enotsup));
+        assert!(clonefile_not_supported(&eopnotsupp));
+        assert!(clonefile_not_supported(&exdev));
+        assert!(!clonefile_not_supported(&other));
     }
 
     #[test]
