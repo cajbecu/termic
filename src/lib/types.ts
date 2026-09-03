@@ -740,7 +740,7 @@ export interface Settings {
 export interface CliInstallStatus {
   /** Absolute path of the installed symlink, or null when not installed. */
   path: string | null;
-  /** Command name for this build: `termic`, `termic-dev`, or `termic-beta`. */
+  /** Command name for this build: `termic` (both release flavors) or `termic-dev`. */
   name: string;
   /** True when the installed location is on the user's login PATH. */
   on_path: boolean;

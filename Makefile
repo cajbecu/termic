@@ -253,6 +253,11 @@ install: build ## Build a release .app, copy it to /Applications (replacing any 
 # are NOT shared — those live in localStorage, which WKWebView keys by bundle
 # id, so the beta starts on defaults.
 #
+# Sharing the data dir is also why there is only ONE `termic` command and one
+# `termic://` scheme for both apps: one data dir means one control socket means
+# one running instance, so a single command and a single URL scheme already
+# reach whichever of the two is up. See docs/ipc.md, "The `termic` command".
+#
 # VITE_BETA lights up the BETA pill in the unified bar; VITE_BETA_INFO
 # (branch@sha, `+` when the tree was dirty) shows in its tooltip. The beta
 # never self-updates (store/update.ts skips the probe), so nothing can

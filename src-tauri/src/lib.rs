@@ -18069,6 +18069,58 @@ fn deep_link_take_pending() -> Vec<String> {
     std::mem::take(&mut *PENDING_DEEP_LINKS.lock())
 }
 
+/// macOS handoff for a `termic://` link that LaunchServices routed to the
+/// WRONG bundle. Both the shipped app and `make beta` register the scheme
+/// (deliberately: one link should reach whichever of them is open), so LS
+/// picks one, and when the one it picks is not the one holding the data
+/// dir's socket, that process is us. The owner has ALREADY been raised by
+/// the time we get here; all that is left is to deliver the URL.
+///
+/// The catch this exists for: on macOS the URL is not in argv. AppKit
+/// delivers it as an Apple Event which tao surfaces as `RunEvent::Opened`
+/// and the deep-link plugin stores in its `current` slot, and none of that
+/// can happen until the run loop turns, which is strictly AFTER `setup`
+/// returns. Exiting inside `setup` therefore threw the link away every
+/// time, and the user saw the other Termic come to front and do nothing.
+///
+/// So: return from setup with NO window built, let the run loop start, and
+/// poll the plugin's captured URL for a short grace before exiting. The
+/// process is a windowless zombie for at most `GRACE` and nothing is
+/// waiting on it, because the raise already landed.
+///
+/// Accessory first, so this doomed process never takes a dock slot or
+/// pulls focus back off the instance we just raised.
+#[cfg(target_os = "macos")]
+fn handoff_deep_link_then_exit(app: AppHandle) {
+    use tauri_plugin_deep_link::DeepLinkExt;
+    /// One run-loop turn is all this needs; the margin is for a cold
+    /// launch on a loaded machine. Invisible either way (no window, no
+    /// dock icon, owner already frontmost), so it is sized to not lose
+    /// the link rather than to feel fast.
+    const GRACE: Duration = Duration::from_millis(1500);
+    const SLICE: Duration = Duration::from_millis(20);
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + GRACE;
+        loop {
+            if let Ok(Some(urls)) = app.deep_link().get_current() {
+                for u in urls {
+                    // Re-raising per URL is harmless: the server raises
+                    // BEFORE it queues the link, so the two can never land
+                    // out of order.
+                    cli_server::raise_owner(Some(u.as_str()));
+                }
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(SLICE);
+        }
+        std::process::exit(0);
+    });
+}
+
 /// The `termic://` URL this process was launched with, if any. Only
 /// meaningful on Windows/Linux, where a link spawns a fresh process with
 /// the URL in argv; macOS routes it to the running app as an Apple Event
@@ -18236,10 +18288,12 @@ pub fn run() {
             // races the shared projects.json/tasks/. Debug is newest-wins.
             // See cli_server::another_instance_running.
             //
-            // A `termic://` link that spawned THIS process (Windows/Linux;
-            // macOS routes links to the running app instead) rides along
-            // with the raise, so the link opens in the instance that
-            // survives rather than dying with the one we exit. GH #192.
+            // A `termic://` link that spawned THIS process rides along with
+            // the raise, so the link opens in the instance that survives
+            // rather than dying with the one we exit. GH #192. On
+            // Windows/Linux the URL is in argv and can go with the raise
+            // right here; on macOS it has not arrived yet and the handoff
+            // has to wait for it (`handoff_deep_link_then_exit`).
             let argv_link = deep_link_from_argv();
             if cli_server::another_instance_running(argv_link.as_deref()) {
                 // Say WHY on stderr before going. Exiting silently before the
@@ -18258,6 +18312,16 @@ pub fn run() {
                         .map(|d| d.join(termic_proto::SOCKET_FILE).display().to_string())
                         .unwrap_or_else(|_| "<unresolved data dir>".into()),
                 );
+                // macOS: do NOT exit yet. If LaunchServices launched us to
+                // open a `termic://` link, that URL is still in flight and
+                // exiting now is what made the link vanish. Return from
+                // setup without a window and let the run loop deliver it.
+                #[cfg(target_os = "macos")]
+                {
+                    handoff_deep_link_then_exit(app.handle().clone());
+                    return Ok(());
+                }
+                #[cfg(not(target_os = "macos"))]
                 std::process::exit(0);
             }
             // Reap any Docker-sandbox containers left behind by a crash or

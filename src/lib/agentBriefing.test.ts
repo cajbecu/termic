@@ -24,8 +24,8 @@ describe("cliFallbackCommand", () => {
   it("uses the absolute path when the link is installed but off PATH", () => {
     // A bare name the login shell can't resolve would make the pasted block
     // silently fail for an agent outside Termic.
-    expect(cliFallbackCommand({ path: "/usr/local/bin/termic-beta", name: "termic-beta", on_path: false }))
-      .toBe("/usr/local/bin/termic-beta");
+    expect(cliFallbackCommand({ path: "/usr/local/bin/termic-dev", name: "termic-dev", on_path: false }))
+      .toBe("/usr/local/bin/termic-dev");
   });
 
   it("falls back to the build's command name when nothing is installed", () => {
@@ -83,8 +83,8 @@ describe("buildAgentBriefing", () => {
   it("threads the resolved command through both legs of the exchange", () => {
     // Outbound and the nested reply must both use a command that resolves;
     // an off-PATH install is an absolute path (see cliFallbackCommand).
-    const b = buildAgentBriefing({ task, projectName: "termic", cli: "/usr/local/bin/termic-beta" });
-    expect(b.match(/\/usr\/local\/bin\/termic-beta/g)).toHaveLength(2);
+    const b = buildAgentBriefing({ task, projectName: "termic", cli: "/usr/local/bin/termic-dev" });
+    expect(b.match(/\/usr\/local\/bin\/termic-dev/g)).toHaveLength(2);
   });
 
   it("names what goes in the prompt slot instead of an abstract placeholder", () => {

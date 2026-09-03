@@ -961,7 +961,7 @@ export const detectClis    = () => invoke<CliInfo[]>("detect_clis");
 export const cliInstallSymlink = (system: boolean) =>
   invoke<string>("cli_install_symlink", { system });
 /** Where the CLI is installed for this build, the command name
- *  (termic / termic-dev / termic-beta), and whether that location is on
+ *  (termic, or termic-dev in a debug build), and whether that location is on
  *  the user's login PATH. */
 export const cliInstallStatus  = () => invoke<CliInstallStatus>("cli_install_status");
 /** Live MCP endpoint state: the bound URL and the token file's path.

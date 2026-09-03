@@ -117,7 +117,15 @@ const IDLE_SETTLE_GRACE: Duration = Duration::from_millis(if cfg!(test) { 200 } 
 /// app: every failure path logs and returns (the CLI then reports
 /// "Termic did not start" / "not listening").
 pub fn start(app: tauri::AppHandle) {
-    std::thread::spawn(move || server_main(app));
+    std::thread::spawn(move || {
+        // Before the socket, and on this thread rather than the main one:
+        // it stats a handful of paths and may write one symlink. Runs
+        // regardless of the "Enable CLI" setting, because a disabled CLI
+        // keeps its command installed (it just refuses every request), and
+        // a stale link is exactly as confusing either way.
+        reconcile_link();
+        server_main(app)
+    });
 }
 
 /// Single instance per DATA DIR. If another termic already owns this data
@@ -142,6 +150,20 @@ pub fn another_instance_running(deep_link: Option<&str>) -> bool {
     if cfg!(debug_assertions) {
         return false;
     }
+    raise_owner(deep_link)
+}
+
+/// Hand a `termic://` URL (or a bare raise) to whichever instance owns
+/// this data dir's socket, and report whether a LIVE one answered.
+///
+/// Split out of `another_instance_running` for the macOS deep-link
+/// handoff: there the URL is not known until AFTER the single-instance
+/// decision has been made and the raise already sent, because AppKit
+/// delivers it as an Apple Event that only lands once the run loop turns
+/// (see `handoff_deep_link_then_exit` in lib.rs). Unlike
+/// `another_instance_running` this is NOT debug-gated: it is a plain
+/// "forward to the owner", not a policy about whether we should exist.
+pub fn raise_owner(deep_link: Option<&str>) -> bool {
     let Ok(dir) = crate::data_dir() else { return false };
     raise_existing(&dir.join(proto::SOCKET_FILE), deep_link)
 }
@@ -4322,20 +4344,59 @@ pub(crate) fn bundled_cli_path() -> Result<PathBuf, String> {
     }
 }
 
-/// The command name to install on PATH, per build flavor, so dev, beta,
-/// and prod can all coexist:
-///   - debug build  -> `termic-dev`  (talks to the termic_dev data dir)
-///   - beta bundle   -> `termic-beta` (identifier ends in ".beta")
-///   - release       -> `termic`
+/// The command name to install on PATH. There is ONE release command,
+/// `termic`, for BOTH the shipped app and `make beta`:
+///   - debug build -> `termic-dev` (its own termic_dev data dir + socket)
+///   - release     -> `termic`     (shipped app AND beta bundle)
+///
+/// The beta used to install a `termic-beta` twin, which was a name and
+/// nothing else. Both release flavors share the data dir, therefore the
+/// control socket, therefore the single instance that owns it, so the
+/// two symlinks pointed at the same binary talking to the same socket:
+/// `termic-beta` drove the shipped app whenever the shipped app was the
+/// one running, while its name promised otherwise. One command that
+/// reaches whichever release app is up is the honest version of what the
+/// pair already did. Debug keeps its own name because `termic_dev` is a
+/// genuinely separate data dir and socket.
+///
 /// The on-disk sidecar is always `termic-cli`; only the LINK name varies,
 /// so `replaceable` still recognizes our links by their target basename.
-fn install_name(identifier: &str) -> &'static str {
+fn install_name() -> &'static str {
     if cfg!(debug_assertions) {
         "termic-dev"
-    } else if identifier.ends_with(".beta") {
-        "termic-beta"
     } else {
         "termic"
+    }
+}
+
+/// Command names we used to install and no longer do. A leftover link
+/// keeps resolving (it points at a real `termic-cli`), so muscle memory
+/// still runs it and it still appears to work, which is exactly the
+/// ambiguity the unification removes: prune it on every install.
+///
+/// Best-effort. A `/usr/local/bin` entry we cannot unlink without an
+/// admin prompt is left alone rather than nagging for a password to
+/// delete something harmless.
+const LEGACY_NAMES: &[&str] = &["termic-beta"];
+
+fn prune_legacy_links() {
+    // Release only. Every legacy name is a RELEASE name, and a debug
+    // build must not reach across the dev/release boundary and delete
+    // the user's real command - `npm run tauri:dev` and `make e2e` run
+    // this code too. Same carve-out as `another_instance_running` and
+    // the `APP_DIR` split: dev never touches release state.
+    if cfg!(debug_assertions) {
+        return;
+    }
+    for name in LEGACY_NAMES {
+        for link in install_targets(name) {
+            // `replaceable` is true for an ABSENT link too, so check
+            // existence separately: we only ever remove a symlink of
+            // ours that is really there.
+            if std::fs::symlink_metadata(&link).is_ok() && replaceable(&link).unwrap_or(false) {
+                let _ = std::fs::remove_file(&link);
+            }
+        }
     }
 }
 
@@ -4381,6 +4442,125 @@ fn symlink_replacing(src: &Path, link: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(src, link)
 }
 
+/// Atomic replace: build the new link under a temp name in the SAME
+/// directory, then rename over the old one.
+///
+/// `symlink_replacing` removes before it creates, so there is a window
+/// where the command does not exist, and if the create then fails (an
+/// unwritable /usr/local/bin) it never comes back. That is tolerable on
+/// the explicit install path, where the user clicked a button and gets
+/// the error. It is not tolerable on the silent launch reconcile, which
+/// would delete a working `termic` and say nothing.
+fn symlink_atomic(src: &Path, link: &Path) -> std::io::Result<()> {
+    let base = link.file_name().and_then(|n| n.to_str()).unwrap_or("termic");
+    let tmp = link.with_file_name(format!(".{base}.{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    std::os::unix::fs::symlink(src, &tmp)?;
+    std::fs::rename(&tmp, link).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// Find the links of OURS that exist right now, under the current name
+/// and under every legacy name. Current name first, and within a name
+/// /usr/local/bin before ~/.local/bin, so an explicit system-wide
+/// install is what `reconcile_target` sees.
+fn scan_installed(name: &str) -> (Option<PathBuf>, Vec<PathBuf>) {
+    let mut installed: Option<PathBuf> = None;
+    let mut legacy: Vec<PathBuf> = Vec::new();
+    for n in std::iter::once(name).chain(LEGACY_NAMES.iter().copied()) {
+        for link in install_targets(n) {
+            // `replaceable` says yes to an ABSENT path too, so existence
+            // is a separate check: we only ever act on a symlink of ours
+            // that is really there.
+            if std::fs::symlink_metadata(&link).is_err() {
+                continue;
+            }
+            if !replaceable(&link).unwrap_or(false) {
+                continue;
+            }
+            if n == name {
+                installed.get_or_insert(link);
+            } else {
+                legacy.push(link);
+            }
+        }
+    }
+    (installed, legacy)
+}
+
+/// Where the current-name link belongs, or None to leave the filesystem
+/// alone. Pure, so the two rules that matter are testable without a home
+/// directory: an install keeps the DIRECTORY it is already in, and
+/// nothing installed anywhere means nothing gets created.
+fn reconcile_target(name: &str, installed: Option<PathBuf>, legacy: &[PathBuf]) -> Option<PathBuf> {
+    // A legacy link and no current one: put the new name beside it. That
+    // is the whole `termic-beta` -> `termic` migration.
+    installed.or_else(|| legacy.first().map(|l| l.with_file_name(name)))
+}
+
+/// Keep an ALREADY-INSTALLED command in step with the app. Called once
+/// per launch, off the main thread.
+///
+/// Three things drift, and every one of them fails silently:
+///   1. the NAME changed. A `termic-beta` link predates both release
+///      flavors unifying on `termic`; left alone it keeps working under
+///      a name that lies about which app it reaches.
+///   2. the bundle it points into was deleted, renamed or rebuilt
+///      somewhere else, so the link dangles and the command is simply
+///      "not found" with nothing to explain why.
+///   3. the sidecar belongs to the OTHER release flavor and is older
+///      than this app, so `hello` fails the protocol check even though
+///      both sides are installed and healthy. Pointing the link at the
+///      app you actually launched is the version that always matches,
+///      and the two flavors are mutually exclusive anyway, so
+///      last-launched-wins has no one to fight with.
+///
+/// Deliberately narrow: it only ever REWRITES a link of ours that is
+/// already there, in the directory it is already in. An absent command
+/// is absent on purpose (Settings installs on the enable click and
+/// nowhere else, so that re-enabling cannot resurrect one you removed),
+/// and anything that is not our symlink is never touched.
+pub fn reconcile_link() {
+    // Release only, for the reason in `prune_legacy_links`, plus one of
+    // its own: `make cli-dev` installs `termic-dev` by hand, and a dev
+    // run has no business second-guessing where the developer pointed it.
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let Ok(src) = bundled_cli_path() else { return };
+    let name = install_name();
+    let (installed, legacy) = scan_installed(name);
+    let Some(target) = reconcile_target(name, installed, &legacy) else { return };
+
+    // On the migration path the target is DERIVED from where the legacy
+    // link sits, not found by the scan, so somebody else may already own
+    // that name. `symlink_atomic` ends in a rename, and a rename asks no
+    // questions: without this check the launch reconcile would silently
+    // replace a foreign `termic` on PATH. (A link we found is already
+    // known replaceable; re-checking it is free.)
+    if !replaceable(&target).unwrap_or(false) {
+        dlog(&format!("[cli] {} was not installed by us, leaving it alone", target.display()));
+        return;
+    }
+
+    if std::fs::read_link(&target).ok().as_deref() != Some(src.as_path()) {
+        if let Err(e) = symlink_atomic(&src, &target) {
+            // An unwritable /usr/local/bin is the expected failure. Say so
+            // in the log and change nothing else: pruning the legacy link
+            // now would leave the user with no command at all.
+            dlog(&format!("[cli] could not point {} at {}: {e}", target.display(), src.display()));
+            return;
+        }
+        dlog(&format!("[cli] {} -> {}", target.display(), src.display()));
+    }
+    for l in legacy {
+        if l != target {
+            let _ = std::fs::remove_file(&l);
+        }
+    }
+}
+
 /// Install the CLI onto PATH. `system=false` is the no-prompt path used
 /// automatically when the CLI is enabled: it symlinks into ~/.local/bin
 /// (created if needed) and never asks for a password. `system=true` is
@@ -4389,8 +4569,8 @@ fn symlink_replacing(src: &Path, link: &Path) -> std::io::Result<()> {
 /// human-readable result line that already states whether the location is
 /// on the user's PATH.
 #[tauri::command]
-pub async fn cli_install_symlink(app: tauri::AppHandle, system: bool) -> Result<String, String> {
-    let name = install_name(&app.config().identifier);
+pub async fn cli_install_symlink(_app: tauri::AppHandle, system: bool) -> Result<String, String> {
+    let name = install_name();
     tauri::async_runtime::spawn_blocking(move || install_inner(name, system))
         .await
         .map_err(|e| e.to_string())?
@@ -4419,6 +4599,12 @@ fn on_path_suffix(dir: &Path) -> String {
 }
 
 fn install_inner(name: &str, system: bool) -> Result<String, String> {
+    // Prune only on the way OUT, and only on success: dropping the old
+    // name first would leave a failed install with no command at all.
+    install_at(name, system).inspect(|_| prune_legacy_links())
+}
+
+fn install_at(name: &str, system: bool) -> Result<String, String> {
     let src = bundled_cli_path()?;
 
     if system {
@@ -4474,15 +4660,16 @@ fn admin_symlink(src: &Path, name: &str) -> Result<(), String> {
 pub struct CliInstallStatus {
     /// Absolute path of the installed symlink, or null when not installed.
     pub path: Option<String>,
-    /// The command name for this build (termic / termic-dev / termic-beta).
+    /// The command name for this build (`termic`, or `termic-dev` in a
+    /// debug build). Both release flavors report `termic`.
     pub name: String,
     /// True when the installed location is on the user's login PATH.
     pub on_path: bool,
 }
 
 #[tauri::command]
-pub fn cli_install_status(app: tauri::AppHandle) -> CliInstallStatus {
-    let name = install_name(&app.config().identifier);
+pub fn cli_install_status(_app: tauri::AppHandle) -> CliInstallStatus {
+    let name = install_name();
     for link in install_targets(name) {
         if let Ok(md) = std::fs::symlink_metadata(&link) {
             let ours = md.file_type().is_symlink()
@@ -6771,15 +6958,100 @@ mod tests {
     #[test]
     fn install_name_is_build_aware() {
         // In this test binary cfg!(debug_assertions) is true, so the name
-        // is always the dev one regardless of identifier - which is
-        // exactly the invariant we want (a debug build installs
-        // `termic-dev`, never colliding with a prod `termic`).
-        assert_eq!(install_name("com.simion.termic"), "termic-dev");
-        assert_eq!(install_name("com.simion.termic.beta"), "termic-dev");
-        // The release/beta arms are unreachable here; assert the pure
-        // suffix rule they use so a rename is caught.
-        assert!("com.simion.termic.beta".ends_with(".beta"));
-        assert!(!"com.simion.termic".ends_with(".beta"));
+        // is the dev one - which is exactly the invariant we want (a
+        // debug build installs `termic-dev` against its own termic_dev
+        // socket, never colliding with a release `termic`).
+        assert_eq!(install_name(), "termic-dev");
+        // The release arm is unreachable here. What it must NOT do is
+        // vary by bundle: the shipped app and `make beta` share one data
+        // dir, one socket and one running instance, so they must also
+        // share one command name.
+        assert!(!LEGACY_NAMES.contains(&install_name()));
+        assert!(LEGACY_NAMES.contains(&"termic-beta"));
+    }
+
+    #[test]
+    fn reconcile_never_resurrects_a_removed_command() {
+        // Nothing of ours installed anywhere: the user removed it (or
+        // never enabled the CLI), and a launch must not hand it back.
+        assert_eq!(reconcile_target("termic", None, &[]), None);
+    }
+
+    #[test]
+    fn reconcile_keeps_the_directory_it_is_installed_in() {
+        let sys = PathBuf::from("/usr/local/bin/termic");
+        assert_eq!(reconcile_target("termic", Some(sys.clone()), &[]), Some(sys));
+        let user = PathBuf::from("/Users/x/.local/bin/termic");
+        assert_eq!(reconcile_target("termic", Some(user.clone()), &[]), Some(user));
+    }
+
+    #[test]
+    fn reconcile_migrates_a_legacy_name_in_place() {
+        // The `termic-beta` install this unification replaces: same
+        // directory, new name, and the old one is pruned by the caller.
+        let legacy = vec![PathBuf::from("/Users/x/.local/bin/termic-beta")];
+        assert_eq!(
+            reconcile_target("termic", None, &legacy),
+            Some(PathBuf::from("/Users/x/.local/bin/termic"))
+        );
+        let sys = vec![PathBuf::from("/usr/local/bin/termic-beta")];
+        assert_eq!(
+            reconcile_target("termic", None, &sys),
+            Some(PathBuf::from("/usr/local/bin/termic"))
+        );
+    }
+
+    #[test]
+    fn reconcile_prefers_an_existing_current_name_over_a_legacy_one() {
+        let cur = PathBuf::from("/usr/local/bin/termic");
+        let legacy = vec![PathBuf::from("/Users/x/.local/bin/termic-beta")];
+        assert_eq!(reconcile_target("termic", Some(cur.clone()), &legacy), Some(cur));
+    }
+
+    #[test]
+    fn symlink_atomic_replaces_without_a_gap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("termic-cli");
+        let b = tmp.path().join("other-termic-cli");
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let link = tmp.path().join("termic");
+        symlink_atomic(&a, &link).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), a);
+        // Repoint an EXISTING link (the launch-reconcile case).
+        symlink_atomic(&b, &link).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), b);
+        // No temp droppings left behind.
+        let strays: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "left temp links behind: {strays:?}");
+    }
+
+    #[test]
+    fn prune_legacy_links_leaves_foreign_files_alone() {
+        // `replaceable` is the only thing standing between a prune and
+        // somebody else's binary: a real file (not a symlink of ours) is
+        // never touched, however the name matches. Same guard is what
+        // stops the migration writing over a foreign `termic`, where the
+        // target path is derived rather than found.
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["termic-beta", "termic"] {
+            let foreign = tmp.path().join(name);
+            std::fs::write(&foreign, b"#!/bin/sh\necho not ours\n").unwrap();
+            assert!(!replaceable(&foreign).unwrap(), "{name} looked replaceable");
+            assert!(foreign.exists());
+        }
+        // A symlink to something that is not a `termic-cli` is equally
+        // not ours (an older install pointing elsewhere, a user's own).
+        let other = tmp.path().join("some-other-binary");
+        std::fs::write(&other, b"x").unwrap();
+        let link = tmp.path().join("termic-link");
+        std::os::unix::fs::symlink(&other, &link).unwrap();
+        assert!(!replaceable(&link).unwrap());
     }
 
     #[test]

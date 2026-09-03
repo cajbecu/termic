@@ -11,7 +11,7 @@
 //! codes inline (`termic help --json` returns the whole surface
 //! machine-readably).
 
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use std::io::Read as _;
 use termic_proto as proto;
 use termic_proto::exit_code;
@@ -1023,9 +1023,52 @@ Exit codes: 0 removed, 1 error (unknown project, declined, no TTY without \
     },
 }
 
+/// Help header: the build's version, on `--help` and not just
+/// `--version`.
+///
+/// It answers a question this CLI made real. `termic` is ONE command for
+/// both release apps (they share a data dir, therefore a socket,
+/// therefore a single running instance), so the symlink can point into
+/// either bundle, and "which build am I actually running" has a
+/// non-obvious answer that `--help` is the natural place to see. The
+/// version is the APP version the binary was built with (`VERSION`), so
+/// one line covers both halves.
+///
+/// clap 3 printed this line by default and clap 4 dropped it; this is
+/// that line, on every subcommand's help too.
+///
+/// `{version}` is deliberately NOT used: it renders empty on a
+/// subcommand unless `propagate_version` is set, and that would bolt a
+/// `--version` flag onto every subcommand — widening the surface that
+/// `machine_help()` publishes and the MCP parity test pins, to fix a
+/// help header.
+fn help_template() -> String {
+    format!(
+        "termic {VERSION}\n\
+         {{about-with-newline}}\n\
+         {{usage-heading}} {{usage}}\n\
+         \n\
+         {{all-args}}{{after-help}}"
+    )
+}
+
+/// The clap command with that header on the root AND every subcommand.
+/// Every path that renders help goes through this one - argument
+/// parsing, and `termic help [command]`'s own renderer - or `termic new
+/// --help` quietly disagrees with `termic --help`.
+pub fn cli_command() -> clap::Command {
+    let t = help_template();
+    Cli::command().help_template(t.clone()).mut_subcommands(|s| s.help_template(t.clone()))
+}
+
 pub fn run() -> i32 {
     // clap exits 2 on usage/parse errors itself; 2 stays reserved for it.
-    let cli = Cli::parse();
+    // Not `Cli::parse()`: that would rebuild the command without the
+    // version header, so `--help` would lose it.
+    let cli = match Cli::from_arg_matches(&cli_command().get_matches()) {
+        Ok(c) => c,
+        Err(e) => e.exit(),
+    };
     match execute(&cli) {
         Ok(out) => {
             if !out.stdout.is_empty() {
@@ -2127,7 +2170,7 @@ fn verb_exit_codes(name: &str) -> Vec<i32> {
 
 fn help_output(command: Option<&str>, format: OutputFormat) -> Result<Output, CliError> {
     if format == OutputFormat::Text {
-        let mut root = Cli::command();
+        let mut root = cli_command();
         let text = match command {
             None => root.render_long_help().to_string(),
             Some(name) => {
@@ -2299,7 +2342,30 @@ mod tests {
 
     #[test]
     fn clap_definition_is_coherent() {
-        Cli::command().debug_assert();
+        cli_command().debug_assert();
+    }
+
+    #[test]
+    fn help_carries_the_version_everywhere_it_is_rendered() {
+        // `termic` is one command for two release bundles, so the build
+        // behind it is a real question. Every surface that renders help
+        // must answer it, not just the root: a subcommand's --help and
+        // the `termic help <cmd>` renderer go through separate clap
+        // paths and it is easy to fix one and miss the others.
+        let stamp = format!("termic {VERSION}");
+        let mut root = cli_command();
+        assert!(root.render_long_help().to_string().starts_with(&stamp));
+        for name in ["new", "list", "wait"] {
+            let sub = root.find_subcommand_mut(name).expect("subcommand exists");
+            let text = sub.render_long_help().to_string();
+            assert!(text.starts_with(&stamp), "{name} --help lost the version:\n{text}");
+        }
+        // The `help` subcommand renders through help_output, not clap's
+        // own flag handling.
+        let out = help_output(None, OutputFormat::Text).unwrap();
+        assert!(out.stdout.starts_with(&stamp));
+        let out = help_output(Some("new"), OutputFormat::Text).unwrap();
+        assert!(out.stdout.starts_with(&stamp));
     }
 
     #[test]
