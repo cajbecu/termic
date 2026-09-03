@@ -103,6 +103,8 @@ Add a `## [version] - ` section to the TOP of `CHANGELOG.md` (Keep a Changelog f
 
 No em dashes (—) anywhere in user-visible text: dialogs, tooltips, buttons, `CHANGELOG.md`, error messages. Use a comma, period, parentheses, or colon instead.
 
+**GitHub prose uses semantic line breaks (SEMBR).** PR descriptions, PR review comments and issue comments: break the line after each sentence, and at major clause boundaries within a long one. Never hard-wrap to a column. GitHub reflows the source either way, so column wrapping buys nothing and costs the line-per-thought structure: editing a comment then means reflowing a paragraph instead of touching the one line that changed. See <https://sembr.org>. Commit message bodies and the `docs/` tree are the exception and stay wrapped to ~72-78 columns, matching what is already there.
+
 ## What NOT to do without asking
 
 - Open a PR without first asking the user whether they manually tested the change (see ## Testing). Every suite in the repo being green is not a substitute, and neither is your own confidence in the diff.
