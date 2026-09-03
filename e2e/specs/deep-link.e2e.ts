@@ -230,6 +230,37 @@ describe("termic:// deep links", () => {
     expect((await dialogState()).prompt).toBe("edited by the user");
   });
 
+  // The seeded prompt has to be VISIBLE, not just present. The field is
+  // conditionally rendered, so the seed lands in the same commit that first
+  // mounts the textarea: growing it from an effect keyed on the value alone
+  // ran while the ref was still null, and the box stayed one row tall until
+  // the user typed. A link that delivers a ticket body the user cannot read
+  // without scrolling defeats the point of showing it to them.
+  it("sizes the prompt box to a seeded prompt, with no keystroke", async () => {
+    /** Rendered + content height of the dialog's prompt textarea. */
+    const measure = () => browser.execute((sel) => {
+      const ta = document.querySelector(sel)?.closest('[role="dialog"]')
+        ?.querySelector("textarea") as HTMLTextAreaElement;
+      return { client: ta.clientHeight, scroll: ta.scrollHeight };
+    }, NAME_INPUT);
+
+    await openLink(`termic://new?project=${projectName}&p=${encodeURIComponent("one line")}`);
+    await waitVisible(NAME_INPUT);
+    const short = await measure();
+    await closeDialog();
+
+    const body = Array.from({ length: 6 }, (_, i) => `line ${i + 1} of a ticket body`).join("\n");
+    await openLink(`termic://new?project=${projectName}&p=${encodeURIComponent(body)}`);
+    await waitVisible(NAME_INPUT);
+    const tall = await measure();
+
+    // Taller than the one-line case, and tall enough to show the whole
+    // prompt: a box that still scrolls is the bug wearing a bigger size.
+    expect(tall.client).toBeGreaterThan(short.client);
+    expect(tall.scroll).toBeLessThanOrEqual(tall.client + 2);
+    await snap("deep-link-prompt-autosized");
+  });
+
   it("accepts a prompt at the cap and rejects one past it", async () => {
     const cap = await browser.execute(
       () => window.__termic!.deepLink.MAX_PROMPT_CHARS as number,

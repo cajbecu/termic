@@ -1,7 +1,7 @@
 // New task dialog: name + CLI segmented pills + branch name +
 // branch-from. Calls task_create on submit.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useUI } from "@/store/ui";
 import { useApp } from "@/store/app";
@@ -52,6 +52,15 @@ function persistLast(key: string, val: string) { try { localStorage.setItem(key,
 // Branch names auto-fill as `<prefix>/<name>` where the prefix comes from
 // the customizable `branchPrefix` pref (Settings → Tasks, default
 // "feature"). The user edits the resulting field freely from there.
+
+/** Fit a textarea to its content, capped by its CSS max-height (then it
+ *  scrolls). Module scope: it touches no component state, so the callback
+ *  ref that calls it needs no dependencies. */
+function growPrompt(el: HTMLTextAreaElement | null) {
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = `${el.scrollHeight}px`;
+}
 
 export function NewTaskDialog() {
   const projectId = useUI(s => s.newTaskProjectId);
@@ -251,13 +260,19 @@ export function NewTaskDialog() {
   const canPrompt = cli !== "shell" && !isTerminalCli(cli);
   const agentLabel = agentDisplayName(cli);
   // Auto-grow to fit the content, capped by max-height (then it scrolls).
-  // Runs on seed as well as on typing, so a link-delivered prompt opens at
-  // its real height instead of a 3-row window the user has to scroll.
-  function growPrompt(el: HTMLTextAreaElement | null) {
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
-  }
+  //
+  // Growing has to happen on ATTACH, not only when `prompt` changes, which
+  // is why the ref below is a callback. The field is conditionally rendered
+  // (`canPrompt`), so a seeded open sets the prompt in the same commit that
+  // first mounts the textarea: the effect runs with `promptRef.current`
+  // still null, and by the time the node exists `prompt` has not changed
+  // again, so nothing ever grows it. A deep link's prompt then sat in a
+  // one-row box (GH #192) and only sprang open once the user typed into it.
+  // The effect still covers typing, where the node is already attached.
+  const attachPrompt = useCallback((el: HTMLTextAreaElement | null) => {
+    promptRef.current = el;
+    growPrompt(el);
+  }, []);
   useEffect(() => { growPrompt(promptRef.current); }, [prompt]);
   // A plain shell or a registry terminal entry (docker, ssh) has no agent
   // session to resume, so there is nothing for an override to replace. Every
@@ -1167,15 +1182,15 @@ export function NewTaskDialog() {
 
         {/* Optional first message (GH #192). Sent to the agent once it
             finishes booting. Hidden for a plain terminal, which has no
-            prompt box to type into. Starts at 1 row — growPrompt() (below)
-            grows it as the user types, so the hint that used to explain
+            prompt box to type into. Starts at 1 row — growPrompt() (above)
+            grows it on attach and as the user types, so the hint that used to explain
             "typed once ready, nothing sent until Create" isn't needed to
             justify the extra height; the placeholder carries that now. */}
         {canPrompt && (
           <Field label={issueSelected ? "Initial prompt (from the issue)" : "Initial prompt"}>
             <div className="flex flex-col gap-1">
               <textarea
-                ref={promptRef}
+                ref={attachPrompt}
                 value={prompt}
                 onChange={e => setPrompt(e.target.value.slice(0, MAX_PROMPT_CHARS))}
                 rows={1}

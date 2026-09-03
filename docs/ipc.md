@@ -63,7 +63,7 @@ termic://open?project=web&task=fix-login
 | --- | --- |
 | `project` | **required.** Registered project, by id or by name (case-insensitive). |
 | `name` | task name (max 200 chars) |
-| `prompt` / `p` | first message, pre-filled into the dialog (max 8000 chars) |
+| `prompt` / `p` | first message, pre-filled into the dialog (max 8000 chars, counted after decoding) |
 | `agent` / `cli` | agent id to pre-select; ignored if this install doesn't offer it |
 | `mode` | `worktree` or `main`. `worktree=1` is the shorthand. On a multi project `main` is the host-level shape: the live host checkout with every member linked in, the same task the sidebar quick menu's Main checkout creates. |
 | `base` | "Branch from" ref |
@@ -81,7 +81,39 @@ The rule that separates them, and that any future action must pick a side of:
 
 `open` only selects something that already exists, so it just happens. **`new` never creates anything** — it fills the form and a human presses Create. That is the whole security model for accepting a `prompt`: links are authored in the ticket tracker, so whoever can file or edit an issue (in many orgs that includes external reporters) controls the text. It is also why an unregistered `project` is a hard error rather than a fallback to "the first project" or a silent project add. Do not add an auto-create or skip-confirmation option.
 
-**Templating gotcha.** A tracker that expands `{{issue.summary}}` without a URL-encode filter truncates silently at the first `&` or `#` — both common in ticket titles — turning `Fix login & signup` into `Fix login `. Raw `+` becomes a space and raw newlines vanish. The confirm step is what catches this: the user sees the mangled text in the textarea instead of an agent acting on half a sentence. Template authors should apply the tracker's encode filter (Jira automation's `.urlEncode()`, and equivalents elsewhere).
+### Percent-encoding the `prompt`
+
+`prompt` carries free text (a ticket body, a paragraph, newlines) through a URL query string, so it MUST be percent-encoded by whoever builds the link. Termic decodes it once, with the standard `URLSearchParams` rules, and never tries to repair a malformed value: there is no way to tell a truncated prompt from a short one.
+
+Four characters decide whether a link survives, and all four are ordinary in ticket titles:
+
+| raw | encoded | if you leave it raw |
+| --- | --- | --- |
+| `&` | `%26` | everything after it parses as a NEW query param, so the prompt silently truncates |
+| `#` | `%23` | everything after it becomes the URL fragment and never reaches the app |
+| `+` | `%2B` | decodes back as a SPACE, so `C++` arrives as `C  ` |
+| newline | `%0A` | usually stripped by whatever hands the URL over |
+
+Space may be `%20` or `+`; both decode to a space. `%` itself must be `%25`, or a literal `%2` in the text will eat the next two characters.
+
+Build the value with a real encoder rather than escaping by hand:
+
+```sh
+# shell
+jq -Rr @uri <<<"$BODY"
+python3 -c 'import sys,urllib.parse as u; print(u.quote(sys.stdin.read(), safe=""))'
+```
+```js
+`termic://new?project=web&p=${encodeURIComponent(body)}`   // NOT encodeURI
+```
+
+`encodeURI` is the wrong function here: it deliberately leaves `&`, `#` and `+` alone, which are exactly the three that break a query value.
+
+**The cap is on the decoded text, not the URL.** `MAX_PROMPT_CHARS` is 8000 characters after decoding, so a fully-encoded 8000-character prompt is a URL of roughly 11000 characters, and that is fine. Over the cap the whole link is REJECTED with a toast and no dialog opens, rather than being truncated, because half a prompt is worse than none: the user would have to notice the missing tail themselves. The value is also trimmed, so leading and trailing whitespace never counts toward the cap.
+
+**Templating gotcha.** A tracker that expands `{{issue.summary}}` without a URL-encode filter hits the table above at the first `&` or `#`, turning `Fix login & signup` into `Fix login `. The confirm step is what catches this: the user sees the mangled text in the textarea instead of an agent acting on half a sentence. Template authors should apply the tracker's encode filter (Jira automation's `.urlEncode()`, and equivalents elsewhere).
+
+**A link that seems to do nothing at all** is usually not the link. Deep links reach the process that LaunchServices resolves the scheme to, so after Termic updates itself the OLD running process stops receiving them: `open` still exits 0, nothing is queued, and `[deeplink] queued` never appears in `termic-debug.log`. Restarting the app fixes it. Check that log line first, before suspecting the URL.
 
 Explicit non-goals: no `project/add` (a link must never register a repo — that routes around the gate above), and nothing destructive (`archive`, `quit`), where no amount of confirmation justifies exposure to a channel any web page can trigger.
 
