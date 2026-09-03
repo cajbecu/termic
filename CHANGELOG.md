@@ -4,7 +4,7 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [1.1.0] - 2026-09-02
+## [1.1.1] - 2026-09-03
 
 Agents now tell Termic what they are doing, instead of Termic guessing from the terminal.
 
@@ -14,6 +14,8 @@ Agents now tell Termic what they are doing, instead of Termic guessing from the 
 - **Cloned agents inherit instead of copying.** Duplicating an agent used to take a full copy of its settings, once. That copy then rotted: when a CLI renames a flag, the built-in agent moves with the app and every clone keeps the old value forever, with no way to tell which of its seventeen fields you actually chose. A clone now stores only what you override and reads everything else from its parent as it changes, with the inherited values shown greyed in each field so you can see what is in force. One button clears every override and returns the clone to its parent.
 - **Task ports are a range you choose.** Settings, Tasks now carries a min and max instead of a hard-coded floor at 18100. Existing tasks keep the ports they were given, because a task's ports are frozen at creation, so narrowing the range never moves a live task off the port its dev server is bound to. (#271)
 - **A way out when the editor cannot show a file.** Binary and very large files now offer Open in default app and Reveal in Finder, with a plain explanation instead of an empty pane.
+- **Agents say when they are ready, not only when they are working.** Claude's session start is part of the hook set now, so Termic knows an agent is past its own startup before it types a task's first message into it. It is the one thing the terminal cannot tell you: a blocking startup dialog paints and then goes quiet, which is exactly what a waiting input box looks like.
+- **Hook coverage at a glance.** The Agent hooks row shows a green check when every detected agent is wired, and an amber marker when some are not, instead of a count you have to read.
 
 ### Bug fixes
 
@@ -24,6 +26,11 @@ Agents now tell Termic what they are doing, instead of Termic guessing from the 
 - **A commit inside a Docker sandbox no longer fails with "Please tell me who you are".** Your git identity is mounted at git's global level, so a repo with its own `user.email` still wins.
 - **Agent state read from terminal titles, rebuilt from captured titles.** The previous patterns covered two agents and were written from reasoning; these are derived from titles recorded off live sessions. Grok's plan approval freezes its spinner and used to read as busy forever, and an agent with no patterns at all rang the needs-you bell on every completed turn.
 - **Settings fields fit their placeholders.** Multi-line placeholders were scrolling inside a two-row box, so the example patterns a field exists to show were clipped.
+- **A task's first message can no longer kill the agent.** Claude asks whether it trusts a folder the first time it runs in a repo, with "No, exit" pre-selected. That question paints and then goes quiet, which reads exactly like a waiting input box, so Termic typed the first message into it and the Enter that followed answered "No, exit". Termic now waits for the agent to report itself ready, and for agents that report nothing it checks that the text it typed came back before pressing Enter.
+- **Agent hooks update themselves.** An install from an older Termic kept its original hook set forever while still reporting as installed, so every fix and every new signal reached only people installing for the first time.
+- **One `termic` command, whichever app is open.** A beta build installed a second `termic-beta` command that talked to the same socket as `termic`, so it drove whichever app happened to be running regardless of which name you typed. There is one command now, and `termic --help` says which build it is.
+- **`termic://` links reach whichever Termic is open.** With a beta installed alongside the shipped app, a link could start the other one, bring the running one to the front and then do nothing, because the URL was lost in the handoff between them.
+- **A link-delivered prompt opens at full height** instead of in a one-row box that only grew once you typed into it. (#192)
 
 ## [1.0.2] - 2026-08-28
 
