@@ -52,10 +52,19 @@ export const READY_PAINTING_DEADLINE_MS = 8000;
 export const READY_DEADLINE_MS = 20_000;
 const POLL_MS = 150;
 
-/** Why the wait ended. `settled` is the good one: the agent painted and
- *  went quiet. `deadline` means it never stopped painting. `lost` means
- *  the tab dropped its PTY and there is nothing to type into. */
-export type AgentReadyOutcome = "settled" | "deadline" | "lost";
+/** Why the wait ended.
+ *  - `ready`    the agent's own hook SAID so (`agentReadyAt`). The only
+ *               non-guess, and the only one that clears a blocking startup
+ *               dialog, which the heuristic below cannot see at all.
+ *  - `settled`  the agent painted and went quiet. A guess, and a good one,
+ *               but see `blocked`.
+ *  - `deadline` it never stopped painting. Type anyway, best-effort.
+ *  - `blocked`  this agent DOES report readiness and did not, for the whole
+ *               wait. Do not type: the likeliest explanation is that it is
+ *               sitting on something that eats keystrokes, and the worst case
+ *               (claude's trust picker) answers `No, exit` on the submit.
+ *  - `lost`     the tab dropped its PTY; there is nothing to type into. */
+export type AgentReadyOutcome = "ready" | "settled" | "deadline" | "blocked" | "lost";
 
 /** Plain setTimeout, not window.setTimeout: this module is unit-tested
  *  outside a DOM environment, and the handle is never kept. */
@@ -71,12 +80,19 @@ export async function waitForAgentReady(
     paintingDeadlineMs?: number;
     deadlineMs?: number;
     pollMs?: number;
+    /** True when this agent's hooks are installed, so `agentReadyAt` is
+     *  EXPECTED. Turns the quiet heuristic off: with a real readiness signal
+     *  available, guessing is strictly worse, and a wrong guess here is the
+     *  one that kills an agent. Absent hooks the heuristic is all there is,
+     *  so it stays exactly as it was. */
+    hooksOwnReadiness?: boolean;
   } = {},
 ): Promise<AgentReadyOutcome> {
   const quietMs = opts.quietMs ?? READY_QUIET_MS;
   const floorMs = opts.floorMs ?? READY_FLOOR_MS;
   const paintingDeadlineMs = opts.paintingDeadlineMs ?? READY_PAINTING_DEADLINE_MS;
   const pollMs = opts.pollMs ?? POLL_MS;
+  const hooked = opts.hooksOwnReadiness === true;
   const started = Date.now();
   const deadline = started + (opts.deadlineMs ?? READY_DEADLINE_MS);
 
@@ -84,6 +100,14 @@ export async function waitForAgentReady(
     await sleep(pollMs);
     const t = tab();
     if (!t?.ptyId) return "lost";
+    // The agent said so. Short-circuits the floor as well as the quiet
+    // window: those exist to approximate this, and there is nothing left to
+    // approximate once it has arrived.
+    if (t.agentReadyAt) return "ready";
+    // Hooks are installed for this agent, so readiness is reportable and has
+    // not been reported. Every heuristic below would be guessing against a
+    // signal that exists, so none of them run.
+    if (hooked) continue;
     const now = Date.now();
     const quietSince = t.lastOutputAt ?? now;
     if (t.firstOutputAt) {
@@ -91,5 +115,5 @@ export async function waitForAgentReady(
       if (now - started >= paintingDeadlineMs) return "deadline";
     }
   }
-  return "deadline";
+  return hooked ? "blocked" : "deadline";
 }

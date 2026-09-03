@@ -26,9 +26,10 @@ function painted(lastOutputAt: number): TerminalTab {
 
 /** Start the wait and expose its outcome without awaiting it, so a test can
  *  assert what it has NOT done yet while stepping the clock. */
-function start(tab: () => TerminalTab | undefined) {
+function start(tab: () => TerminalTab | undefined, hooksOwnReadiness = false) {
   const state: { outcome?: AgentReadyOutcome } = {};
-  const done = waitForAgentReady(tab).then(o => { state.outcome = o; return o; });
+  const done = waitForAgentReady(tab, { hooksOwnReadiness })
+    .then(o => { state.outcome = o; return o; });
   return { state, done };
 }
 
@@ -108,6 +109,78 @@ describe("waitForAgentReady", () => {
       const { done } = start(() => tab);
       setTimeout(() => { tab = { ...tab, ptyId: undefined }; }, 300);
       await vi.advanceTimersByTimeAsync(1000);
+      expect(await done).toBe("lost");
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+describe("readiness reported by the agent's own hook", () => {
+  it("is taken immediately, without waiting out the floor", async () => {
+    // The floor and the quiet window exist to APPROXIMATE this. Once the
+    // agent has said it, there is nothing left to approximate, and making a
+    // link-delivered prompt sit through 3s of guessing helps nobody.
+    vi.useFakeTimers();
+    try {
+      const tab = { ...spawned(Date.now()), agentReadyAt: Date.now() } as TerminalTab;
+      const { state, done } = start(() => tab, true);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(state.outcome).toBe("ready");
+      expect(await done).toBe("ready");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("blocks rather than guessing when the hook stays silent", async () => {
+    // The bug this exists for. claude's trust picker paints and then goes
+    // quiet, which is byte-for-byte a waiting input box, so the heuristic
+    // called it settled and typed. The submit confirmed the highlighted
+    // `No, exit` and killed the agent. With hooks installed, quiet is no
+    // longer evidence of anything.
+    vi.useFakeTimers();
+    try {
+      const tab = painted(Date.now());
+      const { state, done } = start(() => tab, true);
+      // Long past the point the heuristic would have declared "settled".
+      await vi.advanceTimersByTimeAsync(READY_QUIET_MS + READY_FLOOR_MS + 500);
+      expect(state.outcome).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(READY_DEADLINE_MS);
+      expect(await done).toBe("blocked");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("still settles on quiet for an agent with no hooks", async () => {
+    // The fallback must be untouched: most agents report nothing, and
+    // refusing to type for them would trade a rare dead agent for a
+    // universal undelivered prompt.
+    vi.useFakeTimers();
+    try {
+      const tab = painted(Date.now());
+      const { done } = start(() => tab, false);
+      await vi.advanceTimersByTimeAsync(READY_QUIET_MS + READY_FLOOR_MS + 200);
+      expect(await done).toBe("settled");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("prefers a late hook signal over the painting deadline", async () => {
+    // A chatty agent never looks quiet, so the heuristic gives up at the
+    // painting deadline and types anyway. A hook arriving in that window is
+    // better evidence and must win.
+    vi.useFakeTimers();
+    try {
+      let tab = painted(Date.now());
+      const { state, done } = start(() => tab, true);
+      await vi.advanceTimersByTimeAsync(READY_PAINTING_DEADLINE_MS + 300);
+      expect(state.outcome).toBeUndefined();
+      tab = { ...tab, agentReadyAt: Date.now() } as TerminalTab;
+      await vi.advanceTimersByTimeAsync(300);
+      expect(await done).toBe("ready");
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("reports a lost pty ahead of everything else", async () => {
+    vi.useFakeTimers();
+    try {
+      const { done } = start(() => ({ id: "t1", type: "terminal" } as TerminalTab), true);
+      await vi.advanceTimersByTimeAsync(300);
       expect(await done).toBe("lost");
     } finally { vi.useRealTimers(); }
   });

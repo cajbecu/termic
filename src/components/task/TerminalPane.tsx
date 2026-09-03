@@ -33,7 +33,7 @@ import { loadTerminalRenderer, awaitTerminalFonts } from "@/lib/terminalRenderer
 import { resyncViewportAfterReveal } from "@/lib/xtermViewportSync";
 import { IS_MAC, bindingMatches, type ShortcutId } from "@/lib/shortcuts";
 import { registerTerminalDropTarget } from "@/lib/terminalDrop";
-import { HOOK_OSC_TITLE } from "@/lib/agentHooks";
+import { HOOK_OSC_TITLE, HOOK_OSC_READY_BODY } from "@/lib/agentHooks";
 import { imageFromClipboard, pastePathText } from "@/lib/clipboardImage";
 import { setupImeReplacementBridge } from "@/lib/ime";
 import { deliverMessage, sendMessageToPty } from "@/lib/agentSend";
@@ -270,6 +270,10 @@ export function TerminalPane({ task, tab, active }: Props) {
    *  fraction of one turn; a transport that cannot deliver leaves the fallbacks
    *  armed, which is the behaviour that was there before hooks existed. */
   const hookSeenRef = useRef(false);
+  // Whether this PTY's readiness has been stamped. One patch per PTY lifetime,
+  // like firstOutputAt: `SessionStart` fires again on resume/compact, and a
+  // later stamp would move a readiness that has already been acted on.
+  const agentReadyPatchedRef = useRef(false);
   /** When the user last pressed Escape or Ctrl-C in this tab, and the only
    *  thing that licenses a heuristic to end a turn while hooks own the state.
    *
@@ -1221,6 +1225,7 @@ const captureArmedRef = useRef(false);
     // env and possibly a different sandbox mode, so it has to demonstrate
     // delivery again rather than inherit a claim the previous process earned.
     hookSeenRef.current = false;
+    agentReadyPatchedRef.current = false;
     // Reset sender classification so signal-silent agents (agy, custom CLIs)
     // get submit-window working detection on every respawn, not just the first.
     senderStateRef.current = null;
@@ -1672,6 +1677,26 @@ const captureArmedRef = useRef(false);
       // told apart from whatever the agent decided to notify about. See
       // lib/agentHooks.ts and docs/agent-hooks.md.
       const trusted = parts[1] === HOOK_OSC_TITLE;
+      // READY shares this OSC id and the trusted title with the attention
+      // signal, and is told apart by its body alone. It is NOT attention: it
+      // reports that the agent is past its own startup and a typed message
+      // will reach its input box. Routed before notifyAttention so a ready
+      // session can never badge as needing you.
+      if (trusted && body === HOOK_OSC_READY_BODY) {
+        wdlog("OSC 777 ready (termic hook)", body);
+        dbg("osc777-ready", body.slice(0, 200));
+        if (!hookSeenRef.current) {
+          hookSeenRef.current = true;
+          logWorkState("hook-proven", `cli=${tab.cli} task=${JSON.stringify(task.name)} (via ready)`);
+        }
+        // Stamped once per PTY: seedPrompt waits on it, and a resumed session
+        // re-firing SessionStart must not look like a second, later readiness.
+        if (!agentReadyPatchedRef.current) {
+          agentReadyPatchedRef.current = true;
+          patchTab(task.id, tab.id, { agentReadyAt: Date.now() });
+        }
+        return false;
+      }
       wdlog(`OSC 777 notify${trusted ? " (termic hook)" : ""}`, body);
       dbg("osc777-notify", body.slice(0, 200));
       notifyAttention(`OSC 777 notify`, body, trusted);

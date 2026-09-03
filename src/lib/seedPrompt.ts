@@ -21,7 +21,8 @@
 // copy for that.
 
 import { useApp } from "@/store/app";
-import { sendMessageToPty } from "@/lib/agentSend";
+import { logWorkState } from "@/lib/workStateLog";
+import { deliverMessage } from "@/lib/agentSend";
 import { waitForAgentReady, sleep } from "@/lib/agentReady";
 import type { TerminalTab } from "@/lib/types";
 
@@ -50,12 +51,35 @@ export function seedPromptWhenReady(
       if (Date.now() >= deadline) return;
       await sleep(POLL_MS);
     }
-    if (await waitForAgentReady(defaultTab) === "lost") return;
+    // Does this agent report its own readiness? If so, waiting for it beats
+    // every heuristic, and NOT waiting is what makes this path dangerous.
+    const cli = defaultTab()?.cli;
+    const hooksOwnReadiness = !!cli && useApp.getState().agentHooksInstalled[cli] === true;
+    const outcome = await waitForAgentReady(defaultTab, { hooksOwnReadiness });
+    if (outcome === "lost") return;
+    // The agent reports readiness and never reported it. Something is holding
+    // its startup, and the one case measured is claude's trust picker, where
+    // typing is not merely useless: the submit confirms the highlighted
+    // option, which is `No, exit`, and the agent exits. Losing the prompt is
+    // the better failure, so this gives up without writing a byte.
+    if (outcome === "blocked") {
+      logWorkState("seed-blocked", `${cli} never reported ready; not typing (startup prompt?)`);
+      return;
+    }
     // Re-read: the tab may have restarted onto a fresh PTY while we
     // waited, so never write the prompt into a stale/dead pty.
     const still = defaultTab();
     if (!still?.ptyId) return;
-    sendMessageToPty(still.ptyId, prompt);
+    // Echo-verify unless the agent already told us it is ready. This is the
+    // same protection for agents that report nothing: an input box echoes
+    // what you type, a selection list does not, so a missing echo withholds
+    // the submit rather than pressing Enter on someone else's dialog.
+    try {
+      await deliverMessage(still.ptyId, prompt, { verifyEcho: outcome !== "ready" });
+    } catch (e) {
+      logWorkState("seed-withheld", String(e));
+      return;
+    }
     useApp.getState().patchTab(taskId, still.id, { lastInputAt: Date.now() });
   })();
 }

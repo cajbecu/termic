@@ -15,13 +15,16 @@ vi.mock("@/lib/ipc", () => ({
   taskSetYolo: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("@/lib/runTabs", () => ({ launchSetupTab: vi.fn().mockResolvedValue(true) }));
-vi.mock("@/lib/agentSend", () => ({ sendMessageToPty: vi.fn() }));
+// `deliverMessage`, not `sendMessageToPty`: seedPrompt awaits delivery now,
+// because it withholds the submit when the agent does not echo what was
+// typed. Resolving means "delivered", which is what these assertions mean.
+vi.mock("@/lib/agentSend", () => ({ deliverMessage: vi.fn(() => Promise.resolve()) }));
 
 import { useApp } from "@/store/app";
 import { useRace, latestRace, raceOf } from "@/store/race";
 import { startRace, suggestRaceName } from "@/lib/agentRace";
 import { taskCreate, taskSetYolo } from "@/lib/ipc";
-import { sendMessageToPty } from "@/lib/agentSend";
+import { deliverMessage } from "@/lib/agentSend";
 import type { TerminalTab } from "@/lib/types";
 
 const createCalls = () => (taskCreate as unknown as { mock: { calls: any[][] } }).mock.calls;
@@ -260,19 +263,19 @@ describe("startRace", () => {
 
       // PTY is up, but the agent has not painted: nothing may be typed.
       await vi.advanceTimersByTimeAsync(300);
-      expect(sendMessageToPty).not.toHaveBeenCalled();
+      expect(deliverMessage).not.toHaveBeenCalled();
 
       paint(ids);
       // Painted, but still mid-boot as far as anyone knows.
       await vi.advanceTimersByTimeAsync(1000);
-      expect(sendMessageToPty).not.toHaveBeenCalled();
+      expect(deliverMessage).not.toHaveBeenCalled();
 
       // Quiet stretch elapses -> the same prompt lands in every racer,
       // lastInputAt stamped so work-done detection re-arms (as runPrompt does).
       await vi.advanceTimersByTimeAsync(5000);
-      expect(sendMessageToPty).toHaveBeenCalledTimes(2);
+      expect(deliverMessage).toHaveBeenCalledTimes(2);
       for (const id of ids) {
-        expect(sendMessageToPty).toHaveBeenCalledWith(`pty-${id}`, "do the thing");
+        expect(deliverMessage).toHaveBeenCalledWith(`pty-${id}`, "do the thing", { verifyEcho: true });
         expect((useApp.getState().tabs[id][0] as TerminalTab).lastInputAt).toBeGreaterThan(0);
       }
     } finally {
@@ -293,12 +296,12 @@ describe("startRace", () => {
       // The old fixed settle would have typed here, into a splash screen
       // that drops the text (GH: first prompt lost on a cold start).
       await vi.advanceTimersByTimeAsync(6000);
-      expect(sendMessageToPty).not.toHaveBeenCalled();
+      expect(deliverMessage).not.toHaveBeenCalled();
 
       // An agent that never paints is still typed into eventually: the
       // deadline costs a slow delivery, never a lost one.
       await vi.advanceTimersByTimeAsync(20_000);
-      expect(sendMessageToPty).toHaveBeenCalledTimes(1);
+      expect(deliverMessage).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }

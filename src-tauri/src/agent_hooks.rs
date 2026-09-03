@@ -42,7 +42,14 @@ use std::path::{Path, PathBuf};
 // does not exist in the container, which made every hook in a sandboxed tab a
 // silent no-op. A v2 install is not stale-but-working there, it is dead, which
 // is the strongest reason yet for sync to update installs on its own.
-pub const SCHEMA_VERSION: u32 = 3;
+// v4 registers claude's `SessionStart` as `Signal::Ready`. Without it the only
+// evidence that an agent can accept typed input is that its terminal painted
+// and went quiet, and a blocking startup dialog does exactly that: termic typed
+// its first message into claude's "do you trust this folder?" picker and the
+// submit landed on the highlighted default, `No, exit`. A v3 install types into
+// the dialog exactly as before, so this is stale-and-harmful, not stale-and-
+// quieter. See `Signal::Ready`.
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Directory we create inside the agent's config dir. Also the prefix that
 /// identifies our entries for removal, which is why it must never be renamed
@@ -100,6 +107,22 @@ pub struct HookStatus {
     /// heartbeat that stops a cleared spinner staying gone arrived this way,
     /// and without this every existing install would have silently missed it.
     pub stale: bool,
+    /// At least one entry of OURS is in the config, i.e. the user opted in at
+    /// some point and has not removed it. NOT the same as `installed`, which
+    /// demands every event in TODAY's set.
+    ///
+    /// The distinction is what makes the hook set extensible. `installed` is
+    /// an ALL, so the moment a new event joins an agent's set every existing
+    /// install fails it - and `agent_hooks_sync` skipping anything not
+    /// installed meant adding an event orphaned exactly the installs the sync
+    /// exists to upgrade. Caught the first time it mattered: `SessionStart`
+    /// was added, agy and grok (whose sets were unchanged) upgraded, and
+    /// claude, the agent the event was FOR, silently did not.
+    ///
+    /// Consent is what this tracks, so it is the right gate for an unattended
+    /// upgrade: `remove` deletes every entry of ours, so a user who opted out
+    /// reads false here and is never re-installed behind their back.
+    pub ours_present: bool,
 }
 
 /// What a hook tells termic. Each maps onto an OSC the terminal already
@@ -117,6 +140,19 @@ pub enum Signal {
     /// when we were working, which is why an agent using it needs `Working`
     /// registered too.
     Done,
+    /// The session exists and the agent is past its own startup, so a typed
+    /// message will reach its input box. OSC 777 `notify` like `Attention`,
+    /// distinguished by its BODY (`lib/agentHooks.ts` owns both strings): same
+    /// trusted-sender check, no new OSC id to parse, and it survives the Docker
+    /// three-target write that `Attention` already relies on.
+    ///
+    /// This is the one signal termic cannot approximate from the terminal.
+    /// Everything else here corrects a state the terminal gets WRONG; this one
+    /// reports a state the terminal cannot express at all. A blocking startup
+    /// dialog paints and then goes quiet, which is byte-for-byte what a ready
+    /// agent looks like, so the quiet heuristic says "ready" and the first
+    /// message is typed into a picker whose default answer is destructive.
+    Ready,
 }
 
 impl Signal {
@@ -126,6 +162,7 @@ impl Signal {
             Signal::Attention => "777;notify;termic;agent needs your input",
             Signal::Working => "133;C",
             Signal::Done => "133;D",
+            Signal::Ready => "777;notify;termic;agent ready for input",
         }
     }
     /// Filename stem for the generated script, so one agent's scripts do not
@@ -135,6 +172,7 @@ impl Signal {
             Signal::Attention => "attention",
             Signal::Working => "working",
             Signal::Done => "done",
+            Signal::Ready => "ready",
         }
     }
 
@@ -148,6 +186,7 @@ impl Signal {
             Signal::Attention => "termic: reporting that you are needed",
             Signal::Working => "termic: reporting that this turn started",
             Signal::Done => "termic: reporting that this turn finished",
+            Signal::Ready => "termic: reporting that this session is ready",
         }
     }
 }
@@ -201,7 +240,22 @@ pub fn hooks_for(agent: &str) -> &'static [(&'static str, Signal)] {
         // per turn, and an observer hook that exits 0 with no output cannot
         // affect the tool (the same shape as the rtk hook people already run on
         // this event).
+        //
+        // `SessionStart` fires only once claude is past its own startup, which
+        // notably includes the trust picker: "Is this a project you created or
+        // one you trust?" with `No, exit` highlighted, and NO hook fires while
+        // it is up. Measured. That makes it a true readiness gate rather than a
+        // guess, and it is the only signal that distinguishes a blocking dialog
+        // from a waiting input box, since both paint and then go quiet.
+        //
+        // Trust resolves through the REPO, not the directory: a worktree of an
+        // already-trusted repo inherits it and gets no record of its own, which
+        // is why the picker is not an every-task event. It is the FIRST task in
+        // a repo claude has never run in - a project just added to termic, or a
+        // machine where claude only ever runs through termic. Also measured,
+        // after the opposite was assumed and written down.
         "claude" => &[
+            ("SessionStart", Signal::Ready),
             ("UserPromptSubmit", Signal::Working),
             ("PreToolUse", Signal::Working),
             ("PermissionRequest", Signal::Attention),
@@ -778,18 +832,22 @@ pub fn status(target: &Target) -> HookStatus {
         error: None,
         schema_version: None,
         stale: false,
+        ours_present: false,
     };
     let (Ok(settings), Ok(script)) = (settings, script) else {
         out.error = Some("could not resolve the agent config directory".into());
         return out;
     };
     if schema_for(&agent) == Schema::OpencodePlugin {
-        // A JS file, not JSON: presence IS the install.
+        // A JS file, not JSON: presence IS the install, and there are no
+        // per-event entries, so consent and completeness coincide.
         out.installed = settings.exists();
+        out.ours_present = out.installed;
         out.schema_version = std::fs::read_to_string(script.join(MANIFEST_NAME))
             .ok()
             .and_then(|s| serde_json::from_str::<Manifest>(&s).ok())
             .map(|m| m.schema_version);
+        out.stale = out.ours_present && out.schema_version != Some(SCHEMA_VERSION);
         return out;
     }
     let root = match read_settings(&settings) {
@@ -799,22 +857,31 @@ pub fn status(target: &Target) -> HookStatus {
     out.disabled_all = disable_all_hooks(&root);
     let Ok(prefix) = command_prefix(target) else { return out };
 
-    out.installed = match schema_for(&agent) {
-        // Every registered event must be present, or a partial install would
-        // report as done and quietly miss a signal.
+    match schema_for(&agent) {
         Schema::ClaudeCompatible => {
             let hooks = hooks_for(&agent);
-            !hooks.is_empty() && hooks.iter().all(|(event, _)| {
+            let has = |event: &str| {
                 root.get("hooks")
-                    .and_then(|h| h.get(*event))
+                    .and_then(|h| h.get(event))
                     .and_then(Value::as_array)
                     .is_some_and(|groups| groups.iter().any(|g| {
                         g.get("hooks").and_then(Value::as_array)
                             .is_some_and(|l| l.iter().any(|e| is_ours(e, &prefix)))
                     }))
-            })
+            };
+            // Every registered event must be present, or a partial install
+            // would report as done and quietly miss a signal.
+            out.installed = !hooks.is_empty() && hooks.iter().all(|(event, _)| has(event));
+            // ANY entry is consent. A set that gained an event since this
+            // install was written is incomplete, not absent, and it is the
+            // case sync exists for.
+            out.ours_present = hooks.iter().any(|(event, _)| has(event));
         }
-        Schema::AntigravityNamed => root.get(AGY_HOOK_NAME).is_some(),
+        Schema::AntigravityNamed => {
+            out.installed = root.get(AGY_HOOK_NAME).is_some();
+            // One key we own outright: it is there or it is not.
+            out.ours_present = out.installed;
+        }
         // Handled by the early return above: the plugin is one file we write
         // whole, so there is no config to inspect or merge. Spelled out rather
         // than a catch-all so a NEW schema still fails to compile here.
@@ -825,8 +892,11 @@ pub fn status(target: &Target) -> HookStatus {
         .and_then(|s| serde_json::from_str::<Manifest>(&s).ok())
         .map(|m| m.schema_version);
     // An install predating the manifest has no version at all, which is older
-    // than anything and therefore stale too.
-    out.stale = out.installed && out.schema_version != Some(SCHEMA_VERSION);
+    // than anything and therefore stale too. Keyed on `ours_present`, not
+    // `installed`: an install missing an event ADDED since it was written is
+    // the definition of stale, and keying on the stricter flag made exactly
+    // that case invisible to sync.
+    out.stale = out.ours_present && out.schema_version != Some(SCHEMA_VERSION);
     out
 }
 
@@ -1191,7 +1261,11 @@ pub fn agent_hooks_sync() -> Vec<String> {
             Target::Docker(agent.clone()),
         ] {
             let st = status(&target);
-            if !st.installed || !st.stale || st.error.is_some() || st.disabled_all {
+            // `ours_present`, not `installed`: see its doc comment. Gating
+            // an upgrade on the CURRENT set already being complete means an
+            // upgrade can never add an event, which is most of what an
+            // upgrade is for.
+            if !st.ours_present || !st.stale || st.error.is_some() || st.disabled_all {
                 continue;
             }
             if install(&target).is_ok() && matches!(target, Target::Host(_)) {
@@ -1293,7 +1367,64 @@ mod tests {
     }
 
     #[test]
-    fn install_is_idempotent() {
+fn an_install_missing_a_newly_added_event_is_still_ours() {
+        // The regression that broke the upgrade the first time an event was
+        // added. `installed` is an ALL over today's set, so a config written
+        // before `SessionStart` existed fails it - and sync skipping anything
+        // not installed meant the agent the new event was FOR was the one
+        // agent that never got it. Consent is `ours_present`, and that is what
+        // sync gates on.
+        let mut cfg = serde_json::json!({});
+        for ev in ["UserPromptSubmit", "PreToolUse", "PermissionRequest", "Stop"] {
+            cfg = merge(&cfg, &format!("{P}{ev}.sh"), P, ev, SM);
+        }
+        let hooks = hooks_for("claude");
+        let has = |root: &Value, event: &str| {
+            root.get("hooks").and_then(|h| h.get(event)).and_then(Value::as_array)
+                .is_some_and(|groups| groups.iter().any(|g| {
+                    g.get("hooks").and_then(Value::as_array)
+                        .is_some_and(|l| l.iter().any(|e| is_ours(e, P)))
+                }))
+        };
+        // Exactly the shape `status` computes, without needing a real HOME.
+        let installed = hooks.iter().all(|(e, _)| has(&cfg, e));
+        let ours_present = hooks.iter().any(|(e, _)| has(&cfg, e));
+        assert!(!installed, "a v3 config should NOT satisfy the v4 set");
+        assert!(ours_present, "a v3 config is still ours, and still needs upgrading");
+    }
+
+    #[test]
+fn a_v3_config_gains_the_readiness_event_without_losing_the_others() {
+        // What the self-upgrade actually has to do. A config written by the
+        // build before Ready already carries our four entries; syncing must
+        // ADD SessionStart and leave the rest byte-identical, not rewrite the
+        // file wholesale and not append a second copy of anything.
+        let mut cfg = serde_json::json!({});
+        let v3 = ["UserPromptSubmit", "PreToolUse", "PermissionRequest", "Stop"];
+        for ev in v3 {
+            cfg = merge(&cfg, &format!("{P}{ev}.sh"), P, ev, SM);
+        }
+        let before = cfg.clone();
+        // The sync: re-run install for the CURRENT set, which now includes
+        // the readiness event.
+        let mut after = cfg;
+        for (ev, _sig) in hooks_for("claude") {
+            after = merge(&after, &format!("{P}{ev}.sh"), P, ev, SM);
+        }
+        assert!(after["hooks"]["SessionStart"].is_array(), "readiness event not added");
+        for ev in v3 {
+            assert_eq!(after["hooks"][ev], before["hooks"][ev], "{ev} was disturbed by the upgrade");
+        }
+        // Re-running it changes nothing: sync runs on every launch.
+        let mut again = after.clone();
+        for (ev, _sig) in hooks_for("claude") {
+            again = merge(&again, &format!("{P}{ev}.sh"), P, ev, SM);
+        }
+        assert_eq!(again, after, "sync is not idempotent, so every launch rewrites the config");
+    }
+
+    #[test]
+        fn install_is_idempotent() {
         let once = merge(&serde_json::json!({}), C, P, EVENT, SM);
         let twice = merge(&once, C, P, EVENT, SM);
         assert_eq!(ours_count(&twice), 1, "no duplicate entry");
@@ -1490,6 +1621,57 @@ mod tests {
             assert!(script_body(a, Signal::Attention).trim_end().ends_with("exit 0"));
             assert!(!script_body(a, Signal::Attention).contains('\u{1b}'), "no raw ESC in {a}'s script");
         }
+    }
+
+    #[test]
+    fn claude_registers_a_readiness_event() {
+        // The one signal that is not a correction of something the terminal
+        // got wrong, but a state it cannot express at all. Without it the
+        // first message is typed on a quiet-terminal guess, and claude's trust
+        // picker is quiet with `No, exit` highlighted.
+        let set = hooks_for("claude");
+        assert!(set.contains(&("SessionStart", Signal::Ready)),
+            "claude lost its readiness hook: {set:?}");
+        // Only claude: nobody else was measured, and a guessed event name
+        // installs a hook that never fires and looks like one that does.
+        for agent in ["grok", "agy", "opencode"] {
+            assert!(!hooks_for(agent).iter().any(|(_, s)| *s == Signal::Ready),
+                "{agent} claims Ready without a measurement behind it");
+        }
+    }
+
+    #[test]
+    fn ready_and_attention_share_an_osc_but_never_a_body() {
+        // They are told apart on the TypeScript side by BODY alone
+        // (`lib/agentHooks.ts`), so neither may be a prefix of the other or a
+        // ready session badges as needing you.
+        let ready = Signal::Ready.payload();
+        let attn = Signal::Attention.payload();
+        let pre = "777;notify;termic;";
+        assert!(ready.starts_with(pre) && attn.starts_with(pre));
+        let (rb, ab) = (&ready[pre.len()..], &attn[pre.len()..]);
+        assert!(!rb.starts_with(ab) && !ab.starts_with(rb), "{rb:?} vs {ab:?} are confusable");
+        // Pinned against HOOK_OSC_READY_BODY, which cannot import this. The
+        // two constants are the halves of one contract across the boundary.
+        assert_eq!(rb, "agent ready for input");
+        // Each signal needs its own script filename or one overwrites another.
+        let stems = [Signal::Attention, Signal::Working, Signal::Done, Signal::Ready]
+            .map(|s| s.stem());
+        let mut uniq = stems.to_vec();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), stems.len(), "duplicate script stem: {stems:?}");
+        // User-visible in claude's UI while the hook runs, so it has to
+        // describe the signal actually being sent.
+        assert_ne!(Signal::Ready.status_message(), Signal::Attention.status_message());
+    }
+
+    #[test]
+    fn adding_ready_bumped_the_schema_so_sync_replaces_old_installs() {
+        // The upgrade path rests entirely on this. An install from the build
+        // before Ready must read as stale, or `agent_hooks_sync` skips it and
+        // the user keeps a set that types into startup dialogs forever.
+        assert_eq!(SCHEMA_VERSION, 4, "bump me with the hook set, or installs go stale silently");
     }
 
     #[test]

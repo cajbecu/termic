@@ -21,6 +21,19 @@ export const HOOK_OSC_TITLE = "termic";
  *  your input", which is claude's ignore pattern for its own 60s idle nudge. */
 export const HOOK_OSC_BODY = "agent needs your input";
 
+/** Body of the READY signal (`Signal::Ready`, claude's `SessionStart`). Shares
+ *  the OSC id and the trusted-sender title with the attention body above and is
+ *  told apart by this string alone, so the two must never be prefixes of each
+ *  other: `TerminalPane`'s handler routes on an exact match and would otherwise
+ *  badge a ready session as needing you.
+ *
+ *  It reports the one thing the terminal cannot express. A blocking startup
+ *  dialog (claude's "do you trust this folder?", whose highlighted default is
+ *  `No, exit`) paints and then goes quiet, which is byte-for-byte what a
+ *  waiting input box looks like, so every quiet-based heuristic calls it ready
+ *  and types into it. KEEP IN SYNC with `Signal::Ready`'s payload in Rust. */
+export const HOOK_OSC_READY_BODY = "agent ready for input";
+
 /** The OSC payload without its introducer or terminator: what you would put
  *  between `ESC ]` and `BEL`. Control characters are never written as raw bytes
  *  in this file, only as escapes, so the source stays greppable and a stray

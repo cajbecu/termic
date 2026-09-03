@@ -31,12 +31,53 @@ target.
 
 ## What is installed, per agent
 
-| agent | working | attention | done | interrupt |
-| --- | --- | --- | --- | --- |
-| claude | `UserPromptSubmit`, `PreToolUse` | `PermissionRequest` | `Stop`, guarded on `background_tasks: []` | none exists |
-| grok | `UserPromptSubmit`, `PreToolUse` | `Notification` | `Stop` + `StopCancelled` | `StopCancelled` |
-| agy | `PreInvocation` | none exists (see below) | `Stop`, guarded on `fullyIdle` | none exists |
-| opencode | `chat.message`, `permission.replied` | `permission.asked` | `session.idle` | `session.idle`, on the SECOND escape |
+| agent | ready | working | attention | done | interrupt |
+| --- | --- | --- | --- | --- | --- |
+| claude | `SessionStart` | `UserPromptSubmit`, `PreToolUse` | `PermissionRequest` | `Stop`, guarded on `background_tasks: []` | none exists |
+| grok | not measured | `UserPromptSubmit`, `PreToolUse` | `Notification` | `Stop` + `StopCancelled` | `StopCancelled` |
+| agy | not measured | `PreInvocation` | none exists (see below) | `Stop`, guarded on `fullyIdle` | none exists |
+| opencode | not measured | `chat.message`, `permission.replied` | `permission.asked` | `session.idle` | `session.idle`, on the SECOND escape |
+
+**Ready is the only signal that is not a correction.** Everything else here
+replaces a state the terminal reports WRONG. Ready reports one the terminal
+cannot express at all: whether a typed message will reach the agent's input
+box. A blocking startup dialog paints and then goes quiet, which is
+byte-for-byte what a waiting input box looks like, so every quiet-based
+heuristic calls it ready.
+
+The measured case is claude's trust picker: a repo claude has never run in gets
+`Is this a project you created or one you trust?` with `No, exit` HIGHLIGHTED,
+and no hook fires while it is up, not even `SessionStart`.
+
+Trust resolves through the REPO, not the directory. A worktree of an
+already-trusted repo inherits it and is given no record of its own, so this is
+NOT an every-task event: it is the first task in a project just added to
+termic, or on a machine where claude only ever runs through termic. Measured
+both ways (standalone `git init` prompts, `git worktree add` off a trusted repo
+does not) after the opposite was assumed and written down here. termic's first-message path waited out its 3s floor, saw
+quiet, typed the prompt into the picker and sent the submit 450ms later, which
+confirmed the highlighted option: the agent EXITED. One injection, no retry
+needed. That is why a retry loop is not a fix on its own here, and why
+`seedPromptWhenReady` refuses to type at all when an agent that reports
+readiness has not reported it (`lib/agentReady`, outcome `blocked`).
+
+Ready reuses OSC 777 `notify` with the trusted `termic` title, and is told
+apart from attention by its BODY alone (`HOOK_OSC_READY_BODY` in
+`lib/agentHooks.ts`, pinned on both sides). No new OSC id to parse, and it
+inherits the v3 three-target write that makes hooks work inside Docker.
+
+Only claude registers it. The other agents have plausible-looking candidate
+events, but a guessed event name installs a hook that never fires and is
+indistinguishable from one that does. They keep the echo fallback below.
+
+**Agents without hooks are not left on the old behaviour.** `deliverMessage`
+takes a `verifyEcho` option, used by the first-message path only: it writes the
+text, watches the PTY for the agent echoing it back, and sends the submit only
+if it does. An input box echoes what you type; a selection list does not. That
+is a discriminator rather than another timer, and it is what protects an agent
+whose hooks are not installed. The queue does NOT use it: a queued message is
+only ever sent after a turn ended, which already proves the agent was at its
+input box.
 
 Codex is deliberately excluded: its title already says `Action Required` at
 +22ms, so it stays on the fallback path.
@@ -184,6 +225,46 @@ container transport, which a v2 install does not have at all.
 Sync only touches agents already installed, so it never introduces hooks for
 one the user declined, and re-running `install` preserves the pre-install
 backup (`if !backup.exists()`), so removal stays byte-for-byte.
+
+**It has to be CALLED, and for two releases it was not.** `agent_hooks_sync`
+existed, was registered as a command, was exported as `agentHooksSync`, and
+`AgentHookStatus.stale` was documented as "kept up to date automatically by
+`agentHooksSync`" - and no code path invoked it. Every install therefore stayed
+at whatever `SCHEMA_VERSION` it was created with, forever, reporting
+`installed: true` while missing whatever a later set added. The v3 Docker fix
+shipped this way: a v2 install inside a container is not quieter, it is dead,
+and it would have stayed dead.
+
+`App.tsx` now calls `syncAgentHooks()` at startup, which syncs and THEN reads
+status, so `agentHooksInstalled` reflects the upgraded install rather than the
+one just replaced. This is the mechanism the Ready signal depends on: without
+it, only users who install hooks for the first time after this release would
+get a readiness signal, and everyone already opted in would keep typing into
+startup dialogs.
+
+The consent recorded is "hooks on for this agent", not "these exact scripts".
+That is what makes an unattended upgrade legitimate, and it is also its limit:
+sync may replace a set, never introduce one.
+
+**Sync gates on `ours_present`, never on `installed`, and the difference is
+load-bearing.** `installed` is an ALL over the CURRENT event set, because a
+partial install would otherwise report as done while missing a signal. That is
+right for the UI toggle and catastrophic as an upgrade gate: the moment a new
+event joins an agent's set, every existing install fails the ALL, reads as not
+installed, and is skipped by the sync whose entire job is to add that event.
+
+This was not hypothetical. Adding `SessionStart` and syncing upgraded agy and
+grok, whose sets had not changed, and silently skipped claude, the one agent
+the new event was for. It went unnoticed through a green unit suite because
+every part was individually correct: the merge, the schema bump, the staleness
+rule, the new signal. Only the INTERACTION between "what counts as installed"
+and "what sync will touch" was wrong, and nothing tested a pair.
+
+`ours_present` is ANY entry of ours, i.e. consent, which is the question an
+unattended upgrade should actually be asking. It is safe as a gate because
+`remove` deletes every entry AND the script directory, so an opted-out user
+reads false and is never re-installed behind their back. Pinned by
+`an_install_missing_a_newly_added_event_is_still_ours`.
 
 ## Cloned agents
 

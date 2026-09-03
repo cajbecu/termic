@@ -164,6 +164,9 @@ export interface AppState {
    *  deliberately NOT on every window focus. */
   refreshClis: () => Promise<void>;
   refreshAgentHooks: () => Promise<void>;
+  /** Bring every already-installed agent's hooks up to THIS build's set, then
+   *  re-read status. Startup only. See `syncAgentHooks` in the store body. */
+  syncAgentHooks: () => Promise<void>;
   setActiveTask: (id: string | null) => void;
   /** Union `ids` into mountedTasks WITHOUT changing the active task, so their
    *  TaskViews mount (and their agents spawn) while focus stays put. Agent
@@ -686,6 +689,33 @@ export const useApp = create<AppState>((set, get) => ({
       .catch(() => {});
   },
 
+  // The hook set is versioned (`SCHEMA_VERSION` in agent_hooks.rs) and the
+  // backend already knows how to replace a stale install in place. Nothing
+  // called it, so the mechanism existed and never ran: an install from an
+  // older termic kept reporting `installed: true` while missing whatever the
+  // newer set added, forever, and the user had no way to know. The type
+  // comment on `AgentHookStatus.stale` has claimed this was automatic since it
+  // was written.
+  //
+  // The consent recorded is "hooks on for this agent", not "these exact
+  // scripts", so re-running install for an agent already opted in introduces
+  // nothing the user declined - `agent_hooks_sync` skips anything not already
+  // installed, and refuses the same cases install refuses.
+  //
+  // Ordered BEFORE the status read so `agentHooksInstalled` reflects the
+  // upgraded install rather than the one we just replaced. Best-effort: a
+  // refused sync (unreadable config, disableAllHooks) still leaves a correct
+  // status, just a stale one.
+  syncAgentHooks: async () => {
+    try {
+      const updated = await ipc.agentHooksSync();
+      if (updated.length) logWorkState("hooks-synced", `upgraded: ${updated.join(" ")}`);
+    } catch {
+      // Leave the install as found; the refresh below still reports the truth.
+    }
+    await get().refreshAgentHooks();
+  },
+
   refreshAgentHooks: async () => {
     try {
       const ids = get().agents.filter(a => a.kind !== "terminal").map(a => a.id);
@@ -742,7 +772,7 @@ export const useApp = create<AppState>((set, get) => ({
       const cleared = failCliQueuedPromptsInTabs(
         (s.tabs[taskId] ?? []).map(t =>
           t.type === "terminal"
-            ? { ...t, ptyId: undefined, lastInputAt: null, lastOutputAt: null, firstOutputAt: null, workState: undefined }
+            ? { ...t, ptyId: undefined, lastInputAt: null, lastOutputAt: null, firstOutputAt: null, agentReadyAt: null, workState: undefined }
             : t,
         ),
         "the task was stopped before the queued prompt delivered",

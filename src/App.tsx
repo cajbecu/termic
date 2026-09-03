@@ -84,8 +84,11 @@ export function App() {
     // window focus — `loadAll` re-runs on focus, detection does not.
     useApp.getState().refreshClis();
     // Which agents report their own state. Drives whether the terminal title
-    // is still allowed to end a turn for them (docs/agent-hooks.md).
-    useApp.getState().refreshAgentHooks();
+    // is still allowed to end a turn for them (docs/agent-hooks.md). Syncs
+    // first: an install from an older termic is upgraded to this build's hook
+    // set before its status is read, so a user who opted in once keeps getting
+    // the set that opt-in now means.
+    void useApp.getState().syncAgentHooks();
     // Forge CLI (gh / glab) detection for the PR integrations - same
     // policy as agent CLI detection: startup + Settings visits only.
     void usePr.getState().refreshForges();

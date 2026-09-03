@@ -1190,6 +1190,18 @@ export interface TerminalTab extends BaseTab {
    *  `lastOutputAt`, which is stamped at spawn as well. See
    *  `lib/agentReady` for why prompt injection needs the difference. */
   firstOutputAt?: number | null;
+  /** When the agent's own hook reported the session ready for typed input
+   *  (`Signal::Ready`, claude's `SessionStart`). Null when hooks are not
+   *  installed for this agent, so it is EVIDENCE and never a requirement:
+   *  absence means "unknown", not "not ready", and callers must have a path
+   *  that works without it.
+   *
+   *  It is the only readiness signal that is not a guess. A blocking startup
+   *  dialog paints and then goes quiet, which is what a waiting input box
+   *  looks like from the terminal, so `lib/agentReady`'s heuristic cannot
+   *  tell them apart and typed a first message into claude's trust picker,
+   *  submitting its highlighted default (`No, exit`) and killing the agent. */
+  agentReadyAt?: number | null;
   /** True for the auto-created default tab when entering a task.
    *  Drives the resume-on-spawn decision: default tab resumes the agent's
    *  prior conversation (if any), user-added tabs always start fresh
@@ -1472,9 +1484,16 @@ export interface HookTargetStatus {
   error: string | null;
   schema_version: number | null;
   /** Installed, but from an older termic whose hook set differs. Kept up to
-   *  date automatically by `agentHooksSync`; a value that stays true means the
-   *  update was refused (unreadable config, or disableAllHooks). */
+   *  date automatically by `agentHooksSync` (called from `App.tsx` at startup
+   *  via `syncAgentHooks`); a value that stays true means the update was
+   *  refused (unreadable config, or disableAllHooks). */
   stale: boolean;
+  /** At least one entry of ours is present, i.e. the user opted in and has not
+   *  removed it. Distinct from `installed`, which demands every event in
+   *  TODAY's set: an install predating a newly added event is incomplete, not
+   *  absent, and it is what the sync must act on. Gating the sync on
+   *  `installed` meant adding an event could never reach an existing install. */
+  ours_present: boolean;
 }
 
 /** Per-agent hook state. One toggle governs both targets (see
