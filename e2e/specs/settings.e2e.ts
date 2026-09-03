@@ -2942,6 +2942,20 @@ describe("agent hooks", () => {
     await waitVisible('[data-testid="agent-hooks-toggle"][aria-expanded="true"]');
     const rows = await browser.execute(() => document.body.innerText);
     expect(rows).not.toContain("not supported yet");
+    // The collapsed row's coverage summary. `5 of 5` and `3 of 5` are the same
+    // dim grey sentence apart from one digit, so the state is carried by
+    // colour and an icon and pinned here as `data-state` rather than by
+    // asserting a class name. On a scratch profile nothing is installed, which
+    // is the third state and deliberately NOT a warning: an untouched install
+    // has done nothing wrong, so it gets the invitation and no icon.
+    const summary = await browser.execute(() => {
+      const el = document.querySelector('[data-testid="agent-hooks-summary"]');
+      return el ? { state: el.getAttribute("data-state"), text: el.textContent, icons: el.querySelectorAll("svg").length } : null;
+    });
+    expect(summary).not.toBeNull();
+    expect(summary!.state).toBe("none");
+    expect(summary!.text).toContain("Let agents report their own state");
+    expect(summary!.icons).toBe(0);
     await browser.execute(() => window.__termic!.useApp.getState().closeSettings());
   });
 });

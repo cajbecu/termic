@@ -23,7 +23,7 @@
 // installed for it inside a container. See docs/agent-hooks.md.
 
 import { useCallback, useEffect, useState } from "react";
-import { ChevronRight } from "lucide-react";
+import { ChevronRight, Check, CircleAlert } from "lucide-react";
 import { agentHooksInstall, agentHooksPlan, agentHooksRemove, agentHooksStatus } from "@/lib/ipc";
 import { useApp } from "@/store/app";
 import { Button } from "@/components/ui/Button";
@@ -91,6 +91,12 @@ export function AgentHooksBlock() {
   // still described in docs/agent-hooks.md, where the reasoning belongs.
   const wirable = present.filter(id => status[id]?.supported);
   const installedCount = wirable.filter(id => status[id]?.host.installed).length;
+  /** Some wired, some not. A gap the user can close, which is what earns the
+   *  warning colour. An agent blocked by `disableAllHooks` counts as a gap on
+   *  purpose: its hooks genuinely are not reporting, and the fix (removing
+   *  that setting) is theirs to make, so hiding it would be the dishonest
+   *  half of "5 of 5". */
+  const partial = installedCount > 0 && installedCount < wirable.length;
 
   const refresh = useCallback(async (ids: string[]) => {
     const rows = await Promise.all(
@@ -150,7 +156,40 @@ export function AgentHooksBlock() {
         <span className="rounded bg-[var(--color-accent)]/15 px-1.5 py-0.5 text-[11px] uppercase tracking-wider text-[var(--color-accent)]">
           Experimental
         </span>
-        <span className="ml-auto text-[12.5px] text-[var(--color-fg-dim)]">
+        {/* Collapsed, this line is the only thing reporting coverage, and the
+            count alone made "5 of 5" and "3 of 5" look identical at a glance:
+            both are dim grey text ending in "installed", and the digit doing
+            all the work is the easiest character on the row to skim past.
+            State reads faster as colour and shape than as arithmetic.
+
+            Three states, not two. Nothing installed is the untouched default
+            and gets the invitation, NOT a warning: a fresh install has done
+            nothing wrong, and amber on first sight is a nag. The warning is
+            for a coverage GAP, which only exists once some agents are wired
+            and others are not. */}
+        <span
+          data-testid="agent-hooks-summary"
+          data-state={installedCount === 0 ? "none" : partial ? "partial" : "complete"}
+          title={partial
+            ? "Some detected agents are not reporting their own state. Expand to see which."
+            : undefined}
+          className={cn(
+            "ml-auto flex items-center gap-1.5 text-[12.5px]",
+            // Amber carries the gap; the complete and empty cases stay in the
+            // section's ordinary dim, so the row only pulls the eye when
+            // there is something to act on.
+            partial ? "text-[var(--color-warn)]" : "text-[var(--color-fg-dim)]",
+          )}
+        >
+          {installedCount > 0 && (
+            partial
+              // Not AlertTriangle: this is "incomplete", not "something broke",
+              // and the triangle is the shape this app uses for real trouble.
+              ? <CircleAlert className="h-3.5 w-3.5 shrink-0" aria-hidden />
+              // The tick is the whole signal for the good case, which is why
+              // the text beside it stays dim rather than turning green too.
+              : <Check className="h-3.5 w-3.5 shrink-0 text-[var(--color-ok)]" aria-hidden />
+          )}
           {installedCount > 0
             ? `${installedCount} of ${wirable.length} installed`
             : "Let agents report their own state"}
