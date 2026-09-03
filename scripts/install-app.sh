@@ -78,6 +78,25 @@ if [ -n "$HOLDER" ]; then
   exit 0
 fi
 
-echo "→ Launching $DEST"
-open "$DEST"
+# `-g` (background), NOT a plain `open`. Activating an app on macOS switches
+# the user to whichever Space its window lands on, and a rebuild is the worst
+# possible moment for that: you kicked off `make beta`, went to do something
+# else on another desktop, and get yanked back mid-sentence minutes later.
+# lib.rs already carries the same reasoning for `set_focus` (see
+# `focus_window_unless_e2e`), and the CLI's own auto-launch is `open -ga`
+# for exactly this reason.
+#
+# The app still comes up and still shows its window; it just does not steal
+# the foreground, so whatever Space you are on is the Space you stay on.
+# Cmd-Tab to it when you want it.
+#
+# LAUNCH_FOREGROUND=1 restores the old behaviour for anyone who wants the
+# window in their face when the build lands.
+if [ "${LAUNCH_FOREGROUND:-0}" = "1" ]; then
+  echo "→ Launching $DEST (foreground, LAUNCH_FOREGROUND=1)"
+  open "$DEST"
+else
+  echo "→ Launching $DEST (background: will not switch your Space)"
+  open -g "$DEST"
+fi
 echo "✓ Installed $DEST"
