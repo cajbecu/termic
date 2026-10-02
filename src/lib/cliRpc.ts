@@ -22,6 +22,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useApp } from "@/store/app";
+import { agentSendDisposition } from "@/lib/agentSendDisposition";
 import { waitForAgentReady, hooksOwnStartupReadiness } from "@/lib/agentReady";
 import { usePrefs } from "@/store/prefs";
 import { usePromptLibrary } from "@/store/prompts";
@@ -559,11 +560,24 @@ async function deliverOrQueue(
   // And whatever the agent is doing: a user mid-draft in its prompt. Typing
   // now would land inside their unsubmitted text and Enter would send both
   // as one message, so the prompt queues and follows their draft instead.
-  const busy = !!tab.composing || (capable
-    && ((tab.workState === "working" && !tab.delegatedIdle) || (tab.queue?.length ?? 0) > 0));
-  if (busy) {
+  // The rule itself is `agentSendDisposition`, pure and unit-tested: it is
+  // four flags and the failure mode is a deadlock nobody notices until an
+  // agent has been silent for ten minutes.
+  const how = agentSendDisposition({
+    capable,
+    workState: tab.workState,
+    delegatedIdle: !!tab.delegatedIdle,
+    queued: tab.queue?.length ?? 0,
+    composing: !!tab.composing,
+  });
+  if (how !== "deliver") {
     useApp.getState().enqueueAgentMessage(p.taskId, tab.id, p.prompt, 1, p.promptId);
-    return { mode: "queued", capable };
+    // Delegated-idle with a backlog: nothing is coming to drain it, so release
+    // the whole queue back to back, oldest first. Enqueue-then-flush rather
+    // than delivering ahead of what was already waiting, which would reorder
+    // the conversation to fix a liveness bug.
+    if (how === "queue-flush") useApp.getState().flushAgentQueue(p.taskId, tab.id);
+    return { mode: how === "queue-flush" ? "queued-flushed" : "queued", capable };
   }
   useApp.getState().patchTab(p.taskId, tab.id, { workState: "idle", unread: null });
   await deliverMessage(ptyId, p.prompt);
