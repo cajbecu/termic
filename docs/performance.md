@@ -30,6 +30,8 @@ The window itself is not free and the docs should not pretend otherwise: a secon
 
 `phys_footprint`, not RSS, and not a sum of RSS: summing resident size across a process tree double-counts every shared page (an agent and its children share the binary and every dylib), which reads ~2× reality. `ri_phys_footprint` is what Activity Monitor labels "Memory". Cross-checked against an independent ctypes implementation on the same live process before being believed.
 
+Windows reports the private working set for the same reason (`PrivateWorkingSetSize` from `PROCESS_MEMORY_COUNTERS_EX2`): it is what Task Manager labels "Memory", and it leaves shared image pages out. Cross-checked the same way: for one live process the sampler's working set and private working set were byte-identical to PowerShell's `WorkingSet64` and the `WorkingSetPrivate` performance counter. The commit charge (`PrivateUsage`) was not used: it counts memory that was reserved and never touched, and read 3x the private working set on that process. The pid table there is one ToolHelp snapshot rather than a call per pid, and decision 2 holds: a handle is opened only for processes under one of our roots.
+
 CPU% divides a mach-absolute-time delta by a mach-absolute-time wall delta, so the units cancel and no `mach_timebase_info` conversion is involved — which is the trap it avoids, since that conversion is 1/1 on Intel and 125/3 on Apple silicon (a raw-ticks-as-nanoseconds bug reads 24× low on every current Mac). The timebase is still needed for the cumulative "CPU time" column, and `timebase_is_sane` pins it.
 
 ## Worktree creation

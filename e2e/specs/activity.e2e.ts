@@ -9,10 +9,13 @@
 // the lifecycle assertions matter as much as the numbers: a session that
 // outlives its window is a monitor that costs CPU with nobody watching.
 
+import { tmpdir } from "node:os";
 import {
   waitForAppShell, waitVisible, clickWhenVisible, openTask, waitForAgentReady,
   archiveTask, snap, requireTermicApi,
 } from "../helpers.js";
+
+const isWindows = process.platform === "win32";
 
 /** The Activity window's handle, found by its own entry document. One scan
  *  of the open handles; see `waitForActivityHandle` for the polling version —
@@ -276,21 +279,28 @@ describe("Activity monitor", () => {
     // safety story is the ownership check: without it the webview would be an
     // arbitrary kill(2). Both halves are asserted — the refusal AND that a
     // legitimate stop actually lands.
-    const refused = await browser.execute(async () => {
+    const refused = await browser.execute(async (pid) => {
       try {
-        // launchd. Emphatically not one of our terminals.
-        await window.__termic!.invoke("procmon_signal", { pid: 1, signal: "TERM" });
+        // launchd, or the System process on Windows. Emphatically not one of
+        // our terminals.
+        await window.__termic!.invoke("procmon_signal", { pid, signal: "TERM" });
         return "ALLOWED";
       } catch (e: any) {
         return String(e?.message ?? e);
       }
-    });
+    }, isWindows ? 4 : 1);
     expect(refused).toContain("not part of a Termic terminal");
 
-    const badSignal = await browser.execute(async () => {
+    // Something that outlives the case unless it is stopped. On Windows it is
+    // a cmd.exe with a child, the shape a `.cmd` shim gives every agent row:
+    // stopping the row has to take the child with it.
+    const sleeper = isWindows
+      ? { cwd: tmpdir(), cmd: "cmd.exe", args: ["/d", "/c", "ping -n 60 127.0.0.1"] }
+      : { cwd: "/tmp", cmd: "/bin/sh", args: ["-c", "sleep 30"] };
+    const badSignal = await browser.execute(async (sleeper) => {
       const t = window.__termic!;
       const spawned = await t.ipc.ptySpawn({
-        cwd: "/tmp", cmd: "/bin/sh", args: ["-c", "sleep 30"],
+        ...sleeper,
         env: {}, rows: 24, cols: 80, owner: { kind: "shell" },
       });
       // Find our own pid through the sampler, then try an unsupported signal.
@@ -318,7 +328,7 @@ describe("Activity monitor", () => {
       }
       await t.invoke("procmon_stop", { session: first.session });
       return { err, pid: row.pid, aliveAfterTerm };
-    });
+    }, sleeper);
     expect(badSignal.err).toContain("unsupported signal");
     expect(badSignal.pid).toBeGreaterThan(1);
     expect(badSignal.aliveAfterTerm).toBe(false);
@@ -338,12 +348,23 @@ describe("Activity monitor", () => {
       const app = second.rows.find((r: any) => r.kind === "app");
       return {
         appPids: (app?.children ?? []).map((c: any) => c.pid),
+        appLabels: (app?.children ?? []).map((c: any) => c.label as string),
+        webkitUnavailable: second.webkitUnavailable as boolean,
         ptyPids: second.rows.filter((r: any) => r.ptyId).map((r: any) => r.pid),
       };
     });
     expect(shape.ptyPids.length).toBeGreaterThan(0);
     for (const pid of shape.ptyPids) {
       expect(shape.appPids).not.toContain(pid);
+    }
+    // On Windows the webview's processes are the app's own descendants, so
+    // the Termic row holds them with no attribution step, UNLESS another
+    // Termic on the same WebView2 data folder started first and owns the one
+    // browser process (a developer running the suite beside the installed
+    // app). Either the row has them or it says it does not: what must never
+    // happen is the row silently losing most of its memory.
+    if (isWindows) {
+      expect(shape.webkitUnavailable).toBe(!shape.appLabels.includes("msedgewebview2"));
     }
   });
 });

@@ -56,16 +56,20 @@ mod mcp_server;
 mod linux_desktop;
 
 mod procmon_common;
-// macOS: real libproc/mach FFI. Linux: /proc. Everything else: a stub that
-// answers "unsupported on this OS" — see procmon_other.rs's module doc.
+// macOS: real libproc/mach FFI. Linux: /proc. Windows: a ToolHelp snapshot.
+// Everything else: a stub that answers "unsupported on this OS" — see
+// procmon_other.rs's module doc.
 // The macOS FFI fails to LINK (not just behave wrong) if it ends up in a
-// non-macOS build, which is what shipped broken before this 3-way split.
+// non-macOS build, which is what shipped broken before this split.
 #[cfg(target_os = "macos")]
 mod procmon;
 #[cfg(target_os = "linux")]
 #[path = "procmon_linux.rs"]
 mod procmon;
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+#[path = "procmon_windows.rs"]
+mod procmon;
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 #[path = "procmon_other.rs"]
 mod procmon;
 mod docker;

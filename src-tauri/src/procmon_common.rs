@@ -2,8 +2,9 @@
 //! shapes every platform reports, and the pure logic (subtree walking, CPU
 //! ratio math, workload labeling, the signal whitelist) that has no
 //! syscalls in it and so needs writing only once. `procmon.rs` (macOS,
-//! libproc/mach FFI) and `procmon_linux.rs` (/proc) both build on this;
-//! `procmon_other.rs` (every other OS) uses only the row shapes.
+//! libproc/mach FFI), `procmon_linux.rs` (/proc) and `procmon_windows.rs`
+//! (ToolHelp) all build on this; `procmon_other.rs` (every other OS) uses
+//! only the row shapes.
 
 use std::collections::{HashMap, HashSet};
 
@@ -180,8 +181,8 @@ pub fn label_for(
 
 /// Signals the monitor is allowed to send. Deliberately small: this is a
 /// process manager for OUR agents, not a general-purpose `kill`. Unix
-/// only: the monitor itself is (procmon_other.rs answers "unsupported"
-/// everywhere else).
+/// only: Windows has no signals, and procmon_windows.rs maps the same names
+/// to what it can do instead.
 #[cfg(unix)]
 pub fn signal_from_name(name: &str) -> Option<libc::c_int> {
     match name {

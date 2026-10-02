@@ -34,6 +34,7 @@ import {
   type ActivityRow, type Sort, type SortColumn,
 } from "@/lib/activityGroups";
 import { cn } from "@/lib/utils";
+import { IS_WINDOWS } from "@/lib/platform";
 import { usePrefs } from "@/store/prefs";
 import { subscribeActivityTitles } from "@/lib/activityTitleBridge";
 
@@ -410,6 +411,10 @@ function KindIcon({ kind }: { kind: string }) {
 function Row({ row }: { row: ActivityRow }) {
   const { t } = useTranslation("chrome");
   const canSignal = row.ptyId !== null;
+  // Windows has no signals: the same three buttons suspend, resume and end
+  // the row's whole process tree (procmon_windows.rs), so the tooltips must
+  // not name a SIGSTOP that is never sent.
+  const tip = (key: string) => t(`activity.${key}${IS_WINDOWS ? "Windows" : ""}`);
   return (
     <>
       <div
@@ -441,15 +446,15 @@ function Row({ row }: { row: ActivityRow }) {
           {canSignal && (
             <span className="ml-auto flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
               <SignalButton
-                pid={row.pid} signal="STOP" title={t("activity.pauseProc")}
+                pid={row.pid} signal="STOP" title={tip("pauseProc")}
                 icon={<Pause className="h-3 w-3" />}
               />
               <SignalButton
-                pid={row.pid} signal="CONT" title={t("activity.resumeProc")}
+                pid={row.pid} signal="CONT" title={tip("resumeProc")}
                 icon={<PlayCircle className="h-3 w-3" />}
               />
               <SignalButton
-                pid={row.pid} signal="TERM" title={t("activity.stopProc")}
+                pid={row.pid} signal="TERM" title={tip("stopProc")}
                 icon={<Skull className="h-3 w-3" />}
               />
             </span>

@@ -28,11 +28,9 @@ export const config: WebdriverIO.Config = {
 
   specs: [path.join(repoRoot, "e2e", "specs", "**", "*.e2e.ts")],
   // Specs for features a platform does not have: Touch ID for sudo is
-  // macOS only, and the Activity monitor (procmon) is macOS / Linux, not
-  // Windows (docs/windows.md).
+  // macOS only.
   exclude: [
     ...(process.platform === "darwin" ? [] : ["sudo-touchid"]),
-    ...(process.platform === "win32" ? ["activity"] : []),
   ].map(n => path.join(repoRoot, "e2e", "specs", `${n}.e2e.ts`)),
   maxInstances: 1,
 

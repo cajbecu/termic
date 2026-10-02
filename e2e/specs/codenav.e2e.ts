@@ -579,8 +579,7 @@ describe("code intelligence", () => {
     await ensureActiveTask(taskId);
   });
 
-  // The Activity monitor is macOS / Linux only (procmon_other.rs).
-  (process.platform === "win32" ? it.skip : it)("lists the server in Activity, where it can be stopped", async () => {
+  it("lists the server in Activity, where it can be stopped", async () => {
     // These are the first thing termic runs that can cost more than every
     // agent in the window combined, so they are sampled like everything else
     // rather than described in a settings pane.

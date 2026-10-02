@@ -137,7 +137,6 @@ that pin the unix layouts are `#[cfg(unix)]`
   `http://taskpdf.localhost/` on Windows, and the CSP's `object-src` does not
   cover it (`previewPaths.ts`). A CSP change: maintainer only
   (`src/lib/cspGuard.test.ts`).
-- **Activity monitor** (`procmon_other.rs` answers "unsupported").
 - Remaining macOS copy: the Settings sandbox text in `RepositorySection.tsx`
   and `TaskSandboxDialog.tsx` describes Seatbelt, which Windows never shows
   as a choice but still explains.

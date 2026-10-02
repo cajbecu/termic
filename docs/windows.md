@@ -148,6 +148,19 @@ Each of these is a deliberate choice; the reasoning lives next to the code.
   `"$TERMIC_CLI" hook-emit "$TERMIC_PTY"` (`bound_emits`). Claude only for
   now: its hooks run in Git Bash. An end-to-end test runs claude's real
   scripts on the Windows runner.
+- **Activity monitor.** `procmon_windows.rs`: one ToolHelp snapshot is the
+  pid table, and only the processes under one of our roots are opened.
+  Memory is the private working set, the figure Task Manager's Memory column
+  shows. A parent pid is kept only when the child is younger than the parent
+  (the rule `proc_ctl` uses, for the same reason). WebView2's processes are
+  the app's own descendants, so they are in the Termic row with no
+  attribution step, except when another Termic on the same WebView2 data
+  folder started first (a dev or e2e build beside the installed app): there
+  is one browser process per folder, the later instance's renderers hang
+  under the other app, and its Termic row says the webview is not
+  attributable. There are no signals: Stop ends the row's process tree,
+  and Pause / Resume suspend and resume all of it (`NtSuspendProcess`),
+  counted so that one Resume undoes any number of Pauses.
 - **Editor.** A file whose line breaks are all CRLF is saved as CRLF.
 - **Language servers.** The pinned downloads have Windows x64 and arm64
   entries; a server in the checkout is looked up in `.venv\Scripts` and as
@@ -179,6 +192,6 @@ install.
   Windows is unmeasured, so theirs are not offered yet.
 - **Installing `termic` onto PATH** from Settings. Agents inside Termic
   still get it.
-- **Activity monitor**, **PDF preview** (needs a CSP change), and **code
-  signing** (updates work; the installer is not Authenticode-signed, so
-  SmartScreen warns on the first install).
+- **PDF preview** (needs a CSP change) and **code signing** (updates work;
+  the installer is not Authenticode-signed, so SmartScreen warns on the
+  first install).
