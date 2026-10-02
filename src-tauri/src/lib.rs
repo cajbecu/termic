@@ -2335,6 +2335,38 @@ fn apply_cli_default_migration(s: &mut Settings) -> bool {
     true
 }
 
+/// One-time flip of `auto_install_hooks` to true, so work-state signals are on
+/// for everyone instead of only for the people who found the setting.
+///
+/// Hooks are what make a tab report busy/idle/waiting rather than termic
+/// guessing from output, so leaving them off by default meant the headline
+/// behaviour of the app was opt-in. The install itself is not new or
+/// unguarded: `agent_hooks_sync` already refuses an agent whose config cannot
+/// be read, one carrying `disableAllHooks`, and anything not on PATH, and it
+/// keeps the pre-install backup that makes removal clean.
+///
+/// Same one-shot shape as `migrate_cli_enabled_default`, including its honest
+/// cost: a `false` on disk cannot be distinguished from a deliberate decline,
+/// so this does override the minority who turned it off. The marker means it
+/// happens once, and turning it off afterwards sticks.
+fn migrate_hooks_auto_default() {
+    let mut s = load_settings_inner();
+    if apply_hooks_auto_default_migration(&mut s) {
+        let _ = save_settings_inner(&s);
+    }
+}
+
+/// Pure half, testable without a settings file for the same reason its sibling
+/// is (`TERMIC_DATA_DIR` is process-global and would race parallel tests).
+fn apply_hooks_auto_default_migration(s: &mut Settings) -> bool {
+    if s.hooks_auto_default_migrated {
+        return false;
+    }
+    s.auto_install_hooks = true;
+    s.hooks_auto_default_migrated = true;
+    true
+}
+
 /// Exclusive migration lock, released on drop. Guards against two concurrent
 /// launches migrating the same data dir at once (the app is single-instance in
 /// practice, but nothing enforces it — a double-click or a stray second dev
@@ -21060,6 +21092,18 @@ pub struct Settings {
     /// nearly every `false` on disk is the default rather than a decision.
     #[serde(default)]
     pub cli_default_migrated: bool,
+    /// Whether the one-time flip of `auto_install_hooks` to true has run
+    /// (`migrate_hooks_auto_default`). False/absent means it has not.
+    ///
+    /// Same shape and the same accepted cost as `cli_default_migrated`: the
+    /// flip happens ONCE and stamps this, so anyone who turns hooks back off
+    /// keeps them off forever after. The cost is real and worth naming: hooks
+    /// shipped OFF by default, so a `false` on disk cannot be told apart from
+    /// a deliberate decline, and this overrides the few who declined. They get
+    /// it back with one toggle, and `agent_hooks_sync` refuses an agent whose
+    /// config is unreadable or carries `disableAllHooks` either way.
+    #[serde(default)]
+    pub hooks_auto_default_migrated: bool,
     /// One-time marker for the launch-time auto-install of the `termic`
     /// command into `~/.local/bin`.
     ///
@@ -24649,6 +24693,7 @@ pub fn run() {
             // the migrated value; cli_enabled is re-read per request, so even
             // an in-flight one picks it up.
             migrate_cli_enabled_default();
+            migrate_hooks_auto_default();
             // The main window is created HERE (not in tauri.conf.json) so the
             // macOS traffic-light inset can be chosen per-OS. macOS Tahoe (26+)
             // stopped vertically centering the window controls in an overlay
@@ -25387,6 +25432,53 @@ fn position_on_cursor_monitor(win: &tauri::WebviewWindow) -> Result<(), Box<dyn 
 
 #[cfg(test)]
 mod tests {
+
+    // ───────── hooks on by default, once ─────────
+
+    #[test]
+    fn the_hooks_default_flips_on_for_an_install_that_predates_it() {
+        let mut s = crate::Settings::default();
+        assert!(!s.auto_install_hooks, "precondition: shipped off");
+        assert!(super::apply_hooks_auto_default_migration(&mut s));
+        assert!(s.auto_install_hooks);
+        assert!(s.hooks_auto_default_migrated);
+    }
+
+    #[test]
+    fn turning_hooks_off_after_the_flip_sticks() {
+        // THE case the marker exists for. Without it the migration would
+        // re-enable hooks on every launch and the setting would be unusable:
+        // the user turns it off, relaunches, and it is on again.
+        let mut s = crate::Settings::default();
+        super::apply_hooks_auto_default_migration(&mut s);
+        s.auto_install_hooks = false;            // the user declines, after
+        assert!(!super::apply_hooks_auto_default_migration(&mut s));
+        assert!(!s.auto_install_hooks, "a later opt-out must survive relaunch");
+    }
+
+    #[test]
+    fn the_flip_is_idempotent_and_writes_once() {
+        let mut s = crate::Settings::default();
+        assert!(super::apply_hooks_auto_default_migration(&mut s));
+        // False means "nothing changed, do not write", which is what keeps a
+        // best-effort migration from rewriting settings.json on every launch.
+        assert!(!super::apply_hooks_auto_default_migration(&mut s));
+        assert!(!super::apply_hooks_auto_default_migration(&mut s));
+    }
+
+    #[test]
+    fn it_leaves_an_already_on_install_alone_but_still_stamps() {
+        // Somebody who opted in before this shipped: nothing to change about
+        // the value, but the marker has to land or the next launch would be
+        // free to flip it back on after they turn it off.
+        let mut s = crate::Settings::default();
+        s.auto_install_hooks = true;
+        assert!(super::apply_hooks_auto_default_migration(&mut s));
+        assert!(s.hooks_auto_default_migrated);
+        s.auto_install_hooks = false;
+        assert!(!super::apply_hooks_auto_default_migration(&mut s));
+        assert!(!s.auto_install_hooks);
+    }
 
     // ───────── ⌘Q asks before it kills work ─────────
     //
