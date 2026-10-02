@@ -4,6 +4,56 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
+## [1.12.0] - 2026-10-02
+
+Azure DevOps, the Cursor CLI, and agent hooks on by default.
+
+### Features
+- **Azure DevOps.** A third forge beside GitHub and GitLab: detected remotes,
+  PR status, checks, reviewers and comments, Boards work items in the issue
+  picker, and PR creation, all through the `az` CLI. Thanks to
+  [@kaceper11](https://github.com/kaceper11).
+- **Per-repo pull requests on a multi-repo task.** Each member's own PR and CI
+  show in the Git tab and on its board card, polled by the branch actually
+  checked out, plus an "update all repos" action that pulls or rebases every
+  member on its own base. Thanks to
+  [@kaceper11](https://github.com/kaceper11).
+- **Cursor CLI** joins the built-in agents, with its login persisted in Docker
+  mode like claude and codex.
+- **Agent hooks are on by default.** They are what let a tab report working,
+  needs you and done instead of Termic guessing from output, and they were
+  opt-in. They turn on once at the next launch; Settings, Agents turns them
+  back off and that sticks. They are never installed for an agent whose config
+  cannot be read or that sets `disableAllHooks`.
+- **Quit asks before it stops an agent mid-turn.** Only when there is
+  something to lose: an agent working, or a queued message that would die
+  unsent. A window of finished tasks still quits without a word.
+- **A launcher entry for the Linux AppImage.** An AppImage registers nothing
+  when it runs, so Termic had no menu entry, no icon and no handler for
+  `termic://` links. The welcome wizard offers to add one, and Settings,
+  General does it later.
+- **Right-click a terminal** for Copy, Paste and Select all.
+- **The Activity monitor works on Windows.**
+
+### Bug fixes
+- **Creating a worktree task on Windows could delete the worktree it was
+  registering.** Git reports its own path spelling (`C:/x`) and the
+  registered-vs-orphan check compared it raw against Windows' (`C:\x`), so a
+  live worktree read as an abandoned directory. Thanks to
+  [@kaceper11](https://github.com/kaceper11).
+- **Archiving a task announced that its agent had exited.**
+- **A codex tab could end every task with its prompt never sent**, because
+  codex fires its session-start hook on the first submit rather than at
+  startup, so waiting for it guaranteed a timeout. Thanks to
+  [@kaceper11](https://github.com/kaceper11).
+- **Text on Windows had colour fringes**, from ClearType's subpixel
+  antialiasing; it is grayscale now.
+- **The YOLO bolt showed on tasks with nothing running**, where there is no
+  agent and so nothing it can do. It is also an outline now rather than a
+  solid red fill.
+- **A long reviewer name overflowed the PR card's row.** Thanks to
+  [@kaceper11](https://github.com/kaceper11).
+
 ## [1.11.3] - 2026-09-30
 
 A kanban board over every task, and multi-repo tasks pick their own members.
