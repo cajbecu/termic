@@ -52,8 +52,14 @@ export function ContextMenuItem({ children, className, onSelect, disabled, destr
   return (
     <CM.Item
       aria-label={ariaLabel}
-      role={checked !== undefined ? "menuitemradio" : undefined}
-      aria-checked={checked}
+      // SPREAD, never `role={... : undefined}`. Radix sets `role="menuitem"`
+      // itself, and an explicit `undefined` passed after it wins the prop
+      // merge, so React omitted the attribute entirely: every plain item in
+      // every context menu in the app rendered with NO role, and a screen
+      // reader had nothing to announce them as. Invisible until the terminal
+      // menu's spec became the first to look for `[role="menuitem"]` inside a
+      // ContextMenu, and then it failed on both platforms at once.
+      {...(checked !== undefined ? { role: "menuitemradio", "aria-checked": checked } : {})}
       onSelect={onSelect}
       disabled={disabled}
       className={cn(
