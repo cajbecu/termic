@@ -11,6 +11,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Plus } from "lucide-react";
 import { Terminal } from "@xterm/xterm";
+import { TerminalContextMenu } from "./TerminalContextMenu";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
@@ -471,13 +472,15 @@ export function AuxTerminal({ taskId, tabId, taskPath, active, autoFocus, onExit
           onAction={() => setGen(g => g + 1)}
         />
       )}
-      <div
-        ref={hostRef}
-        className="min-h-0 w-full flex-1"
-        // Only meaningful when the caller primed the prompt; absent otherwise
-        // so an ordinary scratch shell grows no attribute it does not need.
-        data-initial-input={initialInput ? (primed ? "sent" : "pending") : undefined}
-      />
+      <TerminalContextMenu termRef={termRef}>
+        <div
+          ref={hostRef}
+          className="min-h-0 w-full flex-1"
+          // Only meaningful when the caller primed the prompt; absent otherwise
+          // so an ordinary scratch shell grows no attribute it does not need.
+          data-initial-input={initialInput ? (primed ? "sent" : "pending") : undefined}
+        />
+      </TerminalContextMenu>
     </div>
   );
 }

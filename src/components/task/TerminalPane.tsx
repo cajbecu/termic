@@ -42,6 +42,7 @@ import { lastAgentLine } from "@/lib/resumeTail";
 import { parseUsageBody } from "@/lib/agentUsage";
 import { parseContextBody } from "@/lib/agentContext";
 import { FooterAgentChip } from "./AgentChip";
+import { TerminalContextMenu } from "./TerminalContextMenu";
 import { footerChipMode, moreMarkerClass } from "./footerChipMode";
 import { activeFooterAgent, footerAgentIds, footerAgentKey } from "@/lib/footerAgents";
 import { useAgentUsage } from "@/store/agentUsage";
@@ -3908,7 +3909,9 @@ const captureArmedRef = useRef(false);
       )}
       {/* data-* hooks: the terminal renders to a WebGL canvas, so e2e has no
           text to select this pane by (see the drop spec in files.e2e.ts). */}
-      <div ref={hostRef} data-terminal-host={tab.id} className="min-h-0 flex-1 bg-[var(--color-bg)]" />
+      <TerminalContextMenu termRef={termRef}>
+        <div ref={hostRef} data-terminal-host={tab.id} className="min-h-0 flex-1 bg-[var(--color-bg)]" />
+      </TerminalContextMenu>
       {pathMenu && (
         <TerminalPathMenu
           x={pathMenu.x}

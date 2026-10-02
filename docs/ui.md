@@ -781,6 +781,17 @@ Two gestures, one landing point (`lib/terminalDrop.ts`): every terminal host reg
 
 Both share the hit test and the `.termic-drop-target` highlight, so they agree on where a drop lands.
 
+## Right-click in a terminal
+
+Every xterm (agent tabs, shell tabs, the scratch shell) has a context menu:
+Copy, Paste, Select all (`TerminalContextMenu.tsx`, wrapping the xterm host
+element). Copy is disabled until the terminal has a selection, read when the
+menu opens. A paste goes through `term.paste`, so it is bracketed exactly
+like a keyboard paste. The clipboard goes through the Rust clipboard plugin
+(`clipboard-manager:allow-read-text` / `allow-write-text`), not
+`navigator.clipboard`, for the reason `lib/clipboard.ts` gives: a Radix
+menu's onSelect carries no user gesture in WKWebView.
+
 ## Find in terminal
 
 ⌘F (Ctrl+Shift+F elsewhere) opens `TerminalFindBar` over any terminal: agent and shell tabs, and the footer shell. Every match gets a wash of the accent the moment the query changes; the current one gets a stronger wash and an accent outline (and xterm's selection colour, since the addon selects it), with a "3 of 12" count. Reopening on a kept query highlights again straight away.

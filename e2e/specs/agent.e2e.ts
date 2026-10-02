@@ -49,6 +49,9 @@ import {
   waitForAttr,
   setInputValue,
   textOf,
+  clickMenuItem,
+  readClipboard,
+  waitGone,
 } from "../helpers";
 
 /** ms since the task's agent tab last produced PTY bytes. Not in the DOM. */
@@ -239,6 +242,102 @@ describe("terminal IME", () => {
 // file (sniffing the format from the bytes, not from a claimed name), and the
 // capture-phase listener on the terminal actually consuming an image paste
 // while leaving an ordinary text paste alone.
+// The terminal's right-click menu (TerminalContextMenu). The keyboard already
+// copies and pastes, but the bindings differ per platform and a menu is where
+// someone looks when the one they tried did nothing.
+describe("terminal right-click menu", () => {
+  let taskId!: string;
+  before(async () => {
+    await waitForAppShell();
+    await requireTermicApi();
+    taskId = await openTask("term-menu");
+    await waitForAgentReady(taskId);
+  });
+  after(async () => {
+    if (taskId) await archiveTask(taskId);
+  });
+
+  const MENU = '[data-testid="terminal-context-menu"]';
+
+  /** Right-click the agent terminal and wait for its menu. */
+  const openMenu = async () => {
+    await ensureActiveTask(taskId);
+    await browser.execute((id) => {
+      const host = document.querySelector(`[data-task-id="${id}"] [data-terminal-host]`) as HTMLElement | null;
+      if (!host) throw new Error("no terminal host for the task");
+      const r = host.getBoundingClientRect();
+      host.dispatchEvent(new MouseEvent("contextmenu", {
+        bubbles: true, cancelable: true, button: 2,
+        clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+      }));
+    }, taskId);
+    await waitVisible(MENU);
+  };
+
+  /** One menu entry: is it there, and can it be chosen? */
+  const item = (text: string) =>
+    browser.execute((sel, t) => {
+      const el = [...document.querySelectorAll(`${sel} [role="menuitem"]`)]
+        .find(e => e.textContent?.trim() === t);
+      return el ? { disabled: el.hasAttribute("data-disabled") } : null;
+    }, MENU, text) as Promise<{ disabled: boolean } | null>;
+
+  const choose = async (text: string) => {
+    await clickMenuItem(text);
+    await waitGone(MENU);
+  };
+
+  it("offers copy, paste and select all, with copy off until something is selected", async () => {
+    await openMenu();
+    expect(await item("Copy")).toEqual({ disabled: true });
+    expect(await item("Paste")).toEqual({ disabled: false });
+    expect(await item("Select all")).toEqual({ disabled: false });
+    await snap("terminal-context-menu.png");
+    await choose("Select all");
+
+    // Now there is a selection, and the same menu says so.
+    await openMenu();
+    expect(await item("Copy")).toEqual({ disabled: false });
+    await choose("Copy");
+    // The fixture's banner is on screen from the moment it is ready.
+    await browser.waitUntil(async () => readClipboard().includes("FAKE-AGENT ready"), {
+      timeout: 10_000,
+      timeoutMsg: "Copy never put the terminal's text on the clipboard",
+    });
+  });
+
+  it("pastes the clipboard into the terminal", async () => {
+    // Put a token on the clipboard through the app's own clipboard plugin, so
+    // the case needs no per-OS clipboard tool to write it.
+    const token = `menu-paste-${Date.now()}`;
+    await browser.execute(async (text) => {
+      const internals = (window as unknown as {
+        __TAURI_INTERNALS__: { invoke: (cmd: string, args: unknown) => Promise<unknown> };
+      }).__TAURI_INTERNALS__;
+      await internals.invoke("plugin:clipboard-manager|write_text", { text });
+    }, token);
+
+    await openMenu();
+    await choose("Paste");
+
+    // Terminal text is not in the DOM (it is a WebGL canvas), so read it back
+    // the way a user would: select all, copy. The shell echoes what was
+    // pasted, so the token shows up in the terminal's own text, on the same
+    // line as the fixture's prompt rather than alone on the clipboard.
+    await browser.waitUntil(
+      async () => {
+        await openMenu();
+        await choose("Select all");
+        await openMenu();
+        await choose("Copy");
+        const text = readClipboard();
+        return text.includes("FAKE-AGENT ready") && text.includes(token);
+      },
+      { timeout: 15_000, interval: 500, timeoutMsg: "the pasted text never appeared in the terminal" },
+    );
+  });
+});
+
 describe("image paste", () => {
   let taskId!: string;
   after(async () => {

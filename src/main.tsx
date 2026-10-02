@@ -25,9 +25,9 @@ import { initWindowFocus } from "@/lib/windowFocus";
 // not happy with the double-invoke discipline. Re-enable if we add expensive
 // pure effects that benefit from the duplicate-call check.
 
-// Suppress the WKWebView native right-click context menu app-wide. xterm
-// terminals and CodeMirror still get their selection/copy via keyboard
-// shortcuts; we don't want browser-style "Reload"/"Inspect" menus showing.
+// Suppress the WKWebView native right-click context menu app-wide: we don't
+// want browser-style "Reload"/"Inspect" menus showing. Terminals draw their
+// own (TerminalContextMenu); CodeMirror keeps its keyboard shortcuts.
 window.addEventListener("contextmenu", (e) => e.preventDefault());
 
 // Boot marker: lets us confirm a webview reload actually picked up the latest
