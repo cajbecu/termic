@@ -4,7 +4,7 @@ All notable changes to Termic, newest first. This file is the human-authored
 source of truth: the in-app Update card and the /changelog page on termic.dev
 are generated from it. See the `release` skill for how entries are added.
 
-## [1.12.0] - 2026-10-02
+## [1.12.1] - 2026-10-02
 
 Azure DevOps, the Cursor CLI, and agent hooks on by default.
 
@@ -53,6 +53,9 @@ Azure DevOps, the Cursor CLI, and agent hooks on by default.
   solid red fill.
 - **A long reviewer name overflowed the PR card's row.** Thanks to
   [@kaceper11](https://github.com/kaceper11).
+- **Messages between agents could pile up unsent.** An agent waiting on
+  subagents it started has no turn left to end, so nothing was ever going to
+  deliver what had queued behind it. Those messages now go through.
 
 ## [1.11.3] - 2026-09-30
 
