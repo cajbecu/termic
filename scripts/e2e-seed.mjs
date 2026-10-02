@@ -80,6 +80,15 @@ export function seed(o = {}) {
     );
   }
 
+  // An identity for the fixture itself, in its own config. The specs commit
+  // here with a bare `git commit`, and so does the app when a case drives the
+  // Commit button; on a machine with no global identity (a fresh install, a
+  // container) every one of those died with "Author identity unknown" and
+  // took the whole git spec file with it. Every run, not only when the
+  // fixture is created, so an already-seeded checkout picks it up too.
+  sh("git config user.email e2e@termic.dev", fixture);
+  sh("git config user.name e2e", fixture);
+
   // 1a. A committed 1x1 PNG, so the image-diff spec has a HEAD side to compare
   // against. Separate from the block above (which only runs for a brand-new
   // fixture) so an already-seeded checkout picks it up too.

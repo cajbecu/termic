@@ -1246,6 +1246,13 @@ export async function onNotifyClick(cb: (route: NotifyRoute) => void): Promise<(
  *  (e.g. when the user enables Desktop notifications in Settings) so the
  *  system dialog appears in context rather than mid-task. */
 export async function ensureNotifyPermission(): Promise<boolean> {
+  // The e2e build never notifies. On macOS it never could (the unbundled
+  // binary has no permission, so this returned false anyway), but Windows
+  // needs no permission: every fake agent finishing in a suite run raised a
+  // real toast, attributed to "Windows PowerShell", on the desktop of whoever
+  // was running it. The specs assert on the unread mark, which is the last
+  // decision before this (agent.e2e.ts, "one turn raises one notification").
+  if (import.meta.env.VITE_E2E) return false;
   try {
     if (notifPermission === "granted") return true;
     if (await notifIsGranted()) { notifPermission = "granted"; return true; }
