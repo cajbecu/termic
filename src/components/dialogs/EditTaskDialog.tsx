@@ -836,7 +836,7 @@ export function EditTaskDialog() {
                   onChange={e => setYolo(e.target.checked)}
                   className="h-3.5 w-3.5 shrink-0 cursor-pointer rounded border-[var(--color-border)] bg-[var(--color-bg-2)] text-[var(--color-accent)] focus:ring-0 focus:ring-offset-0 disabled:cursor-default"
                 />
-                <Zap className="h-3.5 w-3.5 shrink-0" fill={yoloCaged || yolo ? "currentColor" : "none"} />
+                <Zap className="h-3.5 w-3.5 shrink-0" fill="none" />
                 {yoloCaged ? t("newTask.yoloAutoCaged") : t("newTask.yoloSkipPrompts")}
               </label>
             </Field>

@@ -1151,11 +1151,21 @@ function TaskSandboxBadge({ task: w, tabs, t }: {
       </span>
     );
   }
-  if (!!w.yolo && !isSandboxEnforced(mode)) {
+  // Only while something is actually RUNNING. YOLO is a statement about what
+  // an agent may do to your machine right now; on a stopped task there is no
+  // agent and nothing it can do, so the mark was describing a setting rather
+  // than a risk. It used to render at 40% opacity instead, which reads as a
+  // live warning that has been turned down rather than as "not running".
+  //
+  // Outline, not filled: a solid red zap on every YOLO row is the loudest
+  // thing on the board, and it is the normal state for anyone who works this
+  // way. The shape still says it; the fill was shouting it.
+  if (!!w.yolo && !isSandboxEnforced(mode) && active) {
     return (
       <Zap
-        className={cn("h-3 w-3 shrink-0 text-[var(--color-err)]", active ? "opacity-100" : "opacity-40")}
-        fill="currentColor"
+        data-testid="task-yolo-badge"
+        className="h-3 w-3 shrink-0 text-[var(--color-err)]"
+        fill="none"
       />
     );
   }

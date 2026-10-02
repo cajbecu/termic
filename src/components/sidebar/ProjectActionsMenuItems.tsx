@@ -295,7 +295,7 @@ export function ProjectActionsMenuItems({ projectId, onPick }: {
               data-testid="quick-create-yolo-note"
               className="mt-1 flex items-center gap-1.5 px-0.5 text-[11.5px] leading-snug text-[var(--color-fg-dim)]"
             >
-              <Zap className="h-3 w-3 shrink-0 text-[var(--color-err)]" fill="currentColor" />
+              <Zap className="h-3 w-3 shrink-0 text-[var(--color-err)]" fill="none" />
               <span>
                 YOLO: <span className="text-[var(--color-fg)]">agents skip their permission prompts</span>
               </span>

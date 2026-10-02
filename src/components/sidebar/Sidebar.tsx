@@ -3001,6 +3001,14 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                 {(() => {
                   const wMode = effectiveSandboxMode(w);
                   const isLaunched = terminalTabs.length > 0;
+                  // A LIVE pty, not merely "this task has tabs". A tab
+                  // outlives the process it spawned, so `isLaunched` stays
+                  // true after the agent is gone and the YOLO mark below
+                  // would warn about an agent that no longer exists. The
+                  // board's badge already uses this signal; the two have to
+                  // agree or one task reads dangerous in one surface and
+                  // quiet in the other.
+                  const hasLivePty = terminalTabs.some(t => t.ptyId);
                   // Docker mode always stores sandbox_mode as off (the two
                   // cages are mutually exclusive), so it has to be checked
                   // FIRST or a Docker-sandboxed task would show no badge at
@@ -3014,15 +3022,16 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                       />
                     );
                   }
-                  if (!!w.yolo && !isSandboxEnforced(wMode)) {
+                  // Only while the task is actually RUNNING, and outline
+                  // rather than filled. See the board's TaskSandboxBadge for
+                  // both reasons; the two surfaces have to agree or the same
+                  // task reads as dangerous in one and quiet in the other.
+                  if (!!w.yolo && !isSandboxEnforced(wMode) && hasLivePty) {
                     return (
                       <Zap
                         data-testid="task-yolo-badge"
-                        className={cn(
-                          "absolute h-3.5 w-3.5 text-[var(--color-err)] transition-opacity group-hover/wsrow:opacity-0",
-                          isLaunched ? "opacity-100" : "opacity-40",
-                        )}
-                        fill="currentColor"
+                        className="absolute h-3.5 w-3.5 text-[var(--color-err)] transition-opacity group-hover/wsrow:opacity-0"
+                        fill="none"
                       />
                     );
                   }
@@ -3161,7 +3170,7 @@ function TaskRow({ w, compact, dragging = false, dragTy = 0, onDragPointerDown, 
                     effectiveSandboxMode(w) === "enforce-fs" && "text-[var(--color-ok)]",
                     w.docker_sandbox_enabled && "text-[var(--color-ok)]",
                   )}
-                  fill={(isTaskCaged(w) || !!w.yolo) ? "currentColor" : "none"}
+                  fill="none"
                 />
                 <span>
                   {w.docker_sandbox_enabled

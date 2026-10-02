@@ -404,6 +404,26 @@ describe("YOLO default for new tasks", () => {
     await browser.waitUntil(() => rowBadge(task.id), {
       timeout: 5_000, timeoutMsg: "no red YOLO badge on the new task's row",
     });
+
+    // ...and it goes away once nothing is running. YOLO is a statement about
+    // what an agent may do to your machine right now, so on a task with no
+    // live agent the mark described a setting rather than a risk. It used to
+    // render dimmed, which reads as a live warning turned down rather than as
+    // "not running".
+    // Expression body, like every other `execute` in this file: wdio's
+    // overloads resolve a BLOCK body to the (elem: HTMLElement) signature,
+    // which types the argument as an element rather than the id.
+    const killed = await browser.execute(
+      (i: string) => (window.__termic!.useApp.getState().tabs[i] ?? [])
+        .filter((t: any) => t.type === "terminal" && !!t.ptyId)
+        .map((t: any) => (void window.__termic!.ipc.ptyKill(t.ptyId), 1)).length,
+      task.id as string,
+    );
+    expect(killed).toBeGreaterThan(0);
+    await browser.waitUntil(async () => !(await rowBadge(task.id)), {
+      timeout: 10_000,
+      timeoutMsg: "the YOLO badge outlived the agent it was warning about",
+    });
   });
 
   it("lets the user untick the default for one task", async () => {
