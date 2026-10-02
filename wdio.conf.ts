@@ -73,6 +73,16 @@ export const config: WebdriverIO.Config = {
     // The app is launched as a child of this process and inherits env, so
     // point it at the throwaway profile (seeded by scripts/e2e-seed.mjs).
     process.env.TERMIC_DATA_DIR = dataDir;
+    // Windows: WebView2 keeps its profile (localStorage, so every pref) in a
+    // folder named after the app identifier, NOT under TERMIC_DATA_DIR, and
+    // runs one browser process per folder. Left alone, a run shares both with
+    // the developer's installed Termic: specs write prefs into the real app,
+    // and the webview is never created at all when the two builds ask for
+    // different browser arguments (measured: the suite timed out in its first
+    // `before` beside an installed build without `--disable-lcd-text`).
+    if (process.platform === "win32") {
+      process.env.WEBVIEW2_USER_DATA_FOLDER = path.join(dataDir, "webview2");
+    }
     // Agent-hook installs write into an agent's own config dir. Point that at
     // the throwaway profile so a run can exercise install/remove without
     // touching the developer's real ~/.claude/settings.json. Honoured only by

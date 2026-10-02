@@ -9820,6 +9820,33 @@ fn without_browser_accelerators<'a>(
     })
 }
 
+/// Grayscale text antialiasing on Windows, for every window.
+///
+/// WebView2 draws text with ClearType by default: each glyph edge is
+/// antialiased per colour channel, which on a dark theme reads as a red or
+/// blue shadow beside every letter. It is not only DOM text: xterm's WebGL
+/// glyph atlas is rasterized on an opaque 2D canvas, which gets the same
+/// treatment. CSS has no switch for it on Windows (`-webkit-font-smoothing`
+/// is a macOS property), so it is a browser argument.
+///
+/// Two rules that come with a browser argument:
+/// - Setting any replaces wry's own defaults, so they are repeated here.
+/// - Every window must pass the SAME string. All of an app's webviews share
+///   one WebView2 environment, and a second one asking for different
+///   arguments fails to be created.
+fn with_grayscale_text<'a>(
+    builder: tauri::WebviewWindowBuilder<'a, tauri::Wry, AppHandle>,
+) -> tauri::WebviewWindowBuilder<'a, tauri::Wry, AppHandle> {
+    #[cfg(windows)]
+    {
+        builder.additional_browser_args(
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-lcd-text",
+        )
+    }
+    #[cfg(not(windows))]
+    builder
+}
+
 fn build_profile_window(app: &AppHandle, id: &ProfileId) -> tauri::Result<tauri::WebviewWindow> {
     use tauri::Manager;
     let label = id.window_label();
@@ -9870,7 +9897,7 @@ fn build_profile_window(app: &AppHandle, id: &ProfileId) -> tauri::Result<tauri:
     }
 
     dlog(&format!("[profile] build {label}: builder.build"));
-    let win = without_browser_accelerators(builder).build()?;
+    let win = without_browser_accelerators(with_grayscale_text(builder)).build()?;
     dlog(&format!("[profile] build {label}: built"));
 
     // Restore saved bounds ourselves (the plugin skips "main" via
@@ -10169,7 +10196,7 @@ fn procmon_open_window_main(app: &AppHandle) -> Result<(), String> {
     .title("Activity")
     .inner_size(880.0, 620.0)
     .min_inner_size(560.0, 320.0);
-    let win = without_browser_accelerators(win)
+    let win = without_browser_accelerators(with_grayscale_text(win))
     .build()
     .map_err(|e| e.to_string())?;
     // Remember WHERE the monitor was, never how big. The window-state plugin

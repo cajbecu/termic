@@ -136,6 +136,16 @@ Each of these is a deliberate choice; the reasoning lives next to the code.
   snap-layout flyout on the maximize button yet. WebView2's browser keys
   (F5 and Ctrl+R reload, Ctrl+P prints) are switched off
   (`disable_browser_accelerators`).
+- **Text.** Grayscale antialiasing, not ClearType: every window is created
+  with `--disable-lcd-text` (`with_grayscale_text`), because ClearType's
+  colour fringes read as a shadow on a dark theme. A WebView2 browser
+  argument has a cost worth knowing: every process sharing a WebView2
+  user-data folder shares one browser process, and a webview asking for
+  different arguments than the running one is never created. Measured: a
+  build with the flag, started beside an installed build without it, came
+  up with no webview at all. Two builds that differ in their arguments
+  cannot run side by side on one folder (`WEBVIEW2_USER_DATA_FOLDER` moves
+  one of them; the e2e suite sets it).
 - **Keys.** Ctrl stands in for Cmd, and shortcut hints read `Ctrl+Alt+P`.
   In a terminal, plain Ctrl+letter goes to the shell (Ctrl+P is readline's,
   not the file finder), and Ctrl+V pastes, as in every Windows terminal.

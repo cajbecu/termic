@@ -44,7 +44,7 @@ Do not drop `node_modules` from the default list to "fix" a slow create without 
 
 ## Sub-pixel / rendering hardening
 
-- Force grayscale font smoothing on `html` (`-webkit-font-smoothing: antialiased`) — subpixel AA produces colored fringing on dark backgrounds.
+- Font smoothing is per platform. macOS: `html` leaves `-webkit-font-smoothing` at `auto` (`index.css`), the WKWebView default. Windows: WebView2 defaults to ClearType, which antialiases each glyph edge per colour channel and reads as a red or blue shadow beside every letter on a dark theme, in DOM text and in the terminal alike (xterm's glyph atlas is an opaque 2D canvas, which gets the same treatment). No CSS property turns it off there, so every window passes `--disable-lcd-text` (`with_grayscale_text` in `lib.rs`). Measured on WebDriver screenshots of the Activity window: 69% of text pixels tinted before, 1% after. Do not add a second browser argument in one window only: see [windows.md](windows.md).
 - Dialogs use flexbox centering on a full-viewport wrapper, no transforms on `Dialog.Content` — `-translate-x-1/2 -translate-y-1/2` hits sub-pixel offsets on odd viewport widths.
 - Streaming output / `pre` boxes inside dialogs need `min-w-0` on grid items (default `min-width: auto` overflows).
 - `ResizeHandle` is 1px wide (`-ml-px`/`-mt-px`) with 4px invisible hit area each side.
