@@ -43,13 +43,17 @@ winget_install() { # <id> [extra winget args...]
 # Pick up tools installed moments ago without a new shell: re-read the
 # machine + user PATH from the registry, then add the well-known install
 # dirs in case a fresh installer has not broadcast its PATH change yet.
+#
+# The registry PATH goes AFTER the current one. It starts with System32,
+# whose bash.exe is the WSL launcher: in front, it shadows Git Bash's own
+# bash, and every `#!/usr/bin/env bash` script (npm is one) runs in WSL.
 refresh_path() {
   local reg
   reg="$(powershell -NoProfile -Command \
     "[Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')" \
     2>/dev/null | tr -d '\r')" || true
   if [ -n "$reg" ]; then
-    PATH="$(cygpath -p "$reg"):$PATH"
+    PATH="$PATH:$(cygpath -p "$reg")"
   fi
   local d
   for d in "$HOME/.cargo/bin" "/c/Program Files/nodejs" \

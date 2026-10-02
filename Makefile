@@ -9,13 +9,25 @@
 #   * `MAKEFLAGS += --no-print-directory` keeps the output legible.
 #   * Each recipe runs in its own shell; multi-line uses backslash-newline.
 #
-# Windows: run from Git Bash, with GNU make installed
-# (`winget install ezwinports.make`). Recipes run under Git's bash there, and
-# the targets that differ by platform (setup, install, beta, reset, ...) pick
-# their Windows branch from $(IS_WINDOWS). See docs/windows.md.
+# Windows: needs GNU make (`winget install ezwinports.make`) and Git for
+# Windows, and runs from Git Bash, PowerShell or cmd alike. Recipes run under
+# Git's bash, and the targets that differ by platform (setup, install, beta,
+# reset, ...) pick their Windows branch from $(IS_WINDOWS). See docs/windows.md.
 ifeq ($(OS),Windows_NT)
 IS_WINDOWS := 1
-SHELL := bash
+# Git's bash by PATH, never a bare `bash`. Outside Git Bash that name is
+# System32's WSL launcher, or nothing at all, and then make quietly runs the
+# recipes in cmd.exe ("'#' is not recognized as an internal or external
+# command"). The unix tools the recipes use (awk, sed, cygpath) are not on
+# PATH there either. So ask git where it lives, which is
+# <Git>/<mingw64|ucrt64|clangarm64>/libexec/git-core, and put <Git>/usr/bin
+# first. `subst`, not the word functions: the path has a space in it.
+GIT_ROOT := $(shell git --exec-path)
+GIT_ROOT := $(subst /mingw64/libexec/git-core,,$(GIT_ROOT))
+GIT_ROOT := $(subst /ucrt64/libexec/git-core,,$(GIT_ROOT))
+GIT_ROOT := $(subst /clangarm64/libexec/git-core,,$(GIT_ROOT))
+export PATH := $(subst /,\,$(GIT_ROOT))\usr\bin;$(PATH)
+SHELL := $(GIT_ROOT)/usr/bin/bash.exe
 else
 SHELL := /bin/bash
 endif

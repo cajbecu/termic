@@ -11,13 +11,17 @@ still to do, and the measurements that decide how, is in
 
 ## Building it
 
-Everything runs from **Git Bash**, which comes with
-[Git for Windows](https://git-scm.com/download/win) (the app needs Git
-anyway). Then, in the clone:
+It needs [Git for Windows](https://git-scm.com/download/win) (the app needs
+Git anyway). The first run is from **Git Bash**, in the clone:
 
 ```sh
 bash scripts/setup-windows.sh    # or `make setup` once GNU make is installed
 ```
+
+After that `make` works from Git Bash, PowerShell or cmd alike: the Makefile
+finds Git's own bash from `git --exec-path` and runs every recipe under it,
+rather than trusting a bare `bash`, which outside Git Bash is System32's WSL
+launcher.
 
 It installs whatever is missing through winget and skips what is there:
 the Visual Studio C++ build tools, WebView2, Rust (rustup), Node 22 and GNU
