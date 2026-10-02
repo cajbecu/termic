@@ -8,6 +8,7 @@ import { i18n } from "@/lib/i18n";
 import { AlertTriangle, TerminalSquare, Copy, Check, ChevronDown, ChevronRight, X, Loader2 } from "lucide-react";
 import { PopoverRoot, PopoverTrigger, PopoverContent } from "@/components/ui/Popover";
 import { useUI } from "@/store/ui";
+import { isArchiving } from "@/store/archivingTasks";
 import { EMPTY_TABS, isUserWatching, useApp } from "@/store/app";
 import { logWorkState } from "@/lib/workStateLog";
 import { usePr, prRelevant } from "@/store/pr";
@@ -3219,7 +3220,10 @@ const captureArmedRef = useRef(false);
             return;
           }
           if (isRunTab) useApp.getState().clearAttention(task.id, tab.id);
-          else markAttention(task.id, tab.id, "exit");
+          // An agent the archive itself stopped did not die unexpectedly:
+          // the user asked for it. Marking it raised an "agent exited" banner
+          // about a task they had just archived.
+          else if (!isArchiving(task.id)) markAttention(task.id, tab.id, "exit");
           // Capture-based session resume (opencode): on the first normal exit
           // when no session ID is stored, run the capture command so the next
           // spawn can use --session <id> instead of starting fresh.

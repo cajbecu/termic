@@ -994,6 +994,57 @@ describe("non-blocking archive (GH #246)", () => {
     }, other);
     try { execSync(`git -C "${ARCHIVE_REPO}" worktree prune`); } catch { /* nothing to prune */ }
   });
+
+  it("does not announce the exit of an agent the archive itself stopped", async () => {
+    // Archive stops the task's agents before it removes the worktree, and a
+    // stopped agent is a PTY exit like any other: the terminal marked the tab
+    // unread with reason "exit", and the notifier turned that into an
+    // "agent exited" banner about a task the user had just archived. Reported
+    // on Windows, where the stop is a Ctrl+C and a grace period, so the exit
+    // lands while the task is still in the store.
+    //
+    // Counted on the unread mark for the same reason "one turn raises one
+    // notification" (agent.e2e.ts) counts edges: the e2e binary never reaches
+    // the OS banner, and the mark is the last decision before it.
+    await browser.execute(() => {
+      window.__termic!.usePrefs.getState().setConfirmBeforeArchiveTask(false);
+    });
+    const id = await createWorktreeTask("e2e-archive-quiet", "wt-archive-quiet");
+    await waitForAgentReady(id);
+    await browser.execute((taskId) => {
+      const w = window as unknown as { __exitMarks?: number; __exitStop?: () => void };
+      w.__exitMarks = 0;
+      const marked = new Set<string>();
+      w.__exitStop = window.__termic!.useApp.subscribe((s: { tabs: Record<string, Array<{ id: string; unread?: { reason?: string } | null }>> }) => {
+        for (const tab of s.tabs[taskId] ?? []) {
+          if (tab.unread?.reason === "exit" && !marked.has(tab.id)) {
+            marked.add(tab.id);
+            w.__exitMarks = (w.__exitMarks ?? 0) + 1;
+          }
+        }
+      });
+    }, id);
+
+    // The real button, so the archive goes through the flow a user's does.
+    await clickWhenVisible('[data-testid="archive-task"]');
+    await browser.waitUntil(() => isArchived(id), { timeout: 20_000, timeoutMsg: "task never became archived" });
+    // The archive has returned, so the agent is long stopped. What can still
+    // be in flight is its exit event; the archiving flag is cleared in the
+    // same settle, so wait for that rather than for a fixed time.
+    await browser.waitUntil(
+      () => browser.execute((taskId) => !window.__termic!.useArchivingTasks.getState().ids[taskId], id),
+      { timeout: 10_000, timeoutMsg: "the archive never settled" },
+    );
+    const marks = await browser.execute(() => {
+      const w = window as unknown as { __exitMarks?: number; __exitStop?: () => void };
+      w.__exitStop?.();
+      w.__exitStop = undefined;
+      return w.__exitMarks ?? 0;
+    });
+    expect(marks).toBe(0);
+    try { execSync(`git -C "${ARCHIVE_REPO}" worktree prune`); } catch { /* nothing to prune */ }
+    try { execSync(`git -C "${ARCHIVE_REPO}" branch -D wt-archive-quiet`, { stdio: "ignore" }); } catch { /* already gone */ }
+  });
 });
 
 // P1: emptying the archive from History. It's the one destructive bulk action
